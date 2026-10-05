@@ -1,0 +1,7 @@
+.venv
+__pycache__
+*.pyc
+aihub-data
+dist
+.git
+tests

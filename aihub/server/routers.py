@@ -1,0 +1,981 @@
+import json
+import os
+import re
+import tempfile
+import time
+
+import csv
+import io
+import secrets
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from pydantic import BaseModel
+
+from ..core import archive, manifest as M, naming, version as V
+from . import image, markdown, sheet
+from .db import ALL_PERMS
+from .deps import can_develop, can_manage, current_user, require_perm, require_user, viewer_of
+from .security import hash_password, hash_token, new_token, verify_password
+
+r = APIRouter(prefix="/api/v1")
+TTL = 20
+
+
+_fails = {}  # (ip, key) -> (count, window_start); per-process throttle for login / password checks
+
+
+def R(request): return request.app.state.repos
+
+
+SETTING_DEFAULTS = {"public_browse": "1", "public_install": "0", "default_visibility": "public", "allow_private": "1",
+                    "signup": None}
+
+
+def setting(request, key):
+    """Runtime setting (admin-editable). Falls back to SETTING_DEFAULTS."""
+    v = R(request).setting(key)
+    return v if v is not None else SETTING_DEFAULTS.get(key)
+
+
+def viewer(request, u):
+    return viewer_of(R(request), u)
+
+
+def need_login_unless(request, u, key):
+    """Anonymous access is allowed only when the admin switched `key` on."""
+    if not u and setting(request, key) != "1":
+        raise HTTPException(401, "sign in required")
+def C(request): return request.app.state.cache
+
+
+_BAD_CHARS = re.compile("[\x00-\x1f\x7f\u2028\u2029\u202a-\u202e\u2066-\u2069\u200b-\u200f]")  # controls, bidi overrides, zero-width
+
+
+def _clean(v, n):
+    """Single-line display text: no control / bidi-override characters, collapsed whitespace, length-capped."""
+    return re.sub(r"\s+", " ", _BAD_CHARS.sub(" ", str(v or ""))).strip()[:n]
+
+
+def _avatar_url(username, v):
+    return "/api/v1/users/%s/avatar?v=%d" % (username, v) if v else None
+
+
+def _public(u):
+    return {"username": u["username"], "display_name": u.get("display_name") or "", "title": u.get("title") or "",
+            "avatar_url": _avatar_url(u["username"], u.get("avatar_v") or 0)}
+
+
+# ---------------- auth
+class Cred(BaseModel):
+    username: str
+    password: str
+
+
+class PwChange(BaseModel):
+    old: str
+    new: str
+
+
+class TokenReq(BaseModel):
+    name: str = ""
+
+
+@r.get("/auth/providers")
+def providers(): return {"providers": ["password"]}
+
+
+@r.post("/auth/register")
+def register(c: Cred, request: Request):
+    repos = R(request)
+    if not re.match(r"^[A-Za-z0-9_.-]{2,40}$", c.username) or len(c.password) < 6:
+        raise HTTPException(400, "username 2-40 chars; password >= 6 chars")
+    first = repos.user_count() == 0
+    mode = repos.setting("signup", "open" if request.app.state.settings.open_registration else "closed")
+    if not first and mode == "closed":
+        raise HTTPException(403, "registration closed")
+    if repos.user_by_name(c.username):
+        raise HTTPException(409, "username taken")
+    status = "active" if (first or mode == "open") else "pending"
+    repos.user_create(c.username, hash_password(c.password), "admin" if first else "user", status)
+    return {"username": c.username, "status": status}
+
+
+@r.post("/auth/login")
+def login(c: Cred, request: Request):
+    repos = R(request)
+    key = (request.client.host if request.client else "?", c.username.lower())
+    n, first = _fails.get(key, (0, time.time()))
+    if n >= 8 and time.time() - first < 300:
+        raise HTTPException(429, "too many attempts; try again in a few minutes")
+    if time.time() - first >= 300:
+        n, first = 0, time.time()
+    u = repos.user_by_name(c.username)
+    if not u or not verify_password(c.password, u["password_hash"] or ""):
+        _fails[key] = (n + 1, first)
+        raise HTTPException(401, "bad credentials")
+    _fails.pop(key, None)
+    if u["status"] != "active":
+        raise HTTPException(403, "account " + u["status"])
+    t = new_token()
+    repos.token_add(hash_token(t), u["id"], "session")
+    return {"token": t, "username": u["username"], "role": u["role"]}
+
+
+@r.post("/auth/logout")
+def logout(request: Request, u=Depends(require_user)):
+    h = request.headers["authorization"][7:].strip()
+    R(request).token_delete(u["id"], h=hash_token(h))
+    return {"ok": True}
+
+
+@r.get("/auth/me")
+def me(request: Request, u=Depends(require_user)):
+    return dict(_public(u), role=u["role"], permissions=sorted(R(request).perms(u["role"])))
+
+
+@r.patch("/auth/me")
+def me_update(body: dict, request: Request, u=Depends(require_user)):
+    dn = _clean(body["display_name"], 60) if "display_name" in body else None
+    title = _clean(body["title"], 80) if "title" in body else None
+    R(request).profile_set(u["username"], dn, title)
+    return {"ok": True}
+
+
+@r.post("/auth/password")
+def password(p: PwChange, request: Request, u=Depends(require_user)):
+    key = (request.client.host if request.client else "?", "pw:" + u["username"])
+    n, first = _fails.get(key, (0, time.time()))
+    if n >= 8 and time.time() - first < 300:
+        raise HTTPException(429, "too many attempts; try again in a few minutes")
+    if not verify_password(p.old, u["password_hash"] or ""):
+        _fails[key] = (n + 1, first if time.time() - first < 300 else time.time())
+        raise HTTPException(400, "current password is incorrect")
+    _fails.pop(key, None)
+    if len(p.new) < 6:
+        raise HTTPException(400, "new password must be at least 6 characters")
+    if p.new == p.old:
+        raise HTTPException(400, "new password must differ from the current one")
+    R(request).user_set(u["username"], password_hash=hash_password(p.new))
+    # sign every other device out; the session that changed the password stays valid
+    R(request).tokens_revoke_others(u["id"], hash_token(request.headers["authorization"][7:].strip()))
+    R(request).audit(u["username"], "password.change", u["username"])
+    return {"ok": True}
+
+
+@r.post("/auth/avatar")
+async def avatar_set(request: Request, u=Depends(require_user)):
+    data = b""
+    async for chunk in request.stream():
+        data += chunk
+        if len(data) > image.MAX_BYTES:
+            raise HTTPException(413, "image too large (max %d KB)" % (image.MAX_BYTES // 1024))
+    try:
+        mime, _, _ = image.sniff(data)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    R(request).avatar_set(u["id"], mime, data)
+    return {"avatar_url": _avatar_url(u["username"], int(time.time()))}
+
+
+@r.delete("/auth/avatar")
+def avatar_delete(request: Request, u=Depends(require_user)):
+    R(request).avatar_clear(u["id"])
+    return {"ok": True}
+
+
+@r.get("/users/{username}/avatar")
+def avatar_get(username: str, request: Request):
+    a = R(request).avatar_get(username)
+    if not a:
+        raise HTTPException(404, "no avatar")
+    return Response(a[1], media_type=a[0], headers={"Cache-Control": "public, max-age=86400", "X-Content-Type-Options": "nosniff"})
+
+
+@r.get("/auth/tokens")
+def tokens(request: Request, u=Depends(require_user)):
+    return {"tokens": R(request).tokens(u["id"])}
+
+
+@r.post("/auth/tokens")
+def token_create(t: TokenReq, request: Request, u=Depends(require_user)):
+    tok = new_token()
+    R(request).token_add(hash_token(tok), u["id"], "api", t.name)
+    return {"token": tok}
+
+
+@r.delete("/auth/tokens/{tid}")
+def token_delete(tid: str, request: Request, u=Depends(require_user)):
+    R(request).token_delete(u["id"], h=tid)
+    return {"ok": True}
+
+
+# ---------------- catalogue
+def _ser(request, p, detail=False):
+    repos = R(request)
+    vs = repos.versions(p["id"])
+    live = [v for v in vs if not v["yanked"]]
+    out = {k: p[k] for k in ("name", "type", "description", "tags", "latest_version", "hidden", "visibility", "updated")}
+    out["downloads"] = sum(v["downloads"] for v in vs)
+    out["rating"] = repos.rating(p["id"])
+    if detail:
+        lm = next((v["manifest"] for v in live), {})
+        out["requires"] = lm.get("requires", {})
+        out["manifest"] = lm
+        out["maintainers"] = [_public(m) | {"role": m["role"]} for m in repos.maintainers(p["id"])]
+        out["versions"] = [{k: v[k] for k in ("version", "sha256", "size", "downloads", "yanked", "created")} for v in vs]
+    return out
+
+
+@r.get("/meta")
+def meta(request: Request, u=Depends(current_user)):
+    return {"name": "AI Hub", "public_url": request.app.state.settings.public_url, "cli_version": "0.1.0",
+            "overview": R(request).overview(viewer(request, u)),
+            "public_browse": setting(request, "public_browse") == "1", "public_install": setting(request, "public_install") == "1",
+            "allow_private": setting(request, "allow_private") == "1", "default_visibility": setting(request, "default_visibility")}
+
+
+@r.get("/healthz")
+def healthz(): return {"ok": True}
+
+
+@r.get("/readyz")
+def readyz(request: Request):
+    """Readiness: DB answers and the event queue is not backed up."""
+    try:
+        R(request).db.conn().execute("SELECT 1").fetchone()
+    except Exception:
+        raise HTTPException(503, "database unavailable")
+    return {"ok": True, "queued_events": len(request.app.state.events.buf)}
+
+
+def _cache_scope(v):
+    """Cache key part: cached lists differ per viewer, so never share a private list across people."""
+    return "pub" if not v else ("all" if v["bypass"] else "u%d" % v["id"])
+
+
+@r.get("/packages")
+def packages(request: Request, q: str = "", type: str = None, tag: str = None, sort: str = "",
+             page: int = 1, per_page: int = 20, mine: bool = False, u=Depends(current_user)):
+    need_login_unless(request, u, "public_browse")
+    v = viewer(request, u)
+    per_page = min(max(per_page, 1), 100)
+    key = "pkg:list:%s:%s|%s|%s|%s|%s|%s|%s" % (_cache_scope(v), q, type, tag, sort, page, per_page, mine)
+    hit = C(request).get(key)
+    if hit:
+        return hit
+    total, rows = R(request).packages(q, type, tag, sort, page, per_page, viewer=v, mine=mine)
+    res = {"total": total, "page": page, "per_page": per_page, "items": [_ser(request, p) for p in rows]}
+    C(request).set(key, res, TTL)
+    return res
+
+
+@r.get("/facets")
+def facets(request: Request, u=Depends(current_user)):
+    need_login_unless(request, u, "public_browse")
+    v = viewer(request, u)
+    c, key = C(request), "pkg:facets:" + _cache_scope(v)
+    hit = c.get(key)
+    if not hit:
+        hit = R(request).facets(v)
+        c.set(key, hit, TTL)
+    return hit
+
+
+def _pkg_or_404(request, name, u=None, need="view"):
+    """Load a package the caller may access. A package they can't see is reported as 404 (its existence is not revealed)."""
+    p = R(request).package(naming.normalize(name))
+    lvl = R(request).access_level(p["id"], viewer(request, u)) if p else None
+    order = {"view": 1, "develop": 2, "admin": 3}
+    if not p or not lvl:
+        if not u and p and R(request).access_level(p["id"], None) is None:
+            raise HTTPException(401, "sign in required")
+        raise HTTPException(404, "package not found")
+    if order[lvl] < order[need]:
+        raise HTTPException(403, "requires %s access" % need)
+    return p
+
+
+@r.get("/packages/{name}")
+def package(name: str, request: Request, u=Depends(current_user)):
+    need_login_unless(request, u, "public_browse")
+    p = _pkg_or_404(request, name, u)
+    out = _ser(request, p, detail=True)
+    out["access"] = R(request).access_level(p["id"], viewer(request, u))
+    return out
+
+
+@r.get("/packages/{name}/versions")
+def versions(name: str, request: Request, u=Depends(current_user)):
+    need_login_unless(request, u, "public_browse")
+    return {"versions": _ser(request, _pkg_or_404(request, name, u), True)["versions"]}
+
+
+@r.get("/packages/{name}/readme")
+def readme(name: str, request: Request, u=Depends(current_user)):
+    need_login_unless(request, u, "public_browse")
+    p = _pkg_or_404(request, name, u)
+    vs = [v for v in R(request).versions(p["id"]) if not v["yanked"]]
+    if not vs:
+        return {"markdown": "", "html": ""}
+    path = request.app.state.storage.path(p["name"], vs[0]["file"])
+    rd = vs[0]["manifest"].get("package", {}).get("readme", "README.md")
+    try:
+        raw = archive.read_member(path, rd) or b""
+    except Exception:
+        raw = b""
+    md = raw.decode("utf-8", "replace")
+    return {"markdown": md, "html": markdown.render(md)}
+
+
+@r.get("/resolve")
+def resolve(name: str, request: Request, spec: str = "", u=Depends(current_user)):
+    need_login_unless(request, u, "public_install")
+    p = _pkg_or_404(request, name, u)
+    for v in R(request).versions(p["id"]):
+        if not v["yanked"] and V.satisfies(v["version"], spec):
+            return {"name": p["name"], "version": v["version"], "sha256": v["sha256"], "size": v["size"],
+                    "url": "%s/files/%s/%s" % (request.app.state.settings.public_url.rstrip("/"), p["name"], v["file"]),
+                    "manifest": v["manifest"]}
+    raise HTTPException(404, "no matching version")
+
+
+@r.patch("/packages/{name}")
+def patch_package(name: str, body: dict, request: Request, u=Depends(require_user)):
+    p = _pkg_or_404(request, name, u, need="admin")
+    f = {}
+    if "hidden" in body: f["hidden"] = bool(body["hidden"])
+    if "tags" in body: f["tags"] = [str(t).lower() for t in body["tags"]]
+    R(request).package_patch(p["name"], **f)
+    if "visibility" in body:
+        _set_visibility(request, p, body["visibility"], u)
+    R(request).audit(u["username"], "package.patch", p["name"], json.dumps(body)[:300])
+    C(request).invalidate("pkg")
+    return {"ok": True}
+
+
+def _set_visibility(request, p, vis, u):
+    if vis not in ("public", "private"):
+        raise HTTPException(400, "visibility must be public or private")
+    if vis == "private" and setting(request, "allow_private") != "1" and "admin" not in R(request).perms(u["role"]):
+        raise HTTPException(403, "private repositories are disabled by the administrator")
+    R(request).set_visibility(p["name"], vis)
+
+
+# ---- sharing: who (users / groups) can view or develop a package. Repo admins and site admins manage it.
+@r.get("/packages/{name}/access")
+def access_get(name: str, request: Request, u=Depends(require_user)):
+    p = _pkg_or_404(request, name, u, need="admin")
+    return {"visibility": p["visibility"], "maintainers": [_public(m) | {"role": m["role"]} for m in R(request).maintainers(p["id"])],
+            "access": [dict(x, avatar_v=x.get("avatar_v")) for x in R(request).access_list(p["id"])]}
+
+
+@r.put("/packages/{name}/access")
+def access_put(name: str, body: dict, request: Request, u=Depends(require_user)):
+    """Grant or change: {type: 'user'|'group', name, access: 'view'|'develop'}"""
+    p = _pkg_or_404(request, name, u, need="admin")
+    ptype, pname, access = body.get("type"), str(body.get("name", "")), body.get("access")
+    if access not in ("view", "develop"):
+        raise HTTPException(400, "access must be view or develop")
+    if ptype == "user":
+        t = R(request).user_by_name(pname)
+    elif ptype == "group":
+        t = R(request).group_by_name(pname)
+    else:
+        raise HTTPException(400, "type must be user or group")
+    if not t:
+        raise HTTPException(404, "%s not found" % ptype)
+    R(request).access_grant(p["id"], ptype, t["id"], access)
+    R(request).audit(u["username"], "access.grant", p["name"], "%s:%s=%s" % (ptype, pname, access))
+    C(request).invalidate("pkg")
+    return {"ok": True}
+
+
+@r.delete("/packages/{name}/access/{ptype}/{pname}")
+def access_delete(name: str, ptype: str, pname: str, request: Request, u=Depends(require_user)):
+    p = _pkg_or_404(request, name, u, need="admin")
+    t = R(request).user_by_name(pname) if ptype == "user" else R(request).group_by_name(pname) if ptype == "group" else None
+    if t:
+        R(request).access_revoke(p["id"], ptype, t["id"])
+        R(request).audit(u["username"], "access.revoke", p["name"], "%s:%s" % (ptype, pname))
+        C(request).invalidate("pkg")
+    return {"ok": True}
+
+
+# ---------------- publish
+@r.post("/upload")
+async def upload(request: Request, u=Depends(require_perm("publish"))):
+    s = request.app.state.settings
+    fname = request.headers.get("x-aihub-filename", "pkg.tar.gz")
+    ext = ".whl" if fname.endswith(".whl") else ".zip" if fname.endswith(".zip") else ".tar.gz"
+    fd, tmp = tempfile.mkstemp(suffix=ext, dir=s.data_dir)
+    size, limit = 0, s.max_upload_mb * 1024 * 1024
+    try:
+        with os.fdopen(fd, "wb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > limit:
+                    raise HTTPException(413, "upload too large")
+                f.write(chunk)
+        raw = archive.read_member(tmp, "aihub.toml")
+        if raw is None:
+            hdr = request.headers.get("x-aihub-manifest")
+            if not hdr:
+                raise HTTPException(400, "aihub.toml not found in archive")
+            m = M.normalize(json.loads(hdr))
+        else:
+            try:
+                m = M.parse(raw.decode())
+            except (ValueError, KeyError) as e:
+                raise HTTPException(400, "invalid manifest: %s" % e)
+        pk = m["package"]
+        repos = R(request)
+        existing = repos.package(pk["name"])
+        if existing and not can_develop(repos, u, existing):
+            # a package the caller can't even see must not reveal that it exists
+            if repos.access_level(existing["id"], viewer(request, u)) is None:
+                raise HTTPException(409, "package name is not available")
+            raise HTTPException(403, "you need develop access to publish to " + pk["name"])
+        if existing and any(v["version"] == pk["version"] for v in repos.versions(existing["id"])):
+            raise HTTPException(409, "version already exists (immutable)")
+        try:
+            rd = (archive.read_member(tmp, pk["readme"]) or b"").decode("utf-8", "replace")
+        except Exception:
+            rd = ""
+        vis = request.headers.get("x-aihub-visibility") or setting(request, "default_visibility")
+        if vis not in ("public", "private"):
+            raise HTTPException(400, "visibility must be public or private")
+        if vis == "private" and not existing and setting(request, "allow_private") != "1" and "admin" not in repos.perms(u["role"]):
+            vis = "public"
+        pid = repos.package_upsert(pk["name"], pk["type"], pk["description"], pk["tags"], rd, visibility=None if existing else vis)
+        if not existing:
+            repos.maintainer_add(pid, u["id"], "owner")   # the creator is the repo admin by default
+        sha = archive.sha256_file(tmp)
+        stored = "%s-%s%s" % (pk["name"], pk["version"], ext)
+        request.app.state.storage.put(pk["name"], stored, tmp)
+        repos.version_add(pid, pk["version"], stored, sha, size, m)
+        repos.audit(u["username"], "upload", pk["name"], pk["version"])
+        C(request).invalidate("pkg")
+        return {"name": pk["name"], "version": pk["version"], "sha256": sha}
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _yank(request, name, version, flag, u):
+    p = _pkg_or_404(request, name, u, need="develop")
+    R(request).version_yank(p["id"], version, flag)
+    R(request).audit(u["username"], "yank" if flag else "unyank", name, version)
+    C(request).invalidate("pkg")
+    return {"ok": True}
+
+
+@r.post("/packages/{name}/versions/{version}/yank")
+def yank(name: str, version: str, request: Request, u=Depends(require_user)):
+    return _yank(request, name, version, True, u)
+
+
+@r.post("/packages/{name}/versions/{version}/unyank")
+def unyank(name: str, version: str, request: Request, u=Depends(require_user)):
+    return _yank(request, name, version, False, u)
+
+
+@r.get("/packages/{name}/maintainers")
+def maintainers(name: str, request: Request, u=Depends(current_user)):
+    need_login_unless(request, u, "public_browse")
+    return {"maintainers": [_public(m) | {"role": m["role"]} for m in R(request).maintainers(_pkg_or_404(request, name, u)["id"])]}
+
+
+@r.post("/packages/{name}/maintainers")
+def maintainer_add(name: str, body: dict, request: Request, u=Depends(require_user)):
+    p = _pkg_or_404(request, name, u, need="admin")
+    t = R(request).user_by_name(body.get("username", ""))
+    if not t:
+        raise HTTPException(404, "user not found")
+    R(request).maintainer_add(p["id"], t["id"])
+    return {"ok": True}
+
+
+@r.delete("/packages/{name}/maintainers/{username}")
+def maintainer_remove(name: str, username: str, request: Request, u=Depends(require_user)):
+    p = _pkg_or_404(request, name, u, need="admin")
+    t = R(request).user_by_name(username)
+    if t and len(R(request).maintainers(p["id"])) <= 1:
+        raise HTTPException(400, "a repository needs at least one admin")
+    if t:
+        R(request).maintainer_remove(p["id"], t["id"])
+    return {"ok": True}
+
+
+@r.get("/me/packages")
+def my_packages(request: Request, u=Depends(require_user)):
+    return {"packages": R(request).packages_of(u["id"])}
+
+
+# ---------------- reviews
+@r.get("/packages/{name}/reviews")
+def reviews(name: str, request: Request, u=Depends(current_user)):
+    need_login_unless(request, u, "public_browse")
+    p = _pkg_or_404(request, name, u)
+    revs = [dict(_public(x), rating=x["rating"], body=x["body"], created=x["created"]) for x in R(request).reviews(p["id"])]
+    return {"rating": R(request).rating(p["id"]), "reviews": revs}
+
+
+@r.post("/packages/{name}/reviews")
+def review_post(name: str, body: dict, request: Request, u=Depends(require_perm("review"))):
+    p = _pkg_or_404(request, name, u)
+    rating = int(body.get("rating", 0))
+    if not 1 <= rating <= 5:
+        raise HTTPException(400, "rating 1..5")
+    R(request).review_upsert(p["id"], u["id"], rating, str(body.get("body", ""))[:2000])
+    C(request).invalidate("pkg")
+    return {"ok": True}
+
+
+# ---------------- telemetry
+@r.post("/events")
+async def events(request: Request, u=Depends(current_user)):
+    body = await request.json()
+    items = body.get("events", body) if isinstance(body, dict) else body
+    rows, now = [], time.time()
+    for e in items[:500]:
+        if e.get("kind") not in ("install", "update", "uninstall", "use", "error") or not e.get("package"):
+            continue
+        rows.append({"ts": float(e.get("ts") or now), "kind": e["kind"], "package": naming.normalize(e["package"]),
+                     "version": e.get("version"), "client_id": e.get("client_id"),
+                     # identity comes only from the token; anonymous clients can't claim a username
+                     "username": u["username"] if u else None,
+                     "component": str(e["component"])[:120] if e.get("component") else None,
+                     "duration": e.get("duration"),
+                     "source": e.get("source") if e.get("source") in ("claude", "opencode", "codex", "cli") else None})
+    request.app.state.events.add(rows)
+    return {"accepted": len(rows)}
+
+
+@r.get("/packages/{name}/stats")
+def pkg_stats(name: str, request: Request, days: int = 30, u=Depends(current_user)):
+    need_login_unless(request, u, "public_browse")
+    p = _pkg_or_404(request, name, u)
+    request.app.state.events.flush()
+    return R(request).stats(p["name"], days)
+
+
+@r.get("/packages/{name}/events")
+def pkg_events(name: str, request: Request, u=Depends(require_user)):
+    p = _pkg_or_404(request, name, u, need="admin")
+    request.app.state.events.flush()
+    return {"events": R(request).package_events(p["name"])}
+
+
+@r.get("/rankings/{what}")
+def rankings(what: str, request: Request, days: int = 30, u=Depends(current_user)):
+    if what not in ("packages", "developers", "users"):
+        raise HTTPException(404)
+    need_login_unless(request, u, "public_browse")
+    request.app.state.events.flush()
+    return {"items": R(request).rank(what, days, viewer=viewer(request, u))}
+
+
+@r.get("/stats/overview")
+def overview(request: Request, u=Depends(current_user)):
+    need_login_unless(request, u, "public_browse")
+    return R(request).overview(viewer(request, u))
+
+
+# ---------------- admin
+admin = Depends(require_perm("admin"))
+
+
+@r.get("/admin/users")
+def a_users(request: Request, q: str = "", u=admin):
+    return {"users": [dict(_public(x), role=x["role"], status=x["status"], created=x["created"]) for x in R(request).users(q)]}
+
+
+@r.post("/admin/users/{username}/status")
+def a_status(username: str, body: dict, request: Request, u=admin):
+    if body.get("status") not in ("active", "pending", "disabled"):
+        raise HTTPException(400, "bad status")
+    R(request).user_set(username, status=body["status"])
+    R(request).audit(u["username"], "user.status", username, body["status"])
+    return {"ok": True}
+
+
+@r.post("/admin/users/{username}/role")
+def a_role(username: str, body: dict, request: Request, u=admin):
+    if body.get("role") not in R(request).roles():
+        raise HTTPException(400, "unknown role")
+    R(request).user_set(username, role=body["role"])
+    R(request).audit(u["username"], "user.role", username, body["role"])
+    return {"ok": True}
+
+
+@r.delete("/admin/users/{username}")
+def a_delete(username: str, request: Request, u=admin):
+    if username == u["username"]:
+        raise HTTPException(400, "cannot delete yourself")
+    R(request).user_delete(username)
+    R(request).audit(u["username"], "user.delete", username)
+    return {"ok": True}
+
+
+@r.get("/admin/settings/registration")
+def a_reg_get(request: Request, u=admin):
+    return {"mode": R(request).setting("signup", "open" if request.app.state.settings.open_registration else "closed")}
+
+
+@r.put("/admin/settings/registration")
+def a_reg_set(body: dict, request: Request, u=admin):
+    if body.get("mode") not in ("open", "approval", "closed"):
+        raise HTTPException(400, "mode: open|approval|closed")
+    R(request).set_setting("signup", body["mode"])
+    R(request).audit(u["username"], "settings.registration", "", body["mode"])
+    return {"ok": True}
+
+
+# All admin-editable settings in one place: key -> (allowed values, label, help). Add a row to add a setting.
+SETTINGS = {
+    "signup": (("open", "approval", "closed"), "Sign-up", "Who can create their own account"),
+    "public_browse": (("0", "1"), "Public browsing", "Let signed-out visitors browse public packages, rankings and docs"),
+    "public_install": (("0", "1"), "Public install (no sign-in)", "Let the CLI install public packages without logging in"),
+    "allow_private": (("0", "1"), "Allow private repositories", "Let people make their repositories private and share them"),
+    "default_visibility": (("public", "private"), "Default visibility for new repositories", "Applied when a package is first published"),
+    "allow_group_creation": (("0", "1"), "Let members create groups", "People with the 'create groups' permission can make their own"),
+}
+
+
+@r.get("/admin/settings")
+def a_settings(request: Request, u=admin):
+    cur = {"signup": R(request).setting("signup", "open" if request.app.state.settings.open_registration else "closed")}
+    for k in SETTINGS:
+        if k != "signup":
+            cur[k] = setting(request, k) if setting(request, k) is not None else R(request).setting(k, "0")
+    return {"values": cur, "schema": [{"key": k, "options": list(v[0]), "label": v[1], "help": v[2]} for k, v in SETTINGS.items()]}
+
+
+@r.put("/admin/settings")
+def a_settings_put(body: dict, request: Request, u=admin):
+    done = {}
+    for k, v in body.items():
+        if k not in SETTINGS or str(v) not in SETTINGS[k][0]:
+            raise HTTPException(400, "invalid setting: %s" % k)
+        done[k] = str(v)
+    for k, v in done.items():
+        R(request).set_setting(k, v)
+    R(request).audit(u["username"], "settings.update", "", json.dumps(done))
+    C(request).invalidate("pkg")
+    return {"ok": True}
+
+
+# ---------------- groups. Site admins manage all groups; people with `create_groups` manage the ones they made.
+GROUP_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,39}$")
+
+
+def _can_group(request, u, g):
+    return "admin" in R(request).perms(u["role"]) or g.get("owner_id") == u["id"]
+
+
+@r.get("/groups")
+def groups_list(request: Request, u=Depends(require_user)):
+    """Admins see every group; everyone else sees the groups they belong to or own."""
+    repos = R(request)
+    allg = repos.groups()
+    if "admin" in repos.perms(u["role"]):
+        return {"groups": allg}
+    mine = set(repos.groups_of(u["id"]))
+    return {"groups": [g for g in allg if g["name"] in mine or g.get("owner_id") == u["id"]]}
+
+
+@r.get("/groups/lookup")
+def groups_lookup(request: Request, q: str = "", u=Depends(require_user)):
+    """Names only, for the share dialog: any signed-in person can pick a group or user to share a repo with."""
+    q = q.strip().lower()[:40]
+    g = [x["name"] for x in R(request).groups() if q in x["name"]][:8]
+    us = [dict(_public(x)) for x in R(request).users(q)[:8] if x["status"] == "active"]
+    return {"groups": g, "users": us}
+
+
+@r.post("/groups")
+def group_create(body: dict, request: Request, u=Depends(require_user)):
+    repos = R(request)
+    is_admin = "admin" in repos.perms(u["role"])
+    if not is_admin and not ("create_groups" in repos.perms(u["role"]) and setting(request, "allow_group_creation") == "1"):
+        raise HTTPException(403, "you cannot create groups")
+    name = str(body.get("name", "")).strip().lower()
+    if not GROUP_RE.match(name):
+        raise HTTPException(400, "group name: 2-40 chars, lowercase letters, digits, . _ -")
+    if repos.group_by_name(name):
+        raise HTTPException(409, "group already exists")
+    gid = repos.group_create(name, _clean(body.get("description", ""), 200), u["id"])
+    repos.group_member_add(gid, [u["id"]])
+    repos.audit(u["username"], "group.create", name)
+    return {"ok": True, "name": name}
+
+
+def _group_or_404(request, name, u):
+    g = R(request).group_by_name(name)
+    if not g or not _can_group(request, u, g):
+        raise HTTPException(404, "group not found")
+    return g
+
+
+@r.get("/groups/{name}")
+def group_get(name: str, request: Request, u=Depends(require_user)):
+    g = _group_or_404(request, name, u)
+    return {"name": g["name"], "description": g["description"], "members": [dict(_public(m)) for m in R(request).group_members(g["id"])]}
+
+
+@r.put("/groups/{name}")
+def group_update(name: str, body: dict, request: Request, u=Depends(require_user)):
+    g = _group_or_404(request, name, u)
+    R(request).group_update(g["id"], _clean(body.get("description", ""), 200))
+    return {"ok": True}
+
+
+@r.delete("/groups/{name}")
+def group_delete(name: str, request: Request, u=Depends(require_user)):
+    g = _group_or_404(request, name, u)
+    R(request).group_delete(g["id"])
+    R(request).audit(u["username"], "group.delete", name)
+    C(request).invalidate("pkg")
+    return {"ok": True}
+
+
+@r.post("/groups/{name}/members")
+def group_members_add(name: str, body: dict, request: Request, u=Depends(require_user)):
+    g = _group_or_404(request, name, u)
+    names = body.get("usernames") if isinstance(body.get("usernames"), list) else [body.get("username", "")]
+    found = [R(request).user_by_name(str(n)) for n in names[:200]]
+    missing = [str(n) for n, f in zip(names, found) if not f]
+    R(request).group_member_add(g["id"], [f["id"] for f in found if f])
+    R(request).audit(u["username"], "group.members.add", name, ",".join(str(n) for n in names[:20]))
+    C(request).invalidate("pkg")
+    return {"ok": True, "missing": missing}
+
+
+@r.delete("/groups/{name}/members/{username}")
+def group_member_remove(name: str, username: str, request: Request, u=Depends(require_user)):
+    g = _group_or_404(request, name, u)
+    t = R(request).user_by_name(username)
+    if t:
+        R(request).group_member_remove(g["id"], t["id"])
+        C(request).invalidate("pkg")
+    return {"ok": True}
+
+
+# ---------------- roles (permission matrix)
+ROLE_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
+
+
+def _perm_list(v):
+    if not isinstance(v, list) or any(not isinstance(x, str) for x in v):
+        raise HTTPException(400, "permissions must be a list of strings")
+    bad = [x for x in v if x not in ALL_PERMS]
+    if bad:
+        raise HTTPException(400, "unknown permission: " + ", ".join(bad))
+    return sorted(set(v))
+
+
+@r.get("/admin/roles")
+def a_roles(request: Request, u=admin):
+    return {"roles": R(request).roles(), "detail": R(request).roles_detail(),
+            "permissions": [{"key": k, "label": v} for k, v in ALL_PERMS.items()]}
+
+
+@r.post("/admin/roles")
+def a_role_create(body: dict, request: Request, u=admin):
+    name = str(body.get("name", "")).strip().lower()
+    if not ROLE_RE.match(name):
+        raise HTTPException(400, "role name: 2-32 chars, lowercase letters, digits, - or _, starting with a letter")
+    if name in R(request).roles():
+        raise HTTPException(409, "role already exists")
+    perms = _perm_list(body.get("permissions", []))
+    R(request).role_create(name, str(body.get("description", ""))[:200], perms)
+    R(request).audit(u["username"], "role.create", name, ",".join(perms))
+    return {"ok": True}
+
+
+@r.put("/admin/roles/{name}")
+def a_role_update(name: str, body: dict, request: Request, u=admin):
+    repos = R(request)
+    if name not in repos.roles():
+        raise HTTPException(404, "role not found")
+    perms = _perm_list(body["permissions"]) if "permissions" in body else None
+    if name == "admin" and perms is not None and "admin" not in perms:
+        raise HTTPException(400, "the admin role must keep the admin permission")
+    if perms is not None and name == u["role"] and "admin" not in perms:
+        raise HTTPException(400, "you cannot remove your own admin access")
+    desc = str(body["description"])[:200] if "description" in body else None
+    repos.role_update(name, perms, desc)
+    repos.audit(u["username"], "role.update", name, ",".join(perms) if perms is not None else "description")
+    return {"ok": True}
+
+
+@r.delete("/admin/roles/{name}")
+def a_role_delete(name: str, request: Request, u=admin):
+    repos = R(request)
+    d = next((x for x in repos.roles_detail() if x["name"] == name), None)
+    if not d:
+        raise HTTPException(404, "role not found")
+    if d["builtin"]:
+        raise HTTPException(400, "built-in roles cannot be deleted")
+    if d["users"]:
+        raise HTTPException(409, "%d account(s) still have this role; move them first" % d["users"])
+    repos.role_delete(name)
+    repos.audit(u["username"], "role.delete", name)
+    return {"ok": True}
+
+
+# ---------------- batch account import -> generated password sheet
+PW_ALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no look-alikes (0/O, 1/l/I)
+MAX_BATCH = 300
+
+
+def gen_password(n=14):
+    while True:
+        p = "".join(secrets.choice(PW_ALPHABET) for _ in range(n))
+        if any(c.islower() for c in p) and any(c.isupper() for c in p) and any(c.isdigit() for c in p):
+            return p
+
+
+_U_H = {"username", "account", "login", "user name", "user_name"}
+_D_H = {"display_name", "display name", "displayname", "full name", "full_name", "fullname", "name"}
+_T_H = {"title", "job title", "job_title", "position"}
+_R_H = {"role"}
+
+
+def _idx(header, names, exclude=()):
+    for i, h in enumerate(header):
+        if h in names and i not in exclude:
+            return i
+    return -1
+
+
+def _batch_rows(rows, default_role):
+    """Sheet -> [{username, role, display_name, title}]. With a header row, columns are found by name
+    (username, display_name, title, role); without one the layout is `username, role`."""
+    header = []
+    if rows and rows[0]:
+        cells = [c.strip().lower() for c in rows[0]]
+        # A header row is recognised by its column names. `user` is deliberately not an alias: it is also a
+        # role value, so "dan,user" is a data row. Two or more known names, or a known username column, mark a header.
+        known = _U_H | _D_H | _T_H | _R_H
+        if sum(c in known for c in cells) >= 2 or cells[0] in _U_H:
+            header, rows = cells, rows[1:]
+    if header:
+        ui = max(_idx(header, _U_H), 0)
+        di, ti, ri = _idx(header, _D_H, (ui,)), _idx(header, _T_H, (ui,)), _idx(header, _R_H, (ui,))
+    else:
+        ui, di, ti, ri = 0, -1, -1, 1
+    g = lambda r, i: r[i].strip() if 0 <= i < len(r) else ""
+    out = []
+    for r in rows:
+        if not r or not any(c.strip() for c in r):
+            continue
+        out.append({"username": g(r, ui), "role": g(r, ri).lower() or default_role,
+                    "display_name": _clean(g(r, di), 60), "title": _clean(g(r, ti), 80)})
+    return out
+
+
+@r.post("/admin/users/batch")
+async def a_batch(request: Request, role: str = "user", u=admin):
+    repos = R(request)
+    roles = repos.roles()
+    if role not in roles:
+        raise HTTPException(400, "unknown default role: " + role)
+    data = await request.body()
+    try:
+        items = _batch_rows(sheet.parse(data, request.headers.get("x-aihub-filename", "")), role)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not items:
+        raise HTTPException(400, "no accounts found in the file")
+    if len(items) > MAX_BATCH:
+        raise HTTPException(400, "too many rows (max %d per upload)" % MAX_BATCH)
+
+    def work():
+        seen, plan, result = set(), [], []
+        for it in items:
+            row = dict(it, password="", status="")
+            if not re.match(r"^[A-Za-z0-9_.-]{2,40}$", it["username"]):
+                row["status"] = "invalid username"
+            elif it["role"] not in roles:
+                row["status"] = "unknown role"
+            elif it["username"].lower() in seen:
+                row["status"] = "duplicate in file"
+            else:
+                seen.add(it["username"].lower())
+                row["password"] = gen_password()
+                plan.append(row)
+            result.append(row)
+        made = repos.users_create_many([(x["username"], hash_password(x["password"]), x["role"], x["display_name"], x["title"]) for x in plan])
+        for x in plan:
+            if x["username"] in made:
+                x["status"] = "created"
+            else:
+                x["status"], x["password"] = "skipped: username exists", ""
+        return result, len(made)
+
+    result, created = await run_in_threadpool(work)
+    repos.audit(u["username"], "users.batch", "", "created=%d rows=%d" % (created, len(items)))
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["username", "display_name", "title", "role", "password", "status"])
+    for x in result:
+        w.writerow([sheet.safe_cell(x["username"]), sheet.safe_cell(x["display_name"]), sheet.safe_cell(x["title"]),
+                    x["role"], x["password"], x["status"]])
+    return Response("﻿" + buf.getvalue(), media_type="text/csv; charset=utf-8", headers={
+        "Content-Disposition": 'attachment; filename="new-accounts.csv"', "Cache-Control": "no-store",
+        "X-Created": str(created), "X-Skipped": str(len(result) - created)})
+
+
+@r.get("/admin/audit")
+def a_audit(request: Request, u=admin): return {"audit": R(request).audit_list()}
+
+
+# ---------------- docs (rendered from the repo's docs/ folder)
+_DOCS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "docs")
+
+
+def _doc_files():
+    if not os.path.isdir(_DOCS):
+        return {}
+    return {f[:-3]: os.path.join(_DOCS, f) for f in sorted(os.listdir(_DOCS)) if f.endswith(".md") and re.match(r"^[\w-]+\.md$", f)}
+
+
+@r.get("/docs")
+def docs_list():
+    out = []
+    for slug, path in _doc_files().items():
+        first = open(path, encoding="utf-8").readline().lstrip("# ").strip()
+        out.append({"slug": slug, "title": first or slug})
+    return {"docs": out}
+
+
+@r.get("/docs/{slug}")
+def docs_get(slug: str):
+    path = _doc_files().get(slug)
+    if not path:
+        raise HTTPException(404, "doc not found")
+    return {"slug": slug, "html": markdown.render(open(path, encoding="utf-8").read())}
+
+
+# ---------------- usage dashboard (permission: view_dashboard, grantable per role)
+@r.get("/dashboard")
+def dashboard(request: Request, days: int = 30, package: str = None, type: str = None, user: str = None, source: str = None,
+              kind: str = None, u=Depends(require_perm("view_dashboard"))):
+    if days not in (7, 14, 30, 90, 180, 365):
+        raise HTTPException(400, "days must be one of 7, 14, 30, 90, 180, 365")
+    if kind and kind not in ("install", "update", "uninstall", "use", "error"):
+        raise HTTPException(400, "unknown event kind")
+    v = viewer(request, u)
+    if package:
+        package = _pkg_or_404(request, package, u)["name"]      # also enforces that the viewer may see it
+    request.app.state.events.flush()
+    key = "dash:%s:%s" % (_cache_scope(v), "|".join(str(x) for x in (days, package, type, user, source, kind)))
+    hit = C(request).get(key)
+    if hit:
+        return hit
+    res = R(request).dashboard(days, package, viewer=v, type=type, user=user, source=source, kind=kind)
+    C(request).set(key, res, 15)
+    return res

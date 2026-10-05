@@ -1,0 +1,10 @@
+services:
+  aihub:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      AIHUB_PUBLIC_URL: ${AIHUB_PUBLIC_URL:-http://localhost:8000}
+    volumes: ["aihub-data:/data"]
+    restart: unless-stopped
+volumes:
+  aihub-data:
