@@ -357,14 +357,20 @@ function Roles({ tick, bump }) {
       <input class="field" style="flex:2;min-width:200px" placeholder="Description (optional)" value=${nd} onInput=${(e) => setNd(e.target.value)} /><button class="btn" disabled=${!nn} onClick=${create}>Create role</button></div>
       <p class="xs mut3">Lowercase letters, digits, - or _. Create it, then tick its permissions in the table above.</p></div></div>`;
 }
+function NumSetting({ x, v, busy, save }) {
+  const [t, setT] = useState(v); const n = Number(t), ok = /^\d+$/.test(t) && n >= x.min && n <= x.max;
+  return html`<div class="li"><div class="t"><b>${x.label}</b><span>${x.help}</span>${!ok && html`<span class="xs" style="color:var(--orange)">Enter a whole number from ${x.min} to ${x.max}.</span>`}</div>
+    <div class="row"><input type="number" min=${x.min} max=${x.max} value=${t} aria-label=${x.label} style="width:7rem" onInput=${(e) => setT(e.target.value)} />
+    <button class="btn sm" disabled=${busy || !ok || t === v} onClick=${() => save(n)}>Save</button></div></div>`;
+}
 function AdminSettings() {
   const [tick, setTick] = useState(0); const d = useLoad(() => api("/admin/settings"), [tick]); const [busy, setBusy] = useState("");
   if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
   const set1 = async (k, v) => { setBusy(k); try { await api("/admin/settings", { method: "PUT", body: { [k]: v } }); toast("Saved"); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
-  const sections = [["Access", ["signup", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility", "allow_source_download"]], ["Groups", ["allow_group_creation"]]];
+  const sections = [["Access", ["signup", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility", "allow_source_download"]], ["Groups", ["allow_group_creation"]], ["Uploads", ["max_upload_mb"]]];
   const by = Object.fromEntries(d.d.schema.map((x) => [x.key, x]));
   const warn = d.d.values.public_install === "1";
-  return html`<div class="stack">${sections.map(([title, keys]) => html`<div class="stack" key=${title}><h3>${title}</h3><div class="list">${keys.filter((k) => by[k]).map((k) => { const x = by[k], v = d.d.values[k], onoff = x.options.length === 2 && x.options[0] === "0";
+  return html`<div class="stack">${sections.map(([title, keys]) => html`<div class="stack" key=${title}><h3>${title}</h3><div class="list">${keys.filter((k) => by[k]).map((k) => { const x = by[k], v = d.d.values[k]; if (x.type === "number") return html`<${NumSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; const onoff = x.options.length === 2 && x.options[0] === "0";
       return html`<div class="li" key=${k}><div class="t"><b>${x.label}</b><span>${x.help}</span></div>
         ${onoff ? html`<label class="switch"><input type="checkbox" role="switch" checked=${v === "1"} disabled=${busy === k} onChange=${(e) => set1(k, e.target.checked ? "1" : "0")} aria-label=${x.label} /><i></i></label>`
         : html`<div class="seg">${x.options.map((o) => html`<button key=${o} class=${v === o ? "on" : ""} disabled=${busy === k} onClick=${() => v !== o && set1(k, o)}>${o}</button>`)}</div>`}</div>`; })}</div></div>`)}

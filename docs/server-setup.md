@@ -151,6 +151,6 @@ The web interface loads the pinned Preact/htm bundle from `cdn.jsdelivr.net` in 
 | --- | --- |
 | CLI reports `cannot reach hub` | Confirm `aihub config` shows the correct hub URL, that DNS/TLS and proxy routing work, and that `GET /api/v1/healthz` succeeds. Run `aihub doctor`. |
 | CLI reports `sha256 mismatch for download` | The archive received differs from the hash returned by the hub. Check proxy/CDN caching and that metadata and `files/` were restored from a consistent backup. Retry after correcting the source. |
-| Upload returns `413` | Increase `AIHUB_MAX_UPLOAD_MB` and set nginx `client_max_body_size` at least as high; restart/reload both. |
+| Upload returns `413` | Raise the limit in Admin > Settings > Uploads (or `AIHUB_MAX_UPLOAD_MB`) and set nginx `client_max_body_size` at least as high; restart/reload both. |
 | Login returns `429` | The in-process limiter saw at least eight failed attempts for that IP and username within five minutes. Wait for the window to reset and verify credentials. |
 | Usage hook is not firing | Run `aihub doctor`, then `aihub hooks install`. Confirm the package component is registered with the tool and the CLI can reach the hub. Codex does not provide a general tool-call hook. |

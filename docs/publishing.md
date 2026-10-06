@@ -27,6 +27,18 @@ aihub dev publish --bump patch
 
 The first publish requires a logged-in account with the server's `publish` permission. Publishing another version requires develop access to that repository or the site-level `manage_all` permission (held by site admins).
 
+## Let your assistant package it for you
+
+AI Hub ships a built-in skill, `aihub-package`, for Claude Code and Codex. It handles both new and existing projects: it picks the package type, restructures files into the standard layout, writes `aihub.toml`, creates install/uninstall scripts for each OS, then runs `aihub dev validate` and `aihub dev build`. It asks before `aihub dev publish`.
+
+```sh
+aihub skill install                   # all detected tools (the hub installer already does this)
+aihub skill install --tool codex      # one tool
+aihub skill install --scope project   # only for the current project
+```
+
+Then, inside the project, ask: "package this project for AI Hub". See [CLI reference](cli.md#built-in-packaging-skill) for all options.
+
 ## Choosing a package type
 
 | Type | Use it for | Registered where | Scaffold | Install scripts? |

@@ -436,7 +436,7 @@ async def upload(request: Request, u=Depends(require_perm("publish"))):
     fname = request.headers.get("x-aihub-filename", "pkg.tar.gz")
     ext = ".whl" if fname.endswith(".whl") else ".zip" if fname.endswith(".zip") else ".tar.gz"
     fd, tmp = tempfile.mkstemp(suffix=ext, dir=s.data_dir)
-    size, limit = 0, s.max_upload_mb * 1024 * 1024
+    size, limit = 0, upload_limit_mb(request) * 1024 * 1024
     try:
         with os.fdopen(fd, "wb") as f:
             async for chunk in request.stream():
@@ -696,19 +696,41 @@ SETTINGS = {
 }
 
 
+# Numeric admin settings: key -> (min, max, label, help). The value in the database overrides the AIHUB_* environment default.
+NUMERIC_SETTINGS = {
+    "max_upload_mb": (1, 2048, "Upload size limit (MiB)", "Largest package archive a publisher can upload. Keep your reverse proxy's body limit at least this high"),
+}
+
+
+def upload_limit_mb(request):
+    try:
+        return int(R(request).setting("max_upload_mb", "") or request.app.state.settings.max_upload_mb)
+    except ValueError:
+        return request.app.state.settings.max_upload_mb
+
+
 @r.get("/admin/settings")
 def a_settings(request: Request, u=admin):
     cur = {"signup": R(request).setting("signup", "open" if request.app.state.settings.open_registration else "closed")}
     for k in SETTINGS:
         if k != "signup":
             cur[k] = setting(request, k) if setting(request, k) is not None else R(request).setting(k, "0")
-    return {"values": cur, "schema": [{"key": k, "options": list(v[0]), "label": v[1], "help": v[2]} for k, v in SETTINGS.items()]}
+    cur["max_upload_mb"] = str(upload_limit_mb(request))
+    schema = [{"key": k, "options": list(v[0]), "label": v[1], "help": v[2]} for k, v in SETTINGS.items()]
+    schema += [{"key": k, "type": "number", "min": v[0], "max": v[1], "label": v[2], "help": v[3]} for k, v in NUMERIC_SETTINGS.items()]
+    return {"values": cur, "schema": schema}
 
 
 @r.put("/admin/settings")
 def a_settings_put(body: dict, request: Request, u=admin):
     done = {}
     for k, v in body.items():
+        if k in NUMERIC_SETTINGS:
+            lo, hi = NUMERIC_SETTINGS[k][:2]
+            if not str(v).isdigit() or not lo <= int(v) <= hi:
+                raise HTTPException(400, "%s must be a whole number from %d to %d" % (k, lo, hi))
+            done[k] = str(int(v))
+            continue
         if k not in SETTINGS or str(v) not in SETTINGS[k][0]:
             raise HTTPException(400, "invalid setting: %s" % k)
         done[k] = str(v)

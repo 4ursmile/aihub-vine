@@ -623,6 +623,14 @@ class Access(unittest.TestCase):
         self.assertEqual(r.status_code, 409)                                                                    # same message as a public name clash
         self.assertNotIn("private", r.text.lower())
 
+    def test_settings_upload_limit(self):
+        put = lambda v, h=None: self.c.put("/api/v1/admin/settings", json={"max_upload_mb": v}, headers=h or self.admin)
+        self.assertEqual(put(5, self.alice).status_code, 403)
+        for bad in (0, -1, "abc", 99999):
+            self.assertEqual(put(bad).status_code, 400)
+        self.assertEqual(put(7).status_code, 200)
+        self.assertEqual(self.c.get("/api/v1/admin/settings", headers=self.admin).json()["values"]["max_upload_mb"], "7")
+
     def test_settings_public_install_and_browse_and_private_switch(self):
         self.publish(self.alice, "pub-one")
         self.assertEqual(self.c.get("/api/v1/resolve", params={"name": "pub-one"}).status_code, 401)

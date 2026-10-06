@@ -54,6 +54,8 @@ aihub dev publish
 aihub install hello-world
 ```
 
+To have Claude Code or Codex package a new or existing project for you, run `aihub skill install` (the hub installer does this automatically) and ask "package this project for AI Hub".
+
 ## Backends
 
 Choose SQLite or PostgreSQL for metadata, memory or Redis for cache, and local files or S3-compatible storage for package archives in `.env`. See [Server configuration](docs/configuration.md) for deployment settings and [Publishing to AI Hub](docs/publishing.md) for package authoring.

@@ -241,3 +241,16 @@ class PostgresTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BuiltinSkillTest(unittest.TestCase):
+    def test_install_and_remove(self):
+        import os, tempfile
+        from aihub.cli import integrations
+        with tempfile.TemporaryDirectory() as d:
+            r = integrations.install_builtin_skill(["claude", "codex"], "project", d)
+            self.assertEqual(len(r), 2)
+            for sub in (".claude/skills", ".agents/skills"):
+                self.assertTrue(os.path.isfile(os.path.join(d, sub, "aihub-package", "SKILL.md")))
+            integrations.install_builtin_skill(["claude"], "project", d, remove=True)
+            self.assertFalse(os.path.exists(os.path.join(d, ".claude/skills/aihub-package")))

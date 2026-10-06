@@ -44,6 +44,7 @@ printf '#!/bin/sh\\nexec %s "$HOME/.aihub/bin/aihub.pyz" "$@"\\n' "$PY" > "$HOME
 chmod +x "$HOME/.aihub/bin/aihub"
 "$HOME/.aihub/bin/aihub" config set hub "$HUB" >/dev/null || true
 "$HOME/.aihub/bin/aihub" hooks install || true   # usage hooks for detected tools (Claude Code / OpenCode)
+"$HOME/.aihub/bin/aihub" skill install || true    # built-in packaging skill for detected Claude Code / Codex
 echo "Installed. Add to PATH:  export PATH=\\"$HOME/.aihub/bin:$PATH\\""
 """
 
@@ -123,6 +124,7 @@ Invoke-WebRequest "$Hub/cli/aihub.pyz" -OutFile (Join-Path $Bin "aihub.pyz") -Us
 Set-Content -Path (Join-Path $Bin "aihub.cmd") -Encoding ASCII -Value ('@echo off' + "`r`n" + '"' + $Py + '" "%~dp0aihub.pyz" %*')
 & "$Bin\aihub.cmd" config set hub $Hub | Out-Null
 try { & "$Bin\aihub.cmd" hooks install } catch {}
+try { & "$Bin\aihub.cmd" skill install } catch {}
 $User = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($User -notlike "*$Bin*") { [Environment]::SetEnvironmentVariable("Path", "$User;$Bin", "User") }
 $env:Path += ";$Bin"

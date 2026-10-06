@@ -240,3 +240,35 @@ TOOLS = {t.name: t for t in (ClaudeCode(), Codex(), OpenCode())}
 
 def detected():
     return [t for t in TOOLS.values() if t.detect()]
+
+
+# project-level skill folders (relative to the project root)
+PROJECT_SKILL_DIR = {"claude": os.path.join(".claude", "skills"), "codex": os.path.join(".agents", "skills")}
+
+
+def install_builtin_skill(tools=None, scope="user", project=".", remove=False):
+    """Write (or remove) the bundled aihub-package skill. -> [(label, status)]"""
+    from ..core import builtin_skill as B
+    out = []
+    for key in (tools or ["claude", "codex"]):
+        t = TOOLS[key]
+        if scope == "project":
+            dst = os.path.join(os.path.abspath(project), PROJECT_SKILL_DIR[key], B.NAME)
+        else:
+            if not tools and not t.detect():
+                out.append((t.label, "not detected, skipped"))
+                continue
+            dst = t.d("skills", B.NAME)
+        if remove:
+            existed = os.path.isdir(dst)
+            shutil.rmtree(dst, ignore_errors=True)
+            out.append((t.label, "removed " + dst if existed else "not installed"))
+            continue
+        shutil.rmtree(dst, ignore_errors=True)
+        for rel, content in B.FILES.items():
+            p = os.path.join(dst, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", newline="\n") as f:
+                f.write(content)
+        out.append((t.label, "installed " + dst))
+    return out

@@ -91,6 +91,13 @@ def cmd_flush(a):
         print("sent %d events" % n)
 
 
+def cmd_skill(a):
+    """Install the built-in packaging skill into Claude Code and/or Codex (user or project scope)."""
+    from . import integrations
+    for label, status in integrations.install_builtin_skill(a.tool, a.scope, a.path, remove=a.action == "remove"):
+        print("%-12s %s" % (label, status))
+
+
 def cmd_hooks(a):
     from . import hooks
     for label, status in hooks.ensure(a.tool, remove=a.action == "remove"):
@@ -203,6 +210,9 @@ def build_parser():
     add("flush", cmd_flush, arg("-v", "--verbose", action="store_true"))
     add("hooks", cmd_hooks, arg("action", nargs="?", choices=["install", "remove"], default="install"),
         arg("--tool", action="append"))
+    add("skill", cmd_skill, arg("action", nargs="?", choices=["install", "remove"], default="install"),
+        arg("--tool", action="append", choices=["claude", "codex"]),
+        arg("--scope", choices=["user", "project"], default="user"), arg("--path", default="."))
     dev = sp.add_parser("dev")
     ds = dev.add_subparsers(dest="dcmd", required=True)
     for n, fn, extra in [("init", dev_init, [arg("--name"), arg("--type", default="skill", choices=["skill", "agent", "mcp", "tool", "setup"]),
