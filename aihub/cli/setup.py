@@ -39,6 +39,14 @@ def _path(p, ctx):
     return os.path.expanduser(_x(p, ctx))
 
 
+def _first_missing_dir(path):
+    """The topmost directory of `path`'s parent chain that does not exist yet (None if the parent already exists)."""
+    d, missing = os.path.dirname(path), None
+    while d and not os.path.exists(d):
+        missing, d = d, os.path.dirname(d)
+    return missing
+
+
 def _backup(path, pkg):
     if not os.path.exists(path):
         return None
@@ -88,20 +96,22 @@ def apply(pkg, steps, ctx, confirm):
             elif k == "json_merge":
                 p = _path(s["path"], ctx)
                 b = _backup(p, pkg)
+                made_dir = _first_missing_dir(p)
                 cur = integrations._read_json(p)
                 integrations._write_json(p, _deep_merge(cur, _xd(s["data"], ctx)))
-                reverts.append({"op": "restore", "path": p, "backup": b or p + ".aihub-none"})
+                reverts.append({"op": "restore", "path": p, "backup": b or p + ".aihub-none", "rmdir": made_dir})
             elif k == "file":
                 p = _path(s["path"], ctx)
                 b = _backup(p, pkg)
                 content = _x(s.get("content", ""), ctx)
                 if s.get("source"):
                     content = open(os.path.join(ctx["PKG"], s["source"])).read()
+                made_dir = _first_missing_dir(p)
                 os.makedirs(os.path.dirname(p), exist_ok=True)
                 open(p, "w").write(content)
                 if s.get("mode"):
                     os.chmod(p, int(str(s["mode"]), 8))
-                reverts.append({"op": "restore", "path": p, "backup": b or p + ".aihub-none"})
+                reverts.append({"op": "restore", "path": p, "backup": b or p + ".aihub-none", "rmdir": made_dir})
             elif k == "block":
                 reverts.append(integrations.add_block(_path(s["path"], ctx), "setup:%s:%s" % (pkg, s.get("id", i)),
                                                       _x(s["content"], ctx)))

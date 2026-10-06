@@ -105,14 +105,17 @@ All administration routes require the `admin` permission.
 
 | Method | Path | Auth required | Purpose |
 | --- | --- | --- | --- |
-| GET | `/api/v1/admin/users?q={query}` | `admin` | List or filter accounts. |
+| GET | `/api/v1/admin/users?q={query}` | `admin` or `reset_password` | List or filter accounts. |
 | POST | `/api/v1/admin/users/{username}/status` | `admin` | Set account status to `active`, `pending`, or `disabled`. |
 | POST | `/api/v1/admin/users/{username}/role` | `admin` | Assign an existing role. |
+| POST | `/api/v1/admin/users/{username}/reset-password` | `reset_password` | Set a new random password and sign that person out everywhere. The password is returned once in the response. Not allowed on yourself, and only an administrator can reset an administrator. |
 | DELETE | `/api/v1/admin/users/{username}` | `admin` | Delete an account; an admin cannot delete their own account. |
 | GET | `/api/v1/admin/settings/registration` | `admin` | Get current signup mode. |
 | PUT | `/api/v1/admin/settings/registration` | `admin` | Set mode to `open`, `approval`, or `closed`. |
 | GET | `/api/v1/admin/roles` | `admin` | List roles and permissions. |
-| GET | `/api/v1/admin/audit` | `admin` | Read recent audit records. |
+| GET | `/api/v1/admin/audit` | `audit` | Read recent admin-action records. |
+| GET | `/api/v1/audit` | `audit` | Security audit search. `source=tools` (agent tool calls and installs) or `admin` (account, role and setting changes). Filters: `q` (free text over parameters, tool, package, path, host, person), `actor`, `action` (tool/component or action name), `package`, `kind`, `days` (0 = all time) or `start`/`end` (unix seconds), `page`, `per_page` (max 200). `%` and `_` in text are literal. |
+| GET | `/api/v1/audit/export` | `audit` | Same filters, up to 5,000 rows as CSV. The export itself is audited. |
 
 ## Other server routes
 

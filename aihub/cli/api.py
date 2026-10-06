@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from . import paths
@@ -9,6 +10,21 @@ from . import paths
 
 class ApiError(Exception):
     pass
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but never send the hub token to a different host (e.g. a pre-signed S3/CDN URL).
+    S3 also rejects a request that has both a signed query string and an Authorization header."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(newurl).netloc != urllib.parse.urlsplit(req.full_url).netloc:
+            for h in list(new.headers):
+                if h.lower() == "authorization":
+                    del new.headers[h]
+        return new
+
+
+_opener = urllib.request.build_opener(_SafeRedirect)
 
 
 def _req(method, path, body=None, raw=None, headers=None, timeout=30):
@@ -24,7 +40,7 @@ def _req(method, path, body=None, raw=None, headers=None, timeout=30):
         h["Content-Type"] = "application/json"
     rq = urllib.request.Request(url, data=data, headers=h, method=method)
     try:
-        return urllib.request.urlopen(rq, timeout=timeout)
+        return _opener.open(rq, timeout=timeout)
     except urllib.error.HTTPError as e:
         try:
             msg = json.loads(e.read()).get("detail", e.reason)

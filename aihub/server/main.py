@@ -3,11 +3,13 @@ import os
 import tempfile
 
 import contextlib
+import json
 import logging
 import time
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
+from starlette.background import BackgroundTask
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -16,7 +18,7 @@ from .config import Settings
 from .db import init_db
 from .repos import EventBuffer, Repos
 from .routers import r as api
-from .storage import LocalStorage
+from .storage import init_storage
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -40,18 +42,40 @@ def create_app(settings: Settings = None) -> FastAPI:
     os.makedirs(s.data_dir, exist_ok=True)
     @contextlib.asynccontextmanager
     async def lifespan(_app):
+        logging.getLogger("aihub").info("backends: %s", json.dumps(s.describe()))
         yield
         _app.state.events.close()  # drain queued usage events on shutdown
+        try:
+            db.close()
+        except Exception:
+            pass
 
     app = FastAPI(title="AI Hub", version="0.1.0", lifespan=lifespan)
     db = init_db(s)
     app.state.settings = s
     app.state.repos = Repos(db)
     app.state.cache = init_cache(s)
-    app.state.storage = LocalStorage(os.path.join(s.data_dir, "files"))
+    app.state.storage = init_storage(s)
     app.state.events = EventBuffer(app.state.repos, s.event_flush_rows, s.event_flush_secs)
     app.add_middleware(GZipMiddleware, minimum_size=800)
     app.include_router(api)
+
+    class DbUnitOfWork:
+        """Pure ASGI middleware: one database unit per request, always ended - even when the client disconnects or the handler raises.
+        (Postgres: borrows one pooled connection lazily and returns it here. SQLite: no-op.)"""
+        def __init__(self, inner):
+            self.inner = inner
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                return await self.inner(scope, receive, send)
+            token = db.begin()
+            try:
+                await self.inner(scope, receive, send)
+            finally:
+                db.end(token)
+
+    app.add_middleware(DbUnitOfWork)
 
     CSP = ("default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; "
            "img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
@@ -97,12 +121,18 @@ def create_app(settings: Settings = None) -> FastAPI:
         if not u and (repos.setting("public_install") or "0") != "1":
             raise HTTPException(401, "sign in required")
         st = app.state.storage
-        if p:
-            for v in app.state.repos.versions(p["id"]):
-                if v["file"] == filename:
-                    app.state.repos.version_download(p["id"], v["version"])
-        return FileResponse(st.path(name, filename), filename=filename,
-                            headers={"Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff"})
+        for v in repos.versions(p["id"]):
+            if v["file"] == filename:
+                repos.version_download(p["id"], v["version"])
+        signed = st.url(name, filename, expires=300)       # S3: let the client fetch straight from the bucket
+        if signed:
+            return RedirectResponse(signed, status_code=302, headers={"Cache-Control": "no-store"})
+        from starlette.responses import StreamingResponse
+        f = st.open(name, filename)
+        hdr = {"Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff", "Content-Length": str(st.size(name, filename)),
+               "Content-Disposition": 'attachment; filename="%s"' % os.path.basename(filename)}
+        return StreamingResponse(iter(lambda: f.read(1 << 20), b""), media_type="application/octet-stream", headers=hdr,
+                                 background=BackgroundTask(f.close))
 
     @app.get("/install.sh", response_class=PlainTextResponse)
     def install_sh():
@@ -132,16 +162,41 @@ def create_app(settings: Settings = None) -> FastAPI:
 
 
 def cli():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8000)
+    ap = argparse.ArgumentParser(description="AI Hub server. Backends (database, cache, storage) are chosen in .env / environment.")
+    ap.add_argument("--host", default=None)
+    ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--data", default=None)
     ap.add_argument("--public-url", default=None)
+    ap.add_argument("--env-file", default=None, help="path to a .env file (default: ./.env or <data>/.env)")
+    ap.add_argument("--check", action="store_true", help="validate configuration, test every backend connection, then exit")
     a = ap.parse_args()
     import logging
     import uvicorn
-    logging.basicConfig(level=os.environ.get("AIHUB_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    s = Settings.from_env(data_dir=a.data, public_url=a.public_url)
-    if not a.public_url and "AIHUB_PUBLIC_URL" not in os.environ:
-        s.public_url = "http://%s:%d" % ("localhost" if a.host in ("0.0.0.0", "127.0.0.1") else a.host, a.port)
-    uvicorn.run(create_app(s), host=a.host, port=a.port)
+    try:
+        s = Settings.load(env_file=a.env_file, data_dir=a.data, public_url=a.public_url)
+    except ValueError as e:
+        raise SystemExit("aihub: " + str(e))
+    host = a.host or os.environ.get("AIHUB_HOST") or "127.0.0.1"
+    port = a.port or int(os.environ.get("AIHUB_PORT") or 8000)
+    if not a.public_url and "AIHUB_PUBLIC_URL" not in os.environ and s.public_url == Settings().public_url:
+        s.public_url = "http://%s:%d" % ("localhost" if host in ("0.0.0.0", "127.0.0.1") else host, port)
+    logging.basicConfig(level=s.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    if a.check:
+        raise SystemExit(check(s))
+    uvicorn.run(create_app(s), host=host, port=port)
+
+
+def check(s):
+    """`python -m aihub.server --check`: report which backends are configured and whether each is reachable."""
+    print(json.dumps(s.describe(), indent=2))
+    ok = True
+    for name, fn in (("database", lambda: init_db(s).conn().execute("SELECT 1").fetchone()),
+                     ("cache", lambda: init_cache(s).health() or (_ for _ in ()).throw(RuntimeError("unhealthy"))),
+                     ("storage", lambda: init_storage(s).health() or (_ for _ in ()).throw(RuntimeError("bucket/dir not accessible")))):
+        try:
+            fn()
+            print("  ok    %s" % name)
+        except Exception as e:
+            ok = False
+            print("  FAIL  %s: %s" % (name, e))
+    return 0 if ok else 1

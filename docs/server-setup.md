@@ -4,7 +4,7 @@
 
 - Python 3.10 or later.
 - The server packages listed in `requirements-server.txt`: FastAPI 0.110+ and Uvicorn 0.29+.
-- A persistent writable data directory with room for SQLite data and uploaded archives.
+- A persistent writable data directory for SQLite data and/or local uploaded archives. PostgreSQL and S3-compatible backends are also available; see [Server configuration](configuration.md) for backend selection.
 - A TLS-terminating reverse proxy for public deployments.
 
 ## Install and run
@@ -24,20 +24,7 @@ Check the service with `GET https://hub.example.com/api/v1/healthz`. It returns 
 
 ## Environment variables
 
-Each setting is read from an `AIHUB_`-prefixed uppercase name. Command-line `--data` and `--public-url`, when given, override the corresponding environment variables.
-
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `AIHUB_DATA_DIR` | `./aihub-data` | Data root. Contains `aihub.db` and uploaded package files. |
-| `AIHUB_PUBLIC_URL` | `http://localhost:8000` | Public base URL embedded in download and CLI installation URLs. If unset, it is derived from `--host` and `--port`. The `--public-url` flag overrides it. |
-| `AIHUB_CACHE_BACKEND` | `memory` | Cache implementation. `memory` uses process memory; any other value selects the null cache. |
-| `AIHUB_EVENT_FLUSH_ROWS` | `50` | Number of queued usage events that wakes the database flusher. |
-| `AIHUB_EVENT_FLUSH_SECS` | `5.0` | Maximum interval in seconds between usage-event flush attempts. |
-| `AIHUB_MAX_UPLOAD_MB` | `200` | Maximum request archive size in MiB. Oversized uploads return HTTP 413. |
-| `AIHUB_OPEN_REGISTRATION` | `true` | Default signup mode when no persisted admin signup setting exists. Boolean values `1`, `true`, and `yes` (case-insensitive) are true; other values are false. |
-| `AIHUB_LOG_LEVEL` | `INFO` | Log level for the server process (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Read when started with `python -m aihub.server`. |
-
-Registration mode is stored in the database after it is changed in the admin UI or API. That persisted mode takes precedence over `AIHUB_OPEN_REGISTRATION`.
+For all settings, configuration precedence, secret files, and `.env` examples, see [Server configuration](configuration.md). `Registration mode` is stored in the database after it is changed in the admin UI or API; that persisted mode takes precedence over `AIHUB_OPEN_REGISTRATION`.
 
 ## First run and signup policy
 
@@ -51,7 +38,7 @@ An admin can view or update the mode in the web UI's admin area, or use `GET /ap
 
 ## Data, backups, and upgrades
 
-The data directory contains:
+With the default SQLite and local-storage backends, the data directory contains:
 
 ```text
 <data-dir>/
@@ -66,9 +53,9 @@ SQLite connections use WAL mode. Back up the database using SQLite's backup API 
 sqlite3 /var/lib/aihub/aihub.db ".backup '/var/backups/aihub.db'"
 ```
 
-Back up the `files/` directory as well. Keep database and package-file backups consistent; restore both while the server is stopped. Restore the backup database to `aihub.db` in the data directory and restore `files/` to the matching location. Keep the backup separate from active storage.
+Back up `files/` when using local storage. With PostgreSQL or S3 storage, back up those external services using their own procedures. Keep metadata and archive backups consistent; restore them while the server is stopped. Keep backups separate from active storage.
 
-For upgrades, stop the service gracefully, preserve a database and files backup, update the source/deployment image, and start the service again. Database initialization applies the current schema and the package `readme` column migration at startup. Verify `/api/v1/healthz` and run a CLI check after upgrade.
+For upgrades, stop the service gracefully, preserve a database and files backup, update the source/deployment image, and start the service again. Database initialization applies the current schema and the package `readme` column migration at startup. To change database or storage backend, see [Migrating between backends](configuration.md#migrating-between-backends). Verify `/api/v1/healthz` and run a CLI check after upgrade.
 
 ## systemd example
 
@@ -124,23 +111,25 @@ server {
 
 The application uses its configured `AIHUB_PUBLIC_URL` to generate client-facing links. Forwarded headers do not replace that setting.
 
+## Choosing backends
+
+Choose SQLite/PostgreSQL, memory/Redis/none, and local/S3 independently in `.env`. See [Server configuration](configuration.md) for defaults, every setting, backend-specific guidance, Docker profiles, and examples.
+
 ## Docker
 
-The repository currently includes `Dockerfile` and `docker-compose.yml`. The image runs Python 3.12 and starts the server with `python -m aihub.server --host 0.0.0.0 --port 8000 --data /data`. Compose exposes port 8000, persists a named `aihub-data` volume at `/data`, and declares `AIHUB_PUBLIC_URL` (default `http://localhost:8000`). The image also has a health check for `/api/v1/healthz`.
+The repository's Dockerfile uses Python 3.12, installs `requirements-all.txt` (including PostgreSQL, Redis, and S3 backend support), runs as the unprivileged `aihub` user, and starts the server on `0.0.0.0:8000` with `/data` as its data directory. It copies `aihub/` and `docs/`, exposes port 8000, persists `/data`, and has a `/api/v1/healthz` health check.
 
-Set the public URL with the `AIHUB_PUBLIC_URL` environment variable (Compose reads it from your shell or an `.env` file). The `--public-url` flag, when given, takes precedence.
+The Compose file runs the app with SQLite, memory cache, and local files by default. Optional profiles start PostgreSQL (`postgres`), Redis (`redis`), and MinIO plus bucket initialization (`minio`). Set each profile's secret once in `.env`; the app's connection settings are constructed by Compose. The `aihub` service does not declare `depends_on`, so start-up ordering/readiness is not guaranteed by Compose. For external services, supply their explicit settings; see [Server configuration](configuration.md), including the current S3 endpoint default caveat. For example:
 
 ```sh
-# Compose
-AIHUB_PUBLIC_URL=https://hub.example.com docker compose up -d --build
-
-# Plain docker
-docker build -t aihub .
-docker run -d --name aihub -p 8000:8000 -v aihub-data:/data \
-  -e AIHUB_PUBLIC_URL=https://hub.example.com aihub
+cp .env.example .env
+# Uncomment and set strong values for each enabled service in .env.
+docker compose --profile postgres --profile redis --profile minio up -d --build
 ```
 
-Compose does not configure a TLS reverse proxy; put one in front of the container for public use. Verify the configured URL using `GET /api/v1/meta` and `GET /api/v1/resolve`.
+Before starting, check the effective configuration with `docker compose config`. Compose `.env` values are not expanded inside the env file itself; do not put `${VAR}` references in those values. To use external services, leave profiles disabled and configure the real URLs and storage settings in `.env`; see [Server configuration](configuration.md).
+
+Compose does not configure a TLS reverse proxy; put one in front of the container for public use. Confirm the public URL using `GET /api/v1/meta` and `GET /api/v1/resolve`.
 
 ## Air-gapped networks
 
@@ -149,7 +138,7 @@ The web interface loads the pinned Preact/htm bundle from `cdn.jsdelivr.net` in 
 ## Security checklist
 
 - Serve the public site over TLS and set `AIHUB_PUBLIC_URL` to its HTTPS URL.
-- Restrict filesystem access to the service account; back up both SQLite and `files/`.
+- Restrict filesystem access to the service account; back up SQLite and local `files/` when those backends are enabled, or use the appropriate backup procedures for PostgreSQL and S3.
 - Treat bearer tokens as credentials. Keep CLI credentials private and revoke unused API tokens.
 - Keep the Content Security Policy and other response security headers enabled.
 - Set `AIHUB_MAX_UPLOAD_MB` to an acceptable limit and align the reverse proxy's `client_max_body_size`.

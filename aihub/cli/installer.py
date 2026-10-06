@@ -12,6 +12,64 @@ from . import api, hooks, integrations, paths, setup as setupmod, telemetry
 OS = {"Darwin": "macos", "Linux": "linux", "Windows": "windows"}.get(platform.system(), "linux")
 
 
+SCRIPT_EXT = (".sh", ".ps1", ".cmd", ".bat", ".py")
+
+
+def script_command(entry, pkg_dir, os_name=None):
+    """Turn a manifest script entry into (argv|string, use_shell, description).
+    - a path to a file inside the package (.sh/.ps1/.cmd/.bat/.py)  -> run with the right interpreter, no shell parsing
+    - anything else                                                 -> an inline shell command (legacy behaviour)
+    The path must stay inside the package: the manifest comes from the registry and is not trusted."""
+    os_name = os_name or OS
+    e = entry.strip()
+    if e.lower().endswith(SCRIPT_EXT) and " " not in e:
+        full = os.path.realpath(os.path.join(pkg_dir, e))
+        if not full.startswith(os.path.realpath(pkg_dir) + os.sep):
+            raise api.ApiError("script path escapes the package: %s" % e)
+        if not os.path.isfile(full):
+            raise api.ApiError("script not found in package: %s" % e)
+        ext = full.lower().rsplit(".", 1)[-1]
+        if ext == "ps1":
+            return (["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", full], False, e)
+        if ext in ("cmd", "bat"):
+            return (["cmd", "/c", full], False, e)
+        if ext == "py":
+            return ([sys.executable, full], False, e)
+        return (["sh", full], False, e)
+    return (e, True, e)
+
+
+def run_script(entry, pkg_dir, check=True):
+    cmd, shell, _ = script_command(entry, pkg_dir)
+    env = dict(os.environ, AIHUB_PACKAGE_DIR=pkg_dir)
+    if check:
+        subprocess.check_call(cmd, shell=shell, cwd=pkg_dir, env=env)
+    else:
+        subprocess.call(cmd, shell=shell, cwd=pkg_dir, env=env)
+
+
+def write_shim(bindir, cmdname, target, venv=None):
+    """Create a launcher for a [bin] command. POSIX: an sh script. Windows: a .cmd file."""
+    if OS == "windows":
+        shim = os.path.join(bindir, cmdname + ".cmd")
+        if target.endswith(".py"):
+            py = os.path.join(venv, "Scripts", "python.exe") if venv else "python"
+            body = '@echo off\r\n"%s" "%s" %%*\r\n' % (py, target)
+        elif target.lower().endswith(".ps1"):
+            body = '@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File "%s" %%*\r\n' % target
+        else:
+            body = '@echo off\r\n"%s" %%*\r\n' % target
+        open(shim, "w", newline="").write(body)
+        return shim
+    shim = os.path.join(bindir, cmdname)
+    interp = os.path.join(venv, "bin", "python") if venv else "/usr/bin/env python3"
+    with open(shim, "w") as f:
+        f.write('#!/bin/sh\nexec %s "%s" "$@"\n' % (interp, target) if target.endswith(".py") else '#!/bin/sh\nexec "%s" "$@"\n' % target)
+    os.chmod(shim, os.stat(shim).st_mode | stat.S_IEXEC)
+    os.chmod(target, os.stat(target).st_mode | stat.S_IEXEC)
+    return shim
+
+
 def state():
     return paths.load("state.json", {"packages": {}})
 
@@ -71,19 +129,15 @@ def install(name, spec="", assume_yes=False, tools=None, _seen=None):
         rec["venv"] = venv
     script = m["scripts"].get("install_" + OS)
     if script:
-        if assume_yes or input("Run install script for %s?\n  %s\n[y/N] " % (name, script)).lower().startswith("y"):
-            subprocess.check_call(script, shell=True, cwd=dest)
+        _, _, shown = script_command(script, dest)             # validates the path before asking the user to approve it
+        if assume_yes or input("Run install script for %s?\n  %s\n[y/N] " % (name, shown)).lower().startswith("y"):
+            run_script(script, dest)
     bindir = paths.ensure("bin")
     for cmdname, rel in m["bin"].items():
-        shim = os.path.join(bindir, cmdname)
-        interp = os.path.join(rec["venv"], "bin", "python") if rec["venv"] else "/usr/bin/env python3"
-        target = os.path.join(dest, rel)
-        with open(shim, "w") as f:
-            f.write('#!/bin/sh\nexec %s "%s" "$@"\n' % (interp, target) if rel.endswith(".py")
-                    else '#!/bin/sh\nexec "%s" "$@"\n' % target)
-        os.chmod(shim, os.stat(shim).st_mode | stat.S_IEXEC)
-        os.chmod(target, os.stat(target).st_mode | stat.S_IEXEC)
-        rec["shims"].append(shim)
+        target = os.path.realpath(os.path.join(dest, rel))
+        if not target.startswith(os.path.realpath(dest) + os.sep) or not os.path.isfile(target):
+            raise api.ApiError("[bin] %s points outside the package or to a missing file: %s" % (cmdname, rel))
+        rec["shims"].append(write_shim(bindir, cmdname, target, rec["venv"]))
     comps = (m["skills"], m["agents"], m["mcp_servers"])
     if any(comps):
         avail = integrations.detected()
@@ -127,7 +181,10 @@ def uninstall(name, quiet=False):
     if not rec:
         raise api.ApiError("%s is not installed" % name)
     if rec.get("uninstall_script"):
-        subprocess.call(rec["uninstall_script"], shell=True, cwd=rec["path"])
+        try:
+            run_script(rec["uninstall_script"], rec["path"], check=False)
+        except api.ApiError as e:                    # a broken uninstall script must not block removing the package
+            print("! uninstall script skipped: %s" % e)
     for rv in reversed(rec["reverts"]):
         integrations.revert(rv)
     for rv in reversed(rec.get("setup_reverts", [])):

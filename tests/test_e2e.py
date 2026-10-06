@@ -101,6 +101,111 @@ class Server(unittest.TestCase):
         self.assertIn("aihub", self.c.get("/install.sh").text)
         self.assertEqual(self.c.get("/cli/aihub.pyz").status_code, 200)
 
+    def test_source_download_setting(self):
+        h = self.auth()
+        body = io.BytesIO()
+        with tarfile.open(fileobj=body, mode="w:gz") as t:
+            ti = tarfile.TarInfo("aihub.toml")
+            ti.size = len(TOML)
+            t.addfile(ti, io.BytesIO(TOML))
+        self.assertEqual(self.c.post("/api/v1/upload", content=body.getvalue(), headers=h).status_code, 200)
+        sha = self.c.get("/api/v1/packages/demo-tool").json()["versions"][0]["sha256"]
+        url = "/api/v1/packages/demo-tool/versions/1.0.0/download"
+        self.assertTrue(self.c.get("/api/v1/meta").json()["allow_source_download"])        # default on
+        self.assertEqual(self.c.get(url).status_code, 401)                                 # signed out: needs sign-in
+        r = self.c.get(url, headers=h)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(hashlib.sha256(r.content).hexdigest(), sha)
+        self.assertEqual(self.c.get("/api/v1/packages/demo-tool/versions/9.9.9/download", headers=h).status_code, 404)
+        self.c.put("/api/v1/admin/settings", json={"allow_source_download": "0"}, headers=h)
+        self.assertEqual(self.c.get(url, headers=h).status_code, 403)
+        self.assertFalse(self.c.get("/api/v1/meta").json()["allow_source_download"])
+        f = self.c.get("/files/demo-tool/" + self.c.get("/api/v1/resolve?name=demo-tool", headers=h).json()["url"].rsplit("/", 1)[1], headers=h)
+        self.assertEqual(f.status_code, 200)                                               # CLI installs still work
+
+    def test_reset_password_and_audit(self):
+        from aihub.core import redact
+        h = self.auth("root")                                  # first account = admin
+        hb, hc = self.auth("bob"), self.auth("carol")
+        J = lambda m, u, **k: getattr(self.c, m)(u, **k)
+        perms = {p["key"] for p in self.c.get("/api/v1/admin/roles", headers=h).json()["permissions"]}
+        self.assertTrue({"reset_password", "audit"} <= perms)
+        # nobody but admin has them by default
+        self.assertEqual(J("post", "/api/v1/admin/users/carol/reset-password", headers=hb).status_code, 403)
+        self.assertEqual(J("get", "/api/v1/audit", headers=hb).status_code, 403)
+        # a helpdesk role with only reset_password
+        self.c.post("/api/v1/admin/roles", json={"name": "helpdesk", "permissions": ["reset_password"]}, headers=h)
+        self.c.post("/api/v1/admin/users/bob/role", json={"role": "helpdesk"}, headers=h)
+        self.assertEqual(J("get", "/api/v1/admin/users", headers=hb).status_code, 200)
+        self.assertEqual(J("post", "/api/v1/admin/users/bob/status", json={"status": "disabled"}, headers=hb).status_code, 403)
+        self.assertEqual(J("post", "/api/v1/admin/users/root/reset-password", headers=hb).status_code, 403)   # cannot take over an admin
+        self.assertEqual(J("post", "/api/v1/admin/users/bob/reset-password", headers=hb).status_code, 400)    # not yourself
+        self.assertEqual(J("post", "/api/v1/admin/users/nobody/reset-password", headers=hb).status_code, 404)
+        r = J("post", "/api/v1/admin/users/carol/reset-password", headers=hb)
+        self.assertEqual(r.status_code, 200)
+        pw = r.json()["password"]
+        self.assertEqual(self.c.get("/api/v1/auth/me", headers=hc).status_code, 401)          # old sessions are gone
+        self.assertEqual(self.c.post("/api/v1/auth/login", json={"username": "carol", "password": "secret1"}).status_code, 401)
+        self.assertEqual(self.c.post("/api/v1/auth/login", json={"username": "carol", "password": pw}).status_code, 200)
+        # audit trail names who did it, and never contains the password
+        a = self.c.get("/api/v1/audit?source=admin&action=password_reset", headers=h).json()
+        self.assertEqual(a["total"], 1)
+        self.assertEqual(a["items"][0]["actor"], "bob")
+        self.assertNotIn(pw, str(a))
+
+        # redaction of tool-call parameters
+        d = redact.params({"command": "curl -H 'Authorization: Bearer abc123' https://x", "api_key": "k", "n": 1,
+                           "env": {"TOKEN": "t"}, "text": "key sk-" + "a" * 30})
+        for leak in ("abc123", '"k"', '"t"', "a" * 30):
+            self.assertNotIn(leak, d)
+        self.assertLess(len(redact.params({"x": "y" * 50000})), 2100)
+
+        # tool events: anonymous install shows the local OS user; params are re-scrubbed by the server
+        ev = {"kind": "use", "package": "demo-tool", "component": "mcp__db__query", "client_id": "c" * 32, "local_user": "dan",
+              "host": "dan-mbp", "detail": "token=hunter2 select 1", "cwd": "/work/app"}
+        self.c.post("/api/v1/events", json={"events": [ev]})
+        self.c.post("/api/v1/events", json={"events": [dict(ev, local_user="", kind="install")]})
+        t = self.c.get("/api/v1/audit?source=tools&q=select", headers=h).json()
+        self.assertEqual(t["total"], 2)
+        self.assertEqual({x["actor"] for x in t["items"]}, {"dan (local)", "anon-" + "c" * 6})
+        self.assertNotIn("hunter2", str(t))
+        self.assertEqual(self.c.get("/api/v1/audit?source=tools&actor=dan%20(local)", headers=h).json()["total"], 1)
+        self.assertEqual(self.c.get("/api/v1/audit?source=tools&kind=install", headers=h).json()["total"], 1)
+        self.assertEqual(self.c.get("/api/v1/audit?source=tools&q=%25", headers=h).json()["total"], 0)       # % is literal
+        self.assertEqual(self.c.get("/api/v1/audit?source=nope", headers=h).status_code, 400)
+        csv_ = self.c.get("/api/v1/audit/export?source=tools", headers=h)
+        self.assertIn("dan (local)", csv_.text)
+        self.assertEqual(self.c.get("/api/v1/audit/export", headers=hb).status_code, 403)
+
+
+class Migrate(unittest.TestCase):
+    def test_db_and_storage_roundtrip(self):
+        import aihub.server.migrate as mg
+        from aihub.server.db import init_db
+        a, b = tempfile.mkdtemp(), tempfile.mkdtemp()
+        c = TestClient(create_app(Settings(data_dir=a)))
+        c.post("/api/v1/auth/register", json={"username": "alice", "password": "secret1"})
+        h = {"Authorization": "Bearer " + c.post("/api/v1/auth/login", json={"username": "alice", "password": "secret1"}).json()["token"]}
+        body = io.BytesIO()
+        with tarfile.open(fileobj=body, mode="w:gz") as t:
+            ti = tarfile.TarInfo("aihub.toml")
+            ti.size = len(TOML)
+            t.addfile(ti, io.BytesIO(TOML))
+        self.assertEqual(c.post("/api/v1/upload", content=body.getvalue(), headers=h).status_code, 200)
+        env = os.path.join(b, "dest.env")
+        open(env, "w").write("AIHUB_DATA_DIR=%s\nAIHUB_SQLITE_PATH=%s\nAIHUB_STORAGE_BACKEND=local\n" % (b, os.path.join(b, "new.db")))
+        src = Settings(data_dir=a)
+        dst = Settings.load(env={}, env_file=env)
+        mg.migrate_db(src, dst)
+        self.assertTrue(mg.migrate_storage(src, dst))
+        self.assertTrue(mg.migrate_storage(src, dst))                       # re-run is a no-op
+        d = init_db(dst).conn()
+        self.assertEqual(d.execute("SELECT username FROM users").fetchone()[0], "alice")
+        self.assertEqual(d.execute("SELECT name FROM packages").fetchone()[0], "demo-tool")
+        self.assertTrue(os.path.isdir(os.path.join(b, "files", "demo-tool")))
+        c2 = TestClient(create_app(dst))                                    # the migrated hub serves search + download
+        self.assertEqual(c2.get("/api/v1/packages?q=demo").json()["total"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -577,3 +682,154 @@ class Access(unittest.TestCase):
         self.assertEqual([g["name"] for g in self.c.get("/api/v1/groups", headers=self.alice).json()["groups"]], ["g1"])
         self.assertEqual([g["name"] for g in self.c.get("/api/v1/groups", headers=self.carol).json()["groups"]], [])
         self.assertEqual(self.c.delete("/api/v1/groups/g1", headers=self.admin).status_code, 200)                     # admins manage all
+
+
+class GroupsPageAndBulk(unittest.TestCase):
+    def setUp(self):
+        from aihub.server import routers
+        routers._fails.clear()
+        self.c = TestClient(create_app(Settings(data_dir=tempfile.mkdtemp())))
+        self.admin = self.user("root")
+        self.ann = self.user("ann")
+
+    def user(self, n, pw="secret1"):
+        self.c.post("/api/v1/auth/register", json={"username": n, "password": pw})
+        r = self.c.post("/api/v1/auth/login", json={"username": n, "password": pw})
+        return {"Authorization": "Bearer " + r.json()["token"]} if r.status_code == 200 else None
+
+    def grant_create(self):
+        self.c.put("/api/v1/admin/roles/user", json={"permissions": ["publish", "review", "create_groups"]}, headers=self.admin)
+        self.c.put("/api/v1/admin/settings", json={"allow_group_creation": "1"}, headers=self.admin)
+
+    def test_owner_sees_and_manages_own_groups_without_admin(self):
+        caps = lambda: self.c.get("/api/v1/groups/capabilities", headers=self.ann).json()
+        self.assertFalse(caps()["show_page"])                                    # nothing to show yet
+        self.grant_create()
+        self.assertEqual((caps()["can_create"], caps()["show_page"]), (True, True))
+        self.assertEqual(self.c.post("/api/v1/groups", json={"name": "mine"}, headers=self.ann).status_code, 200)
+        self.c.post("/api/v1/groups", json={"name": "other"}, headers=self.admin)
+        gs = self.c.get("/api/v1/groups", headers=self.ann).json()["groups"]
+        self.assertEqual([(g["name"], g["can_manage"]) for g in gs], [("mine", True)])   # own group only, manageable
+        self.assertNotIn("owner_id", gs[0])                                               # internal ids are not exposed
+        self.assertEqual(self.c.post("/api/v1/groups/mine/members", json={"usernames": ["root"]}, headers=self.ann).status_code, 200)
+        self.assertEqual(self.c.post("/api/v1/groups/other/members", json={"usernames": ["ann"]}, headers=self.ann).status_code, 404)
+        # once the permission is withdrawn the owner keeps managing what they already made, but cannot create more
+        self.c.put("/api/v1/admin/roles/user", json={"permissions": ["publish", "review"]}, headers=self.admin)
+        self.assertEqual(self.c.post("/api/v1/groups", json={"name": "more"}, headers=self.ann).status_code, 403)
+        self.assertTrue(caps()["show_page"] and caps()["owns_groups"])
+
+    def test_member_sees_group_read_only(self):
+        self.c.post("/api/v1/groups", json={"name": "team"}, headers=self.admin)
+        self.c.post("/api/v1/groups/team/members", json={"usernames": ["ann"]}, headers=self.admin)
+        gs = self.c.get("/api/v1/groups", headers=self.ann).json()["groups"]
+        self.assertEqual([(g["name"], g["can_manage"]) for g in gs], [("team", False)])
+        self.assertTrue(self.c.get("/api/v1/groups/capabilities", headers=self.ann).json()["show_page"])
+        self.assertEqual(self.c.get("/api/v1/groups/team", headers=self.ann).status_code, 404)          # member list is manager-only
+
+    def test_bulk_group_column(self):
+        for g in ("data-team", "platform"):
+            self.c.post("/api/v1/groups", json={"name": g}, headers=self.admin)
+        sheet = (b"username,display_name,group\n"
+                 b"a1,Ann One,data-team\n"
+                 b"b2,Bob Two,Data-Team; platform\n"      # several groups, case-insensitive, ; separated
+                 b"c3,Cy Three,data-team|platform|data-team\n"   # pipe separated, duplicates ignored
+                 b"d4,Di Four,ghost\n"                        # unknown group -> row skipped
+                 b"e5,Ed Five,data-team;ghost\n"              # one unknown among valid ones -> whole row skipped
+                 b"f6,Flo Six,\n")                            # no group is fine
+        r = self.c.post("/api/v1/admin/users/batch?role=user", content=sheet, headers=self.admin)
+        self.assertEqual(r.status_code, 200, r.text)
+        import csv as _csv
+        rows = {x["username"]: x for x in _csv.DictReader(io.StringIO(r.text.lstrip("\ufeff")))}
+        self.assertEqual(rows["a1"]["status"], "created"); self.assertEqual(rows["b2"]["groups"], "data-team, platform")
+        self.assertEqual(rows["c3"]["groups"], "data-team, platform")
+        self.assertEqual(rows["d4"]["status"], "unknown group: ghost"); self.assertEqual(rows["d4"]["password"], "")
+        self.assertEqual(rows["e5"]["status"], "unknown group: ghost")
+        self.assertEqual(rows["f6"]["status"], "created")
+        self.assertEqual(r.headers["x-created"], "4")
+        members = lambda g: sorted(m["username"] for m in self.c.get("/api/v1/groups/" + g, headers=self.admin).json()["members"])
+        # "root" created both groups, so the creator is a member (existing behaviour); the sheet added the rest
+        self.assertEqual(members("data-team"), ["a1", "b2", "c3", "root"]); self.assertEqual(members("platform"), ["b2", "c3", "root"])
+        # no group was auto-created, and skipped rows created no account
+        self.assertEqual(sorted(g["name"] for g in self.c.get("/api/v1/groups", headers=self.admin).json()["groups"]), ["data-team", "platform"])
+        all_users = {u["username"] for u in self.c.get("/api/v1/admin/users", headers=self.admin).json()["users"]}
+        self.assertTrue({"a1", "b2", "c3", "f6"} <= all_users)
+        self.assertFalse({"d4", "e5"} & all_users)                         # skipped rows created no account
+        # group membership from the sheet grants access to private repos shared with the group
+        tok = self.c.post("/api/v1/auth/login", json={"username": "a1", "password": rows["a1"]["password"]}).json()["token"]
+        self.assertEqual(self.c.get("/api/v1/groups", headers={"Authorization": "Bearer " + tok}).json()["groups"][0]["name"], "data-team")
+
+    def test_bulk_group_header_detected_and_plain_sheets_unchanged(self):
+        from aihub.server.routers import _batch_rows
+        rows = _batch_rows([["Username", "Team"], ["x", "a; b"]], "user")
+        self.assertEqual(rows[0]["groups"], ["a", "b"])
+        self.assertEqual(_batch_rows([["dan", "user"]], "user")[0]["groups"], [])       # headerless 2-col sheet still username,role
+
+
+class ReviewRankings(unittest.TestCase):
+    def setUp(self):
+        from aihub.server import routers
+        routers._fails.clear()
+        self.c = TestClient(create_app(Settings(data_dir=tempfile.mkdtemp())))
+        self.r = self.c.app.state.repos
+        self.users = {}
+        self.admin = self.reg("root")
+        self.uid = {n: self.r.user_by_name(n)["id"] for n in ["root"]}
+        for i in range(12):
+            self.reg("u%d" % i)
+            self.uid["u%d" % i] = self.r.user_by_name("u%d" % i)["id"]
+
+    def reg(self, n):
+        self.c.post("/api/v1/auth/register", json={"username": n, "password": "secret1"})
+        return {"Authorization": "Bearer " + self.c.post("/api/v1/auth/login", json={"username": n, "password": "secret1"}).json()["token"]}
+
+    def pkg(self, name, vis="public"):
+        return self.r.package_upsert(name, "skill", "d", [], "", visibility=vis)
+
+    def rate(self, pid, ratings):
+        for i, rt in enumerate(ratings):
+            self.r.review_upsert(pid, self.uid["u%d" % i], rt, "x")
+
+    def rank(self, what, h=None):
+        return [(x["name"], x["count"]) for x in self.c.get("/api/v1/rankings/" + what, headers=h or {}).json()["items"]]
+
+    def test_bayesian_order_beats_a_single_five_star(self):
+        self.rate(self.pkg("one-five"), [5])                       # avg 5.0 from one review
+        self.rate(self.pkg("many-good"), [5, 5, 5, 5, 4, 5, 5, 5, 5, 4])   # avg 4.8 from ten reviews
+        self.rate(self.pkg("many-meh"), [3, 3, 3, 3, 3, 3])
+        self.pkg("unreviewed")
+        self.assertEqual([n for n, _ in self.rank("reviews")], ["many-good", "one-five", "many-meh"])   # unreviewed is absent
+        self.assertEqual([n for n, _ in self.rank("reviewed")], ["many-good", "many-meh", "one-five"])  # by number of reviews
+        items = self.c.get("/api/v1/rankings/reviews").json()
+        self.assertFalse(items["windowed"]); self.assertEqual(items["items"][0]["avg"], 4.8)
+        # search sorts use the same ordering
+        names = lambda s: [p["name"] for p in self.c.get("/api/v1/packages?sort=" + s, headers=self.admin).json()["items"]]
+        self.assertEqual(names("rating")[:3], ["many-good", "one-five", "many-meh"])
+        self.assertEqual(names("reviews")[:3], ["many-good", "many-meh", "one-five"])
+        self.assertEqual(names("rating")[-1], "unreviewed")          # unreviewed packages sort last, not first
+        self.assertEqual(self.c.get("/api/v1/packages?sort=ratng", headers=self.admin).status_code, 400)
+
+    def test_search_relevance_still_wins_when_searching_then_sorting_by_rating(self):
+        self.rate(self.pkg("pdf-tool"), [5, 5]); self.rate(self.pkg("pdf-other"), [2])
+        got = [p["name"] for p in self.c.get("/api/v1/packages?q=pdf&sort=rating", headers=self.admin).json()["items"]]
+        self.assertEqual(got, ["pdf-tool", "pdf-other"])
+
+    def test_private_package_reviews_never_leak_into_rankings(self):
+        self.rate(self.pkg("secret-top", "private"), [5, 5, 5, 5, 5, 5])
+        self.rate(self.pkg("public-ok"), [4])
+        for h in ({}, self.reg("outsider")):
+            self.assertEqual(self.rank("reviews", h), [("public-ok", 1)])
+            self.assertEqual(self.rank("reviewed", h), [("public-ok", 1)])
+        self.assertEqual(self.rank("reviews", self.admin)[0][0], "secret-top")     # admins still see it
+        self.c.put("/api/v1/admin/roles/user", json={"permissions": ["publish", "review", "view_dashboard"]}, headers=self.admin)
+        d = self.c.get("/api/v1/dashboard?days=7", headers=self.reg("viewer1")).json()
+        self.assertEqual([x["name"] for x in d["top_reviewed"]], ["public-ok"])
+
+    def test_dashboard_has_top_used_and_top_reviewed(self):
+        self.rate(self.pkg("liked"), [5, 5, 4]); self.pkg("used-a"); self.pkg("used-b")
+        ev = lambda p, k="use": {"kind": k, "package": p, "client_id": "c1"}
+        self.c.post("/api/v1/events", json={"events": [ev("used-a")] * 5 + [ev("used-b")] * 2 + [ev("liked")]})
+        d = self.c.get("/api/v1/dashboard?days=7", headers=self.admin).json()
+        self.assertEqual([x["name"] for x in d["top_packages"]][:2], ["used-a", "used-b"])       # top using
+        self.assertEqual(d["top_reviewed"][0]["name"], "liked"); self.assertEqual(d["top_reviewed"][0]["count"], 3)
+        self.assertEqual(self.c.get("/api/v1/rankings/bogus").status_code, 404)
+

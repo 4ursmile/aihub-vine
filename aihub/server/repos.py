@@ -9,8 +9,30 @@ from ..core import version as V
 from .db import ALL_PERMS
 
 
+# Who an event belongs to: the signed-in account, else the OS user on the machine that ran it, else a short client id.
+ACTOR = ("COALESCE(e.username, CASE WHEN COALESCE(e.local_user,'')<>'' THEN e.local_user||' (local)' END, "
+         "'anon-'||substr(e.client_id,1,6))")
+
+
 def _rows(cur):
     return [dict(r) for r in cur.fetchall()]
+
+
+def _integrity_errors():
+    errs = [sqlite3.IntegrityError]
+    try:
+        import psycopg
+        errs.append(psycopg.errors.UniqueViolation)
+    except ImportError:
+        pass
+    return tuple(errs)
+
+
+INTEGRITY = _integrity_errors()
+
+# Bayesian average: (C*m + sum(ratings)) / (C + n). A package with few reviews is pulled toward the site-wide mean m,
+# so one 5-star review can't outrank 200 reviews averaging 4.8. C = how many reviews it takes to "count" fully.
+BAYES_C = 5
 
 
 class Repos:
@@ -158,18 +180,26 @@ class Repos:
             c.commit()
 
     def users_create_many(self, rows):
-        """rows: [(username, pw_hash, role, display_name, title)] -> set of usernames created. Skips existing names."""
+        """rows: [(username, pw_hash, role, display_name, title[, [group_id, ...]])] -> set of usernames created.
+        Skips existing names. New users join their groups in the same transaction."""
         made = set()
         with self.lock:
             c = self.db.conn()
             now = time.time()
-            for u, h, role, dn, title in rows:
+            for row in rows:
+                u, h, role, dn, title = row[:5]
+                gids = row[5] if len(row) > 5 else []
+                c.execute("SAVEPOINT row_sp")          # a duplicate must undo only this row, never the earlier ones
                 try:
-                    c.execute("INSERT INTO users(username,password_hash,role,status,display_name,title,created) VALUES(?,?,?,?,?,?,?)",
-                              (u, h, role, "active", dn, title, now))
+                    cur = c.execute("INSERT INTO users(username,password_hash,role,status,display_name,title,created) VALUES(?,?,?,?,?,?,?)",
+                                    (u, h, role, "active", dn, title, now))
+                    for gid in gids:
+                        c.execute("INSERT OR IGNORE INTO group_members VALUES(?,?)", (gid, cur.lastrowid))
+                    c.execute("RELEASE SAVEPOINT row_sp")
                     made.add(u)
-                except sqlite3.IntegrityError:
-                    pass
+                except INTEGRITY:
+                    c.execute("ROLLBACK TO SAVEPOINT row_sp")
+                    c.execute("RELEASE SAVEPOINT row_sp")
             c.commit()
         return made
 
@@ -190,6 +220,46 @@ class Repos:
             c.execute("INSERT INTO audit_log(ts,actor,action,target,detail) VALUES(?,?,?,?,?)",
                       (time.time(), actor, action, target, detail))
             c.commit()
+
+    @staticmethod
+    def _like(v):
+        return "%" + str(v).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+    def audit_search(self, source="tools", q="", actor="", action="", package="", kind="", since=0, until=0, limit=100, offset=0):
+        """Security audit. source='tools': agent tool calls and installs (events). source='admin': account/role/setting changes."""
+        c, args, w = self.db.conn(), [], ["1=1"]
+        if source == "admin":
+            t, tscol, ts = "audit_log a", "a.ts", "a.id,a.ts,a.actor,a.action,a.target,a.detail"
+            if actor: w.append("a.actor=?"); args.append(actor)
+            if action: w.append("a.action LIKE ? ESCAPE '\\'"); args.append(self._like(action))
+            if package: w.append("a.target LIKE ? ESCAPE '\\'"); args.append(self._like(package))
+            if q:
+                w.append("(a.actor LIKE ? ESCAPE '\\' OR a.action LIKE ? ESCAPE '\\' OR a.target LIKE ? ESCAPE '\\' OR a.detail LIKE ? ESCAPE '\\')")
+                args += [self._like(q)] * 4
+        else:
+            t, tscol = "events e", "e.ts"
+            ts = ("e.id,e.ts,e.kind,e.package,e.version,e.component," + ACTOR + " AS actor,e.username,e.local_user,e.host,"
+                  "e.source,e.detail,e.cwd,e.ip,e.client_id")
+            if actor: w.append(ACTOR + "=?"); args.append(actor)
+            if kind: w.append("e.kind=?"); args.append(kind)
+            if package: w.append("e.package=?"); args.append(package)
+            if action: w.append("e.component LIKE ? ESCAPE '\\'"); args.append(self._like(action))
+            if q:
+                w.append("(e.detail LIKE ? ESCAPE '\\' OR e.component LIKE ? ESCAPE '\\' OR e.package LIKE ? ESCAPE '\\' OR e.cwd LIKE ? ESCAPE '\\' "
+                         "OR e.host LIKE ? ESCAPE '\\' OR " + ACTOR + " LIKE ? ESCAPE '\\')")
+                args += [self._like(q)] * 6
+        if since: w.append(tscol + ">=?"); args.append(since)
+        if until: w.append(tscol + "<?"); args.append(until)
+        where = " WHERE " + " AND ".join(w)
+        total = c.execute("SELECT COUNT(*) FROM " + t + where, args).fetchone()[0]
+        rows = _rows(c.execute("SELECT " + ts + " FROM " + t + where + " ORDER BY " + tscol + " DESC, " + t.split()[1] + ".id DESC LIMIT ? OFFSET ?",
+                               args + [limit, offset]))
+        return {"total": int(total), "items": rows}
+
+    def audit_actors(self):
+        c = self.db.conn()
+        return {"tools": [r[0] for r in c.execute("SELECT DISTINCT " + ACTOR + " n FROM events e ORDER BY n LIMIT 500")],
+                "admin": [r[0] for r in c.execute("SELECT DISTINCT actor FROM audit_log ORDER BY actor LIMIT 500")]}
 
     def audit_list(self, limit=200):
         return _rows(self.db.conn().execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)))
@@ -306,6 +376,15 @@ class Repos:
             c.execute("DELETE FROM groups WHERE id=?", (gid,))
             c.commit()
 
+    def group_ids_by_name(self, names):
+        c = self.db.conn()
+        out = {}
+        for n in names:
+            r = c.execute("SELECT id FROM groups WHERE name=?", (n,)).fetchone()
+            if r:
+                out[n] = r[0]
+        return out
+
     def group_members(self, gid):
         return _rows(self.db.conn().execute(
             "SELECT u.username,u.display_name,u.title,u.avatar_v FROM group_members m JOIN users u ON u.id=m.user_id "
@@ -336,12 +415,15 @@ class Repos:
         if mine and viewer:
             w.append("EXISTS (SELECT 1 FROM package_maintainers m WHERE m.package_id=packages.id AND m.user_id=?)")
             a.append(viewer["id"])
-        rank = None
+        rank, rank_args = None, []
         fq = self.fts_query(q) if q else ""
-        if q and self.db.fts and fq:
+        if q and self.db.engine == "postgres" and fq:
+            w.append("fts @@ to_tsquery('simple', ?)"); a.append(fq)
+            rank, rank_args = "ts_rank(fts, to_tsquery('simple', ?)) DESC", [fq]
+        elif q and self.db.fts and fq:
             w.append("id IN (SELECT rowid FROM packages_fts WHERE packages_fts MATCH ?)")
             a.append(fq)
-            rank = "(SELECT bm25(packages_fts,10,4,3,1) FROM packages_fts WHERE packages_fts MATCH ? AND rowid=packages.id)"
+            rank, rank_args = "(SELECT bm25(packages_fts,10,4,3,1) FROM packages_fts WHERE packages_fts MATCH ? AND rowid=packages.id)", [fq]
         elif q:
             w.append("(name LIKE ? OR description LIKE ? OR tags LIKE ?)")
             a += ["%" + q + "%"] * 3
@@ -349,17 +431,27 @@ class Repos:
             w.append("type=?"); a.append(type)
         if tag:
             w.append("(',' || tags || ',') LIKE ?"); a.append("%," + tag + ",%")
-        order = {"name": "name", "updated": "updated DESC", "created": "created DESC",
-                 "downloads": "(SELECT COALESCE(SUM(downloads),0) FROM versions v WHERE v.package_id=packages.id) DESC"
-                 }.get(sort or "updated", "updated DESC")
         c = self.db.conn()
+        rsum = "(SELECT COALESCE(SUM(rating),0) FROM reviews r WHERE r.package_id=packages.id)"
+        rcnt = "(SELECT COUNT(*) FROM reviews r WHERE r.package_id=packages.id)"
+        site_mean = c.execute("SELECT COALESCE(AVG(rating),0) FROM reviews").fetchone()[0] or 0
+        order_args = []
+        order = {"name": "name", "updated": "updated DESC", "created": "created DESC",
+                 "downloads": "(SELECT COALESCE(SUM(downloads),0) FROM versions v WHERE v.package_id=packages.id) DESC",
+                 # best reviewed: Bayesian average; ties (and unreviewed packages) fall back to most reviews, then name
+                 # Unreviewed packages sort strictly last: with a plain Bayesian prior they would get exactly the site mean and
+                 # outrank packages people actually rated poorly. Reviewed ones order by the Bayesian score, then review count.
+                 "rating": "(CASE WHEN %s > 0 THEN 0 ELSE 1 END), ((%d * ? + %s) * 1.0 / (%d + %s)) DESC, %s DESC, name" % (rcnt, BAYES_C, rsum, BAYES_C, rcnt, rcnt),
+                 "reviews": "%s DESC, name" % rcnt,
+                 }.get(sort or "updated", "updated DESC")
+        if sort == "rating":
+            order_args = [site_mean]
         total = c.execute("SELECT COUNT(*) FROM packages WHERE " + " AND ".join(w), a).fetchone()[0]
-        oargs = []
         if rank and sort in ("", "relevance"):
-            order, oargs = rank, [fq]
+            order, order_args = rank, rank_args
         rows = c.execute("SELECT id,name,type,description,tags,latest_version,hidden,visibility,created,updated FROM packages "
                          "WHERE %s ORDER BY %s LIMIT ? OFFSET ?" % (" AND ".join(w), order),
-                         a + oargs + [per_page, (max(page, 1) - 1) * per_page])
+                         a + order_args + [per_page, (max(page, 1) - 1) * per_page])
         return total, [self._pkg(r) for r in rows]
 
     def facets(self, viewer=None):
@@ -374,15 +466,16 @@ class Repos:
         return {"types": types, "tags": tags}
 
     def _fts_sync(self, c, pid):
-        if not self.db.fts:
-            return
+        if self.db.engine == "postgres" or not self.db.fts:
+            return                                     # Postgres keeps its generated tsvector column up to date
         c.execute("DELETE FROM packages_fts WHERE rowid=?", (pid,))
         c.execute("INSERT INTO packages_fts(rowid,name,description,tags,body) "
                   "SELECT id,name,description,REPLACE(tags,',',' '),readme FROM packages WHERE id=?", (pid,))
 
-    @staticmethod
-    def fts_query(q):
+    def fts_query(self, q):
         toks = re.findall(r"\w+", q, re.U)[:8]
+        if self.db.engine == "postgres":
+            return " & ".join("%s:*" % t for t in toks)    # to_tsquery prefix match
         return " AND ".join('"%s"*' % t for t in toks)
 
     def package_upsert(self, name, type, description, tags, readme="", visibility=None):
@@ -483,7 +576,7 @@ class Repos:
 
     def rating(self, pid):
         r = self.db.conn().execute("SELECT AVG(rating),COUNT(*) FROM reviews WHERE package_id=?", (pid,)).fetchone()
-        return {"avg": round(r[0], 2) if r[0] else None, "count": r[1]}
+        return {"avg": round(float(r[0]), 2) if r[0] else None, "count": int(r[1])}
 
     # ---- events / stats
     def events_insert_batch(self, rows):
@@ -492,9 +585,10 @@ class Repos:
         with self.lock:
             c = self.db.conn()
             for r in rows:
-                r.setdefault("source", None)
-            c.executemany("INSERT INTO events(ts,kind,package,version,client_id,username,component,duration,source) "
-                          "VALUES(:ts,:kind,:package,:version,:client_id,:username,:component,:duration,:source)", rows)
+                for k in ("source", "local_user", "host", "detail", "cwd", "ip"):
+                    r.setdefault(k, None)
+            c.executemany("INSERT INTO events(ts,kind,package,version,client_id,username,component,duration,source,local_user,host,detail,cwd,ip) "
+                          "VALUES(:ts,:kind,:package,:version,:client_id,:username,:component,:duration,:source,:local_user,:host,:detail,:cwd,:ip)", rows)
             c.commit()
 
     def stats(self, package, days=30):
@@ -513,15 +607,30 @@ class Repos:
         since = time.time() - days * 86400
         vsql, va = self.visible_sql(viewer, "p")
         c = self.db.conn()
+        if what in ("reviews", "reviewed"):
+            return self.top_reviewed(what, limit, viewer)
         if what == "developers":
             return _rows(c.execute(
                 "SELECT u.username AS name, COUNT(e.id) AS count FROM events e JOIN packages p ON p.name=e.package "
                 "JOIN package_maintainers m ON m.package_id=p.id JOIN users u ON u.id=m.user_id "
                 "WHERE e.ts>=? AND " + vsql + " GROUP BY u.username ORDER BY count DESC LIMIT ?", [since] + va + [limit]))
-        col = {"packages": "e.package", "users": "COALESCE(e.username,e.client_id)"}[what]
+        col = {"packages": "e.package", "users": ACTOR}[what]
         return _rows(c.execute(
             "SELECT %s AS name, COUNT(*) AS count FROM events e JOIN packages p ON p.name=e.package "
             "WHERE e.ts>=? AND %s IS NOT NULL AND %s GROUP BY 1 ORDER BY count DESC LIMIT ?" % (col, col, vsql), [since] + va + [limit]))
+
+    def top_reviewed(self, mode, limit=20, viewer=None):
+        """Best-rated packages (Bayesian average, so one 5-star review can't beat 200 reviews at 4.8) or most-reviewed.
+        All-time, not windowed: reviews are a lasting quality signal. Only packages the viewer may see."""
+        vsql, va = self.visible_sql(viewer, "p")
+        c = self.db.conn()
+        mean = c.execute("SELECT COALESCE(AVG(r.rating),0) FROM reviews r JOIN packages p ON p.id=r.package_id WHERE " + vsql, va).fetchone()[0] or 0
+        order = "score DESC, n DESC, name" if mode == "reviews" else "n DESC, avg DESC, name"
+        return _rows(c.execute(
+            "SELECT p.name AS name, COUNT(r.rating) AS n, AVG(r.rating) AS avg, "
+            "((%d * ? + SUM(r.rating)) * 1.0 / (%d + COUNT(r.rating))) AS score, COUNT(r.rating) AS count "
+            "FROM reviews r JOIN packages p ON p.id=r.package_id WHERE %s AND p.hidden=0 "
+            "GROUP BY p.id, p.name ORDER BY %s LIMIT ?" % (BAYES_C, BAYES_C, vsql, order), [mean] + va + [limit]))
 
     def dashboard(self, days=30, package=None, viewer=None, type=None, user=None, source=None, kind=None):
         """Aggregated usage for the dashboard. All times UTC; `days` daily buckets ending today."""
@@ -541,7 +650,7 @@ class Repos:
         if package:
             pf += " AND e.package=?"; pa.append(package)
         if user:
-            pf += " AND COALESCE(e.username,'anon-'||substr(e.client_id,1,6))=?"; pa.append(user)
+            pf += " AND " + ACTOR + "=?"; pa.append(user)
         if source:
             pf += " AND COALESCE(e.source,'cli')=?"; pa.append(source)
         if kind:
@@ -570,7 +679,7 @@ class Repos:
         vs2, va2 = self.visible_sql(viewer, "vp")
         scope = " e.package IN (SELECT vp.name FROM packages vp WHERE %s) AND e.ts>=?" % vs2
         options = {
-            "users": [r[0] for r in c.execute("SELECT DISTINCT COALESCE(e.username,'anon-'||substr(e.client_id,1,6)) n FROM events e WHERE"
+            "users": [r[0] for r in c.execute("SELECT DISTINCT " + ACTOR + " n FROM events e WHERE"
                                               + scope + " ORDER BY n LIMIT 200", va2 + [since])],
             "sources": [r[0] for r in c.execute("SELECT DISTINCT COALESCE(e.source,'cli') n FROM events e WHERE" + scope + " ORDER BY n", va2 + [since])],
             "types": [r[0] for r in c.execute("SELECT DISTINCT p.type FROM packages p WHERE " + vs2.replace("vp.", "p.") + " ORDER BY 1", va2)],
@@ -587,14 +696,15 @@ class Repos:
             "top_packages": rows("SELECT e.package AS name,COUNT(*) AS count,SUM(e.kind='use') AS uses,SUM(e.kind='install') AS installs,"
                                  "SUM(e.kind='error') AS errors FROM events e WHERE e.ts>=?" + pf +
                                  " GROUP BY e.package ORDER BY count DESC LIMIT 10", [since] + pa),
-            "top_users": rows("SELECT COALESCE(e.username,'anon-'||substr(e.client_id,1,6)) AS name,COUNT(*) AS count FROM events e "
+            "top_reviewed": [dict(x, avg=round(float(x["avg"]), 2), score=round(float(x["score"]), 2)) for x in self.top_reviewed("reviews", 10, viewer)],
+            "top_users": rows("SELECT " + ACTOR + " AS name,COUNT(*) AS count FROM events e "
                               "WHERE e.ts>=? AND (e.username IS NOT NULL OR e.client_id IS NOT NULL)" + pf +
                               " GROUP BY 1 ORDER BY count DESC LIMIT 10", [since] + pa),
             "by_type": rows("SELECT COALESCE(p.type,'unknown') AS name,COUNT(*) AS count FROM events e "
                             "LEFT JOIN packages p ON p.name=e.package WHERE e.ts>=?" + pf + " GROUP BY COALESCE(p.type,'unknown') ORDER BY count DESC", [since] + pa),
             "by_source": rows("SELECT COALESCE(e.source,'cli') AS name,COUNT(*) AS count FROM events e WHERE e.ts>=?" + pf +
                               " GROUP BY 1 ORDER BY count DESC", [since] + pa),
-            "recent": rows("SELECT e.ts,e.kind,e.package,e.version,e.component,COALESCE(e.username,'anon-'||substr(e.client_id,1,6)) AS actor,"
+            "recent": rows("SELECT e.ts,e.kind,e.package,e.version,e.component," + ACTOR + " AS actor,"
                            "e.source FROM events e WHERE e.ts>=?" + pf + " ORDER BY e.id DESC LIMIT 20", [since] + pa),
         }
 
@@ -638,6 +748,8 @@ class EventBuffer:
                 with self.lock:  # keep for retry
                     self.buf = rows + self.buf
                 raise
+            finally:
+                self.repos.db.release()       # this thread's pooled connection goes back after every batch
 
     def _loop(self):
         while not self.stop.is_set():

@@ -1,10 +1,72 @@
+# AI Hub.
+# 1) Just the app (SQLite + built-in cache + local files):
+#        cp .env.example .env && docker compose up -d --build
+# 2) Production backends, one profile each - set the secrets in .env, then pick the ones you want:
+#        docker compose --profile postgres --profile redis --profile minio up -d --build
+#    and select them in .env:   AIHUB_DB_BACKEND=postgres   AIHUB_CACHE_BACKEND=redis   AIHUB_STORAGE_BACKEND=s3
+#    The connection URLs for the bundled services are built below from the passwords, so set each secret once:
+#        POSTGRES_PASSWORD=...   REDIS_PASSWORD=...   MINIO_ROOT_USER=...   MINIO_ROOT_PASSWORD=...
+#    (Note: Compose does NOT expand ${VAR} inside an env_file, so never write ${...} in .env values.)
+# To use an EXTERNAL Postgres/Redis/S3 instead, skip the profiles and put the real URLs in .env (see .env.example).
 services:
   aihub:
     build: .
-    ports: ["8000:8000"]
+    ports: ["${AIHUB_PORT:-8000}:8000"]
+    env_file: [{ path: .env, required: false }]
     environment:
       AIHUB_PUBLIC_URL: ${AIHUB_PUBLIC_URL:-http://localhost:8000}
+      AIHUB_DATA_DIR: /data
+      # Bundled-service connections, used only when the matching backend is selected in .env. Real values in .env win
+      # because they are not set here unless the password variables exist.
+      AIHUB_PG_HOST: ${AIHUB_PG_HOST:-postgres}
+      AIHUB_PG_PASSWORD: ${POSTGRES_PASSWORD:-}
+      AIHUB_REDIS_URL: ${AIHUB_REDIS_URL:-redis://:${REDIS_PASSWORD:-}@redis:6379/0}
+      AIHUB_S3_ENDPOINT: ${AIHUB_S3_ENDPOINT:-}      # empty = AWS S3. For the bundled MinIO set it to http://minio:9000 in .env
+      AIHUB_S3_BUCKET: ${AIHUB_S3_BUCKET:-aihub}
+      AIHUB_S3_ACCESS_KEY: ${AIHUB_S3_ACCESS_KEY:-${MINIO_ROOT_USER:-}}   # leave all of these empty on AWS to use an IAM role
+      AIHUB_S3_SECRET_KEY: ${AIHUB_S3_SECRET_KEY:-${MINIO_ROOT_PASSWORD:-}}
     volumes: ["aihub-data:/data"]
     restart: unless-stopped
+
+  postgres:
+    profiles: [postgres]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: aihub
+      POSTGRES_USER: aihub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes: ["pg-data:/var/lib/postgresql/data"]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U aihub -d aihub"], interval: 5s, timeout: 3s, retries: 10 }
+    restart: unless-stopped
+
+  redis:
+    profiles: [redis]
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}", "--save", "", "--appendonly", "no"]
+    healthcheck: { test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep PONG"], interval: 5s, timeout: 3s, retries: 10 }
+    environment: { REDIS_PASSWORD: "${REDIS_PASSWORD:-}" }
+    restart: unless-stopped
+
+  minio:
+    profiles: [minio]
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    volumes: ["minio-data:/data"]
+    healthcheck: { test: ["CMD", "mc", "ready", "local"], interval: 5s, timeout: 3s, retries: 10 }
+    restart: unless-stopped
+
+  minio-init:                       # creates the bucket once, then exits
+    profiles: [minio]
+    image: minio/mc:latest
+    depends_on: { minio: { condition: service_healthy } }
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD && mc mb --ignore-existing local/${AIHUB_S3_BUCKET:-aihub}"]
+    environment: { MINIO_ROOT_USER: "${MINIO_ROOT_USER:-}", MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-}" }
+
 volumes:
   aihub-data:
+  pg-data:
+  minio-data:

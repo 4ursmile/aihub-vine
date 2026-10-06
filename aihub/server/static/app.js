@@ -17,7 +17,7 @@ const set = (p) => { Object.assign(store, p); subs.forEach((f) => f({})); };
 const useStore = () => { const [, f] = useState({}); useEffect(() => { subs.add(f); return () => subs.delete(f); }, []); return store; };
 addEventListener("hashchange", () => { set({ route: location.hash.slice(1) || "/" }); scrollTo(0, 0); });
 let tt; const toast = (m, err) => { set({ toast: { m, err } }); clearTimeout(tt); tt = setTimeout(() => set({ toast: null }), 3200); };
-async function loadMe() { try { set({ me: tok() ? await api("/auth/me") : null }); } catch { try { localStorage.removeItem("aihub_token"); } catch {} set({ me: null }); } }
+async function loadMe() { try { const me = tok() ? await api("/auth/me") : null; let showGroups = false; if (me) { try { showGroups = (await api("/groups/capabilities")).show_page; } catch {} } set({ me, showGroups }); } catch { try { localStorage.removeItem("aihub_token"); } catch {} set({ me: null }); } }
 const initials = (n) => (String(n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("") || "?").toUpperCase();
 const hue = (n) => { let h = 0; for (const c of String(n)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
 const shown = (p) => (p && (p.display_name || p.username)) || "";
@@ -31,7 +31,8 @@ const ago = (t) => { const s = Date.now() / 1000 - t; return s < 3600 ? Math.max
 const copy = async (t) => { try { await navigator.clipboard.writeText(t); toast("Copied"); } catch { toast("Copy failed", 1); } };
 function useLoad(fn, deps) {
   const [s, setS] = useState({ loading: true });
-  useEffect(() => { let on = 1; setS({ loading: true }); fn().then((d) => on && setS({ d }), (e) => on && setS({ e: e.message })); return () => { on = 0; }; }, deps);
+  // keep the previous data visible while a new request is in flight (no flash, controls keep their options)
+  useEffect(() => { let on = 1; setS((p) => ({ d: p.d, loading: true })); fn().then((d) => on && setS({ d }), (e) => on && setS({ e: e.message })); return () => { on = 0; }; }, deps);
   return s;
 }
 const debounced = (v, ms = 250) => { const [x, setX] = useState(v); useEffect(() => { const t = setTimeout(() => setX(v), ms); return () => clearTimeout(t); }, [v]); return x; };
@@ -47,7 +48,7 @@ const Skels = ({ n = 6 }) => html`<div class="grid">${Array.from({ length: n }, 
 const Stars = ({ r }) => r ? html`<span>★ ${r}</span>` : null;
 const TYPE = { skill: "blue", agent: "green", mcp: "orange", tool: "", setup: "red" };
 const Pkg = ({ p }) => html`<a class="card pkg" href=${"#/package/" + p.name}>
-  <div class="row"><h3>${p.name}</h3><span class="sp"></span>${p.visibility === "private" && html`<span class="badge orange" title="Only people you share it with can see this">🔒 private</span>`}<span class=${"badge " + (TYPE[p.type] || "")}>${p.type}</span></div>
+  <div class="row"><h3>${p.name}</h3><span class="sp"></span>${p.visibility === "private" && html`<span class="badge orange" title="Only people you share it with can see this">private</span>`}<span class=${"badge " + (TYPE[p.type] || "")}>${p.type}</span></div>
   <p>${p.description || "No description"}</p>
   <div class="meta"><span>v${p.latest_version || "–"}</span><span>↓ ${fmt(p.downloads)}</span><${Stars} r=${p.rating && p.rating.avg} /></div></a>`;
 
@@ -80,7 +81,7 @@ function Browse() {
   return html`<div class="stack"><h1>Browse</h1><${Search} value=${q} onInput=${setQ} />
     <div class="row"><div class="seg" role="tablist">${types.map((t) => html`<button key=${t} class=${type === t ? "on" : ""} onClick=${() => setType(t)}>${t || "All"}</button>`)}</div>
       <span class="sp"></span><select class="field" aria-label="Sort" value=${sort} onChange=${(e) => setSort(e.target.value)}>
-      <option value="">${dq ? "Relevance" : "Recently updated"}</option><option value="downloads">Most downloaded</option><option value="name">Name</option><option value="created">Newest</option></select></div>
+      <option value="">${dq ? "Relevance" : "Recently updated"}</option><option value="downloads">Most downloaded</option><option value="rating">Best reviewed</option><option value="reviews">Most reviewed</option><option value="name">Name</option><option value="created">Newest</option></select></div>
     ${r.loading ? html`<${Skels} />` : r.e ? html`<${Err} e=${r.e} />` : !r.d.items.length ? html`<${Empty} t="No results" d=${dq ? `Nothing matches “${dq}”.` : "No packages yet."} />` :
       html`<div class="grid">${r.d.items.map((p) => html`<${Pkg} p=${p} key=${p.name} />`)}</div>
       <div class="row" style="justify-content:center;margin-top:24px"><button class="btn sec sm" disabled=${page <= 1} onClick=${() => setPage(page - 1)}>Previous</button>
@@ -90,13 +91,21 @@ function Browse() {
 function Package({ name }) {
   const { me } = useStore(); const [tab, setTab] = useState("Overview"); const [tick, setTick] = useState(0);
   const p = useLoad(() => api("/packages/" + name), [name, tick]);
+  const mt = useLoad(() => api("/meta"), []); const meta = mt.d || {};
   if (p.loading) return html`<div class="skel" style="min-height:300px"></div>`;
   if (p.e) return html`<${Err} e=${p.e} />`;
   const d = p.d, req = d.requires || {};
+  const dl = async (v) => {
+    try {
+      const r = await fetch(`/api/v1/packages/${d.name}/versions/${v.version}/download`, { headers: tok() ? { Authorization: "Bearer " + tok() } : {} });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+      saveBlob(await r.blob(), ((r.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/) || [])[1] || `${d.name}-${v.version}`); setTick((t) => t + 1);
+    } catch (e) { toast(e.message, true); }
+  };
   return html`<div class="stack">
     <div class="row"><h1>${d.name}</h1><span class=${"badge " + (TYPE[d.type] || "")}>${d.type}</span></div>
     <p class="lead">${d.description}</p>
-    <div class="row mut sm">${d.visibility === "private" && html`<span class="badge orange">🔒 private</span>`}<span>v${d.latest_version}</span><span>·</span><span>↓ ${fmt(d.downloads)}</span><${Stars} r=${d.rating.avg} /><span>· updated ${ago(d.updated)}</span>
+    <div class="row mut sm">${d.visibility === "private" && html`<span class="badge orange">private</span>`}<span>v${d.latest_version}</span><span>·</span><span>↓ ${fmt(d.downloads)}</span><${Stars} r=${d.rating.avg} /><span>· updated ${ago(d.updated)}</span>
       ${d.tags.map((t) => html`<span class="badge" key=${t}>${t}</span>`)}</div>
     <${Cmd} text=${"aihub install " + d.name} />
     <div class="seg">${["Overview", "Install", "Versions", "Usage", "Reviews", ...(d.access === "admin" ? ["Sharing"] : [])].map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} onClick=${() => setTab(t)}>${t}</button>`)}</div>
@@ -106,8 +115,8 @@ function Package({ name }) {
       <div class="li"><div class="t"><b>Required commands</b><span>${(req.commands || []).length ? (req.commands || []).map((c) => (c.name || c) + (c.hint ? ` — ${c.hint}` : "")).join(" · ") : "None"}</span></div></div>
       <div class="li"><div class="t"><b>Depends on</b><span>${(req.packages || []).length ? (req.packages || []).map((x) => html`<a href=${"#/package/" + x.split(/[<>=!~]/)[0]} style="margin-right:10px">${x}</a>`) : "No other packages"}</span></div></div>
       <div class="li"><div class="t"><b>Supported systems</b><span>${(req.os || []).length ? req.os.join(", ") : "All"}</span></div></div></div>`}
-    ${tab === "Versions" && html`<div class="list tscroll"><table><thead><tr><th>Version</th><th>Released</th><th>Size</th><th>Downloads</th><th>SHA-256</th></tr></thead><tbody>
-      ${d.versions.map((v) => html`<tr key=${v.version}><td>${v.version} ${v.yanked ? html`<span class="badge red">yanked</span>` : ""}</td><td>${ago(v.created)}</td><td>${(v.size / 1024).toFixed(1)} KB</td><td>${fmt(v.downloads)}</td><td class="mono">${v.sha256.slice(0, 12)}</td></tr>`)}</tbody></table></div>`}
+    ${tab === "Versions" && html`<div class="list tscroll"><table><thead><tr><th>Version</th><th>Released</th><th>Size</th><th>Downloads</th><th>SHA-256</th>${meta.allow_source_download ? html`<th></th>` : null}</tr></thead><tbody>
+      ${d.versions.map((v) => html`<tr key=${v.version}><td>${v.version} ${v.yanked ? html`<span class="badge red">yanked</span>` : ""}</td><td>${ago(v.created)}</td><td>${(v.size / 1024).toFixed(1)} KB</td><td>${fmt(v.downloads)}</td><td class="mono">${v.sha256.slice(0, 12)}</td>${meta.allow_source_download ? html`<td><button class="btn sec sm" onClick=${() => dl(v)}>Download</button></td>` : null}</tr>`)}</tbody></table></div>`}
     ${tab === "Usage" && html`<${Usage} name=${name} />`}
     ${tab === "Sharing" && html`<${Sharing} name=${name} pkg=${d} onChange=${() => setTick(tick + 1)} />`}
     ${tab === "Reviews" && html`<${Reviews} name=${name} me=${me} onDone=${() => setTick(tick + 1)} />`}</div>`;
@@ -180,13 +189,14 @@ function Reviews({ name, me, onDone }) {
 
 function Rankings() {
   const [tab, setTab] = useState("packages"); const r = useLoad(() => api("/rankings/" + tab), [tab]);
-  const label = { packages: "Top packages", developers: "Top developers", users: "Most active users" };
-  const items = (r.d && r.d.items) || [], mx = Math.max(1, ...items.map((i) => i.count));
-  return html`<div class="stack"><h1>Rankings</h1><p class="lead">Based on the last 30 days of real usage.</p>
+  const label = { packages: "Most used", reviews: "Top rated", reviewed: "Most reviewed", developers: "Top developers", users: "Most active users" };
+  const items = (r.d && r.d.items) || [], mx = Math.max(1, ...items.map((i) => (tab === "reviews" ? i.score : i.count)));
+  return html`<div class="stack"><h1>Rankings</h1><p class="lead">${tab === "reviews" || tab === "reviewed" ? "Based on all reviews, ever." : "Based on the last 30 days of real usage."}</p>
     <div class="seg">${Object.keys(label).map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} onClick=${() => setTab(t)}>${label[t]}</button>`)}</div>
     ${r.loading ? html`<div class="skel"></div>` : !items.length ? html`<${Empty} t="No data yet" d="Rankings appear once usage events arrive." />` :
       html`<div class="list">${items.map((i, n) => html`<div class="li" key=${i.name}><span class=${"rank " + (n < 3 ? "top" : "")}>${n + 1}</span>
-        <div class="t"><b>${tab === "packages" ? html`<a href=${"#/package/" + i.name}>${i.name}</a>` : i.name}</b><div class="bar"><i style=${"width:" + (i.count / mx * 100) + "%"}></i></div></div><span class="n">${fmt(i.count)}</span></div>`)}</div>`}</div>`;
+        <div class="t"><b>${tab === "packages" || tab === "reviews" || tab === "reviewed" ? html`<a href=${"#/package/" + i.name}>${i.name}</a>` : i.name}</b><div class="bar"><i style=${"width:" + ((tab === "reviews" ? i.score : i.count) / mx * 100) + "%"}></i></div></div>
+        ${tab === "reviews" || tab === "reviewed" ? html`<span class="n" title=${i.count + " reviews"}>★ ${i.avg} <span class="mut3">(${fmt(i.count)})</span></span>` : html`<span class="n">${fmt(i.count)}</span>`}</div>`)}</div>`}</div>`;
 }
 
 function Start() {
@@ -276,38 +286,45 @@ function Account() {
 
 function Admin() {
   const { me } = useStore(); const [tab, setTab] = useState("People"); const [tick, setTick] = useState(0); const bump = () => setTick((x) => x + 1);
-  if (!can("admin")) return html`<${Empty} t="Admins only" d="You don’t have access to this page." />`;
-  return html`<div class="stack"><h1>Admin</h1><div class="seg">${["People", "Groups", "Roles", "Settings", "Audit"].map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} onClick=${() => setTab(t)}>${t}</button>`)}</div>
-    ${tab === "People" && html`<${People} me=${me} tick=${tick} bump=${bump} />`}${tab === "Groups" && html`<${Groups} tick=${tick} bump=${bump} />`}${tab === "Roles" && html`<${Roles} tick=${tick} bump=${bump} />`}
-    ${tab === "Settings" && html`<${AdminSettings} />`}${tab === "Audit" && html`<${Audit} tick=${tick} />`}</div>`;
+  if (!can("admin") && !can("reset_password")) return html`<${Empty} t="Admins only" d="You don’t have access to this page." />`;
+  const tabs = can("admin") ? ["People", "Roles", "Settings"] : ["People"];
+  return html`<div class="stack"><h1>Admin</h1>${tabs.length > 1 && html`<div class="seg">${tabs.map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} onClick=${() => setTab(t)}>${t}</button>`)}</div>`}
+    ${tab === "People" && html`<${People} me=${me} tick=${tick} bump=${bump} />`}${tab === "Roles" && can("admin") && html`<${Roles} tick=${tick} bump=${bump} />`}
+    ${tab === "Settings" && can("admin") && html`<${AdminSettings} />`}</div>`;
 }
 const SC = { active: "green", pending: "orange", disabled: "red" };
 function People({ me, tick, bump }) {
   const d = useLoad(async () => ({ users: (await api("/admin/users")).users, roles: Object.keys((await api("/admin/roles")).roles) }), [tick]);
-  const [q, setQ] = useState(""); const [batch, setBatch] = useState(false);
+  const [q, setQ] = useState(""); const [batch, setBatch] = useState(false); const [ask, setAsk] = useState(null); const [pw, setPw] = useState(null);
   if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
   const st = async (u, status) => { try { await api(`/admin/users/${u}/status`, { method: "POST", body: { status } }); bump(); } catch (e) { toast(e.message, 1); } };
   const role = async (u, r) => { try { await api(`/admin/users/${u}/role`, { method: "POST", body: { role: r } }); toast("Role updated"); bump(); } catch (e) { toast(e.message, 1); } };
   const users = d.d.users.filter((u) => u.username.toLowerCase().includes(q.toLowerCase()));
-  return html`<div class="stack"><div class="row"><div style="flex:1;min-width:200px"><${Search} value=${q} onInput=${setQ} ph="Filter people" /></div><button class="btn" onClick=${() => setBatch(!batch)}>${batch ? "Close" : "Create accounts in bulk"}</button></div>
-    ${batch && html`<${BatchImport} roles=${d.d.roles} done=${bump} />`}
+  const adm = can("admin"), canReset = can("reset_password");
+  const reset = async (u) => { try { const r = await api(`/admin/users/${u}/reset-password`, { method: "POST" }); setPw(r); setAsk(null); bump(); } catch (e) { toast(e.message, 1); setAsk(null); } };
+  return html`<div class="stack"><div class="row"><div style="flex:1;min-width:200px"><${Search} value=${q} onInput=${setQ} ph="Filter people" /></div>${adm && html`<button class="btn" onClick=${() => setBatch(!batch)}>${batch ? "Close" : "Create accounts in bulk"}</button>`}</div>
+    ${pw && html`<div class="card stack" style="border:1px solid var(--orange)"><b>New password for ${pw.username}</b><div class="row"><code class="mono" style="font-size:18px;user-select:all">${pw.password}</code><span class="sp"></span>
+      <button class="btn sec sm" onClick=${() => { try { navigator.clipboard.writeText(pw.password); toast("Copied"); } catch {} }}>Copy</button><button class="btn sm" onClick=${() => setPw(null)}>Done</button></div>
+      <span class="xs mut3">Shown once. ${pw.username} was signed out everywhere and should change it after signing in (Account → Password).</span></div>`}
+    ${batch && adm && html`<${BatchImport} roles=${d.d.roles} done=${bump} />`}
     <div class="list">${users.map((u) => html`<div class="li" key=${u.username}><${Avatar} p=${u} size=${36} /><div class="t"><b>${shown(u)}</b><span>${u.display_name ? u.username + " · " : ""}${u.title ? u.title + " · " : ""}${u.created ? "joined " + ago(u.created) : ""}</span></div>
-      <select class="field" style="min-height:32px;font-size:14px" aria-label="Role" disabled=${u.username === me.username} onChange=${(e) => role(u.username, e.target.value)}>${d.d.roles.map((r) => html`<option value=${r} key=${r} selected=${r === u.role}>${r}</option>`)}</select>
-      <span class=${"badge " + SC[u.status]}>${u.status}</span>${u.status !== "active" ? html`<button class="btn sec sm" onClick=${() => st(u.username, "active")}>Approve</button>` : u.username !== me.username ? html`<button class="btn danger sm" onClick=${() => st(u.username, "disabled")}>Disable</button>` : null}</div>`)}
+      ${adm ? html`<select class="field" style="min-height:32px;font-size:14px" aria-label="Role" disabled=${u.username === me.username} onChange=${(e) => role(u.username, e.target.value)}>${d.d.roles.map((r) => html`<option value=${r} key=${r} selected=${r === u.role}>${r}</option>`)}</select>` : html`<span class="badge">${u.role}</span>`}
+      <span class=${"badge " + SC[u.status]}>${u.status}</span>${adm && (u.status !== "active" ? html`<button class="btn sec sm" onClick=${() => st(u.username, "active")}>Approve</button>` : u.username !== me.username ? html`<button class="btn danger sm" onClick=${() => st(u.username, "disabled")}>Disable</button>` : null)}
+      ${canReset && u.username !== me.username && (ask === u.username ? html`<button class="btn danger sm" onClick=${() => reset(u.username)}>Confirm reset</button><button class="btn sec sm" onClick=${() => setAsk(null)}>Cancel</button>` : html`<button class="btn sec sm" onClick=${() => setAsk(u.username)}>Reset password</button>`)}</div>`)}
       ${!users.length && html`<div class="li mut">No matches.</div>`}</div></div>`;
 }
 function BatchImport({ roles, done }) {
   const [file, setFile] = useState(null); const [role, setRole] = useState("user"); const [busy, setBusy] = useState(false); const [res, setRes] = useState(null);
-  const tpl = () => saveBlob(new Blob(["username,display_name,title,role\nalice,Alice Nguyen,Data Analyst,user\nbob,Bob Martin,Engineering Manager,publisher\ncarol,Carol Diaz,,\n"], { type: "text/csv" }), "accounts-template.csv");
+  const tpl = () => saveBlob(new Blob(["username,display_name,title,role,group\nalice,Alice Nguyen,Data Analyst,user,data-team\nbob,Bob Martin,Engineering Manager,publisher,data-team; platform\ncarol,Carol Diaz,,,\n"], { type: "text/csv" }), "accounts-template.csv");
   const go = async () => { if (!file) return; setBusy(true); setRes(null);
     try { const r = await fetch(`/api/v1/admin/users/batch?role=${encodeURIComponent(role)}`, { method: "POST", headers: { Authorization: "Bearer " + tok(), "X-Aihub-Filename": file.name }, body: await file.arrayBuffer() });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "Upload failed");
       const blob = await r.blob(); saveBlob(blob, "new-accounts.csv"); setRes({ created: +r.headers.get("X-Created"), skipped: +r.headers.get("X-Skipped") }); done();
     } catch (e) { toast(e.message, 1); } finally { setBusy(false); } };
   return html`<div class="card stack"><h3>Create accounts in bulk</h3>
-    <p class="mut sm">Upload a <b>.csv</b> or <b>.xlsx</b> with a header row. Columns (any order): <code>username</code> (required), <code>display_name</code>, <code>title</code>, <code>role</code>. Without a header row it reads <code>username, role</code>. The default role below is used when the role cell is empty. Passwords are generated for you and returned as a downloadable sheet — <b>this is the only time they are shown</b>. Up to 300 accounts per upload.</p>
+    <p class="mut sm">Upload a <b>.csv</b> or <b>.xlsx</b> with a header row. Columns (any order): <code>username</code> (required), <code>display_name</code>, <code>title</code>, <code>role</code>, <code>group</code>. Put several groups in one cell separated by <code>;</code> or <code>,</code>. Groups must already exist — a row naming an unknown group is skipped and reported. Without a header row it reads <code>username, role</code>. The default role below is used when the role cell is empty. Passwords are generated for you and returned as a downloadable sheet — <b>this is the only time they are shown</b>. Up to 300 accounts per upload.</p>
     <div class="row"><input type="file" class="field" style="padding:9px" accept=".csv,.tsv,.txt,.xlsx" onChange=${(e) => setFile(e.target.files[0] || null)} aria-label="Spreadsheet file" />
-      <label class="sm mut">Default role <select class="field" value=${role} onChange=${(e) => setRole(e.target.value)}>${roles.map((r) => html`<option key=${r}>${r}</option>`)}</select></label>
+      <label class="sm mut">Default role <select class="field" value=${role} onChange=${(e) => setRole(e.target.value)}>${roles.map((r) => html`<option value=${r} key=${r} selected=${r === role}>${r}</option>`)}</select></label>
       <button class="btn sec sm" onClick=${tpl}>Download template</button><span class="sp"></span><button class="btn" disabled=${!file || busy} onClick=${go}>${busy ? "Creating…" : "Create & download passwords"}</button></div>
     ${res && html`<div class="row"><span class="badge green">${res.created} created</span>${res.skipped ? html`<span class="badge orange">${res.skipped} skipped — see the “status” column in the sheet</span>` : null}<span class="xs mut3">Keep the sheet safe and delete it after sharing passwords.</span></div>`}</div>`;
 }
@@ -332,7 +349,7 @@ function AdminSettings() {
   const [tick, setTick] = useState(0); const d = useLoad(() => api("/admin/settings"), [tick]); const [busy, setBusy] = useState("");
   if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
   const set1 = async (k, v) => { setBusy(k); try { await api("/admin/settings", { method: "PUT", body: { [k]: v } }); toast("Saved"); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
-  const sections = [["Access", ["signup", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility"]], ["Groups", ["allow_group_creation"]]];
+  const sections = [["Access", ["signup", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility", "allow_source_download"]], ["Groups", ["allow_group_creation"]]];
   const by = Object.fromEntries(d.d.schema.map((x) => [x.key, x]));
   const warn = d.d.values.public_install === "1";
   return html`<div class="stack">${sections.map(([title, keys]) => html`<div class="stack" key=${title}><h3>${title}</h3><div class="list">${keys.filter((k) => by[k]).map((k) => { const x = by[k], v = d.d.values[k], onoff = x.options.length === 2 && x.options[0] === "0";
@@ -341,20 +358,28 @@ function AdminSettings() {
         : html`<div class="seg">${x.options.map((o) => html`<button key=${o} class=${v === o ? "on" : ""} disabled=${busy === k} onClick=${() => v !== o && set1(k, o)}>${o}</button>`)}</div>`}</div>`; })}</div></div>`)}
     ${warn && html`<div class="card" style="border:1px solid var(--orange)"><b>Public install is on.</b> <span class="mut">Anyone who can reach this server can download <u>public</u> packages without signing in. Private packages always require access.</span></div>`}</div>`;
 }
-function Groups({ tick, bump }) {
-  const d = useLoad(() => api("/groups"), [tick]); const [sel, setSel] = useState(null); const [nn, setNn] = useState(""); const [nd, setNd] = useState("");
-  if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
-  const create = async () => { try { await api("/groups", { method: "POST", body: { name: nn, description: nd } }); setSel(nn.toLowerCase()); setNn(""); setNd(""); toast("Group created"); bump(); } catch (e) { toast(e.message, 1); } };
-  return html`<div class="stack"><p class="mut">Groups let you share repositories with many people at once. Add someone to a group and they gain every access the group has.</p>
-    <div class="two" style="align-items:start"><div class="stack"><div class="list">${d.d.groups.length ? d.d.groups.map((g) => html`<button class="li pick" key=${g.name} onClick=${() => setSel(g.name)} style=${sel === g.name ? "background:var(--fill)" : ""}><span class="av" style="width:36px;height:36px;background:var(--fg-3)">👥</span><div class="t"><b>${g.name}</b><span>${g.members} ${g.members === 1 ? "member" : "members"} · ${g.packages} shared ${g.packages === 1 ? "repo" : "repos"}</span></div></button>`) : html`<div class="li mut">No groups yet.</div>`}</div>
-      <div class="card stack"><h3>New group</h3><input class="field" placeholder="name, e.g. data-team" value=${nn} onInput=${(e) => setNn(e.target.value)} /><input class="field" placeholder="Description (optional)" value=${nd} onInput=${(e) => setNd(e.target.value)} />
-        <button class="btn" disabled=${!nn} onClick=${create}>Create group</button></div></div>
-      ${sel ? html`<${GroupDetail} name=${sel} key=${sel} bump=${bump} onGone=${() => setSel(null)} />` : html`<${Empty} t="Select a group" d="Pick a group to manage its members." />`}</div></div>`;
+function Groups() {
+  const { me } = useStore(); const [tick, setTick] = useState(0); const bump = () => setTick((x) => x + 1);
+  const caps = useLoad(() => me ? api("/groups/capabilities") : Promise.resolve(null), [me && me.username, tick]);
+  const d = useLoad(() => me ? api("/groups") : Promise.resolve({ groups: [] }), [me && me.username, tick]);
+  const [sel, setSel] = useState(null); const [nn, setNn] = useState(""); const [nd, setNd] = useState("");
+  if (!me) return html`<${Empty} t="Sign in required" d="Sign in to see your groups." />`;
+  if (!d.d) return d.e ? html`<${Err} e=${d.e} />` : html`<div class="skel"></div>`;
+  const c = caps.d || {};
+  const create = async () => { try { await api("/groups", { method: "POST", body: { name: nn, description: nd } }); setSel(nn.trim().toLowerCase()); setNn(""); setNd(""); toast("Group created"); bump(); } catch (e) { toast(e.message, 1); } };
+  const manageable = (g) => g.can_manage;
+  return html`<div class="stack"><h1>Groups</h1><p class="lead">${c.is_admin ? "All groups on this hub." : "Groups you own or belong to."} Share repositories with a group and every member gets access.</p>
+    <div class="two" style="align-items:start"><div class="stack"><div class="list">${d.d.groups.length ? d.d.groups.map((g) => html`<button class="li pick" key=${g.name} onClick=${() => setSel(g.name)} style=${sel === g.name ? "background:var(--fill)" : ""}><span class="av" style="width:36px;height:36px;background:var(--fg-3)">👥</span><div class="t"><b>${g.name}</b><span>${g.members} ${g.members === 1 ? "member" : "members"} · ${g.packages} shared ${g.packages === 1 ? "repo" : "repos"}${manageable(g) ? "" : " · member"}</span></div></button>`)
+        : html`<div class="li mut">${c.can_create ? "No groups yet — create your first one." : "You’re not in any groups."}</div>`}</div>
+      ${c.can_create && html`<div class="card stack"><h3>New group</h3><input class="field" placeholder="name, e.g. data-team" value=${nn} onInput=${(e) => setNn(e.target.value)} /><input class="field" placeholder="Description (optional)" value=${nd} onInput=${(e) => setNd(e.target.value)} />
+        <button class="btn" disabled=${!nn.trim()} onClick=${create}>Create group</button></div>`}</div>
+      ${sel ? html`<${GroupDetail} name=${sel} key=${sel} bump=${bump} onGone=${() => setSel(null)} />` : html`<${Empty} t="Select a group" d="Pick a group to see its members." />`}</div></div>`;
 }
 function GroupDetail({ name, bump, onGone }) {
   const [tick, setTick] = useState(0); const g = useLoad(() => api("/groups/" + name), [name, tick]); const [confirm, setConfirm] = useState(false);
   const [paste, setPaste] = useState("");
-  if (g.loading) return html`<div class="skel"></div>`; if (g.e) return html`<${Err} e=${g.e} />`;
+  if (g.loading && !g.d) return html`<div class="skel"></div>`;
+  if (g.e) return html`<${Empty} t="Members only see their own membership" d="Only the group’s owner or an admin can view and edit its member list." />`;
   const re = () => { setTick(tick + 1); bump(); };
   const add = async (names) => { try { const r = await api(`/groups/${name}/members`, { method: "POST", body: { usernames: names } }); toast(r.missing.length ? `Added; not found: ${r.missing.join(", ")}` : "Members added", r.missing.length ? 1 : 0); setPaste(""); re(); } catch (e) { toast(e.message, 1); } };
   const rm = async (u) => { try { await api(`/groups/${name}/members/${encodeURIComponent(u)}`, { method: "DELETE" }); re(); } catch (e) { toast(e.message, 1); } };
@@ -366,9 +391,36 @@ function GroupDetail({ name, bump, onGone }) {
       <button class="btn sec sm" style="width:fit-content" disabled=${!paste.trim()} onClick=${() => add(paste.split(/[\s,;]+/).filter(Boolean))}>Add usernames</button></div></details>
     <div class="list">${g.d.members.length ? g.d.members.map((m) => html`<div class="li" key=${m.username}><${Avatar} p=${m} size=${36} /><div class="t"><b>${shown(m)}</b><span>${m.title || "@" + m.username}</span></div><button class="btn danger sm" onClick=${() => rm(m.username)}>Remove</button></div>`) : html`<div class="li mut">No members yet.</div>`}</div></div>`;
 }
-function Audit({ tick }) {
-  const d = useLoad(() => api("/admin/audit"), [tick]); if (d.loading) return html`<div class="skel"></div>`;
-  return html`<div class="list tscroll"><table><tbody>${d.d.audit.map((a) => html`<tr key=${a.id}><td class="mut sm">${ago(a.ts)}</td><td>${a.actor}</td><td><code>${a.action}</code></td><td class="mut">${a.target} ${a.detail}</td></tr>`)}</tbody></table></div>`;
+const KINDS = ["install", "update", "uninstall", "use", "error"];
+const DAYS = [["1", "Last 24 hours"], ["7", "Last 7 days"], ["30", "Last 30 days"], ["90", "Last 90 days"], ["0", "All time"]];
+function Audit() {
+  const [f, setF] = useState({ source: "tools", q: "", actor: "", action: "", package: "", kind: "", days: "7", page: 1 }); const [q, setQ] = useState(""); const [open, setOpen] = useState(null);
+  useEffect(() => { const t = setTimeout(() => setF((x) => (x.q === q ? x : { ...x, q, page: 1 })), 300); return () => clearTimeout(t); }, [q]);
+  const qs = (o) => Object.entries(o).filter(([, v]) => v !== "" && v != null).map(([k, v]) => k + "=" + encodeURIComponent(v)).join("&");
+  const d = useLoad(() => api("/audit?" + qs({ ...f, per_page: 50 })), [JSON.stringify(f)]);
+  if (!can("audit")) return html`<${Empty} t="No access" d="You need the audit permission to view this page." />`;
+  const up = (k, v) => setF((x) => ({ ...x, [k]: v, page: 1 })); const tools = f.source === "tools";
+  const exportCsv = async () => { try { const r = await fetch("/api/v1/audit/export?" + qs(f), { headers: { Authorization: "Bearer " + tok() } }); if (!r.ok) throw new Error("Export failed"); saveBlob(await r.blob(), `audit-${f.source}.csv`); } catch (e) { toast(e.message, 1); } };
+  const rows = d.d ? d.d.items : [], total = d.d ? d.d.total : 0, pages = Math.max(1, Math.ceil(total / 50));
+  const stamp = (t) => new Date(t * 1000).toLocaleString();
+  return html`<div class="stack"><div class="row"><h1>Security audit</h1><span class="sp"></span><button class="btn sec sm" onClick=${exportCsv}>Export CSV</button></div>
+    <div class="seg">${[["tools", "Tool calls & installs"], ["admin", "Admin actions"]].map(([k, l]) => html`<button key=${k} class=${f.source === k ? "on" : ""} onClick=${() => { setQ(""); setF({ source: k, q: "", actor: "", action: "", package: "", kind: "", days: f.days, page: 1 }); }}>${l}</button>`)}</div>
+    <div class="card stack"><div class="row" style="flex-wrap:wrap;gap:10px"><div style="flex:2;min-width:220px"><${Search} value=${q} onInput=${setQ} ph=${tools ? "Search parameters, commands, paths, hosts, people" : "Search actor, action, target, detail"} /></div>
+      <select class="field" aria-label="Time range" value=${f.days} onChange=${(e) => up("days", e.target.value)}>${DAYS.map(([v, l]) => html`<option value=${v} key=${v}>${l}</option>`)}</select>
+      <select class="field" aria-label="Person" value=${f.actor} onChange=${(e) => up("actor", e.target.value)}><option value="">${tools ? "Anyone" : "Any actor"}</option>${(d.d ? d.d.actors : []).map((a) => html`<option value=${a} key=${a}>${a}</option>`)}</select>
+      ${tools && html`<select class="field" aria-label="Event" value=${f.kind} onChange=${(e) => up("kind", e.target.value)}><option value="">Any event</option>${KINDS.map((k) => html`<option value=${k} key=${k}>${k}</option>`)}</select>
+        <input class="field" style="max-width:170px" placeholder="Package" value=${f.package} onInput=${(e) => up("package", e.target.value.trim())} />`}
+      <input class="field" style="max-width:190px" placeholder=${tools ? "Tool / component" : "Action, e.g. user.role"} value=${f.action} onInput=${(e) => up("action", e.target.value)} /></div>
+      <span class="xs mut3">${d.loading && !d.d ? "Loading…" : `${fmt(total)} ${total === 1 ? "record" : "records"}`}${tools ? ". Parameters are scrubbed of passwords, tokens and keys before they leave the machine. “(local)” = not signed in; the name is the OS user on that device and is self-reported." : ""}</span></div>
+    ${d.e ? html`<${Err} e=${d.e} />` : html`<div class="list tscroll"><table><thead><tr><th>When</th><th>${tools ? "Who" : "Actor"}</th><th>${tools ? "Event" : "Action"}</th><th>${tools ? "Tool call" : "Target"}</th><th></th></tr></thead><tbody>
+      ${rows.map((x) => { const k = x.id + f.source; return html`<tr key=${k} style="cursor:pointer" onClick=${() => setOpen(open === k ? null : k)}>
+        <td class="mut sm" title=${stamp(x.ts)}>${ago(x.ts)}</td><td>${x.actor}${tools && x.host ? html`<div class="xs mut3">${x.host}</div>` : ""}</td>
+        <td>${tools ? html`<span class=${"badge " + (x.kind === "error" ? "red" : x.kind === "use" ? "" : "green")}>${x.kind}</span>` : html`<code>${x.action}</code>`}</td>
+        <td class="mut">${tools ? html`<b style="font-weight:500">${x.package}</b>${x.component ? html` · <code>${x.component}</code>` : ""}${x.detail ? html`<div class="xs mono" style="max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.detail}</div>` : ""}` : `${x.target} ${x.detail}`}</td>
+        <td class="mut3 xs">${open === k ? "▾" : "▸"}</td></tr>${open === k && html`<tr key=${k + "d"}><td colspan="5"><div class="stack" style="padding:6px 0"><div class="xs mut">${stamp(x.ts)}${tools ? ` · source ${x.source || "cli"} · ip ${x.ip || "?"} · client ${String(x.client_id || "").slice(0, 8)}${x.cwd ? " · cwd " + x.cwd : ""}${x.username ? "" : x.local_user ? ` · OS user ${x.local_user} (unverified)` : ""}` : ""}</div>
+          <pre class="mono xs" style="white-space:pre-wrap;word-break:break-all;margin:0">${tools ? (x.detail ? x.detail : "No parameters recorded.") : x.detail || "—"}</pre></div></td></tr>`}`; })}
+      ${!rows.length && !d.loading && html`<tr><td colspan="5" class="mut">Nothing matches these filters.</td></tr>`}</tbody></table></div>`}
+    <div class="row"><button class="btn sec sm" disabled=${f.page <= 1} onClick=${() => setF((x) => ({ ...x, page: x.page - 1 }))}>Previous</button><span class="xs mut3">Page ${f.page} of ${pages}</span><button class="btn sec sm" disabled=${f.page >= pages} onClick=${() => setF((x) => ({ ...x, page: x.page + 1 }))}>Next</button></div></div>`;
 }
 
 function Docs({ slug }) {
@@ -427,18 +479,20 @@ function Dashboard() {
       <div class="seg">${[7, 30, 90, 365].map((n) => html`<button key=${n} class=${days === n ? "on" : ""} onClick=${() => setDays(n)}>${n === 365 ? "1y" : n + "d"}</button>`)}</div>
       <button class="btn sec sm" onClick=${exportCsv} disabled=${!D}>Export CSV</button></div>
     <div class="row filters" role="group" aria-label="Filters"><span class="sm mut">Filter</span>
-      <select class="field" aria-label="Type" value=${fl.type} onChange=${setF("type")}><option value="">Any type</option>${((D && D.options.types) || []).map((x) => html`<option key=${x} selected=${x === fl.type}>${x}</option>`)}</select>
-      <select class="field" aria-label="Person" value=${fl.user} onChange=${setF("user")}><option value="">Anyone</option>${((D && D.options.users) || []).map((x) => html`<option key=${x} selected=${x === fl.user}>${x}</option>`)}</select>
-      <select class="field" aria-label="Tool" value=${fl.source} onChange=${setF("source")}><option value="">Any tool</option>${((D && D.options.sources) || []).map((x) => html`<option key=${x} selected=${x === fl.source}>${x}</option>`)}</select>
-      <select class="field" aria-label="Event" value=${fl.kind} onChange=${setF("kind")}><option value="">Any event</option>${["use", "install", "update", "uninstall", "error"].map((x) => html`<option key=${x} selected=${x === fl.kind}>${x}</option>`)}</select>
+      <select class="field" aria-label="Type" value=${fl.type} onChange=${setF("type")}><option value="">Any type</option>${((D && D.options.types) || []).map((x) => html`<option value=${x} key=${x} selected=${x === fl.type}>${x}</option>`)}</select>
+      <select class="field" aria-label="Person" value=${fl.user} onChange=${setF("user")}><option value="">Anyone</option>${((D && D.options.users) || []).map((x) => html`<option value=${x} key=${x} selected=${x === fl.user}>${x}</option>`)}</select>
+      <select class="field" aria-label="Tool" value=${fl.source} onChange=${setF("source")}><option value="">Any tool</option>${((D && D.options.sources) || []).map((x) => html`<option value=${x} key=${x} selected=${x === fl.source}>${x}</option>`)}</select>
+      <select class="field" aria-label="Event" value=${fl.kind} onChange=${setF("kind")}><option value="">Any event</option>${["use", "install", "update", "uninstall", "error"].map((x) => html`<option value=${x} key=${x} selected=${x === fl.kind}>${x}</option>`)}</select>
       ${nFilters > 0 && html`<button class="btn sec sm" onClick=${() => { setFl({ type: "", user: "", source: "", kind: "" }); setPkg(""); }}>Clear ${nFilters}</button>`}</div>
     ${d.loading && !D ? html`<${Skels} n=4 />` : d.e ? html`<${Err} e=${d.e} />` : D && html`<div class="stack">
       <div class="kpis"><${Kpi} label="Tool calls" value=${t.use || 0} prev=${pv.use || 0} /><${Kpi} label="Active people" value=${D.active_users} prev=${D.active_users_prev} />
         <${Kpi} label="Installs" value=${t.install || 0} prev=${pv.install || 0} /><${Kpi} label="Errors" value=${t.error || 0} prev=${pv.error || 0} invert=${true} /></div>
       <div class="card stack"><div class="row"><h3>Activity</h3><span class="sp"></span><span class="xs mut3">${D.active_packages} active packages · ${D.clients} devices · UTC</span></div>
         ${Object.values(t).some((v) => v) ? html`<${LineChart} daily=${D.daily} series=${["use", "install", "error"]} />` : html`<${Empty} t="No activity yet" d="Events appear here as people install and use packages." />`}</div>
-      <div class="two"><div class="card stack"><h3>Top packages</h3><${Bars} items=${D.top_packages} link=${true} /></div><div class="card stack"><h3>Top people</h3><${Bars} items=${D.top_users} color="var(--green)" /></div></div>
-      <div class="two"><div class="card stack"><h3>By type</h3><${Donut} items=${D.by_type} /></div><div class="card stack"><h3>By tool</h3><${Donut} items=${D.by_source} /></div></div>
+      <div class="two"><div class="card stack"><h3>Most used</h3><${Bars} items=${D.top_packages} link=${true} /></div>
+        <div class="card stack"><div class="row"><h3>Top rated</h3><span class="sp"></span><span class="xs mut3">all time</span></div>${D.top_reviewed.length ? html`<div>${D.top_reviewed.slice(0, 8).map((x) => html`<div class="hb" key=${x.name}><span class="hl"><a href=${"#/package/" + x.name}>${x.name}</a></span><span class="ht"><i style=${`width:${x.score / 5 * 100}%;background:var(--orange)`}></i></span><span class="hn" title=${x.count + " reviews · ranked by weighted score " + x.score}>★ ${x.avg} <span class="mut3">(${x.count})</span></span></div>`)}</div>` : html`<p class="mut sm">No reviews yet.</p>`}</div></div>
+      <div class="two"><div class="card stack"><h3>Top people</h3><${Bars} items=${D.top_users} color="var(--green)" /></div><div class="card stack"><h3>By type</h3><${Donut} items=${D.by_type} /></div></div>
+      <div class="card stack"><h3>By tool</h3><${Donut} items=${D.by_source} /></div>
       <div class="card stack"><h3>Recent activity</h3>${D.recent.length ? html`<div class="tscroll"><table><thead><tr><th>When</th><th>Who</th><th>Event</th><th>Package</th><th>Component</th></tr></thead><tbody>
         ${D.recent.map((e, i) => html`<tr key=${i}><td class="mut sm">${ago(e.ts)}</td><td>${e.actor}</td><td><span class=${"badge " + ({ use: "blue", install: "green", error: "red", update: "orange" }[e.kind] || "")}>${e.kind}</span></td><td><a href=${"#/package/" + e.package}>${e.package}</a></td><td class="mono mut">${e.component || ""}</td></tr>`)}</tbody></table></div>` : html`<p class="mut sm">Nothing yet.</p>`}</div></div>`}</div>`;
 }
@@ -450,10 +504,10 @@ function App() {
   const logout = async () => { try { await api("/auth/logout", { method: "POST" }); } catch {} try { localStorage.removeItem("aihub_token"); } catch {} set({ me: null }); nav("/"); };
   const on = (k) => (seg[0] === k ? "on" : "");
   const page = { "": html`<${Home} />`, browse: html`<${Browse} key=${s.route} />`, package: html`<${Package} name=${seg[1]} key=${seg[1]} />`, rankings: html`<${Rankings} />`, docs: html`<${Docs} slug=${seg[1]} key=${seg[1]} />`, start: html`<${Start} />`,
-    login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, dashboard: html`<${Dashboard} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
+    login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, dashboard: html`<${Dashboard} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
   return html`<div><header class="nav"><div class="nav-in"><a class="brand" href="#/">AI Hub</a>
     <nav class="links" aria-label="Main"><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
-    <div class="r">${s.me ? html`<a href="#/account" class="me-link"><${Avatar} p=${s.me} size=${24} /><span>${shown(s.me)}</span></a>${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}${can("admin") ? html`<a href="#/admin">Admin</a>` : ""}<a href="#/" onClick=${logout}>Sign out</a>` :
+    <div class="r">${s.me ? html`<a href="#/account" class="me-link"><${Avatar} p=${s.me} size=${24} /><span>${shown(s.me)}</span></a>${s.showGroups ? html`<a class=${on("groups")} href="#/groups">Groups</a>` : ""}${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}${can("audit") ? html`<a class=${on("audit")} href="#/audit">Audit</a>` : ""}${can("admin") || can("reset_password") ? html`<a href="#/admin">Admin</a>` : ""}<a href="#/" onClick=${logout}>Sign out</a>` :
       html`<a href="#/login">Sign in</a>`}</div></div></header>
     <main>${page}</main><footer class="foot">AI Hub · internal registry for AI tooling</footer>
     ${s.toast && html`<div class=${"toast " + (s.toast.err ? "err" : "")} role="status">${s.toast.m}</div>`}</div>`;

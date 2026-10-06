@@ -8,24 +8,6 @@ import tempfile
 from ..core import archive, ignore, manifest as M, version as V
 from . import api, installer, paths
 
-TEMPLATE = '''[package]
-name = "%(name)s"
-version = "0.1.0"
-type = "%(type)s"
-description = "Describe %(name)s"
-tags = []
-
-[requires]
-commands = []
-packages = []
-os = []
-
-# [[skills]]
-# name = "%(name)s"
-# path = "skills/%(name)s"
-'''
-
-
 def cmd_config(a):
     c = paths.load("config.json", {})
     if a.action == "set":
@@ -120,15 +102,33 @@ def _root(a): return os.path.abspath(a.path)
 
 
 def dev_init(a):
+    from ..core import templates
     d = _root(a)
     os.makedirs(d, exist_ok=True)
     name = a.name or os.path.basename(d).lower().replace("_", "-")
+    from ..core import naming
+    name = naming.validate(name)
     f = os.path.join(d, "aihub.toml")
-    if os.path.exists(f):
-        sys.exit("aihub.toml exists")
-    open(f, "w").write(TEMPLATE % {"name": name, "type": a.type})
-    open(os.path.join(d, "README.md"), "a").write("# %s\n" % name)
-    print("created", f)
+    if os.path.exists(f) and not a.force:
+        sys.exit("aihub.toml already exists here (use --force to overwrite the starter files)")
+    manifest, files, execs = templates.render(a.type, name, a.description or "")
+    with open(f, "w") as fh:
+        fh.write(manifest)
+    made = ["aihub.toml"]
+    for rel, content in files.items():
+        p = os.path.join(d, rel)
+        if os.path.exists(p) and not a.force:
+            continue
+        os.makedirs(os.path.dirname(p) or d, exist_ok=True)
+        with open(p, "w", newline="\n") as fh:
+            fh.write(content)
+        if rel in execs:
+            os.chmod(p, 0o755)
+        made.append(rel)
+    print("created a %s project in %s" % (a.type, d))
+    for m in sorted(made):
+        print("  " + m)
+    print("next:  edit the files, then  aihub dev validate  &&  aihub dev publish")
 
 
 def _load(a):
@@ -136,13 +136,22 @@ def _load(a):
         return M.parse(f.read())
 
 
-def dev_validate(a):
+def dev_validate(a, quiet=False):
     m = _load(a)
-    print("ok:", m["package"]["name"], m["package"]["version"])
+    errs, warns = M.lint(m, _root(a))
+    for w in warns:
+        print("warning:", w)
+    for e in errs:
+        print("error:  ", e)
+    if errs:
+        raise ValueError("%d problem(s) in the project; fix them and run `aihub dev validate` again" % len(errs))
+    if not quiet:
+        print("ok: %s %s (%s)" % (m["package"]["name"], m["package"]["version"], m["package"]["type"]))
+    return m
 
 
 def dev_build(a):
-    m = _load(a)
+    m = dev_validate(a, quiet=True)
     out = os.path.join(_root(a), "dist")
     os.makedirs(out, exist_ok=True)
     dest = os.path.join(out, "%s-%s.tar.gz" % (m["package"]["name"], m["package"]["version"]))
@@ -196,7 +205,8 @@ def build_parser():
         arg("--tool", action="append"))
     dev = sp.add_parser("dev")
     ds = dev.add_subparsers(dest="dcmd", required=True)
-    for n, fn, extra in [("init", dev_init, [arg("--name"), arg("--type", default="tool")]), ("validate", dev_validate, []),
+    for n, fn, extra in [("init", dev_init, [arg("--name"), arg("--type", default="skill", choices=["skill", "agent", "mcp", "tool", "setup"]),
+                                           arg("--description"), arg("--force", action="store_true")]), ("validate", dev_validate, []),
                          ("build", dev_build, []), ("publish", dev_publish, [arg("--bump", choices=["major", "minor", "patch"])]),
                          ("stats", dev_stats, [])]:
         p = ds.add_parser(n)

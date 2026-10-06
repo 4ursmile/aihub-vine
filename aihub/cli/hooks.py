@@ -4,6 +4,7 @@ import os
 import shlex
 import sys
 
+from ..core import redact
 from . import integrations, paths, telemetry
 
 
@@ -23,7 +24,7 @@ def ensure(only=None, remove=False):
             if remove:
                 out.append((t.label, "removed" if t.remove_hook() else "not installed"))
             elif t.name == "codex":
-                out.append((t.label, "mcp launch counting only"))
+                out.append((t.label, "no tool-call hook available (install/uninstall events only)"))
             else:
                 t.install_hook(hook_cmd())
                 out.append((t.label, "installed"))
@@ -67,7 +68,8 @@ def handle(stdin_text, source="claude"):
                     break
         if hit and hit[0] in comps:
             telemetry.record({"kind": "use", "package": comps[hit[0]], "component": hit[1],
-                              "client_id": client_id(), "source": source})
+                              "client_id": client_id(), "source": source,
+                              "detail": redact.params(inp), "cwd": redact.text(data.get("cwd") or os.getcwd(), 200)})
     except Exception:
         pass
 

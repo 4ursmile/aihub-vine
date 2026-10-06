@@ -57,7 +57,7 @@ aihub doctor
 - `uninstall <name>` removes package files and reverts registered integration and setup changes where recorded.
 - `doctor` checks the hub connection, detected hook status, and whether `python3` is available.
 
-During installation, missing required commands are reported with any manifest hint. Package dependencies are recursively installed. Python dependencies in `[python]` are installed into a package-specific virtual environment.
+During installation, missing required commands are reported with any manifest hint. Package dependencies are recursively installed. Python dependencies in `[python]` are installed into a package-specific virtual environment. Installation asks before running the platform install script and before registering components; `--yes` skips these prompts.
 
 ## Supported tools and install locations
 
@@ -69,11 +69,18 @@ The CLI detects Claude Code, Codex, and OpenCode when their configuration direct
 | Codex | `${CODEX_HOME:-~/.codex}/skills/<name>/` | Custom prompt in `${CODEX_HOME:-~/.codex}/prompts/<name>.md` | Managed `[mcp_servers.<name>]` section in `${CODEX_HOME:-~/.codex}/config.toml` |
 | OpenCode | `~/.config/opencode/skill/<name>/` | `~/.config/opencode/agent/<name>.md` | `mcp` entry in `~/.config/opencode/opencode.json` |
 
-Codex has no native agent format, so agent files are installed as custom prompts. Codex also has no general tool-call usage hook; its adapter reports MCP launch counting only. `aihub hooks install` does not create a Codex tool hook.
+Codex has no native agent format, so agent files are installed as custom prompts. Codex has no tool-call hook, so `aihub hooks install` reports "no tool-call hook available" for it and only install and uninstall events are sent; per-use counting is not available for Codex.
 
 ## Usage hooks and telemetry
 
-Usage hooks record package component use; they do not collect arbitrary tool input content. Hook handling is intended to be fast, non-blocking, and non-fatal to the coding tool.
+Usage hooks record when an installed package's component is used (a skill, an agent, or one of its MCP tools). Calls to tools that do not belong to an installed package are not recorded. Each record also carries, for the security audit:
+
+- the **parameters** of the call (for example the skill arguments or MCP tool input), as compact JSON capped at about 2,000 characters;
+- the **working directory**, the machine's **host name**, and the **OS user name** of whoever ran it.
+
+Parameters are scrubbed on your machine before anything is queued: values under keys such as `password`, `token`, `secret`, `api_key` or `authorization`, `Bearer ...` headers, `password=...` style text, passwords inside `scheme://user:pass@host` URLs, and common key formats (`sk-...`, `ghp_...`, AWS, Slack, JWT, private keys) are replaced with `[redacted]`. The server scrubs again on receipt. Scrubbing is pattern based, so it cannot catch every secret; anyone with the `audit` permission can read what is recorded.
+
+If you are not signed in (public install), your events appear in the audit and dashboard as `<OS user> (local)`. That name comes from the client and is not verified. Signed-in events always use the account name. Hook handling is intended to be fast, non-blocking, and non-fatal to the coding tool.
 
 - Claude Code uses a `PreToolUse` hook in `~/.claude/settings.json`. It matches tool calls, identifies installed skills, agent tasks, and MCP tools, then invokes the CLI hook handler.
 - OpenCode uses `~/.config/opencode/plugin/aihub-usage.js`, listening for `tool.execute.before` and launching the CLI in the background.
@@ -111,10 +118,10 @@ The `credentials.json` file is written with restrictive permissions. Keep the di
 
 ## Package development
 
-`aihub dev` creates and validates manifests, builds a source archive, publishes it, and reads package statistics. Run commands from the project directory or pass its path.
+`aihub dev` creates and validates package projects, builds a source archive, publishes it, and reads package statistics. Run commands from the project directory or pass its path.
 
 ```sh
-aihub dev init ./my-package --name my-package --type skill
+aihub dev init ./my-package --type skill --name my-package --description "A short package description"
 aihub dev validate ./my-package
 aihub dev build ./my-package
 aihub dev publish ./my-package
@@ -122,6 +129,6 @@ aihub dev publish ./my-package --bump patch
 aihub dev stats ./my-package
 ```
 
-`dev init` creates `aihub.toml` and appends a README heading. `dev build` writes `dist/<name>-<version>.tar.gz`. `dev publish` uploads that archive; the server requires a logged-in user with publish permission, and publishing another version of an existing package also requires package maintainer access or admin-level `manage_all` permission. Version numbers cannot be reused once published. `--bump` supports `major`, `minor`, and `patch`.
+`aihub dev init [path] --type skill|agent|mcp|tool|setup --name NAME --description DESCRIPTION --force` creates a complete starter project for the selected type. If `aihub.toml` already exists, init exits rather than overwriting unless `--force` is supplied; with `--force`, files generated by that template are overwritten, while unrelated files are left in place. `aihub dev validate [path]` parses and normalizes the manifest, then lints component, binary, and script files in the project, reporting errors and warnings. See [Publishing to AI Hub](publishing.md) for project trees, manifest examples, install scripts, visibility, and release steps. `dev build` writes `dist/<name>-<version>.tar.gz`. `dev publish` uploads that archive; the server requires a logged-in user with publish permission, and publishing another version of an existing package also requires package develop access or site-admin permission. Version numbers cannot be reused once published. `--bump` supports `major`, `minor`, and `patch`.
 
-See the [manifest reference](manifest.md) for package fields and setup step behavior.
+See [Publishing to AI Hub](publishing.md) for end-to-end package authoring and the [manifest reference](manifest.md) for package fields and setup step behavior.

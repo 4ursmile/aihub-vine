@@ -19,10 +19,35 @@ def _spool():
     return paths.p("queue", "events.jsonl")
 
 
+_WHO = None
+
+
+def who():
+    """(OS user, host) of this machine. Lets anonymous installs show up under a real name in the audit trail."""
+    global _WHO
+    if _WHO is None:
+        user = os.environ.get("USER") or os.environ.get("USERNAME") or os.environ.get("LOGNAME") or ""
+        if not user:
+            try:
+                import pwd
+                user = pwd.getpwuid(os.getuid()).pw_name
+            except Exception:
+                user = ""
+        try:
+            import socket
+            host = socket.gethostname()
+        except Exception:
+            host = ""
+        _WHO = (user[:64], host[:128])
+    return _WHO
+
+
 def enqueue(ev):
     try:
         paths.ensure("queue")
         ev.setdefault("ts", time.time())
+        ev.setdefault("local_user", who()[0])
+        ev.setdefault("host", who()[1])
         line = (json.dumps(ev, separators=(",", ":")) + "\n").encode()
         if os.path.exists(_spool()) and os.path.getsize(_spool()) > MAX_SPOOL:
             return

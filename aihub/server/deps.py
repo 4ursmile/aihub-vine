@@ -29,6 +29,14 @@ def require_perm(perm):
     return dep
 
 
+def require_any(*perms):
+    def dep(request: Request, u=Depends(require_user)):
+        if not set(perms) & request.app.state.repos.perms(u["role"]):
+            raise HTTPException(403, "missing permission: " + " or ".join(perms))
+        return u
+    return dep
+
+
 def viewer_of(repos, u):
     """The identity used for visibility checks. `bypass` = may see every package (site admin / manage_all)."""
     if not u:

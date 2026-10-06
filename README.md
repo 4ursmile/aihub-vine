@@ -1,6 +1,6 @@
 # AI Hub
 
-AI Hub is a registry and command-line client for distributing AI coding tool packages. Packages can contain skills, agents, MCP server definitions, executables, and setup profiles. The server stores package metadata and release archives in SQLite and local files.
+AI Hub is a registry and command-line client for distributing AI coding tool packages. Packages can contain skills, agents, MCP server definitions, executables, and setup profiles. The server stores package metadata and release archives using configurable backends.
 
 ## Architecture
 
@@ -12,8 +12,8 @@ Package author
         AI Hub FastAPI server
         +-------------------+
         | REST API          |
-        | SQLite (metadata) |
-        | files/ (archives) |
+        | SQLite or PostgreSQL |
+        | local files or S3   |
         +-------------------+
                   ^
                   |
@@ -54,6 +54,10 @@ aihub dev publish
 aihub install hello-world
 ```
 
+## Backends
+
+Choose SQLite or PostgreSQL for metadata, memory or Redis for cache, and local files or S3-compatible storage for package archives in `.env`. See [Server configuration](docs/configuration.md) for deployment settings and [Publishing to AI Hub](docs/publishing.md) for package authoring.
+
 ## Features
 
 - Package search, version resolution, download, and SHA-256 verification.
@@ -61,7 +65,7 @@ aihub install hello-world
 - CLI support for Claude Code, Codex, and OpenCode integrations.
 - Manifest-declared commands, dependencies, Python environments, scripts, binaries, and setup steps.
 - Usage events and package statistics.
-- Account roles, permissions, approval-based registration, and admin controls.
+- Account roles, permissions, approval-based registration, and admin controls, including password reset (`reset_password` permission) and a searchable security audit of tool calls and admin actions (`audit` permission). See [CLI usage hooks](docs/cli.md#usage-hooks-and-telemetry) for exactly what is recorded and scrubbed.
 
 ## Repository layout
 
@@ -91,4 +95,6 @@ Dockerfile, docker-compose.yml  Container deployment
 - [Production server setup](docs/server-setup.md)
 - [CLI guide](docs/cli.md)
 - [Manifest reference](docs/manifest.md)
+- [Publishing to AI Hub](docs/publishing.md)
+- [Server configuration](docs/configuration.md)
 - [REST API](docs/api.md)

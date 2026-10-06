@@ -87,6 +87,10 @@ def revert(rec):
                 shutil.copy2(rec["backup"], rec["path"])
             elif os.path.exists(rec["path"]):
                 os.remove(rec["path"])
+            d = rec.get("rmdir")                      # a folder this install created: remove it, but only if nothing else is in it
+            while d and os.path.isdir(d) and not os.listdir(d):
+                os.rmdir(d)
+                break
     except Exception:
         pass
 
@@ -164,7 +168,7 @@ class ClaudeCode(Tool):
 
 class Codex(Tool):
     """Skills -> ~/.codex/skills. MCP -> managed [mcp_servers.X] block in ~/.codex/config.toml.
-    Codex has no tool-call hook, so MCP servers are launched through `aihub exec-mcp` (counts sessions)."""
+    Codex has no tool-call hook, so only install/uninstall events are reported for it (no per-use counting)."""
     name, label = "codex", "Codex"
     def __init__(self): self.d = lambda *a: os.path.join(os.environ.get("CODEX_HOME") or os.path.join(HOME(), ".codex"), *a)
     def detect(self): return os.path.isdir(self.d()) or bool(shutil.which("codex"))

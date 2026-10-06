@@ -9,14 +9,16 @@ import io
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
+from starlette.responses import StreamingResponse
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 
-from ..core import archive, manifest as M, naming, version as V
+from ..core import archive, manifest as M, naming, redact, version as V
 from . import image, markdown, sheet
 from .db import ALL_PERMS
-from .deps import can_develop, can_manage, current_user, require_perm, require_user, viewer_of
+from .deps import can_develop, can_manage, current_user, require_any, require_perm, require_user, viewer_of
 from .security import hash_password, hash_token, new_token, verify_password
 
 r = APIRouter(prefix="/api/v1")
@@ -29,7 +31,7 @@ _fails = {}  # (ip, key) -> (count, window_start); per-process throttle for logi
 def R(request): return request.app.state.repos
 
 
-SETTING_DEFAULTS = {"public_browse": "1", "public_install": "0", "default_visibility": "public", "allow_private": "1",
+SETTING_DEFAULTS = {"public_browse": "1", "public_install": "0", "default_visibility": "public", "allow_private": "1", "allow_source_download": "1",
                     "signup": None}
 
 
@@ -233,7 +235,7 @@ def meta(request: Request, u=Depends(current_user)):
     return {"name": "AI Hub", "public_url": request.app.state.settings.public_url, "cli_version": "0.1.0",
             "overview": R(request).overview(viewer(request, u)),
             "public_browse": setting(request, "public_browse") == "1", "public_install": setting(request, "public_install") == "1",
-            "allow_private": setting(request, "allow_private") == "1", "default_visibility": setting(request, "default_visibility")}
+            "allow_private": setting(request, "allow_private") == "1", "allow_source_download": setting(request, "allow_source_download") == "1", "default_visibility": setting(request, "default_visibility")}
 
 
 @r.get("/healthz")
@@ -247,7 +249,11 @@ def readyz(request: Request):
         R(request).db.conn().execute("SELECT 1").fetchone()
     except Exception:
         raise HTTPException(503, "database unavailable")
-    return {"ok": True, "queued_events": len(request.app.state.events.buf)}
+    st = request.app.state
+    checks = {"cache": st.cache.health(), "storage": st.storage.health()}
+    if not all(checks.values()) and checks["storage"] is False:
+        raise HTTPException(503, "storage unavailable")
+    return {"ok": True, "queued_events": len(st.events.buf), "database": st.settings.db_backend, "cache": st.cache.name, **checks}
 
 
 def _cache_scope(v):
@@ -259,6 +265,8 @@ def _cache_scope(v):
 def packages(request: Request, q: str = "", type: str = None, tag: str = None, sort: str = "",
              page: int = 1, per_page: int = 20, mine: bool = False, u=Depends(current_user)):
     need_login_unless(request, u, "public_browse")
+    if sort not in ("", "relevance", "updated", "created", "name", "downloads", "rating", "reviews"):
+        raise HTTPException(400, "sort must be one of: relevance, updated, created, name, downloads, rating, reviews")
     v = viewer(request, u)
     per_page = min(max(per_page, 1), 100)
     key = "pkg:list:%s:%s|%s|%s|%s|%s|%s|%s" % (_cache_scope(v), q, type, tag, sort, page, per_page, mine)
@@ -319,10 +327,10 @@ def readme(name: str, request: Request, u=Depends(current_user)):
     vs = [v for v in R(request).versions(p["id"]) if not v["yanked"]]
     if not vs:
         return {"markdown": "", "html": ""}
-    path = request.app.state.storage.path(p["name"], vs[0]["file"])
     rd = vs[0]["manifest"].get("package", {}).get("readme", "README.md")
     try:
-        raw = archive.read_member(path, rd) or b""
+        with request.app.state.storage.local_copy(p["name"], vs[0]["file"]) as path:     # works for local disk and S3
+            raw = archive.read_member(path, rd) or b""
     except Exception:
         raw = b""
     md = raw.decode("utf-8", "replace")
@@ -339,6 +347,24 @@ def resolve(name: str, request: Request, spec: str = "", u=Depends(current_user)
                     "url": "%s/files/%s/%s" % (request.app.state.settings.public_url.rstrip("/"), p["name"], v["file"]),
                     "manifest": v["manifest"]}
     raise HTTPException(404, "no matching version")
+
+
+@r.get("/packages/{name}/versions/{version}/download")
+def download_version(name: str, version: str, request: Request, u=Depends(current_user)):
+    """Browser download of one version's archive. Turned off by the `allow_source_download` setting; `aihub install` is unaffected."""
+    if setting(request, "allow_source_download") != "1":
+        raise HTTPException(403, "source download is turned off by the administrator")
+    need_login_unless(request, u, "public_install")
+    p = _pkg_or_404(request, name, u)
+    v = next((x for x in R(request).versions(p["id"]) if x["version"] == version), None)
+    st = request.app.state.storage
+    if not v or not st.exists(p["name"], v["file"]):
+        raise HTTPException(404, "version not found")
+    R(request).version_download(p["id"], v["version"])
+    f = st.open(p["name"], v["file"])
+    return StreamingResponse(iter(lambda: f.read(1 << 20), b""), media_type="application/octet-stream", background=BackgroundTask(f.close),
+                             headers={"Content-Length": str(st.size(p["name"], v["file"])), "X-Content-Type-Options": "nosniff",
+                                      "Content-Disposition": 'attachment; filename="%s"' % os.path.basename(v["file"])})
 
 
 @r.patch("/packages/{name}")
@@ -548,6 +574,10 @@ async def events(request: Request, u=Depends(current_user)):
                      "username": u["username"] if u else None,
                      "component": str(e["component"])[:120] if e.get("component") else None,
                      "duration": e.get("duration"),
+                     # who/where on the machine that ran it. Self-reported, so shown as "claimed" in the audit page.
+                     "local_user": redact.text(e.get("local_user"), 64), "host": redact.text(e.get("host"), 128),
+                     "detail": redact.text(e.get("detail"), 2200), "cwd": redact.text(e.get("cwd"), 200),
+                     "ip": request.client.host if request.client else None,
                      "source": e.get("source") if e.get("source") in ("claude", "opencode", "codex", "cli") else None})
     request.app.state.events.add(rows)
     return {"accepted": len(rows)}
@@ -570,11 +600,14 @@ def pkg_events(name: str, request: Request, u=Depends(require_user)):
 
 @r.get("/rankings/{what}")
 def rankings(what: str, request: Request, days: int = 30, u=Depends(current_user)):
-    if what not in ("packages", "developers", "users"):
+    if what not in ("packages", "developers", "users", "reviews", "reviewed"):
         raise HTTPException(404)
     need_login_unless(request, u, "public_browse")
     request.app.state.events.flush()
-    return {"items": R(request).rank(what, days, viewer=viewer(request, u))}
+    items = R(request).rank(what, days, viewer=viewer(request, u))
+    if what in ("reviews", "reviewed"):                       # JSON-friendly numbers; reviews are all-time, not windowed
+        items = [dict(x, avg=round(float(x["avg"]), 2), score=round(float(x["score"]), 2)) for x in items]
+    return {"items": items, "windowed": what not in ("reviews", "reviewed")}
 
 
 @r.get("/stats/overview")
@@ -588,7 +621,7 @@ admin = Depends(require_perm("admin"))
 
 
 @r.get("/admin/users")
-def a_users(request: Request, q: str = "", u=admin):
+def a_users(request: Request, q: str = "", u=Depends(require_any("admin", "reset_password"))):
     return {"users": [dict(_public(x), role=x["role"], status=x["status"], created=x["created"]) for x in R(request).users(q)]}
 
 
@@ -608,6 +641,24 @@ def a_role(username: str, body: dict, request: Request, u=admin):
     R(request).user_set(username, role=body["role"])
     R(request).audit(u["username"], "user.role", username, body["role"])
     return {"ok": True}
+
+
+@r.post("/admin/users/{username}/reset-password")
+def a_reset_password(username: str, request: Request, u=Depends(require_perm("reset_password"))):
+    """Set a new random password and sign the person out everywhere. The password is returned once, never stored in clear."""
+    repos = R(request)
+    t = repos.user_by_name(username)
+    if not t:
+        raise HTTPException(404, "no such user")
+    if t["id"] == u["id"]:
+        raise HTTPException(400, "use Account → Password to change your own password")
+    if "admin" in repos.perms(t["role"]) and "admin" not in repos.perms(u["role"]):
+        raise HTTPException(403, "only an administrator can reset an administrator's password")
+    pw = gen_password()
+    repos.user_set(username, password_hash=hash_password(pw))
+    repos.tokens_revoke_others(t["id"], "")
+    repos.audit(u["username"], "user.password_reset", username, "all sessions signed out")
+    return {"username": username, "password": pw}
 
 
 @r.delete("/admin/users/{username}")
@@ -640,6 +691,7 @@ SETTINGS = {
     "public_install": (("0", "1"), "Public install (no sign-in)", "Let the CLI install public packages without logging in"),
     "allow_private": (("0", "1"), "Allow private repositories", "Let people make their repositories private and share them"),
     "default_visibility": (("public", "private"), "Default visibility for new repositories", "Applied when a package is first published"),
+    "allow_source_download": (("0", "1"), "Allow source download", "Show a Download button for each version, so people can fetch the package archive from the web"),
     "allow_group_creation": (("0", "1"), "Let members create groups", "People with the 'create groups' permission can make their own"),
 }
 
@@ -675,15 +727,30 @@ def _can_group(request, u, g):
     return "admin" in R(request).perms(u["role"]) or g.get("owner_id") == u["id"]
 
 
+@r.get("/groups/capabilities")
+def groups_caps(request: Request, u=Depends(require_user)):
+    repos = R(request)
+    perms = repos.perms(u["role"])
+    mine = any(g.get("owner_id") == u["id"] for g in repos.groups())
+    can_create = "admin" in perms or ("create_groups" in perms and setting(request, "allow_group_creation") == "1")
+    return {"can_create": can_create, "is_admin": "admin" in perms, "owns_groups": mine,
+            "member_of": len(repos.groups_of(u["id"])), "show_page": can_create or mine or bool(repos.groups_of(u["id"]))}
+
+
 @r.get("/groups")
 def groups_list(request: Request, u=Depends(require_user)):
     """Admins see every group; everyone else sees the groups they belong to or own."""
     repos = R(request)
     allg = repos.groups()
-    if "admin" in repos.perms(u["role"]):
-        return {"groups": allg}
+    is_admin = "admin" in repos.perms(u["role"])
     mine = set(repos.groups_of(u["id"]))
-    return {"groups": [g for g in allg if g["name"] in mine or g.get("owner_id") == u["id"]]}
+    out = []
+    for g in allg:
+        owned = g.get("owner_id") == u["id"]
+        if is_admin or owned or g["name"] in mine:
+            # `can_manage` is decided here, on the server; owner ids never reach the browser
+            out.append({k: v for k, v in g.items() if k != "owner_id"} | {"can_manage": is_admin or owned})
+    return {"groups": out}
 
 
 @r.get("/groups/lookup")
@@ -842,6 +909,7 @@ _U_H = {"username", "account", "login", "user name", "user_name"}
 _D_H = {"display_name", "display name", "displayname", "full name", "full_name", "fullname", "name"}
 _T_H = {"title", "job title", "job_title", "position"}
 _R_H = {"role"}
+_G_H = {"group", "groups", "group name", "group_name", "team", "teams"}
 
 
 def _idx(header, names, exclude=()):
@@ -859,21 +927,27 @@ def _batch_rows(rows, default_role):
         cells = [c.strip().lower() for c in rows[0]]
         # A header row is recognised by its column names. `user` is deliberately not an alias: it is also a
         # role value, so "dan,user" is a data row. Two or more known names, or a known username column, mark a header.
-        known = _U_H | _D_H | _T_H | _R_H
+        known = _U_H | _D_H | _T_H | _R_H | _G_H
         if sum(c in known for c in cells) >= 2 or cells[0] in _U_H:
             header, rows = cells, rows[1:]
     if header:
         ui = max(_idx(header, _U_H), 0)
-        di, ti, ri = _idx(header, _D_H, (ui,)), _idx(header, _T_H, (ui,)), _idx(header, _R_H, (ui,))
+        di, ti, ri, gi = _idx(header, _D_H, (ui,)), _idx(header, _T_H, (ui,)), _idx(header, _R_H, (ui,)), _idx(header, _G_H, (ui,))
     else:
-        ui, di, ti, ri = 0, -1, -1, 1
+        ui, di, ti, ri, gi = 0, -1, -1, 1, -1
     g = lambda r, i: r[i].strip() if 0 <= i < len(r) else ""
     out = []
     for r in rows:
         if not r or not any(c.strip() for c in r):
             continue
+        # several groups in one cell: "data-team; design", "a,b" or "a | b"
+        groups = []
+        for x in re.split(r"[;,|\n]+", g(r, gi)):
+            x = x.strip().lower()
+            if x and x not in groups:
+                groups.append(x)
         out.append({"username": g(r, ui), "role": g(r, ri).lower() or default_role,
-                    "display_name": _clean(g(r, di), 60), "title": _clean(g(r, ti), 80)})
+                    "display_name": _clean(g(r, di), 60), "title": _clean(g(r, ti), 80), "groups": groups})
     return out
 
 
@@ -893,14 +967,20 @@ async def a_batch(request: Request, role: str = "user", u=admin):
     if len(items) > MAX_BATCH:
         raise HTTPException(400, "too many rows (max %d per upload)" % MAX_BATCH)
 
+    # Groups must already exist, and the caller must be allowed to add people to them. Nothing is auto-created.
+    group_ids = repos.group_ids_by_name({x for it in items for x in it["groups"]})
+
     def work():
         seen, plan, result = set(), [], []
         for it in items:
-            row = dict(it, password="", status="")
+            row = dict(it, password="", status="", groups=", ".join(it["groups"]))
+            unknown = [x for x in it["groups"] if x not in group_ids]
             if not re.match(r"^[A-Za-z0-9_.-]{2,40}$", it["username"]):
                 row["status"] = "invalid username"
             elif it["role"] not in roles:
                 row["status"] = "unknown role"
+            elif unknown:
+                row["status"] = "unknown group: " + ", ".join(unknown)
             elif it["username"].lower() in seen:
                 row["status"] = "duplicate in file"
             else:
@@ -908,7 +988,8 @@ async def a_batch(request: Request, role: str = "user", u=admin):
                 row["password"] = gen_password()
                 plan.append(row)
             result.append(row)
-        made = repos.users_create_many([(x["username"], hash_password(x["password"]), x["role"], x["display_name"], x["title"]) for x in plan])
+        made = repos.users_create_many([(x["username"], hash_password(x["password"]), x["role"], x["display_name"], x["title"],
+                                         [group_ids[n] for n in (y.strip() for y in x["groups"].split(",")) if n]) for x in plan])
         for x in plan:
             if x["username"] in made:
                 x["status"] = "created"
@@ -917,20 +998,62 @@ async def a_batch(request: Request, role: str = "user", u=admin):
         return result, len(made)
 
     result, created = await run_in_threadpool(work)
-    repos.audit(u["username"], "users.batch", "", "created=%d rows=%d" % (created, len(items)))
+    repos.audit(u["username"], "users.batch", "", "created=%d rows=%d groups=%d" % (created, len(items), len(group_ids)))
+    if group_ids:
+        C(request).invalidate("pkg")   # group membership changes who can see private repositories
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["username", "display_name", "title", "role", "password", "status"])
+    w.writerow(["username", "display_name", "title", "role", "groups", "password", "status"])
     for x in result:
         w.writerow([sheet.safe_cell(x["username"]), sheet.safe_cell(x["display_name"]), sheet.safe_cell(x["title"]),
-                    x["role"], x["password"], x["status"]])
+                    x["role"], sheet.safe_cell(x["groups"]), x["password"], x["status"]])
     return Response("﻿" + buf.getvalue(), media_type="text/csv; charset=utf-8", headers={
         "Content-Disposition": 'attachment; filename="new-accounts.csv"', "Cache-Control": "no-store",
         "X-Created": str(created), "X-Skipped": str(len(result) - created)})
 
 
+audit_dep = Depends(require_perm("audit"))
+
+
 @r.get("/admin/audit")
-def a_audit(request: Request, u=admin): return {"audit": R(request).audit_list()}
+def a_audit(request: Request, u=audit_dep): return {"audit": R(request).audit_list()}
+
+
+@r.get("/audit")
+def audit_search(request: Request, source: str = "tools", q: str = "", actor: str = "", action: str = "", package: str = "", kind: str = "",
+                 days: float = 7, start: float = 0, end: float = 0, page: int = 1, per_page: int = 50, u=audit_dep):
+    """Security audit with filters. `source=tools` = agent tool calls / installs; `source=admin` = account, role and setting changes."""
+    if source not in ("tools", "admin"):
+        raise HTTPException(400, "source must be tools or admin")
+    if kind and kind not in ("install", "update", "uninstall", "use", "error"):
+        raise HTTPException(400, "bad kind")
+    request.app.state.events.flush()
+    now = time.time()
+    since = start or (now - days * 86400 if days > 0 else 0)
+    per_page = max(1, min(per_page, 200))
+    res = R(request).audit_search(source, q.strip()[:200], actor, action.strip()[:200], package, kind, since, end, per_page, (max(page, 1) - 1) * per_page)
+    return dict(res, page=max(page, 1), per_page=per_page, actors=R(request).audit_actors()[source])
+
+
+@r.get("/audit/export")
+def audit_export(request: Request, source: str = "tools", q: str = "", actor: str = "", action: str = "", package: str = "", kind: str = "",
+                 days: float = 7, start: float = 0, end: float = 0, u=audit_dep):
+    if source not in ("tools", "admin"):
+        raise HTTPException(400, "source must be tools or admin")
+    request.app.state.events.flush()
+    now = time.time()
+    since = start or (now - days * 86400 if days > 0 else 0)
+    res = R(request).audit_search(source, q.strip()[:200], actor, action.strip()[:200], package, kind, since, end, 5000, 0)
+    cols = (["ts", "actor", "action", "target", "detail"] if source == "admin" else
+            ["ts", "actor", "kind", "package", "version", "component", "source", "host", "local_user", "ip", "cwd", "detail"])
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(cols)
+    for x in res["items"]:
+        w.writerow([sheet.safe_cell(time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(x["ts"])) + "Z") if c == "ts" else sheet.safe_cell(x.get(c) or "") for c in cols])
+    R(request).audit(u["username"], "audit.export", source, "%d rows" % len(res["items"]))
+    return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8", headers={
+        "Content-Disposition": 'attachment; filename="audit-%s.csv"' % source, "Cache-Control": "no-store"})
 
 
 # ---------------- docs (rendered from the repo's docs/ folder)

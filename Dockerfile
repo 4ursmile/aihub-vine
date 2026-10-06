@@ -1,8 +1,9 @@
 FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 AIHUB_DATA_DIR=/data
 WORKDIR /app
-COPY requirements-server.txt .
-RUN pip install --no-cache-dir -r requirements-server.txt
+COPY requirements-server.txt requirements-all.txt ./
+COPY requirements-all.txt .
+RUN pip install --no-cache-dir -r requirements-all.txt
 COPY aihub ./aihub
 COPY docs ./docs
 RUN useradd -r -u 10001 aihub && mkdir /data && chown aihub /data
