@@ -220,3 +220,4 @@ __marimo__/
 .streamlit/secrets.toml
 # AI Hub runtime data (database, uploaded packages, generated CLI zipapp)
 aihub-data/
+*.zip
