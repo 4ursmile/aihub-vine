@@ -25,8 +25,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 INSTALL_SH = """#!/bin/sh
 set -e
 HUB="{url}"
-PY=$(command -v python3 || command -v python)
-[ -z "$PY" ] && echo "python3 required" && exit 1
+PY=""
+for c in python3 python; do
+  p=$(command -v $c 2>/dev/null) || continue
+  if "$p" -c 'import sys;sys.exit(0 if sys.version_info>=(3,9) else 1)' >/dev/null 2>&1; then PY="$p"; break; fi
+done
+if [ -z "$PY" ]; then
+  echo "Python 3.9+ is required but was not found."
+  case "$(uname -s)" in
+    Darwin) echo "Install it with:  brew install python   (or https://www.python.org/downloads/macos/)" ;;
+    *) echo "Install it with your package manager, e.g.  sudo apt install python3  /  sudo dnf install python3" ;;
+  esac
+  exit 1
+fi
 mkdir -p "$HOME/.aihub/bin"
 curl -fsSL "$HUB/cli/aihub.pyz" -o "$HOME/.aihub/bin/aihub.pyz"
 printf '#!/bin/sh\\nexec %s "$HOME/.aihub/bin/aihub.pyz" "$@"\\n' "$PY" > "$HOME/.aihub/bin/aihub"
@@ -38,8 +49,74 @@ echo "Installed. Add to PATH:  export PATH=\\"$HOME/.aihub/bin:$PATH\\""
 
 INSTALL_PS1 = r"""$ErrorActionPreference = "Stop"
 $Hub = "__HUB__"
-$Py = (Get-Command python3, python, py -ErrorAction SilentlyContinue | Select-Object -First 1).Source
-if (-not $Py) { Write-Host "Python 3 required"; exit 1 }
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}
+
+# A candidate only counts if it really runs Python >= 3.9. This rejects the Microsoft Store
+# "python.exe" alias in WindowsApps, which is on PATH but prints "Python was not found".
+function Test-Python($exe, $pre) {
+  try {
+    $ErrorActionPreference = "Continue"
+    $v = & $exe @pre -c "import sys;print(sys.version_info[0]*100+sys.version_info[1])" 2>$null
+    return ($LASTEXITCODE -eq 0 -and [int]"$v" -ge 309)
+  } catch { return $false }
+}
+
+function Find-Python {
+  $c = @()
+  foreach ($n in "py", "python", "python3") {
+    foreach ($cmd in @(Get-Command $n -All -ErrorAction SilentlyContinue)) {
+      if ($cmd.Source -and $cmd.Source -notlike "*\WindowsApps\*") { $c += ,@($cmd.Source, @()) }
+    }
+  }
+  foreach ($root in @("$env:LOCALAPPDATA\Programs\Python", "$env:ProgramFiles\Python", "${env:ProgramFiles(x86)}\Python")) {
+    if (Test-Path $root) {
+      Get-ChildItem $root -Directory -Filter "Python3*" | Sort-Object Name -Descending | ForEach-Object {
+        $exe = Join-Path $_.FullName "python.exe"
+        if (Test-Path $exe) { $c += ,@($exe, @()) }
+      }
+    }
+  }
+  foreach ($x in $c) {
+    $exe = $x[0]; $pre = $x[1]
+    if ((Split-Path $exe -Leaf) -eq "py.exe") { $pre = @("-3") }
+    if (Test-Python $exe $pre) {
+      if ($pre.Count) { return (& $exe @pre -c "import sys;print(sys.executable)" 2>$null).Trim() }
+      return $exe
+    }
+  }
+  return $null
+}
+
+function Install-Python {
+  Write-Host "Python 3.9+ not found - installing Python 3.12 for the current user..."
+  $winget = Get-Command winget -ErrorAction SilentlyContinue
+  if ($winget) {
+    try {
+      & winget install -e --id Python.Python.3.12 --scope user --silent --accept-package-agreements --accept-source-agreements | Out-Null
+      if (Find-Python) { return }
+    } catch {}
+  }
+  $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
+  $url = "https://www.python.org/ftp/python/3.12.8/python-3.12.8-$arch.exe"
+  $tmp = Join-Path $env:TEMP "python-installer.exe"
+  Invoke-WebRequest $url -OutFile $tmp -UseBasicParsing
+  $p = Start-Process $tmp -ArgumentList "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_test=0", "Include_launcher=0" -Wait -PassThru
+  Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+  if ($p.ExitCode -ne 0) { throw "Python installer failed (exit $($p.ExitCode))" }
+}
+
+$Py = Find-Python
+if (-not $Py) {
+  try { Install-Python } catch { Write-Host "Automatic Python install failed: $_" }
+  $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+  $Py = Find-Python
+}
+if (-not $Py) {
+  Write-Host "Could not find or install Python 3.9+. Install it from https://www.python.org/downloads/ (tick 'Add python.exe to PATH'), then re-run this command."
+  exit 1
+}
+Write-Host "Using Python: $Py"
+
 $Bin = Join-Path $env:USERPROFILE ".aihub\bin"
 New-Item -ItemType Directory -Force -Path $Bin | Out-Null
 Invoke-WebRequest "$Hub/cli/aihub.pyz" -OutFile (Join-Path $Bin "aihub.pyz") -UseBasicParsing
@@ -48,6 +125,7 @@ Set-Content -Path (Join-Path $Bin "aihub.cmd") -Encoding ASCII -Value ('@echo of
 try { & "$Bin\aihub.cmd" hooks install } catch {}
 $User = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($User -notlike "*$Bin*") { [Environment]::SetEnvironmentVariable("Path", "$User;$Bin", "User") }
+$env:Path += ";$Bin"
 Write-Host "Installed. Open a new terminal to use: aihub"
 """
 

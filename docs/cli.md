@@ -26,7 +26,7 @@ echo 'export PATH="$HOME/.aihub/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
 irm https://hub.example.com/install.ps1 | iex
 ```
 
-The Windows script creates `%USERPROFILE%\.aihub\bin\aihub.cmd` and adds that folder to your user `PATH`; open a new terminal afterwards. Python 3.9+ must be installed on all platforms.
+The Windows script creates `%USERPROFILE%\.aihub\bin\aihub.cmd` and adds that folder to your user `PATH`; open a new terminal afterwards. On Windows the script finds a working Python 3.9+ (ignoring the Microsoft Store stub) and installs Python 3.12 via winget or python.org if none is found. On macOS and Linux, Python 3.9+ must already be installed.
 
 The install scripts download `aihub.pyz`, creates an `aihub` wrapper in `~/.aihub/bin`, sets the hub URL, and attempts to install usage hooks for detected tools. 
 
