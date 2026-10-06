@@ -199,11 +199,23 @@ function Rankings() {
         ${tab === "reviews" || tab === "reviewed" ? html`<span class="n" title=${i.count + " reviews"}>★ ${i.avg} <span class="mut3">(${fmt(i.count)})</span></span>` : html`<span class="n">${fmt(i.count)}</span>`}</div>`)}</div>`}</div>`;
 }
 
+const detectOS = () => { const u = (navigator.userAgentData && navigator.userAgentData.platform || navigator.platform || "") + " " + navigator.userAgent; return /win/i.test(u) && !/darwin/i.test(u) ? "windows" : /mac|iphone|ipad/i.test(u) ? "mac" : "linux"; };
+
 function Start() {
-  const o = location.origin;
+  const m = useLoad(() => api("/meta"), []); const o = ((m.d && m.d.public_url) || location.origin).replace(/\/+$/, ""); const auto = detectOS(); const [os, setOs] = useState(auto);
+  const OS = { mac: "macOS", linux: "Linux", windows: "Windows" };
+  const cmd = os === "windows" ? `irm ${o}/install.ps1 | iex` : `curl -fsSL ${o}/install.sh | sh`;
+  const note = os === "windows" ? "Run in PowerShell. Needs Python 3.9+ (python.org or `winget install Python.Python.3.12`). PATH is updated automatically; open a new terminal afterwards."
+    : os === "mac" ? "Run in Terminal. Needs Python 3.9+ (preinstalled with Xcode tools, or `brew install python`). Then add it to PATH:"
+    : "Run in your shell. Needs Python 3.9+ and curl (e.g. `sudo apt install python3 curl`). Then add it to PATH:";
+  const path = os === "mac" ? `echo 'export PATH="$HOME/.aihub/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc` : os === "linux" ? `echo 'export PATH="$HOME/.aihub/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc` : null;
   const step = (n, t, d, c) => html`<div class="card stack"><div class="row"><span class="rank top">${n}</span><h3>${t}</h3></div><p class="mut">${d}</p>${c && html`<${Cmd} text=${c} />`}</div>`;
+  if (m.loading) return html`<div class="skel"></div>`;
   return html`<div class="stack"><h1>Get started</h1><p class="lead">Up and running in under a minute. Python 3.9 or later.</p>
-    ${step(1, "Install the CLI", "One command installs aihub and sets up usage reporting for Claude Code and OpenCode.", `curl -fsSL ${o}/install.sh | sh`)}
+    <div class="card stack"><div class="row"><span class="rank top">1</span><h3>Install the CLI</h3><span class="sp"></span>
+      <div class="seg" role="tablist">${Object.keys(OS).map((k) => html`<button key=${k} class=${os === k ? "on" : ""} onClick=${() => setOs(k)}>${OS[k]}${k === auto ? " (detected)" : ""}</button>`)}</div></div>
+      <p class="mut">Installs aihub and sets up usage reporting for Claude Code and OpenCode. ${note}</p>
+      <${Cmd} text=${cmd} />${path && html`<${Cmd} text=${path} />`}</div>
     ${step(2, "Sign in", "Create an account on this site, then log in from your terminal.", "aihub login")}
     ${step(3, "Install something", "You'll be asked which tools to connect it to. Everything is reversible.", "aihub install <package>")}
     ${step(4, "Publish your own", "Scaffold a manifest, then publish. Versions are immutable.", "aihub dev init && aihub dev publish")}</div>`;

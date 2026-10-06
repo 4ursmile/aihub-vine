@@ -4,14 +4,31 @@ The `aihub` command is a Python zipapp distributed by the server. It uses the Py
 
 ## Install and configure
 
-Install from your AI Hub server:
+Install from your AI Hub server. The web UI's **Get started** page detects your OS and suggests the matching command.
+
+**macOS** (Terminal):
 
 ```sh
 curl -fsSL https://hub.example.com/install.sh | sh
-export PATH="$HOME/.aihub/bin:$PATH"
+echo 'export PATH="$HOME/.aihub/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 ```
 
-The install script downloads `aihub.pyz`, creates an `aihub` wrapper in `~/.aihub/bin`, sets the hub URL, and attempts to install usage hooks for detected tools. Add the `PATH` line to your shell startup file to keep it across sessions.
+**Linux** (bash):
+
+```sh
+curl -fsSL https://hub.example.com/install.sh | sh
+echo 'export PATH="$HOME/.aihub/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+```
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://hub.example.com/install.ps1 | iex
+```
+
+The Windows script creates `%USERPROFILE%\.aihub\bin\aihub.cmd` and adds that folder to your user `PATH`; open a new terminal afterwards. Python 3.9+ must be installed on all platforms.
+
+The install scripts download `aihub.pyz`, creates an `aihub` wrapper in `~/.aihub/bin`, sets the hub URL, and attempts to install usage hooks for detected tools. 
 
 To install the zipapp manually, use the server URL in place of `https://hub.example.com`:
 

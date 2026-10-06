@@ -36,6 +36,21 @@ chmod +x "$HOME/.aihub/bin/aihub"
 echo "Installed. Add to PATH:  export PATH=\\"$HOME/.aihub/bin:$PATH\\""
 """
 
+INSTALL_PS1 = r"""$ErrorActionPreference = "Stop"
+$Hub = "__HUB__"
+$Py = (Get-Command python3, python, py -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+if (-not $Py) { Write-Host "Python 3 required"; exit 1 }
+$Bin = Join-Path $env:USERPROFILE ".aihub\bin"
+New-Item -ItemType Directory -Force -Path $Bin | Out-Null
+Invoke-WebRequest "$Hub/cli/aihub.pyz" -OutFile (Join-Path $Bin "aihub.pyz") -UseBasicParsing
+Set-Content -Path (Join-Path $Bin "aihub.cmd") -Encoding ASCII -Value ('@echo off' + "`r`n" + '"' + $Py + '" "%~dp0aihub.pyz" %*')
+& "$Bin\aihub.cmd" config set hub $Hub | Out-Null
+try { & "$Bin\aihub.cmd" hooks install } catch {}
+$User = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($User -notlike "*$Bin*") { [Environment]::SetEnvironmentVariable("Path", "$User;$Bin", "User") }
+Write-Host "Installed. Open a new terminal to use: aihub"
+"""
+
 
 def create_app(settings: Settings = None) -> FastAPI:
     s = settings or Settings.from_env()
@@ -137,6 +152,10 @@ def create_app(settings: Settings = None) -> FastAPI:
     @app.get("/install.sh", response_class=PlainTextResponse)
     def install_sh():
         return INSTALL_SH.format(url=s.public_url.rstrip("/"))
+
+    @app.get("/install.ps1", response_class=PlainTextResponse)
+    def install_ps1():
+        return INSTALL_PS1.replace("__HUB__", s.public_url.rstrip("/"))
 
     @app.get("/cli/version")
     def cli_version():
