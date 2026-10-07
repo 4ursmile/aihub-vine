@@ -6,8 +6,9 @@ import sys
 import tempfile
 import urllib.parse
 
-from ..core import archive, ignore, manifest as M, version as V
+from ..core import archive, ignore, manifest as M, naming, version as V
 from . import api, installer, paths, ui, updater
+from .installer import _spec
 
 def cmd_config(a):
     c = paths.load("config.json", {})
@@ -78,7 +79,6 @@ def cmd_info(a):
 
 
 def cmd_install(a):
-    from .installer import _spec
     n, s = _spec(a.name)
     ui.out()
     installer.install(n, s, a.yes, a.tool)
@@ -86,7 +86,6 @@ def cmd_install(a):
 
 def cmd_download(a):
     """Save a package archive without installing it. Resumable: re-run the same command after an interruption."""
-    from .installer import _spec
     n, s = _spec(a.name.replace("@", "==", 1) if "@" in a.name else a.name)
     r = api.call("GET", "/resolve?name=%s&spec=%s" % (n.lower(), s.replace("=", "%3D").replace(">", "%3E").replace("<", "%3C")))
     d = os.path.abspath(a.output or ".")
@@ -101,7 +100,12 @@ def cmd_download(a):
     ui.good("Saved %s (sha256 verified)" % dest)
 
 
-def cmd_uninstall(a): installer.uninstall(a.name)
+def cmd_uninstall(a):
+    users = installer.dependents(installer.state(), naming.normalize(a.name), only_enabled=False)
+    if users and not a.force and ui.INTERACTIVE and not ui.confirm("%s is needed by %s. Remove anyway?" % (a.name, ", ".join(users)), False):
+        ui.info("nothing changed")
+        return
+    installer.uninstall(a.name)
 
 
 def cmd_list(a):
@@ -111,27 +115,142 @@ def cmd_list(a):
         ui.info("find something with: aihub search")
         return
     ui.out()
-    ui.table(["NAME", "VERSION", "ADDS"],
-             [[ui.bold(n), r["version"], ", ".join(r.get("components", [])) or "-"] for n, r in sorted(pk.items())])
+    ui.table(["NAME", "VERSION", "STATUS", "ADDS"],
+             [[ui.bold(n), r["version"], ui.ok("enabled") if installer.enabled(r) else ui.warn("disabled"),
+               ", ".join(r.get("components", [])) or "-"] for n, r in sorted(pk.items())])
     ui.out()
-    ui.info("%d installed. update all with: aihub update" % len(pk))
+    off = sum(1 for r in pk.values() if not installer.enabled(r))
+    ui.info("%d installed%s. update all with: aihub update" % (len(pk), ", %d disabled" % off if off else ""))
+
+
+def cmd_enable(a):
+    ui.out()
+    names = sorted(installer.state()["packages"]) if a.all else a.names
+    if not names:
+        raise ValueError("name a package, or use --all")
+    for n in names:
+        if a.all and installer.enabled(installer.state()["packages"][n]):
+            continue
+        installer.enable(n, a.yes, a.tool)
+
+
+def cmd_disable(a):
+    ui.out()
+    st = installer.state()["packages"]
+    names = a.names
+    if a.all:
+        names = [n for n, r in st.items() if installer.enabled(r)]
+        a.force = True
+    if not names:
+        raise ValueError("name a package, or use --all")
+    for n in names:
+        installer.disable(n, a.force)
+
+
+def cmd_tree(a):
+    ui.out()
+    if a.remote:
+        if not a.name:
+            raise ValueError("--remote needs a package name")
+        n, s = _spec(a.name)
+        with ui.Spinner("Resolving %s" % n):
+            lines, pkgs = installer.remote_tree(n, s)
+        for l in lines:
+            ui.out("  " + l)
+        ui.out()
+        ui.info("%d package%s, %s" % (len(pkgs), "" if len(pkgs) == 1 else "s", ui.human(sum(p.get("size", 0) for p in pkgs))))
+        return
+    lines = installer.local_tree(a.name)
+    if not lines:
+        ui.note("Nothing installed yet.")
+        return
+    for l in lines:
+        ui.out("  " + l)
+    if a.name:
+        users = installer.dependents(installer.state(), naming.normalize(a.name), only_enabled=False)
+        if users:
+            ui.out()
+            ui.info("needed by: " + ", ".join(users))
+
+
+def cmd_lock(a):
+    lock = installer.make_lock()
+    if not lock["packages"]:
+        raise ValueError("nothing installed, so there is nothing to lock")
+    text = json.dumps(lock, indent=2) + "\n"
+    if a.check:
+        try:
+            same = open(a.file, encoding="utf-8").read() == text
+        except OSError:
+            raise ValueError("%s does not exist (create it with: aihub lock)" % a.file)
+        if not same:
+            raise ValueError("%s is out of date; run: aihub lock" % a.file)
+        ui.good("%s is up to date (%d packages)" % (a.file, len(lock["packages"])))
+        return
+    with open(a.file, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    ui.good("Locked %d packages to %s" % (len(lock["packages"]), a.file))
+    ui.info("commit it; on another machine run: aihub sync")
+
+
+def cmd_sync(a):
+    lock = installer.read_lock(a.file)
+    ui.out()
+    with ui.Spinner("Resolving %d locked packages" % len(lock["packages"])):
+        pkgs, todo, flips, extras, want = installer.sync_actions(lock)
+    if not todo and not flips and not (extras and a.prune):
+        ui.good("Already in sync with %s (%d packages)" % (a.file, len(pkgs)))
+        if extras:
+            ui.info("not in the lock file: %s (use --prune to remove)" % ", ".join(extras))
+        return
+    for p in todo:
+        ui.step("install %s %s" % (p["name"], p["version"]))
+    for n, on in flips:
+        ui.step("%s %s" % ("enable" if on else "disable", n))
+    if extras:
+        (ui.step if a.prune else ui.info)("%s: %s" % ("remove" if a.prune else "not in the lock file", ", ".join(extras)))
+    if a.check:
+        raise ValueError("not in sync with %s" % a.file)
+    if not a.yes and not ui.confirm("Apply these changes?", True):
+        ui.info("nothing changed")
+        return
+    roots = [n for n, x in want.items() if x.get("requested")] or list(want)
+    installer.install_plan(todo, a.yes, a.tool, roots=roots)
+    st = installer.state()["packages"]
+    for n, x in want.items():                 # restore requested/enabled flags exactly as locked
+        if n in st:
+            s2 = installer.state()
+            s2["packages"][n]["requested"] = bool(x.get("requested"))
+            installer.save_state(s2)
+    for n, on in sorted(flips + [(n, x.get("enabled", True)) for n, x in want.items() if n in {p["name"] for p in todo}]):
+        cur = installer.state()["packages"].get(n)
+        if not cur or installer.enabled(cur) == on:
+            continue
+        (installer.enable(n, a.yes, a.tool) if on else installer.disable(n, True))
+    if a.prune:
+        for n in extras:
+            installer.uninstall(n)
+    ui.celebrate("in sync with %s" % a.file)
 
 
 def cmd_update(a):
-    pk = [(n, r) for n, r in installer.state()["packages"].items() if not a.name or n == a.name]
+    pk = [(n, r) for n, r in installer.state()["packages"].items() if (not a.name or n == a.name) and installer.enabled(r)]
     if not pk:
         ui.note("No matching installed packages.")
         return
     updated = 0
+    st = installer.state()
     for n, r in pk:
+        spec = installer.constraint_on(st, n)        # never move a package outside what its dependents allow
         with ui.Spinner("Checking %s" % n) as sp:
-            latest = api.call("GET", "/resolve?name=" + n)["version"]
+            latest = api.call("GET", "/resolve?name=%s&spec=%s" % (n, urllib.parse.quote(spec)))["version"]
             newer = V.compare(latest, r["version"]) > 0
             sp.text("%s %s" % (n, "-> " + latest if newer else "is up to date (%s)" % r["version"]))
         if newer:
             ui.step("updating %s %s %s %s" % (n, r["version"], ui.ARROW, latest))
-            installer.install(n, "", True, None)
+            installer.install(n, spec, True, None)
             updated += 1
+            st = installer.state()
     ui.celebrate("%d updated" % updated) if updated else ui.info("everything is current")
 
 
@@ -417,6 +536,7 @@ def build_parser():
     sp.command_groups = [
         ("Discover", ["search", "info"]),
         ("Install", ["install", "uninstall", "update", "list", "download"]),
+        ("Manage", ["enable", "disable", "tree", "lock", "sync"]),
         ("Account", ["config", "login", "register"]),
         ("Publish", ["dev"]),
         ("Setup and maintenance", ["welcome", "doctor", "version", "upgrade", "hook", "flush", "hooks", "skill"]),
@@ -459,6 +579,37 @@ def build_parser():
         arg("name", metavar="PACKAGE[<SPEC>]", help="Package name, optionally followed by a version constraint such as name>=1.0,<2."),
         arg("-y", "--yes", action="store_true", help="Skip install-script and tool-registration prompts; use detected tools unless --tool is given."),
         arg("--tool", action="append", metavar="TOOL", help="Register components with this tool; repeat to select multiple (claude, codex, or opencode)."))
+    add("enable", cmd_enable, "Switch a disabled package back on.",
+        "Re-register an installed but disabled package with your AI tools and put its commands back on PATH. Uses the files already on disk, so it works offline. Disabled dependencies are enabled first. 'aihub install' on a disabled package does the same.",
+        "Examples:\n  aihub enable my-skill\n  aihub enable --all",
+        arg("names", nargs="*", metavar="PACKAGE", help="Installed package(s) to enable."),
+        arg("--all", action="store_true", help="Enable every disabled package."),
+        arg("-y", "--yes", action="store_true", help="Skip prompts; register with all detected tools."),
+        arg("--tool", action="append", metavar="TOOL", help="Register with this tool; repeat to select multiple."))
+    add("disable", cmd_disable, "Switch a package off without removing it.",
+        "Remove a package's skills, agents and MCP servers from your AI tools, undo its setup steps, and take its commands off PATH. The files stay, so 'aihub enable' is instant. Refuses while an enabled package depends on it unless --force.",
+        "Examples:\n  aihub disable my-skill\n  aihub disable --all",
+        arg("names", nargs="*", metavar="PACKAGE", help="Installed package(s) to disable."),
+        arg("--all", action="store_true", help="Disable every enabled package."),
+        arg("--force", action="store_true", help="Disable even if other enabled packages depend on it."))
+    add("tree", cmd_tree, "Show the dependency tree.",
+        "Print installed packages and what they depend on. With a package name, show just that package; with --remote, resolve it on the hub and show what installing it would add (new / already installed).",
+        "Examples:\n  aihub tree\n  aihub tree my-skill\n  aihub tree \"my-skill>=1.2\" --remote",
+        arg("name", nargs="?", metavar="PACKAGE", help="Package (with --remote, optionally with a version constraint)."),
+        arg("--remote", action="store_true", help="Resolve on the hub instead of reading what is installed."))
+    add("lock", cmd_lock, "Write a lock file of the exact installed versions.",
+        "Record every installed package with its exact version, checksum, dependencies and enabled state in aihub.lock (JSON). Commit it so a teammate or CI can reproduce the same set with 'aihub sync'.",
+        "Examples:\n  aihub lock\n  aihub lock --check",
+        arg("-f", "--file", default="aihub.lock", metavar="FILE", help="Lock file path (default: aihub.lock)."),
+        arg("--check", action="store_true", help="Do not write; fail if the file does not match what is installed."))
+    add("sync", cmd_sync, "Make this machine match a lock file.",
+        "Install the exact versions in the lock file (verifying checksums), enable or disable packages as locked, and optionally remove packages that are not in it. Dependencies are resolved in one request and archives download in parallel.",
+        "Examples:\n  aihub sync\n  aihub sync --check\n  aihub sync --yes --prune",
+        arg("-f", "--file", default="aihub.lock", metavar="FILE", help="Lock file path (default: aihub.lock)."),
+        arg("--check", action="store_true", help="Only report differences; exit 1 if not in sync."),
+        arg("--prune", action="store_true", help="Also uninstall packages that are not in the lock file."),
+        arg("-y", "--yes", action="store_true", help="Do not ask before applying; use detected tools."),
+        arg("--tool", action="append", metavar="TOOL", help="Register with this tool; repeat to select multiple."))
     add("download", cmd_download, "Download a package archive without installing it.",
         "Resolve a package version and save its archive in the output folder. Downloads resume from a partial file when possible and verify SHA-256 before the final file is saved. Use name@1.2.0 for an exact version, or comparison constraints such as name>=1.0,<2.",
         "Examples:\n  aihub download my-skill@1.0.0 -o ./pkgs\n  aihub download \"my-skill>=1.0,<2\"",
@@ -467,7 +618,8 @@ def build_parser():
     add("uninstall", cmd_uninstall, "Remove an installed package and undo its changes.",
         "Remove the named installed package, its files and virtual environment, and revert recorded tool registrations and setup changes.",
         "Example:\n  aihub uninstall my-skill",
-        arg("name", metavar="PACKAGE", help="Name of the installed package to remove."))
+        arg("name", metavar="PACKAGE", help="Name of the installed package to remove."),
+        arg("--force", action="store_true", help="Do not ask when other packages depend on it."))
     add("list", cmd_list, "List packages installed by this CLI.",
         "Show each locally installed package, its installed version, and the components it adds to supported tools.",
         "Example:\n  aihub list")

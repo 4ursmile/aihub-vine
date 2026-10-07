@@ -258,13 +258,17 @@ def create_app(settings: Settings = None) -> FastAPI:
         return StreamingResponse(iter(lambda: f.read(1 << 20), b""), media_type="application/octet-stream", headers=hdr,
                                  background=BackgroundTask(f.close))
 
+    def _cli_url():
+        """Admin-set CLI endpoint (Settings > Site), else the configured public URL."""
+        return (app.state.repos.setting("cli_endpoint") or s.public_url).rstrip("/")
+
     @app.get("/install.sh", response_class=PlainTextResponse)
     def install_sh():
-        return INSTALL_SH.format(url=s.public_url.rstrip("/"))
+        return INSTALL_SH.format(url=_cli_url())
 
     @app.get("/install.ps1", response_class=PlainTextResponse)
     def install_ps1():
-        return INSTALL_PS1.replace("__HUB__", s.public_url.rstrip("/"))
+        return INSTALL_PS1.replace("__HUB__", _cli_url())
 
     def _pyz():
         from ..core import zipapp

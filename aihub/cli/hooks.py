@@ -37,6 +37,8 @@ def _components():
     st = paths.load("state.json", {"packages": {}})
     m = {}
     for pkg, rec in st.get("packages", {}).items():
+        if rec.get("enabled", True) is False:
+            continue
         for c in rec.get("components", []):
             m[c] = pkg
     return m

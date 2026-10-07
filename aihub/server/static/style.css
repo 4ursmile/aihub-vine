@@ -14,6 +14,23 @@
   --sep:rgba(84,84,88,.5);--fill:rgba(120,120,128,.24);--fill-2:rgba(120,120,128,.36);
   --blue:#0a84ff;--blue-h:#409cff;--green:#30d158;--red:#ff453a;--orange:#ff9f0a;
   --nav:rgba(22,22,23,.72);--shadow:0 0 0 1px rgba(255,255,255,.04);}}
+/* Accent colors, chosen by an admin (Settings > Site). Default is blue. */
+:root[data-accent=indigo]{--blue:#5856d6;--blue-h:color-mix(in srgb,#5856d6 85%,#fff)}
+:root[data-accent=purple]{--blue:#af52de;--blue-h:color-mix(in srgb,#af52de 85%,#fff)}
+:root[data-accent=pink]{--blue:#d6336c;--blue-h:color-mix(in srgb,#d6336c 85%,#fff)}
+:root[data-accent=red]{--blue:#d70015;--blue-h:color-mix(in srgb,#d70015 85%,#fff)}
+:root[data-accent=orange]{--blue:#c45a00;--blue-h:color-mix(in srgb,#c45a00 85%,#fff)}
+:root[data-accent=green]{--blue:#1d9b45;--blue-h:color-mix(in srgb,#1d9b45 85%,#fff)}
+:root[data-accent=teal]{--blue:#0a8a8a;--blue-h:color-mix(in srgb,#0a8a8a 85%,#fff)}
+@media(prefers-color-scheme:dark){
+:root[data-accent=indigo]{--blue:#6e6cf0;--blue-h:color-mix(in srgb,#6e6cf0 85%,#fff)}
+:root[data-accent=purple]{--blue:#bf5af2;--blue-h:color-mix(in srgb,#bf5af2 85%,#fff)}
+:root[data-accent=pink]{--blue:#ff375f;--blue-h:color-mix(in srgb,#ff375f 85%,#fff)}
+:root[data-accent=red]{--blue:#ff453a;--blue-h:color-mix(in srgb,#ff453a 85%,#fff)}
+:root[data-accent=orange]{--blue:#ff9f0a;--blue-h:color-mix(in srgb,#ff9f0a 85%,#fff)}
+:root[data-accent=green]{--blue:#30d158;--blue-h:color-mix(in srgb,#30d158 85%,#fff)}
+:root[data-accent=teal]{--blue:#40c8e0;--blue-h:color-mix(in srgb,#40c8e0 85%,#fff)}
+}
 *{box-sizing:border-box;margin:0}
 html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
 body{font:17px/1.47 var(--font);letter-spacing:-.022em;background:var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased;min-height:100vh}

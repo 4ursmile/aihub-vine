@@ -34,6 +34,7 @@ Routes marked **No** are public. **User** means an active account token is requi
 | GET | `/api/v1/packages/{name}/versions` | No | List package versions. |
 | GET | `/api/v1/packages/{name}/readme` | No | Return latest non-yanked README as Markdown and rendered HTML. |
 | GET | `/api/v1/resolve?name={name}&spec={constraint}` | No | Resolve the newest non-yanked version matching a version constraint. |
+| POST | `/api/v1/resolve/tree` | No (public install setting) | Resolve `{"roots": [{"name", "spec"}], "installed": {name: version}}` and all dependencies in one request. Returns `{"packages": [...]}` in install order, each with `name`, `version`, `sha256`, `size`, `url`, `manifest`, `requires`, `root`. Constraints from all dependents are combined; `409` names the package and its dependents when none satisfy them all. |
 | PATCH | `/api/v1/packages/{name}` | User + package manager | Change package `hidden` status and/or `tags`. |
 | GET | `/api/v1/packages/{name}/maintainers` | No | List package maintainers. |
 | POST | `/api/v1/packages/{name}/maintainers` | User + package manager | Add an existing user with `{ "username" }`. |
@@ -152,5 +153,6 @@ These routes are outside the `/api/v1` API prefix, except for the repository doc
 | GET | `/openapi.json` | No | OpenAPI schema. |
 | GET | `/api/v1/docs` | No | List Markdown documentation available from the repository docs directory. |
 | GET | `/api/v1/docs/{slug}` | No | Render a repository Markdown document. |
+| GET | `/api/v1/docs/{slug}/raw` | No | The same document as plain Markdown (`text/markdown`), for agents and scripts. |
 
 The FastAPI routes `/docs`, `/redoc`, and `/openapi.json` are enabled by default in `create_app`. They are separate from the repository documentation endpoints under `/api/v1/docs`.

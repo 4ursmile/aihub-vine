@@ -51,3 +51,11 @@ def bump(v: str, part: str = "patch") -> str:
     for j in range(i + 1, 3):
         nums[j] = 0
     return ".".join(map(str, nums))
+
+
+def split_spec(dep: str):
+    """'name>=1,<2' -> ('name', '>=1,<2'); 'name' -> ('name', '')."""
+    for i, ch in enumerate(dep):
+        if ch in "<>=!~":
+            return dep[:i].strip(), dep[i:].strip()
+    return dep.strip(), ""

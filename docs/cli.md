@@ -63,6 +63,11 @@ aihub list
 aihub update
 aihub update package-name
 aihub uninstall package-name
+aihub disable package-name
+aihub enable package-name
+aihub tree
+aihub lock
+aihub sync
 aihub doctor
 ```
 
@@ -72,9 +77,21 @@ aihub doctor
 - `list` shows installed package names and versions.
 - `update [name]` updates all installed packages or the named one.
 - `uninstall <name>` removes package files and reverts registered integration and setup changes where recorded.
+- `disable <name>...` switches a package off without deleting it: its skills, agents and MCP servers are removed from your AI tools, setup steps are reverted, and its commands leave PATH. `enable <name>...` (or `aihub install <name>` on a disabled package) puts it back from the files already on disk, so it works offline. See [Enable, disable, tree, lock and sync](#enable-disable-tree-lock-and-sync).
+- `tree [name]` prints the dependency tree. `lock` and `sync` write and apply a lock file.
 - `doctor` checks the hub connection, detected hook status, and whether `python3` is available.
 
 During installation, missing required commands are reported with any manifest hint. Package dependencies are recursively installed. Python dependencies in `[python]` are installed into a package-specific virtual environment. Installation asks before running the platform install script and before registering components; `--yes` skips these prompts.
+
+## Enable, disable, tree, lock and sync
+
+**Dependency resolution** is one request. `install` and `sync` send the whole set to `POST /api/v1/resolve/tree`; the hub walks the dependency graph and returns every package to install, dependencies first. Constraints from every dependent are combined, so a package shared by two others gets one version that satisfies both (for example `left` needs `base>=1,<2` and `right` needs `base>=1.2,<3`: `base` 1.5.0 is chosen). If nothing satisfies all constraints the error names the package and who requires it. Packages already installed at a satisfying version are skipped, and several archives download in parallel. A hub without that endpoint is detected and the CLI falls back to one lookup per package.
+
+**Enable and disable.** `aihub disable my-skill` keeps the files but removes everything visible to your tools. `aihub disable` refuses while an enabled package depends on it (`--force` overrides; `--all` disables everything). `aihub enable my-skill` enables disabled dependencies first. `aihub install my-skill` on a disabled package enables it, unless the hub has a newer version, in which case it updates. `aihub list` shows the status, `aihub update` skips disabled packages, and usage hooks ignore them. Enable and disable are local only and send no telemetry.
+
+**Tree.** `aihub tree` shows installed packages and what they need; `aihub tree my-skill` shows one package, and which packages need it. `aihub tree "my-skill>=1.2" --remote` resolves on the hub and marks each package `(new)`, `(installed)` or `(installed 1.0.0)` without installing. A package that appears more than once is expanded once and marked `(*)` afterwards.
+
+**Lock and sync.** `aihub lock` writes `aihub.lock` (JSON, `-f` for another path) with each installed package's exact version, SHA-256, dependencies, whether you installed it directly, and whether it is enabled. Commit it. On another machine or in CI, `aihub sync` installs exactly those versions, refuses any package whose hub checksum differs from the lock, and restores the enabled flags. `sync --check` only reports differences (exit 1 if the machine would change), `--prune` removes packages not in the lock, and `--yes` skips the confirmation. `lock --check` fails if the file is out of date. `update` never moves a package outside the range its enabled dependents allow.
 
 ## Supported tools and install locations
 
@@ -123,7 +140,7 @@ The default CLI home is `~/.aihub`; set `AIHUB_HOME` to override it. The CLI use
 ~/.aihub/
   config.json          Hub URL and client ID
   credentials.json     Login token and username
-  state.json            Installed package state
+  state.json            Installed package state (version, sha256, dependencies, enabled flag)
   packages/<name>/      Extracted package files
   venvs/<name>/         Optional package virtual environments
   bin/                  CLI wrapper and package executable shims
@@ -150,9 +167,9 @@ aihub dev stats ./my-package
 
 See [Publishing to AI Hub](publishing.md) for end-to-end package authoring and the [manifest reference](manifest.md) for package fields and setup step behavior.
 
-## Built-in packaging skill
+## Built-in skills
 
-The CLI bundles a skill, `aihub-package`, that teaches Claude Code and Codex how to turn a new or existing project into a valid AI Hub package: choosing the type, restructuring files, writing `aihub.toml`, install scripts, and validating/publishing. The hub installer runs it automatically for detected tools.
+The CLI bundles two skills. `aihub-guide` tells the assistant to fetch the latest Markdown docs from the hub (`GET /api/v1/docs/{slug}/raw`) before using AI Hub or setting up a project for a custom case. `aihub-package` (below) is the packaging skill; it teaches Claude Code and Codex how to turn a new or existing project into a valid AI Hub package: choosing the type, restructuring files, writing `aihub.toml`, install scripts, and validating/publishing. The hub installer runs it automatically for detected tools.
 
 ```sh
 aihub skill install                      # user scope, every detected tool

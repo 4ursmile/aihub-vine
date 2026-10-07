@@ -47,6 +47,11 @@ def setting(request, key):
     return v if v is not None else SETTING_DEFAULTS.get(key)
 
 
+def public_url(request):
+    """Address handed to CLIs: the admin's `cli_endpoint` setting, else the server's configured public URL."""
+    return (R(request).setting("cli_endpoint") or request.app.state.settings.public_url).rstrip("/")
+
+
 def viewer(request, u):
     return viewer_of(R(request), u)
 
@@ -241,14 +246,15 @@ def branding(request):
     """Public, admin-editable identity of this hub: name, contact details, logo."""
     rp = R(request)
     v = rp.setting("logo_v")
-    return {"name": rp.setting("site_name") or "AI Hub", "logo_url": "/api/v1/logo?v=%s" % v if v else None,
+    theme = rp.setting("theme_color")
+    return {"name": rp.setting("site_name") or "AI Hub", "theme": theme if theme in THEME_COLORS else "blue", "logo_url": "/api/v1/logo?v=%s" % v if v else None,
             "contact": {k[8:]: rp.setting(k) for k in TEXT_SETTINGS if k.startswith("contact_") and rp.setting(k)}}
 
 
 @r.get("/meta")
 def meta(request: Request, u=Depends(current_user)):
     b = branding(request)
-    return {"name": b["name"], "logo_url": b["logo_url"], "contact": b["contact"], "public_url": request.app.state.settings.public_url,
+    return {"name": b["name"], "theme": b["theme"], "logo_url": b["logo_url"], "contact": b["contact"], "public_url": public_url(request),
             "cli_version": VERSION, "server_version": VERSION,
             "overview": R(request).overview(viewer(request, u)),
             "public_browse": setting(request, "public_browse") == "1", "public_install": setting(request, "public_install") == "1",
@@ -402,6 +408,78 @@ def readme(name: str, request: Request, u=Depends(current_user)):
     return {"markdown": md, "html": markdown.render(md)}
 
 
+@r.post("/resolve/tree")
+def resolve_tree(body: dict, request: Request, u=Depends(current_user)):
+    """Resolve several packages and all their dependencies in one request, dependencies first.
+    body: {"roots": [{"name", "spec"}], "installed": {name: version}}. Constraints from every dependent are
+    combined, so a package shared by two others gets one version that satisfies both. Installed packages
+    that already satisfy their constraints are left out (they are not roots, so nothing to do)."""
+    need_login_unless(request, u, "public_install")
+    roots, have = body.get("roots"), body.get("installed") or {}
+    if not isinstance(roots, list) or not roots or len(roots) > 200 or not isinstance(have, dict):
+        raise HTTPException(400, "roots must be a list of 1-200 {name, spec}")
+    base = public_url(request)
+    need, chosen, queue, rootset = {}, {}, [], set()
+
+    def add(name, spec, by):
+        name = naming.normalize(str(name))
+        need.setdefault(name, []).append((str(spec or "").strip(), by))
+        queue.append(name)
+        return name
+
+    for x in roots:
+        if not isinstance(x, dict) or not x.get("name"):
+            raise HTTPException(400, "each root needs a name")
+        rootset.add(add(x["name"], x.get("spec"), None))
+    steps = 0
+    while queue:
+        steps += 1
+        if steps > 5000:
+            raise HTTPException(400, "dependency graph is too large")
+        name = queue.pop(0)
+        spec = ",".join(sp for sp, _ in need[name] if sp)
+        cur = chosen.get(name)
+        if cur and V.satisfies(cur["version"], spec):
+            continue
+        inst = have.get(name)
+        if name not in rootset and inst and V.satisfies(str(inst), spec):
+            chosen[name] = {"keep": True, "version": str(inst)}
+            continue
+        try:
+            p = _pkg_or_404(request, name, u)
+        except HTTPException as e:
+            raise HTTPException(e.status_code, "%s: %s" % (name, e.detail))
+        row = next((v for v in R(request).versions(p["id"]) if not v["yanked"] and V.satisfies(v["version"], spec)), None)
+        if not row:
+            by = ", ".join(sorted({b for _, b in need[name] if b})) or "your request"
+            raise HTTPException(409, "no version of %s satisfies '%s' (required by %s)" % (name, spec or "*", by))
+        for k in need:          # a re-pick drops the constraints the previous pick contributed
+            need[k] = [(sp, b) for sp, b in need[k] if b != name]
+        chosen[name] = {"row": row, "pkg": p, "version": row["version"]}
+        for dep in ((row["manifest"].get("requires") or {}).get("packages")) or []:
+            dn, ds = V.split_spec(str(dep))
+            add(dn, ds, name)
+    out, done = [], set()
+
+    def visit(name):            # post-order over what is still reachable: dependencies come first
+        if name in done or name not in chosen:
+            return
+        done.add(name)
+        c = chosen[name]
+        if c.get("keep"):
+            return
+        deps = [str(d) for d in ((c["row"]["manifest"].get("requires") or {}).get("packages")) or []]
+        for d in deps:
+            visit(naming.normalize(V.split_spec(d)[0]))
+        v = c["row"]
+        out.append({"name": c["pkg"]["name"], "version": v["version"], "sha256": v["sha256"], "size": v["size"],
+                    "url": "%s/files/%s/%s" % (base, c["pkg"]["name"], v["file"]), "manifest": v["manifest"],
+                    "requires": deps, "root": name in rootset})
+    for name in sorted(rootset):
+        visit(name)
+    return {"packages": out}
+
+
 @r.get("/resolve")
 def resolve(name: str, request: Request, spec: str = "", u=Depends(current_user)):
     need_login_unless(request, u, "public_install")
@@ -409,7 +487,7 @@ def resolve(name: str, request: Request, spec: str = "", u=Depends(current_user)
     for v in R(request).versions(p["id"]):
         if not v["yanked"] and V.satisfies(v["version"], spec):
             return {"name": p["name"], "version": v["version"], "sha256": v["sha256"], "size": v["size"],
-                    "url": "%s/files/%s/%s" % (request.app.state.settings.public_url.rstrip("/"), p["name"], v["file"]),
+                    "url": "%s/files/%s/%s" % (public_url(request), p["name"], v["file"]),
                     "manifest": v["manifest"]}
     raise HTTPException(404, "no matching version")
 
@@ -872,6 +950,9 @@ def a_reg_set(body: dict, request: Request, u=admin):
     return {"ok": True}
 
 
+THEME_COLORS = ("blue", "indigo", "purple", "pink", "red", "orange", "green", "teal")
+
+
 # All admin-editable settings in one place: key -> (allowed values, label, help). Add a row to add a setting.
 SETTINGS = {
     "signup": (("open", "approval", "closed"), "Sign-up", "Who can create their own account"),
@@ -881,6 +962,7 @@ SETTINGS = {
     "default_visibility": (("public", "private"), "Default visibility for new repositories", "Applied when a package is first published"),
     "allow_source_download": (("0", "1"), "Allow source download", "Show a Download button for each version, so people can fetch the package archive from the web"),
     "allow_group_creation": (("0", "1"), "Let members create groups", "People with the 'create groups' permission can make their own"),
+    "theme_color": (THEME_COLORS, "Accent color", "Color of buttons, links and highlights across the site"),
 }
 
 
@@ -893,6 +975,7 @@ NUMERIC_SETTINGS = {
 # Free-text admin settings: key -> (max length, kind, label, help). Shown on the site and in the footer.
 TEXT_SETTINGS = {
     "site_name": (40, "text", "Site name", "Shown next to the logo and in the browser tab. Blank = AI Hub"),
+    "cli_endpoint": (200, "url", "CLI default endpoint", "Hub address the CLI uses by default: written by install.sh / install.ps1 and used in package download links. Blank = the server's configured public URL"),
     "contact_name": (80, "text", "Contact name", "Person or team to reach for help with this hub"),
     "contact_email": (120, "email", "Contact email", "Shown in the footer as a mail link"),
     "contact_url": (200, "url", "Support link", "Help desk, chat or wiki address (http:// or https://)"),
@@ -911,6 +994,29 @@ def _check_text(k, v):
     return v
 
 
+def probe_hub(url, timeout=6):
+    """Prove `url` is a reachable AI Hub that can serve the CLI. Raises HTTPException(400) with the reason otherwise."""
+    import urllib.error
+    import urllib.request
+
+    def get(path):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url + path, headers={"User-Agent": "aihub-endpoint-check"}), timeout=timeout) as resp:
+                return json.loads(resp.read(65536) or b"{}")
+        except urllib.error.HTTPError as e:
+            raise HTTPException(400, "CLI endpoint check failed: %s%s returned HTTP %s" % (url, path, e.code))
+        except (urllib.error.URLError, OSError) as e:
+            raise HTTPException(400, "CLI endpoint check failed: cannot reach %s (%s)" % (url, getattr(e, "reason", e)))
+        except ValueError:
+            raise HTTPException(400, "CLI endpoint check failed: %s%s did not return JSON, so this does not look like an AI Hub" % (url, path))
+    info = get("/api/v1/version")
+    if not isinstance(info, dict) or "server" not in info:
+        raise HTTPException(400, "CLI endpoint check failed: %s is reachable but is not an AI Hub" % url)
+    cli = get("/cli/version")
+    if not isinstance(cli, dict) or not cli.get("sha256"):
+        raise HTTPException(400, "CLI endpoint check failed: %s does not serve the CLI download (/cli/version)" % url)
+
+
 def upload_limit_mb(request):
     try:
         return int(R(request).setting("max_upload_mb", "") or request.app.state.settings.max_upload_mb)
@@ -922,7 +1028,9 @@ def upload_limit_mb(request):
 def a_settings(request: Request, u=admin):
     cur = {"signup": R(request).setting("signup", "open" if request.app.state.settings.open_registration else "closed")}
     for k in SETTINGS:
-        if k != "signup":
+        if k == "theme_color":
+            cur[k] = branding(request)["theme"]
+        elif k != "signup":
             cur[k] = setting(request, k) if setting(request, k) is not None else R(request).setting(k, "0")
     cur["max_upload_mb"] = str(upload_limit_mb(request))
     for k in TEXT_SETTINGS:
@@ -939,6 +1047,9 @@ def a_settings_put(body: dict, request: Request, u=admin):
     for k, v in body.items():
         if k in TEXT_SETTINGS:
             done[k] = _check_text(k, v)
+            if k == "cli_endpoint" and done[k]:
+                done[k] = done[k].rstrip("/")
+                probe_hub(done[k])  # blocking, but this route runs in the threadpool; nothing is saved if it fails
             continue
         if k in NUMERIC_SETTINGS:
             lo, hi = NUMERIC_SETTINGS[k][:2]
@@ -1337,7 +1448,7 @@ def docs_list():
     out = []
     for slug, path in _doc_files().items():
         first = open(path, encoding="utf-8").readline().lstrip("# ").strip()
-        out.append({"slug": slug, "title": first or slug})
+        out.append({"slug": slug, "title": first or slug, "raw_url": "/api/v1/docs/%s/raw" % slug})
     return {"docs": out}
 
 
@@ -1347,6 +1458,15 @@ def docs_get(slug: str):
     if not path:
         raise HTTPException(404, "doc not found")
     return {"slug": slug, "html": markdown.render(open(path, encoding="utf-8").read())}
+
+
+@r.get("/docs/{slug}/raw")
+def docs_raw(slug: str):
+    """Plain Markdown source, for agents and scripts that want the latest docs without HTML."""
+    path = _doc_files().get(slug)
+    if not path:
+        raise HTTPException(404, "doc not found")
+    return PlainTextResponse(open(path, encoding="utf-8").read(), media_type="text/markdown; charset=utf-8")
 
 
 # ---------------- usage dashboard (permission: view_dashboard, grantable per role)

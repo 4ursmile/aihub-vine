@@ -17,7 +17,7 @@ const set = (p) => { Object.assign(store, p); subs.forEach((f) => f({})); };
 const useStore = () => { const [, f] = useState({}); useEffect(() => { subs.add(f); return () => subs.delete(f); }, []); return store; };
 addEventListener("hashchange", () => { set({ route: location.hash.slice(1) || "/" }); scrollTo(0, 0); });
 let tt; const toast = (m, err) => { set({ toast: { m, err } }); clearTimeout(tt); tt = setTimeout(() => set({ toast: null }), 3200); };
-async function loadBrand() { try { const m = await api("/meta"); set({ brand: m }); document.title = m.name; } catch {} }
+async function loadBrand() { try { const m = await api("/meta"); set({ brand: m }); document.title = m.name; document.documentElement.dataset.accent = m.theme || "blue"; } catch {} }
 async function loadMe() { try { const me = tok() ? await api("/auth/me") : null; let showGroups = false; if (me) { try { showGroups = (await api("/groups/capabilities")).show_page; } catch {} } set({ me, showGroups }); } catch { try { localStorage.removeItem("aihub_token"); } catch {} set({ me: null }); } }
 const initials = (n) => (String(n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("") || "?").toUpperCase();
 const hue = (n) => { let h = 0; for (const c of String(n)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
@@ -471,8 +471,8 @@ function LogoSetting({ url, bump }) {
 function AdminSettings() {
   const [tick, setTick] = useState(0); const d = useLoad(() => api("/admin/settings"), [tick]); const [busy, setBusy] = useState("");
   if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
-  const set1 = async (k, v) => { setBusy(k); try { await api("/admin/settings", { method: "PUT", body: { [k]: v } }); toast("Saved"); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
-  const sections = [["Site", ["site_name", "contact_name", "contact_email", "contact_url", "contact_phone"]], ["Access", ["signup", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility", "allow_source_download"]], ["Groups", ["allow_group_creation"]], ["Uploads", ["max_upload_mb"]]];
+  const set1 = async (k, v) => { setBusy(k); if (k === "cli_endpoint" && v) toast("Checking endpoint…"); try { await api("/admin/settings", { method: "PUT", body: { [k]: v } }); toast("Saved"); if (k === "theme_color") loadBrand(); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
+  const sections = [["Site", ["site_name", "theme_color", "cli_endpoint", "contact_name", "contact_email", "contact_url", "contact_phone"]], ["Access", ["signup", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility", "allow_source_download"]], ["Groups", ["allow_group_creation"]], ["Uploads", ["max_upload_mb"]]];
   const by = Object.fromEntries(d.d.schema.map((x) => [x.key, x]));
   const warn = d.d.values.public_install === "1";
   return html`<div class="stack"><div class="card row"><b>Server version</b><span class="mono">v${d.d.server_version}</span><span class="sp"></span><span class="xs mut3">CLIs on this hub self-update to this version (<code>aihub upgrade</code>)</span></div>${sections.map(([title, keys]) => html`<div class="stack" key=${title}><h3>${title}</h3><div class="list">${title === "Site" && html`<${LogoSetting} url=${d.d.logo_url} bump=${() => setTick(tick + 1)} />`}${keys.filter((k) => by[k]).map((k) => { const x = by[k], v = d.d.values[k]; if (x.type === "text") return html`<${TextSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; if (x.type === "number") return html`<${NumSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; const onoff = x.options.length === 2 && x.options[0] === "0";

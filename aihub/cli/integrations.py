@@ -247,28 +247,29 @@ PROJECT_SKILL_DIR = {"claude": os.path.join(".claude", "skills"), "codex": os.pa
 
 
 def install_builtin_skill(tools=None, scope="user", project=".", remove=False):
-    """Write (or remove) the bundled aihub-package skill. -> [(label, status)]"""
+    """Write (or remove) the bundled skills (aihub-package, aihub-guide). -> [(label, status)]"""
     from ..core import builtin_skill as B
     out = []
     for key in (tools or ["claude", "codex"]):
         t = TOOLS[key]
-        if scope == "project":
-            dst = os.path.join(os.path.abspath(project), PROJECT_SKILL_DIR[key], B.NAME)
-        else:
-            if not tools and not t.detect():
-                out.append((t.label, "not detected, skipped"))
-                continue
-            dst = t.d("skills", B.NAME)
-        if remove:
-            existed = os.path.isdir(dst)
-            shutil.rmtree(dst, ignore_errors=True)
-            out.append((t.label, "removed " + dst if existed else "not installed"))
+        if scope != "project" and not tools and not t.detect():
+            out.append((t.label, "not detected, skipped"))
             continue
-        shutil.rmtree(dst, ignore_errors=True)
-        for rel, content in B.FILES.items():
-            p = os.path.join(dst, rel)
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "w", newline="\n") as f:
-                f.write(content)
-        out.append((t.label, "installed " + dst))
+        for name, files in B.SKILLS:
+            if scope == "project":
+                dst = os.path.join(os.path.abspath(project), PROJECT_SKILL_DIR[key], name)
+            else:
+                dst = t.d("skills", name)
+            if remove:
+                existed = os.path.isdir(dst)
+                shutil.rmtree(dst, ignore_errors=True)
+                out.append((t.label, "removed " + dst if existed else "not installed: " + name))
+                continue
+            shutil.rmtree(dst, ignore_errors=True)
+            for rel, content in files.items():
+                p = os.path.join(dst, rel)
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "w", newline="\n") as f:
+                    f.write(content)
+            out.append((t.label, "installed " + dst))
     return out

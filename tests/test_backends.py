@@ -249,8 +249,10 @@ class BuiltinSkillTest(unittest.TestCase):
         from aihub.cli import integrations
         with tempfile.TemporaryDirectory() as d:
             r = integrations.install_builtin_skill(["claude", "codex"], "project", d)
-            self.assertEqual(len(r), 2)
+            self.assertEqual(len(r), 4)
             for sub in (".claude/skills", ".agents/skills"):
-                self.assertTrue(os.path.isfile(os.path.join(d, sub, "aihub-package", "SKILL.md")))
+                for name in ("aihub-package", "aihub-guide"):
+                    self.assertTrue(os.path.isfile(os.path.join(d, sub, name, "SKILL.md")))
             integrations.install_builtin_skill(["claude"], "project", d, remove=True)
-            self.assertFalse(os.path.exists(os.path.join(d, ".claude/skills/aihub-package")))
+            for name in ("aihub-package", "aihub-guide"):
+                self.assertFalse(os.path.exists(os.path.join(d, ".claude/skills", name)))
