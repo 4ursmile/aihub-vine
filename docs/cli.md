@@ -10,15 +10,15 @@ Install from your AI Hub server. The web UI's **Get started** page detects your 
 
 ```sh
 curl -fsSL https://hub.example.com/install.sh | sh
-echo 'export PATH="$HOME/.aihub/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 ```
 
 **Linux** (bash):
 
 ```sh
 curl -fsSL https://hub.example.com/install.sh | sh
-echo 'export PATH="$HOME/.aihub/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
 ```
+
+On macOS and Linux the installer adds `~/.aihub/bin` to your PATH by writing one marked block (`# >>> aihub` … `# <<< aihub`) to your shell profile (`~/.zshrc`, `~/.bash_profile` on macOS or `~/.bashrc` on Linux, `~/.config/fish/config.fish`, otherwise `~/.profile`). In a terminal it asks first (`[Y/n]`, default yes); run non-interactively it adds the block directly. Set `AIHUB_NO_MODIFY_PATH=1` to skip the change, in which case it prints the line to add yourself (`curl -fsSL https://hub.example.com/install.sh | AIHUB_NO_MODIFY_PATH=1 sh`). Re-running never adds a second block. Open a new terminal afterwards.
 
 **Windows** (PowerShell):
 

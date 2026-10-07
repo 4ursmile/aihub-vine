@@ -35,11 +35,10 @@ pip install -r requirements-server.txt
 python -m aihub.server --host 127.0.0.1 --port 8000 --data ./aihub-data --public-url http://localhost:8000
 ```
 
-The first account registered on a new server becomes its admin. Install the bundled CLI zipapp from that server and add it to `PATH`:
+The first account registered on a new server becomes its admin. Install the bundled CLI zipapp from that server (the installer adds it to your `PATH`):
 
 ```sh
-curl -fsSL http://localhost:8000/install.sh | sh
-export PATH="$HOME/.aihub/bin:$PATH"
+curl -fsSL http://localhost:8000/install.sh | sh   # asks before adding ~/.aihub/bin to your PATH; open a new terminal after
 aihub register
 aihub login
 ```

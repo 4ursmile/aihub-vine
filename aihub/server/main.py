@@ -62,8 +62,34 @@ chmod +x "$HOME/.aihub/bin/aihub"
 ok "Installed to $HOME/.aihub/bin"
 step "Connecting your AI tools"
 "$HOME/.aihub/bin/aihub" welcome -y < /dev/null || true   # usage hooks + packaging skill for detected tools
-printf '  %sAdd to PATH:%s  export PATH="$HOME/.aihub/bin:$PATH"\\n' "$Y" "$N"
-printf '  %sThen run:%s     aihub\\n\\n' "$D" "$N"
+# Put ~/.aihub/bin on PATH for future shells. Guard: ask first when a person is at the terminal (default yes),
+# add directly when non-interactive (CI), and skip entirely with AIHUB_NO_MODIFY_PATH=1.
+BIN="$HOME/.aihub/bin"
+case "$(basename "${{SHELL:-sh}}")" in
+  zsh) RC="${{ZDOTDIR:-$HOME}}/.zshrc"; LINE='export PATH="$HOME/.aihub/bin:$PATH"' ;;
+  bash) if [ -f "$HOME/.bash_profile" ] || [ "$(uname -s)" = "Darwin" ]; then RC="$HOME/.bash_profile"; else RC="$HOME/.bashrc"; fi; LINE='export PATH="$HOME/.aihub/bin:$PATH"' ;;
+  fish) RC="$HOME/.config/fish/config.fish"; LINE='fish_add_path $HOME/.aihub/bin' ;;
+  *) RC="$HOME/.profile"; LINE='export PATH="$HOME/.aihub/bin:$PATH"' ;;
+esac
+case ":$PATH:" in *":$BIN:"*) ONPATH=1 ;; *) ONPATH=0; export PATH="$BIN:$PATH" ;; esac
+if [ -f "$RC" ] && grep -q '# >>> aihub' "$RC" 2>/dev/null; then
+  ok "$BIN is already set up in $RC"
+elif [ -n "$AIHUB_NO_MODIFY_PATH" ]; then
+  printf '  %sSkipped PATH change.%s Add this to %s:  %s\\n' "$Y" "$N" "$RC" "$LINE"
+else
+  GO=y
+  if [ -t 1 ] && [ -r /dev/tty ]; then
+    printf '  Add %s to your PATH by editing %s? [Y/n] ' "$BIN" "$RC"
+    read GO < /dev/tty || GO=y
+  fi
+  case "$GO" in
+    n|N|no|NO) printf '  %sNot changed.%s To do it yourself add to %s:  %s\\n' "$Y" "$N" "$RC" "$LINE" ;;
+    *) mkdir -p "$(dirname "$RC")" 2>/dev/null
+       if printf '\\n# >>> aihub\\n%s\\n# <<< aihub\\n' "$LINE" >> "$RC" 2>/dev/null; then ok "Added $BIN to PATH in $RC"
+       else printf '  %sCould not write %s.%s Add this yourself:  %s\\n' "$Y" "$RC" "$N" "$LINE"; fi ;;
+  esac
+fi
+printf '  %sOpen a new terminal, then run:%s  aihub\\n\\n' "$D" "$N"
 """
 
 INSTALL_PS1 = r"""$ErrorActionPreference = "Stop"
