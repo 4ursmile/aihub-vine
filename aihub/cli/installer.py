@@ -7,7 +7,7 @@ import sys
 import tempfile
 
 from ..core import archive, manifest as M, version as V
-from . import api, hooks, integrations, paths, setup as setupmod, telemetry
+from . import api, hooks, integrations, paths, setup as setupmod, telemetry, ui
 
 OS = {"Darwin": "macos", "Linux": "linux", "Windows": "windows"}.get(platform.system(), "linux")
 
@@ -88,7 +88,9 @@ def install(name, spec="", assume_yes=False, tools=None, _seen=None):
         return
     _seen.add(name)
     st = state()
-    r = api.call("GET", "/resolve?name=%s&spec=%s" % (name, spec.replace("=", "%3D").replace(">", "%3E").replace("<", "%3C")))
+    with ui.Spinner("Resolving %s" % name) as sp:
+        r = api.call("GET", "/resolve?name=%s&spec=%s" % (name, spec.replace("=", "%3D").replace(">", "%3E").replace("<", "%3C")))
+        sp.text("Resolved %s %s" % (name, r["version"]))
     m = M.normalize(r["manifest"]) if r["manifest"].get("package") else None
     if not m:
         raise api.ApiError("server returned invalid manifest")
@@ -98,12 +100,12 @@ def install(name, spec="", assume_yes=False, tools=None, _seen=None):
     for c in req["commands"]:
         cn, hint = (c, "") if isinstance(c, str) else (c.get("name"), c.get("hint", ""))
         if not shutil.which(cn):
-            print("! missing command '%s'. %s" % (cn, hint))
+            ui.note("missing command '%s'. %s" % (cn, hint))
     for dep in req["packages"]:
         dn, ds = _spec(dep)
         cur = st["packages"].get(dn)
         if not (cur and V.satisfies(cur["version"], ds)):
-            print("-> dependency", dep)
+            ui.step("dependency %s" % ui.accent(dep))
             install(dn, ds, assume_yes, tools, _seen)
     old = state()["packages"].get(name)
     if old:
@@ -111,27 +113,36 @@ def install(name, spec="", assume_yes=False, tools=None, _seen=None):
     root = paths.ensure("packages")
     with tempfile.TemporaryDirectory() as td:
         fn = os.path.join(td, r["url"].rsplit("/", 1)[-1])
-        api.download(r["url"], fn, r["sha256"])
-        dest = os.path.join(root, name)
-        shutil.rmtree(dest, ignore_errors=True)
-        top = archive.safe_extract(fn, os.path.join(td, "x"))
-        shutil.move(top, dest)
+        pg = ui.Progress("downloading")
+        try:
+            api.download(r["url"], fn, r["sha256"], progress=pg)
+        finally:
+            pg.finish()
+        ui.good("Downloaded and verified (sha256)")
+        with ui.Spinner("Unpacking"):
+            dest = os.path.join(root, name)
+            shutil.rmtree(dest, ignore_errors=True)
+            top = archive.safe_extract(fn, os.path.join(td, "x"))
+            shutil.move(top, dest)
     rec = {"version": r["version"], "path": dest, "reverts": [], "shims": [], "venv": None}
     py = m["python"]
     if py["requires"] or py["requirements_file"]:
         venv = paths.ensure("venvs", name)
-        subprocess.check_call([sys.executable, "-m", "venv", venv])
-        pip = os.path.join(venv, "bin", "pip")
-        cmd = [pip, "install", "-q"] + py["requires"]
-        if py["requirements_file"]:
-            cmd += ["-r", os.path.join(dest, py["requirements_file"])]
-        subprocess.check_call(cmd)
+        with ui.Spinner("Setting up Python environment"):
+            subprocess.check_call([sys.executable, "-m", "venv", venv])
+            pip = os.path.join(venv, "Scripts", "pip.exe") if OS == "windows" else os.path.join(venv, "bin", "pip")
+            cmd = [pip, "install", "-q"] + py["requires"]
+            if py["requirements_file"]:
+                cmd += ["-r", os.path.join(dest, py["requirements_file"])]
+            subprocess.check_call(cmd, stdout=subprocess.DEVNULL)
         rec["venv"] = venv
     script = m["scripts"].get("install_" + OS)
     if script:
         _, _, shown = script_command(script, dest)             # validates the path before asking the user to approve it
         if assume_yes or input("Run install script for %s?\n  %s\n[y/N] " % (name, shown)).lower().startswith("y"):
+            ui.step("running %s" % shown)
             run_script(script, dest)
+            ui.good("Install script finished")
     bindir = paths.ensure("bin")
     for cmdname, rel in m["bin"].items():
         target = os.path.realpath(os.path.join(dest, rel))
@@ -153,11 +164,12 @@ def install(name, spec="", assume_yes=False, tools=None, _seen=None):
                     spec = {"command": s["command"], "args": [x.replace("${PKG}", dest) for x in s.get("args", [])],
                             "env": s.get("env", {})}
                     rec["reverts"].append(t.add_mcp(s["name"], spec))
+                ui.good("Registered with %s" % t.label)
             except ValueError as e:
-                print("! %s: %s" % (t.label, e))
+                ui.note("%s: %s" % (t.label, e))
         # usage hooks: auto-install once per tool, so `use` events flow without any manual step
         for label, status in hooks.ensure([t.name for t in chosen]):
-            print("  usage hook (%s): %s" % (label, status))
+            ui.info("usage hook (%s): %s" % (label, status))
     rec["components"] = (["skill:" + x["name"] for x in m["skills"]] + ["agent:" + x["name"] for x in m["agents"]]
                          + ["mcp:" + x["name"] for x in m["mcp_servers"]])
     rec["reverts"] = [x for x in rec["reverts"] if x]
@@ -172,7 +184,12 @@ def install(name, spec="", assume_yes=False, tools=None, _seen=None):
     paths.save("state.json", st)
     telemetry.record({"kind": "update" if old else "install", "package": name, "version": r["version"],
                       "client_id": hooks.client_id()})
-    print("installed %s %s" % (name, r["version"]))
+    ui.celebrate("%s %s is ready" % (name, r["version"]))
+    if rec["components"]:
+        ui.info("adds: " + ", ".join(rec["components"]))
+    if rec["shims"]:
+        ui.info("commands: " + ", ".join(os.path.basename(x) for x in rec["shims"]))
+    ui.info("restart your AI tool to pick it up. Remove any time with: aihub uninstall %s" % name)
 
 
 def uninstall(name, quiet=False):
@@ -184,7 +201,7 @@ def uninstall(name, quiet=False):
         try:
             run_script(rec["uninstall_script"], rec["path"], check=False)
         except api.ApiError as e:                    # a broken uninstall script must not block removing the package
-            print("! uninstall script skipped: %s" % e)
+            ui.note("uninstall script skipped: %s" % e)
     for rv in reversed(rec["reverts"]):
         integrations.revert(rv)
     for rv in reversed(rec.get("setup_reverts", [])):
@@ -199,4 +216,4 @@ def uninstall(name, quiet=False):
     paths.save("state.json", st)
     if not quiet:
         telemetry.record({"kind": "uninstall", "package": name, "client_id": hooks.client_id()})
-        print("uninstalled", name)
+        ui.celebrate("%s uninstalled" % name)

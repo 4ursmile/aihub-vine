@@ -63,6 +63,24 @@ curl -X POST \
 
 `X-Aihub-Filename` is optional and defaults to `pkg.tar.gz`. If the archive does not contain `aihub.toml`, send a JSON manifest in `X-Aihub-Manifest`. Uploads larger than `AIHUB_MAX_UPLOAD_MB` return HTTP 413. The response contains the package `name`, `version`, and archive `sha256`. A version cannot be published twice for the same package.
 
+### Chunked, resumable upload
+
+For packages too large for a reverse proxy's body limit. All calls need the `publish` permission; a session belongs to the user who created it and expires after 24 hours idle (max 5 open per user).
+
+| Call | Purpose |
+|---|---|
+| `POST /api/v1/uploads` `{filename, size, sha256, visibility?, manifest?}` | Start. Returns `{upload_id, chunk_size, chunks}`. Rejects with 413 if `size` is over the limit. |
+| `GET /api/v1/uploads/{id}` | `{received: [chunk numbers]}`, to resume. |
+| `PUT /api/v1/uploads/{id}/chunks/{n}` | Raw body, exactly `chunk_size` bytes (the last may be shorter). Optional `X-Chunk-Sha256`. Re-sending is safe. |
+| `POST /api/v1/uploads/{id}/complete` | Assembles, verifies size and sha256, then publishes exactly like `/upload`. |
+| `DELETE /api/v1/uploads/{id}` | Abort and delete the chunks. |
+
+The CLI uses this automatically above 8 MiB and falls back to `POST /upload` against older hubs.
+
+### Downloads
+
+`GET /api/v1/packages/{name}/versions/{version}/download` and `GET /files/{name}/{file}` honour `Range` (206 / 416), so interrupted downloads resume. `aihub download <name>[@version] [-o dir]` saves the archive with resume and sha256 verification. The web Download button requests a 2-minute signed link (`POST .../download-link`) and lets the browser stream the file to disk.
+
 ## Reviews
 
 | Method | Path | Auth required | Purpose |

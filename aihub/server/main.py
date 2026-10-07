@@ -14,6 +14,8 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .cache import init_cache
+from .uploads import UploadStore
+from .ranged import stream_file
 from .config import Settings
 from .db import init_db
 from .repos import EventBuffer, Repos
@@ -25,31 +27,50 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 INSTALL_SH = """#!/bin/sh
 set -e
 HUB="{url}"
+if [ -t 1 ] && [ -z "$NO_COLOR" ] && [ "$TERM" != "dumb" ]; then
+  B=$(printf '\\033[38;5;75m'); G=$(printf '\\033[38;5;41m'); Y=$(printf '\\033[38;5;214m'); R=$(printf '\\033[38;5;203m'); D=$(printf '\\033[2m'); N=$(printf '\\033[0m')
+  OKM="$G+$N"
+else
+  B=""; G=""; Y=""; R=""; D=""; N=""; OKM="+"
+fi
+step() {{ printf '  %s->%s %s\\n' "$B" "$N" "$1"; }}
+ok() {{ printf '  %s %s\\n' "$OKM" "$1"; }}
+printf '\\n  %saihub%s %sinstaller%s\\n\\n' "$B" "$N" "$D" "$N"
 PY=""
+step "Looking for Python 3.9+"
 for c in python3 python; do
   p=$(command -v $c 2>/dev/null) || continue
   if "$p" -c 'import sys;sys.exit(0 if sys.version_info>=(3,9) else 1)' >/dev/null 2>&1; then PY="$p"; break; fi
 done
 if [ -z "$PY" ]; then
-  echo "Python 3.9+ is required but was not found."
+  printf '  %sx Python 3.9+ is required but was not found.%s\\n' "$R" "$N"
   case "$(uname -s)" in
-    Darwin) echo "Install it with:  brew install python   (or https://www.python.org/downloads/macos/)" ;;
-    *) echo "Install it with your package manager, e.g.  sudo apt install python3  /  sudo dnf install python3" ;;
+    Darwin) echo "    Install it with:  brew install python   (or https://www.python.org/downloads/macos/)" ;;
+    *) echo "    Install it with your package manager, e.g.  sudo apt install python3  /  sudo dnf install python3" ;;
   esac
   exit 1
 fi
+ok "Using $PY"
 mkdir -p "$HOME/.aihub/bin"
+step "Downloading the CLI from $HUB"
 curl -fsSL "$HUB/cli/aihub.pyz" -o "$HOME/.aihub/bin/aihub.pyz"
 printf '#!/bin/sh\\nexec %s "$HOME/.aihub/bin/aihub.pyz" "$@"\\n' "$PY" > "$HOME/.aihub/bin/aihub"
 chmod +x "$HOME/.aihub/bin/aihub"
 "$HOME/.aihub/bin/aihub" config set hub "$HUB" >/dev/null || true
-"$HOME/.aihub/bin/aihub" hooks install || true   # usage hooks for detected tools (Claude Code / OpenCode)
-"$HOME/.aihub/bin/aihub" skill install || true    # built-in packaging skill for detected Claude Code / Codex
-echo "Installed. Add to PATH:  export PATH=\\"$HOME/.aihub/bin:$PATH\\""
+ok "Installed to $HOME/.aihub/bin"
+step "Connecting your AI tools"
+"$HOME/.aihub/bin/aihub" welcome -y < /dev/null || true   # usage hooks + packaging skill for detected tools
+printf '  %sAdd to PATH:%s  export PATH="$HOME/.aihub/bin:$PATH"\\n' "$Y" "$N"
+printf '  %sThen run:%s     aihub\\n\\n' "$D" "$N"
 """
 
 INSTALL_PS1 = r"""$ErrorActionPreference = "Stop"
 $Hub = "__HUB__"
+function Say-Step($t) { Write-Host "  -> " -ForegroundColor Cyan -NoNewline; Write-Host $t }
+function Say-Ok($t) { Write-Host "  + " -ForegroundColor Green -NoNewline; Write-Host $t }
+Write-Host ""
+Write-Host "  aihub " -ForegroundColor Cyan -NoNewline; Write-Host "installer" -ForegroundColor DarkGray
+Write-Host ""
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}
 
 # A candidate only counts if it really runs Python >= 3.9. This rejects the Microsoft Store
@@ -89,7 +110,7 @@ function Find-Python {
 }
 
 function Install-Python {
-  Write-Host "Python 3.9+ not found - installing Python 3.12 for the current user..."
+  Say-Step "Python 3.9+ not found, installing Python 3.12 for the current user"
   $winget = Get-Command winget -ErrorAction SilentlyContinue
   if ($winget) {
     try {
@@ -108,27 +129,30 @@ function Install-Python {
 
 $Py = Find-Python
 if (-not $Py) {
-  try { Install-Python } catch { Write-Host "Automatic Python install failed: $_" }
+  try { Install-Python } catch { Write-Host "  Automatic Python install failed: $_" -ForegroundColor Yellow }
   $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
   $Py = Find-Python
 }
 if (-not $Py) {
-  Write-Host "Could not find or install Python 3.9+. Install it from https://www.python.org/downloads/ (tick 'Add python.exe to PATH'), then re-run this command."
+  Write-Host "  x Could not find or install Python 3.9+. Install it from https://www.python.org/downloads/ (tick 'Add python.exe to PATH'), then re-run this command." -ForegroundColor Red
   exit 1
 }
-Write-Host "Using Python: $Py"
+Say-Ok "Using Python: $Py"
 
 $Bin = Join-Path $env:USERPROFILE ".aihub\bin"
 New-Item -ItemType Directory -Force -Path $Bin | Out-Null
+Say-Step "Downloading the CLI from $Hub"
 Invoke-WebRequest "$Hub/cli/aihub.pyz" -OutFile (Join-Path $Bin "aihub.pyz") -UseBasicParsing
 Set-Content -Path (Join-Path $Bin "aihub.cmd") -Encoding ASCII -Value ('@echo off' + "`r`n" + '"' + $Py + '" "%~dp0aihub.pyz" %*')
 & "$Bin\aihub.cmd" config set hub $Hub | Out-Null
-try { & "$Bin\aihub.cmd" hooks install } catch {}
-try { & "$Bin\aihub.cmd" skill install } catch {}
+Say-Ok "Installed to $Bin"
+Say-Step "Connecting your AI tools"
+try { $null | & "$Bin\aihub.cmd" welcome -y } catch {}
 $User = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($User -notlike "*$Bin*") { [Environment]::SetEnvironmentVariable("Path", "$User;$Bin", "User") }
 $env:Path += ";$Bin"
-Write-Host "Installed. Open a new terminal to use: aihub"
+Write-Host "  Open a new terminal, then run: " -NoNewline -ForegroundColor DarkGray; Write-Host "aihub" -ForegroundColor Cyan
+Write-Host ""
 """
 
 
@@ -151,6 +175,7 @@ def create_app(settings: Settings = None) -> FastAPI:
     app.state.repos = Repos(db)
     app.state.cache = init_cache(s)
     app.state.storage = init_storage(s)
+    app.state.uploads = UploadStore(s.data_dir, s.upload_chunk_mb * 1024 * 1024)
     app.state.events = EventBuffer(app.state.repos, s.event_flush_rows, s.event_flush_secs)
     app.add_middleware(GZipMiddleware, minimum_size=800)
     app.include_router(api)
@@ -226,6 +251,9 @@ def create_app(settings: Settings = None) -> FastAPI:
         f = st.open(name, filename)
         hdr = {"Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff", "Content-Length": str(st.size(name, filename)),
                "Content-Disposition": 'attachment; filename="%s"' % os.path.basename(filename)}
+        if hasattr(f, "seek"):                              # local files: honour Range so interrupted installs resume
+            hdr.pop("Content-Length")
+            return stream_file(f, st.size(name, filename), request.headers.get("range"), hdr)
         return StreamingResponse(iter(lambda: f.read(1 << 20), b""), media_type="application/octet-stream", headers=hdr,
                                  background=BackgroundTask(f.close))
 

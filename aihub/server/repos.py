@@ -407,7 +407,7 @@ class Repos:
         return [r[0] for r in self.db.conn().execute(
             "SELECT g.name FROM groups g JOIN group_members m ON m.group_id=g.id WHERE m.user_id=? ORDER BY g.name", (uid,))]
 
-    def packages(self, q="", type=None, tag=None, sort="", page=1, per_page=20, include_hidden=False, viewer=None, mine=False):
+    def packages(self, q="", type=None, tag=None, sort="", page=1, per_page=20, include_hidden=False, viewer=None, mine=False, category=None):
         vsql, va = self.visible_sql(viewer)
         w, a = [vsql], list(va)
         if not include_hidden:
@@ -431,6 +431,13 @@ class Repos:
             w.append("type=?"); a.append(type)
         if tag:
             w.append("(',' || tags || ',') LIKE ?"); a.append("%," + tag + ",%")
+        if category:
+            # category is derived (tags/type), not stored: resolve the matching names first, then filter by them
+            names = [n for n, cid in self.package_categories(viewer, include_hidden).items() if cid == category]
+            if not names:
+                w.append("1=0")
+            else:
+                w.append("name IN (%s)" % ",".join("?" * len(names))); a += names
         c = self.db.conn()
         rsum = "(SELECT COALESCE(SUM(rating),0) FROM reviews r WHERE r.package_id=packages.id)"
         rcnt = "(SELECT COUNT(*) FROM reviews r WHERE r.package_id=packages.id)"
@@ -454,16 +461,59 @@ class Repos:
                          a + order_args + [per_page, (max(page, 1) - 1) * per_page])
         return total, [self._pkg(r) for r in rows]
 
+    def package_categories(self, viewer=None, include_hidden=False):
+        """{name: category id} for packages the viewer may see."""
+        from .categories import category_of
+        vsql, va = self.visible_sql(viewer)
+        extra = "" if include_hidden else " AND hidden=0"
+        return {n: category_of([x for x in (t or "").split(",") if x], ty)
+                for n, ty, t in self.db.conn().execute("SELECT name,type,tags FROM packages WHERE %s%s" % (vsql, extra), va)}
+
+    def related(self, name, viewer=None, limit=6):
+        """Visible packages ranked by shared tags (x3), same category (x2), same type (x1). Excludes the package itself."""
+        from .categories import category_of
+        vsql, va = self.visible_sql(viewer)
+        rows = self.db.conn().execute("SELECT name,type,tags,description,latest_version FROM packages WHERE hidden=0 AND %s" % vsql, va).fetchall()
+        tg = lambda t: {x for x in (t or "").split(",") if x}
+        me = next((r for r in rows if r[0] == name), None)
+        if me is None:
+            row = self.db.conn().execute("SELECT name,type,tags,description,latest_version FROM packages WHERE name=?", (name,)).fetchone()
+            me = row
+        if me is None:
+            return []
+        mt, mc = tg(me[2]), category_of(tg(me[2]), me[1])
+        scored = []
+        for n, ty, t, d, v in rows:
+            if n == name:
+                continue
+            s = 3 * len(mt & tg(t)) + (2 if category_of(tg(t), ty) == mc else 0) + (1 if ty == me[1] else 0)
+            if s > 0:
+                scored.append((-s, n))
+        scored.sort()
+        return [n for _, n in scored[:limit]]
+
+    def recent_activity(self, viewer=None, limit=15):
+        """Latest install/use/update events on packages the viewer may see. Deliberately carries no user or client identifiers."""
+        vsql, va = self.visible_sql(viewer, "p")
+        return _rows(self.db.conn().execute(
+            "SELECT e.package AS package, e.kind AS kind, e.ts AS ts, p.type AS type FROM events e JOIN packages p ON p.name=e.package "
+            "WHERE e.kind IN ('install','use','update') AND p.hidden=0 AND " + vsql + " ORDER BY e.id DESC LIMIT ?", va + [limit]))
+
     def facets(self, viewer=None):
+        from .categories import BY_ID
         c = self.db.conn()
         vsql, va = self.visible_sql(viewer)
+        cats = {k: 0 for k in BY_ID}
+        for cid in self.package_categories(viewer).values():
+            cats[cid] += 1
         types = {r[0]: r[1] for r in c.execute("SELECT type,COUNT(*) FROM packages WHERE hidden=0 AND %s GROUP BY type" % vsql, va)}
         tags = {}
         for (t,) in c.execute("SELECT tags FROM packages WHERE hidden=0 AND %s" % vsql, va):
             for x in (t or "").split(","):
                 if x:
                     tags[x] = tags.get(x, 0) + 1
-        return {"types": types, "tags": tags}
+        return {"types": types, "tags": tags,
+                "categories": [{"id": k, "label": BY_ID[k]["label"], "desc": BY_ID[k]["desc"], "count": n} for k, n in cats.items()]}
 
     def _fts_sync(self, c, pid):
         if self.db.engine == "postgres" or not self.db.fts:

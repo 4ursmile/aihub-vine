@@ -221,3 +221,4 @@ __marimo__/
 # AI Hub runtime data (database, uploaded packages, generated CLI zipapp)
 aihub-data/
 *.zip
+skills-lock.json

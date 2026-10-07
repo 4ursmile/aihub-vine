@@ -3,6 +3,7 @@ import io
 import os
 import tarfile
 import tempfile
+import time
 import unittest
 
 from fastapi.testclient import TestClient
@@ -623,6 +624,119 @@ class Access(unittest.TestCase):
         self.assertEqual(r.status_code, 409)                                                                    # same message as a public name clash
         self.assertNotIn("private", r.text.lower())
 
+    def _big_archive(self, name, version="1.0.0", pad=300_000):
+        b = io.BytesIO()
+        with tarfile.open(fileobj=b, mode="w:gz") as t:
+            toml = b'[package]\nname = "%s"\nversion = "%s"\ntype = "skill"\ndescription = "d"\n' % (name.encode(), version.encode())
+            ti = tarfile.TarInfo("aihub.toml"); ti.size = len(toml); t.addfile(ti, io.BytesIO(toml))
+            blob = os.urandom(pad)                      # incompressible, so the archive really is large
+            ti = tarfile.TarInfo("res/blob.bin"); ti.size = len(blob); t.addfile(ti, io.BytesIO(blob))
+        return b.getvalue()
+
+    def _chunked(self, h, data, cs=100_000):
+        self.c.app.state.uploads.chunk_size = cs
+        init = self.c.post("/api/v1/uploads", headers=h, json={"filename": "x.tar.gz", "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+        self.assertEqual(init.status_code, 200, init.text)
+        return init.json()
+
+    def test_chunked_upload_resume_and_download_range(self):
+        data = self._big_archive("bigpkg")
+        init = self._chunked(self.alice, data)
+        uid, cs, n = init["upload_id"], init["chunk_size"], init["chunks"]
+        self.assertEqual(n, -(-len(data) // cs))
+        put = lambda i, body, h=None: self.c.put("/api/v1/uploads/%s/chunks/%d" % (uid, i), content=body, headers=h or self.alice)
+        # out of order, with a bad chunk first, then re-sent
+        self.assertEqual(put(1, data[cs:2 * cs], dict(self.alice, **{"X-Chunk-Sha256": "0" * 64})).status_code, 400)
+        self.assertEqual(put(n - 1, data[(n - 1) * cs:]).status_code, 200)
+        self.assertEqual(put(0, data[:cs - 1]).status_code, 400)                    # wrong length
+        self.assertEqual(put(n, b"x").status_code, 400)                              # out of range
+        self.assertEqual(put(0, data[:cs]).status_code, 200)
+        self.assertEqual(self.c.post("/api/v1/uploads/%s/complete" % uid, headers=self.alice).status_code, 400)   # still missing
+        st = self.c.get("/api/v1/uploads/" + uid, headers=self.alice).json()
+        self.assertEqual(st["received"], [0, n - 1])
+        for i in range(1, n - 1):                                                    # resume: only the missing ones
+            self.assertEqual(put(i, data[i * cs:(i + 1) * cs]).status_code, 200)
+        self.assertEqual(put(2, data[2 * cs:3 * cs]).status_code, 200)               # idempotent re-send
+        r = self.c.post("/api/v1/uploads/%s/complete" % uid, headers=self.alice)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["sha256"], hashlib.sha256(data).hexdigest())
+        self.assertEqual(self.c.get("/api/v1/uploads/" + uid, headers=self.alice).status_code, 404)   # session cleaned up
+        # immutable version still enforced on the chunked path
+        again = self._chunked(self.alice, data)
+        for i in range(again["chunks"]):
+            self.c.put("/api/v1/uploads/%s/chunks/%d" % (again["upload_id"], i), content=data[i * cs:(i + 1) * cs], headers=self.alice)
+        self.assertEqual(self.c.post("/api/v1/uploads/%s/complete" % again["upload_id"], headers=self.alice).status_code, 409)
+        # ranged download: resume from the middle and a suffix, and a bad range
+        url = "/api/v1/packages/bigpkg/versions/1.0.0/download"
+        full = self.c.get(url, headers=self.alice)
+        self.assertEqual(full.content, data)
+        self.assertEqual(full.headers["accept-ranges"], "bytes")
+        part = self.c.get(url, headers=dict(self.alice, Range="bytes=1000-"))
+        self.assertEqual(part.status_code, 206)
+        self.assertEqual(part.content, data[1000:])
+        self.assertEqual(part.headers["content-range"], "bytes 1000-%d/%d" % (len(data) - 1, len(data)))
+        self.assertEqual(self.c.get(url, headers=dict(self.alice, Range="bytes=-50")).content, data[-50:])
+        self.assertEqual(self.c.get(url, headers=dict(self.alice, Range="bytes=%d-" % (len(data) + 5))).status_code, 416)
+
+    def test_chunked_init_accepts_null_optionals_and_signed_link(self):
+        data = self._big_archive("nullopt", pad=150_000)
+        self.c.app.state.uploads.chunk_size = 100_000
+        r = self.c.post("/api/v1/uploads", headers=self.alice, json={"filename": "x.tar.gz", "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                                                                       "visibility": None, "manifest": None})
+        self.assertEqual(r.status_code, 200, r.text)
+        uid, cs = r.json()["upload_id"], r.json()["chunk_size"]
+        for i in range(r.json()["chunks"]):
+            self.c.put("/api/v1/uploads/%s/chunks/%d" % (uid, i), content=data[i * cs:(i + 1) * cs], headers=self.alice)
+        self.assertEqual(self.c.post("/api/v1/uploads/%s/complete" % uid, headers=self.alice).status_code, 200)
+        # browser download: signed link needs the same access as the direct download, and only works for that file
+        lk = self.c.post("/api/v1/packages/nullopt/versions/1.0.0/download-link", headers=self.alice)
+        self.assertEqual(lk.status_code, 200)
+        self.assertEqual(self.c.get(lk.json()["url"]).content, data)                    # link itself needs no header
+        self.assertEqual(self.c.get(lk.json()["url"][:-2] + "00").status_code, 403)     # tampered signature
+        self.assertEqual(self.c.post("/api/v1/packages/nullopt/versions/9.9.9/download-link", headers=self.alice).status_code, 404)
+
+    def test_chunked_upload_security(self):
+        data = self._big_archive("secpkg")
+        good = hashlib.sha256(data).hexdigest()
+        bad = lambda **kw: self.c.post("/api/v1/uploads", headers=self.alice, json=dict({"filename": "x.tar.gz", "size": len(data), "sha256": good}, **kw))
+        self.assertEqual(self.c.post("/api/v1/uploads", json={"filename": "x", "size": 5, "sha256": good}).status_code, 401)
+        self.assertEqual(bad(size=0).status_code, 400)
+        self.assertEqual(bad(sha256="zz").status_code, 400)
+        self.assertEqual(bad(size=10 ** 12).status_code, 413)                         # over the limit: rejected before any bytes
+        init = self._chunked(self.alice, data)
+        uid = init["upload_id"]
+        # another user can neither see, feed, complete nor abort it - and gets the same 404 as for a missing id
+        for call in (lambda: self.c.get("/api/v1/uploads/" + uid, headers=self.bob),
+                     lambda: self.c.put("/api/v1/uploads/%s/chunks/0" % uid, content=b"x", headers=self.bob),
+                     lambda: self.c.post("/api/v1/uploads/%s/complete" % uid, headers=self.bob),
+                     lambda: self.c.delete("/api/v1/uploads/" + uid, headers=self.bob),
+                     lambda: self.c.get("/api/v1/uploads/..%2f..%2fetc", headers=self.alice)):
+            self.assertEqual(call().status_code, 404)
+        # a chunk bigger than announced is refused
+        self.assertEqual(self.c.put("/api/v1/uploads/%s/chunks/0" % uid, content=b"x" * (init["chunk_size"] + 1), headers=self.alice).status_code, 413)
+        # tampered content: all chunks right length but wrong bytes -> final sha256 check rejects it
+        cs = init["chunk_size"]
+        for i in range(init["chunks"]):
+            piece = data[i * cs:(i + 1) * cs]
+            self.c.put("/api/v1/uploads/%s/chunks/%d" % (uid, i), content=bytes(len(piece)) if i == 1 else piece, headers=self.alice)
+        r = self.c.post("/api/v1/uploads/%s/complete" % uid, headers=self.alice)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("sha256", r.text)
+        self.assertEqual(self.c.delete("/api/v1/uploads/" + uid, headers=self.alice).status_code, 200)
+        # per-user session cap
+        for _ in range(5):
+            self.assertEqual(bad().status_code, 200)
+        self.assertEqual(bad().status_code, 429)
+
+    def test_upload_sweep_removes_stale_sessions(self):
+        data = self._big_archive("sweepy")
+        uid = self._chunked(self.alice, data)["upload_id"]
+        d = os.path.join(self.c.app.state.uploads.root, uid)
+        old = time.time() - 48 * 3600
+        os.utime(d, (old, old))
+        self.c.app.state.uploads.sweep()
+        self.assertFalse(os.path.exists(d))
+
     def test_settings_upload_limit(self):
         put = lambda v, h=None: self.c.put("/api/v1/admin/settings", json={"max_upload_mb": v}, headers=h or self.admin)
         self.assertEqual(put(5, self.alice).status_code, 403)
@@ -841,3 +955,48 @@ class ReviewRankings(unittest.TestCase):
         self.assertEqual(d["top_reviewed"][0]["name"], "liked"); self.assertEqual(d["top_reviewed"][0]["count"], 3)
         self.assertEqual(self.c.get("/api/v1/rankings/bogus").status_code, 404)
 
+
+
+class Discovery(Access):
+    """Categories, related packages and the anonymised activity feed."""
+    TOML = b'[package]\nname = "%s"\nversion = "1.0.0"\ntype = "skill"\ndescription = "d"\ntags = %s\n'
+
+    def publish(self, h, name, visibility=None, version="1.0.0", tags=b'["demo"]'):
+        b = io.BytesIO()
+        with tarfile.open(fileobj=b, mode="w:gz") as t:
+            toml = (self.TOML % (name.encode(), tags)).replace(b"1.0.0", version.encode())
+            ti = tarfile.TarInfo("aihub.toml"); ti.size = len(toml); t.addfile(ti, io.BytesIO(toml))
+        return self.c.post("/api/v1/upload", content=b.getvalue(), headers=dict(h, **({"X-Aihub-Visibility": visibility} if visibility else {})))
+
+    def test_categories_and_filter(self):
+        self.publish(self.alice, "q-one", tags=b'["sql"]'); self.publish(self.alice, "q-two", tags=b'["database"]')
+        self.publish(self.alice, "hidden-sql", "private", tags=b'["sql"]'); self.publish(self.alice, "rev", tags=b'["review"]')
+        f = self.c.get("/api/v1/facets").json()["categories"]
+        self.assertEqual({c["id"]: c["count"] for c in f}["data"], 2)                    # anonymous: private one not counted
+        self.assertEqual({c["id"]: c["count"] for c in self.c.get("/api/v1/facets", headers=self.alice).json()["categories"]}["data"], 3)
+        r = self.c.get("/api/v1/packages?category=data").json()
+        self.assertEqual(sorted(p["name"] for p in r["items"]), ["q-one", "q-two"])
+        self.assertTrue(all(p["category"] == "data" for p in r["items"]))
+        self.assertEqual(self.c.get("/api/v1/packages?category=development").json()["total"], 1)
+        self.assertEqual(self.c.get("/api/v1/packages?category=nope").json()["total"], 0)
+
+    def test_related(self):
+        self.publish(self.alice, "a-sql", tags=b'["sql","db"]'); self.publish(self.alice, "b-sql", tags=b'["sql"]')
+        self.publish(self.alice, "c-docs", tags=b'["pdf"]'); self.publish(self.alice, "p-sql", "private", tags=b'["sql"]')
+        names = [p["name"] for p in self.c.get("/api/v1/packages/a-sql/related").json()["items"]]
+        self.assertEqual(names[0], "b-sql"); self.assertNotIn("a-sql", names); self.assertNotIn("p-sql", names)
+        self.assertIn("p-sql", [p["name"] for p in self.c.get("/api/v1/packages/a-sql/related", headers=self.alice).json()["items"]])
+        self.assertEqual(self.c.get("/api/v1/packages/p-sql/related", headers=self.bob).status_code, 404)
+
+    def test_activity_privacy(self):
+        import time
+        self.publish(self.alice, "open-one"); self.publish(self.alice, "secret-one", "private")
+        ev = [{"kind": "use", "package": "open-one", "client_id": "cid-xyz"}, {"kind": "use", "package": "secret-one", "client_id": "cid-xyz"}]
+        self.c.post("/api/v1/events", json={"events": ev}, headers=self.alice)
+        time.sleep(0.8)
+        for h in ({}, self.bob):
+            res = self.c.get("/api/v1/activity", headers=h)
+            self.assertEqual([i["package"] for i in res.json()["items"]], ["open-one"])
+            self.assertNotIn("alice", res.text); self.assertNotIn("cid-xyz", res.text)
+            self.assertEqual(set(res.json()["items"][0]), {"package", "kind", "ts", "type"})
+        self.assertIn("secret-one", [i["package"] for i in self.c.get("/api/v1/activity", headers=self.alice).json()["items"]])

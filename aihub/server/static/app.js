@@ -47,45 +47,129 @@ const Err = ({ e }) => html`<${Empty} t="Something went wrong" d=${e} />`;
 const Skels = ({ n = 6 }) => html`<div class="grid">${Array.from({ length: n }, (_, i) => html`<div class="skel" key=${i}></div>`)}</div>`;
 const Stars = ({ r }) => r ? html`<span>★ ${r}</span>` : null;
 const TYPE = { skill: "blue", agent: "green", mcp: "orange", tool: "", setup: "red" };
-const Pkg = ({ p }) => html`<a class="card pkg" href=${"#/package/" + p.name}>
+const Pkg = ({ p, i = 0 }) => html`<a class="card pkg spot" style=${"--i:" + Math.min(i, 12)} href=${"#/package/" + p.name}>
   <div class="row"><h3>${p.name}</h3><span class="sp"></span>${p.visibility === "private" && html`<span class="badge orange" title="Only people you share it with can see this">private</span>`}<span class=${"badge " + (TYPE[p.type] || "")}>${p.type}</span></div>
   <p>${p.description || "No description"}</p>
   <div class="meta"><span>v${p.latest_version || "–"}</span><span>↓ ${fmt(p.downloads)}</span><${Stars} r=${p.rating && p.rating.avg} /></div></a>`;
 
 // ---------- pages
+// ---------- motion helpers (all JS-driven motion is skipped under prefers-reduced-motion)
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const revealIO = "IntersectionObserver" in window && !reduced ? new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add("in"); revealIO.unobserve(e.target); } }), { rootMargin: "0px 0px -8% 0px", threshold: 0.08 }) : null;
+// call once per page component: marks every .rv element visible as it scrolls into view
+const useReveal = () => useEffect(() => { document.querySelectorAll(".rv:not(.in)").forEach((el) => (revealIO ? revealIO.observe(el) : el.classList.add("in"))); });
+// spotlight cards follow the pointer through CSS variables, no component state involved
+addEventListener("pointermove", (e) => { const c = e.target.closest && e.target.closest(".spot"); if (!c) return; const r = c.getBoundingClientRect(); c.style.setProperty("--mx", e.clientX - r.left + "px"); c.style.setProperty("--my", e.clientY - r.top + "px"); }, { passive: true });
+
+function Count({ to }) {
+  const ref = useRef();
+  useEffect(() => {
+    const el = ref.current, n = Number(to) || 0; if (!el) return;
+    if (reduced || !("IntersectionObserver" in window)) { el.textContent = fmt(n); return; }
+    let raf; const ob = new IntersectionObserver((es) => { if (!es[0].isIntersecting) return; ob.disconnect(); const t0 = performance.now();
+      const step = (t) => { const k = Math.min(1, (t - t0) / 900); el.textContent = fmt(Math.round(n * (1 - Math.pow(1 - k, 3)))); if (k < 1) raf = requestAnimationFrame(step); }; raf = requestAnimationFrame(step); });
+    el.textContent = fmt(0); ob.observe(el); return () => { ob.disconnect(); cancelAnimationFrame(raf); };
+  }, [to]);
+  return html`<span ref=${ref}>${fmt(to)}</span>`;
+}
+
+// types real package names after "aihub install"; the full name is kept in data-full so Copy always gets the whole command
+function Typer({ words }) {
+  const ref = useRef(), key = words.join();
+  useEffect(() => {
+    const el = ref.current; if (!el || !words.length) return;
+    el.dataset.full = words[0]; if (reduced) { el.textContent = words[0]; return; }
+    let i = 0, j = 0, dir = 1, t;
+    const tick = () => { const w = words[i]; el.dataset.full = w; j += dir; el.textContent = w.slice(0, j); let d = dir > 0 ? 70 : 32;
+      if (dir > 0 && j >= w.length) { dir = -1; d = 2000; } else if (dir < 0 && j <= 0) { dir = 1; i = (i + 1) % words.length; d = 380; } t = setTimeout(tick, d); };
+    tick(); return () => clearTimeout(t);
+  }, [key]);
+  return html`<span class="typed" ref=${ref}>${words[0] || "package-name"}</span>`;
+}
+
+const since = (t) => { const s = Date.now() / 1000 - t; return s < 45 ? "just now" : ago(t); };
+const VERB = { install: "installed", use: "used", update: "updated" };
+function Activity() {
+  const [items, setItems] = useState(null), [err, setErr] = useState(null), [, tick] = useState(0); const seen = useRef(new Set());
+  useEffect(() => {
+    let on = 1;
+    const load = async () => {
+      if (document.hidden) return;
+      try { const r = await api("/activity"); if (!on) return;
+        const rows = r.items.map((i) => ({ ...i, k: i.package + i.kind + i.ts })); const first = seen.current.size === 0;
+        setItems(rows.map((x) => ({ ...x, fresh: !first && !seen.current.has(x.k) }))); rows.forEach((x) => seen.current.add(x.k)); setErr(null);
+      } catch (e) { if (on) setErr(e.message); }
+    };
+    load(); const poll = setInterval(load, 20000), clock = setInterval(() => !document.hidden && tick((n) => n + 1), 30000);
+    const vis = () => { if (!document.hidden) load(); }; document.addEventListener("visibilitychange", vis);
+    return () => { on = 0; clearInterval(poll); clearInterval(clock); document.removeEventListener("visibilitychange", vis); };
+  }, []);
+  return html`<aside class="feed" aria-label="Live activity"><div class="feed-h"><h3>Happening now</h3><span class="live" title="Refreshes while this tab is open">live</span></div>
+    ${err ? html`<p class="mut sm feed-e">Activity is unavailable right now.</p>` : !items ? html`<div class="feed-l">${[0, 1, 2, 3, 4].map((i) => html`<div class="skel line" key=${i}></div>`)}</div>` :
+      !items.length ? html`<p class="mut sm feed-e">Nothing yet. Installs and usage show up here as they happen.</p>` :
+      html`<ul class="feed-l">${items.slice(0, 7).map((x, n) => html`<li key=${x.k} class=${x.fresh ? "fresh" : ""} style=${"--i:" + n}>
+        <span class=${"badge " + (TYPE[x.type] || "")}>${x.type}</span><a href=${"#/package/" + x.package}>${x.package}</a><span class="v">${VERB[x.kind] || x.kind}</span><time class="mut3">${since(x.ts)}</time></li>`)}</ul>`}</aside>`;
+}
+
+const catClass = (n) => ["a", "b", "c", "d", "e", "f"][n] || "x";
 function Home() {
   const [q, setQ] = useState("");
   const m = useLoad(() => api("/meta"), []);
   const top = useLoad(() => api("/packages?sort=downloads&per_page=6"), []);
-  const o = (m.d && m.d.overview) || {};
-  return html`<div>
-    <section class="hero"><h1>Everything your AI<br/>needs. One hub.</h1>
-      <p class="lead">Discover, install and manage skills, agents and MCP servers for Claude Code, Codex and OpenCode.</p>
-      <form class="search" style="margin-top:32px;max-width:520px;margin-inline:auto" onSubmit=${(e) => { e.preventDefault(); nav("/browse?q=" + encodeURIComponent(q)); }}>
-        <${Search} value=${q} onInput=${setQ} /></form></section>
-    <div class="card stats"><div class="stat"><b>${fmt(o.packages)}</b><span>Packages</span></div><div class="stat"><b>${fmt(o.versions)}</b><span>Releases</span></div>
-      <div class="stat"><b>${fmt(o.downloads)}</b><span>Downloads</span></div><div class="stat"><b>${fmt(o.users)}</b><span>People</span></div></div>
-    <div class="gap row"><h2>Popular</h2><span class="sp"></span><a href="#/browse">See all</a></div>
-    <div style="margin-top:20px">${top.loading ? html`<${Skels} n=3 />` : top.e ? html`<${Err} e=${top.e} />` :
-      top.d.items.length ? html`<div class="grid">${top.d.items.map((p) => html`<${Pkg} p=${p} key=${p.name} />`)}</div>` :
-      html`<${Empty} t="Nothing here yet" d="Publish the first package with aihub dev publish." />`}</div></div>`;
+  const recent = useLoad(() => api("/packages?sort=updated&per_page=8"), []);
+  const f = useLoad(() => api("/facets"), []);
+  const o = (m.d && m.d.overview) || {}; const cats = (f.d && f.d.categories) || [];
+  const names = ((top.d && top.d.items) || []).map((p) => p.name);
+  useReveal();
+  return html`<div class="home">
+    <section class="hero"><div class="hero-copy"><h1>Install what your AI needs.</h1>
+      <p class="lead">Find skills, agents and MCP servers for Claude Code, Codex and OpenCode, then install them with one command.</p>
+      <form class="search" onSubmit=${(e) => { e.preventDefault(); nav("/browse?q=" + encodeURIComponent(q)); }}><${Search} value=${q} onInput=${setQ} /></form>
+      <div class="cmd hero-cmd"><code>aihub install <${Typer} words=${names} /></code><button class="btn sec sm" onClick=${() => { const t = document.querySelector(".typed"); copy("aihub install " + ((t && t.dataset.full) || "<package>")); }}>Copy</button></div></div>
+      <${Activity} /></section>
+    <div class="stats3 rv"><div class="stat"><b><${Count} to=${o.packages} /></b><span>Packages</span></div><div class="stat"><b><${Count} to=${o.versions} /></b><span>Releases</span></div>
+      <div class="stat"><b><${Count} to=${o.downloads} /></b><span>Downloads</span></div><div class="stat"><b><${Count} to=${o.users} /></b><span>People</span></div></div>
+    <div class="gap rv"><h2>Browse by category</h2></div>
+    ${f.loading && !f.d ? html`<div class="bento"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>` : html`<div class="bento">${cats.map((c, n) => html`<a key=${c.id} href=${"#/browse?category=" + c.id} class=${"tile spot rv t-" + catClass(n)} style=${"--d:" + n * 70 + "ms"}>
+      <div class="tile-in"><h3>${c.label}</h3><p>${c.desc}</p></div><span class="tile-n"><b>${c.count}</b> ${c.count === 1 ? "package" : "packages"}</span></a>`)}</div>`}
+    <div class="gap row rv"><h2>Popular</h2><span class="sp"></span><a href="#/browse?sort=downloads">See all</a></div>
+    <div style="margin-top:20px">${top.loading && !top.d ? html`<${Skels} n=3 />` : top.e ? html`<${Err} e=${top.e} />` :
+      top.d.items.length ? html`<div class="grid">${top.d.items.map((p, i) => html`<${Pkg} p=${p} i=${i} key=${p.name} />`)}</div>` :
+      html`<${Empty} t="Nothing here yet" d="Publish the first package with aihub dev publish." />`}</div>
+    ${recent.d && recent.d.items.length ? html`<div class="gap rv"><h2>Recently updated</h2></div>
+      <div class="strip rv">${recent.d.items.map((p) => html`<a class="chip-pkg spot" key=${p.name} href=${"#/package/" + p.name}><b>${p.name}</b><span>v${p.latest_version || "-"} / ${ago(p.updated)}</span></a>`)}</div>` : null}</div>`;
 }
 
 function Browse() {
   const qs = new URLSearchParams((store.route.split("?")[1]) || "");
-  const [q, setQ] = useState(qs.get("q") || ""); const [type, setType] = useState(""); const [sort, setSort] = useState(""); const [page, setPage] = useState(1);
-  const dq = debounced(q); useEffect(() => setPage(1), [dq, type, sort]);
+  const [q, setQ] = useState(qs.get("q") || ""); const [type, setType] = useState(qs.get("type") || ""); const [sort, setSort] = useState(qs.get("sort") || "");
+  const [cat, setCat] = useState(qs.get("category") || ""); const [tag, setTag] = useState(qs.get("tag") || ""); const [page, setPage] = useState(1);
+  const dq = debounced(q); useEffect(() => setPage(1), [dq, type, sort, cat, tag]);
+  // keep the address bar in sync without remounting the page (replaceState fires no hashchange)
+  useEffect(() => { const p = new URLSearchParams(); [["q", dq], ["category", cat], ["type", type], ["tag", tag], ["sort", sort]].forEach(([k, v]) => v && p.set(k, v)); const s = p.toString(); history.replaceState(null, "", "#/browse" + (s ? "?" + s : "")); }, [dq, cat, type, tag, sort]);
   const f = useLoad(() => api("/facets"), []);
-  const r = useLoad(() => api(`/packages?q=${encodeURIComponent(dq)}&type=${type}&sort=${sort}&page=${page}&per_page=18`), [dq, type, sort, page]);
-  const types = ["", ...Object.keys((f.d && f.d.types) || {})];
+  const r = useLoad(() => api(`/packages?q=${encodeURIComponent(dq)}&type=${type}&sort=${sort}&category=${cat}&tag=${encodeURIComponent(tag)}&page=${page}&per_page=18`), [dq, type, sort, cat, tag, page]);
+  const types = ["", ...Object.keys((f.d && f.d.types) || {})]; const cats = (f.d && f.d.categories) || [];
+  const clear = () => { setQ(""); setType(""); setCat(""); setTag(""); };
+  useReveal();
   return html`<div class="stack"><h1>Browse</h1><${Search} value=${q} onInput=${setQ} />
-    <div class="row"><div class="seg" role="tablist">${types.map((t) => html`<button key=${t} class=${type === t ? "on" : ""} onClick=${() => setType(t)}>${t || "All"}</button>`)}</div>
+    <div class="chips" role="group" aria-label="Categories"><button class=${"chip " + (cat === "" ? "on" : "")} onClick=${() => setCat("")}>All</button>
+      ${cats.map((c) => html`<button key=${c.id} class=${"chip " + (cat === c.id ? "on" : "")} onClick=${() => setCat(c.id)}>${c.label} <i>${c.count}</i></button>`)}
+      ${tag && html`<button class="chip on" onClick=${() => setTag("")} title="Remove tag filter">#${tag} x</button>`}</div>
+    <div class="row"><div class="seg" role="tablist">${types.map((t) => html`<button key=${t} class=${type === t ? "on" : ""} onClick=${() => setType(t)}>${t || "All types"}</button>`)}</div>
       <span class="sp"></span><select class="field" aria-label="Sort" value=${sort} onChange=${(e) => setSort(e.target.value)}>
       <option value="">${dq ? "Relevance" : "Recently updated"}</option><option value="downloads">Most downloaded</option><option value="rating">Best reviewed</option><option value="reviews">Most reviewed</option><option value="name">Name</option><option value="created">Newest</option></select></div>
-    ${r.loading ? html`<${Skels} />` : r.e ? html`<${Err} e=${r.e} />` : !r.d.items.length ? html`<${Empty} t="No results" d=${dq ? `Nothing matches “${dq}”.` : "No packages yet."} />` :
-      html`<div class="grid">${r.d.items.map((p) => html`<${Pkg} p=${p} key=${p.name} />`)}</div>
+    ${r.e ? html`<${Err} e=${r.e} />` : !r.d ? html`<${Skels} />` : !r.d.items.length ? html`<div class="empty"><h3>No results</h3><p>${dq ? `Nothing matches “${dq}”.` : "No packages match these filters."}</p><button class="btn sec sm" style="margin-top:14px" onClick=${clear}>Clear filters</button></div>` :
+      html`<div class=${"grid results " + (r.loading ? "busy" : "")}>${r.d.items.map((p, i) => html`<${Pkg} p=${p} i=${i} key=${p.name} />`)}</div>
       <div class="row" style="justify-content:center;margin-top:24px"><button class="btn sec sm" disabled=${page <= 1} onClick=${() => setPage(page - 1)}>Previous</button>
-        <span class="mut sm">${r.d.total} results · page ${page}</span><button class="btn sec sm" disabled=${page * r.d.per_page >= r.d.total} onClick=${() => setPage(page + 1)}>Next</button></div>`}</div>`;
+        <span class="mut sm">${r.d.total} results, page ${page}</span><button class="btn sec sm" disabled=${page * r.d.per_page >= r.d.total} onClick=${() => setPage(page + 1)}>Next</button></div>`}</div>`;
+}
+
+function Related({ name }) {
+  const r = useLoad(() => api(`/packages/${name}/related`), [name]);
+  useReveal();
+  if (!r.d || !r.d.items.length) return null;
+  return html`<section class="rv related"><h2 class="gap">Related</h2><div class="grid" style="margin-top:20px">${r.d.items.map((p, i) => html`<${Pkg} p=${p} i=${i} key=${p.name} />`)}</div></section>`;
 }
 
 function Package({ name }) {
@@ -97,29 +181,32 @@ function Package({ name }) {
   const d = p.d, req = d.requires || {};
   const dl = async (v) => {
     try {
-      const r = await fetch(`/api/v1/packages/${d.name}/versions/${v.version}/download`, { headers: tok() ? { Authorization: "Bearer " + tok() } : {} });
+      // ask for a short-lived signed link, then let the browser stream it to disk (no whole-file buffering, native resume)
+      const r = await fetch(`/api/v1/packages/${d.name}/versions/${v.version}/download-link`, { method: "POST", headers: tok() ? { Authorization: "Bearer " + tok() } : {} });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-      saveBlob(await r.blob(), ((r.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/) || [])[1] || `${d.name}-${v.version}`); setTick((t) => t + 1);
+      const a = document.createElement("a"); a.href = (await r.json()).url; a.download = ""; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => setTick((t) => t + 1), 1500);
     } catch (e) { toast(e.message, true); }
   };
   return html`<div class="stack">
     <div class="row"><h1>${d.name}</h1><span class=${"badge " + (TYPE[d.type] || "")}>${d.type}</span></div>
     <p class="lead">${d.description}</p>
     <div class="row mut sm">${d.visibility === "private" && html`<span class="badge orange">private</span>`}<span>v${d.latest_version}</span><span>·</span><span>↓ ${fmt(d.downloads)}</span><${Stars} r=${d.rating.avg} /><span>· updated ${ago(d.updated)}</span>
-      ${d.tags.map((t) => html`<span class="badge" key=${t}>${t}</span>`)}</div>
+      ${d.tags.map((t) => html`<a class="badge tag" key=${t} href=${"#/browse?tag=" + encodeURIComponent(t)}>${t}</a>`)}</div>
     <${Cmd} text=${"aihub install " + d.name} />
     <div class="seg">${["Overview", "Install", "Versions", "Usage", "Reviews", ...(d.access === "admin" ? ["Sharing"] : [])].map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} onClick=${() => setTab(t)}>${t}</button>`)}</div>
     ${tab === "Overview" && html`<${Readme} name=${name} />`}
     ${tab === "Install" && html`<div class="list">
       <div class="li"><div class="t"><b>Command</b><span class="mono">aihub install ${d.name}</span></div></div>
-      <div class="li"><div class="t"><b>Required commands</b><span>${(req.commands || []).length ? (req.commands || []).map((c) => (c.name || c) + (c.hint ? ` — ${c.hint}` : "")).join(" · ") : "None"}</span></div></div>
+      <div class="li"><div class="t"><b>Required commands</b><span>${(req.commands || []).length ? (req.commands || []).map((c) => (c.name || c) + (c.hint ? ` - ${c.hint}` : "")).join(" · ") : "None"}</span></div></div>
       <div class="li"><div class="t"><b>Depends on</b><span>${(req.packages || []).length ? (req.packages || []).map((x) => html`<a href=${"#/package/" + x.split(/[<>=!~]/)[0]} style="margin-right:10px">${x}</a>`) : "No other packages"}</span></div></div>
       <div class="li"><div class="t"><b>Supported systems</b><span>${(req.os || []).length ? req.os.join(", ") : "All"}</span></div></div></div>`}
     ${tab === "Versions" && html`<div class="list tscroll"><table><thead><tr><th>Version</th><th>Released</th><th>Size</th><th>Downloads</th><th>SHA-256</th>${meta.allow_source_download ? html`<th></th>` : null}</tr></thead><tbody>
       ${d.versions.map((v) => html`<tr key=${v.version}><td>${v.version} ${v.yanked ? html`<span class="badge red">yanked</span>` : ""}</td><td>${ago(v.created)}</td><td>${(v.size / 1024).toFixed(1)} KB</td><td>${fmt(v.downloads)}</td><td class="mono">${v.sha256.slice(0, 12)}</td>${meta.allow_source_download ? html`<td><button class="btn sec sm" onClick=${() => dl(v)}>Download</button></td>` : null}</tr>`)}</tbody></table></div>`}
     ${tab === "Usage" && html`<${Usage} name=${name} />`}
     ${tab === "Sharing" && html`<${Sharing} name=${name} pkg=${d} onChange=${() => setTick(tick + 1)} />`}
-    ${tab === "Reviews" && html`<${Reviews} name=${name} me=${me} onDone=${() => setTick(tick + 1)} />`}</div>`;
+    ${tab === "Reviews" && html`<${Reviews} name=${name} me=${me} onDone=${() => setTick(tick + 1)} />`}
+    <${Related} name=${name} /></div>`;
 }
 
 function PrincipalPicker({ onPick, exclude = [], ph = "Add a person or group…" }) {
@@ -224,7 +311,7 @@ function Start() {
 function Auth({ mode }) {
   const [u, setU] = useState(""); const [p, setP] = useState(""); const [e, setE] = useState(""); const [busy, setBusy] = useState(false); const reg = mode === "register";
   const go = async (ev) => { ev.preventDefault(); setBusy(true); setE("");
-    try { if (reg) { const r = await api("/auth/register", { method: "POST", body: { username: u, password: p } }); if (r.status === "pending") { toast("Account created — awaiting admin approval"); return nav("/login"); } }
+    try { if (reg) { const r = await api("/auth/register", { method: "POST", body: { username: u, password: p } }); if (r.status === "pending") { toast("Account created - awaiting admin approval"); return nav("/login"); } }
       const r = await api("/auth/login", { method: "POST", body: { username: u, password: p } }); localStorage.setItem("aihub_token", r.token); await loadMe(); nav("/"); }
     catch (x) { setE(x.message); } finally { setBusy(false); } };
   return html`<form class="form" onSubmit=${go}><h2>${reg ? "Create your account" : "Sign in"}</h2>
@@ -267,7 +354,7 @@ function PasswordCard() {
   const strength = f.nw.length >= 12 ? 3 : f.nw.length >= 8 ? 2 : f.nw.length >= 6 ? 1 : 0;
   const submit = async (e) => { e.preventDefault(); setErr("");
     if (f.nw !== f.again) return setErr("The new passwords don’t match.");
-    setBusy(true); try { await api("/auth/password", { method: "POST", body: { old: f.old, new: f.nw } }); setF({ old: "", nw: "", again: "" }); toast("Password changed — other devices were signed out"); }
+    setBusy(true); try { await api("/auth/password", { method: "POST", body: { old: f.old, new: f.nw } }); setF({ old: "", nw: "", again: "" }); toast("Password changed - other devices were signed out"); }
     catch (x) { setErr(x.message); } finally { setBusy(false); } };
   return html`<form class="card stack" onSubmit=${submit}>
     <input type="text" autocomplete="username" value=${store.me && store.me.username} hidden readonly />
@@ -291,7 +378,7 @@ function Account() {
     <h2 class="gap">Password</h2><${PasswordCard} />
     <h2 class="gap">API tokens</h2><p class="mut">For CI or scripts. <code>aihub login</code> creates one automatically.</p>
     <div class="row"><input class="field" style="flex:1;min-width:200px" placeholder="Token name" value=${name} onInput=${(e) => setName(e.target.value)} /><button class="btn" onClick=${mk}>Create token</button></div>
-    ${fresh && html`<div class="card stack"><b>Copy your token now — it won’t be shown again.</b><${Cmd} text=${fresh} /></div>`}
+    ${fresh && html`<div class="card stack"><b>Copy your token now - it won’t be shown again.</b><${Cmd} text=${fresh} /></div>`}
     ${t.d && t.d.tokens.length ? html`<div class="list">${t.d.tokens.map((k) => html`<div class="li" key=${k.id}><div class="t"><b>${k.name || k.kind}</b><span>${k.kind} · created ${ago(k.created)}</span></div><button class="btn danger sm" onClick=${() => rm(k.id)}>Revoke</button></div>`)}</div>` : null}
     <h2 class="gap">My packages</h2>${mine.d && mine.d.packages.length ? html`<div class="list">${mine.d.packages.map((x) => html`<a class="li" href=${"#/package/" + x.name} key=${x.name}><div class="t"><b>${x.name}</b><span>${x.type} · v${x.latest_version}</span></div></a>`)}</div>` : html`<p class="mut">You haven’t published anything yet.</p>`}</div>`;
 }
@@ -334,11 +421,11 @@ function BatchImport({ roles, done }) {
       const blob = await r.blob(); saveBlob(blob, "new-accounts.csv"); setRes({ created: +r.headers.get("X-Created"), skipped: +r.headers.get("X-Skipped") }); done();
     } catch (e) { toast(e.message, 1); } finally { setBusy(false); } };
   return html`<div class="card stack"><h3>Create accounts in bulk</h3>
-    <p class="mut sm">Upload a <b>.csv</b> or <b>.xlsx</b> with a header row. Columns (any order): <code>username</code> (required), <code>display_name</code>, <code>title</code>, <code>role</code>, <code>group</code>. Put several groups in one cell separated by <code>;</code> or <code>,</code>. Groups must already exist — a row naming an unknown group is skipped and reported. Without a header row it reads <code>username, role</code>. The default role below is used when the role cell is empty. Passwords are generated for you and returned as a downloadable sheet — <b>this is the only time they are shown</b>. Up to 300 accounts per upload.</p>
+    <p class="mut sm">Upload a <b>.csv</b> or <b>.xlsx</b> with a header row. Columns (any order): <code>username</code> (required), <code>display_name</code>, <code>title</code>, <code>role</code>, <code>group</code>. Put several groups in one cell separated by <code>;</code> or <code>,</code>. Groups must already exist - a row naming an unknown group is skipped and reported. Without a header row it reads <code>username, role</code>. The default role below is used when the role cell is empty. Passwords are generated for you and returned as a downloadable sheet - <b>this is the only time they are shown</b>. Up to 300 accounts per upload.</p>
     <div class="row"><input type="file" class="field" style="padding:9px" accept=".csv,.tsv,.txt,.xlsx" onChange=${(e) => setFile(e.target.files[0] || null)} aria-label="Spreadsheet file" />
       <label class="sm mut">Default role <select class="field" value=${role} onChange=${(e) => setRole(e.target.value)}>${roles.map((r) => html`<option value=${r} key=${r} selected=${r === role}>${r}</option>`)}</select></label>
       <button class="btn sec sm" onClick=${tpl}>Download template</button><span class="sp"></span><button class="btn" disabled=${!file || busy} onClick=${go}>${busy ? "Creating…" : "Create & download passwords"}</button></div>
-    ${res && html`<div class="row"><span class="badge green">${res.created} created</span>${res.skipped ? html`<span class="badge orange">${res.skipped} skipped — see the “status” column in the sheet</span>` : null}<span class="xs mut3">Keep the sheet safe and delete it after sharing passwords.</span></div>`}</div>`;
+    ${res && html`<div class="row"><span class="badge green">${res.created} created</span>${res.skipped ? html`<span class="badge orange">${res.skipped} skipped - see the “status” column in the sheet</span>` : null}<span class="xs mut3">Keep the sheet safe and delete it after sharing passwords.</span></div>`}</div>`;
 }
 function Roles({ tick, bump }) {
   const d = useLoad(() => api("/admin/roles"), [tick]); const [nn, setNn] = useState(""); const [nd, setNd] = useState("");
@@ -346,7 +433,7 @@ function Roles({ tick, bump }) {
   const roles = d.d.detail, perms = d.d.permissions;
   const toggle = async (r, p) => { const cur = new Set(r.permissions); cur.has(p) ? cur.delete(p) : cur.add(p);
     try { await api("/admin/roles/" + r.name, { method: "PUT", body: { permissions: [...cur] } }); bump(); } catch (e) { toast(e.message, 1); } };
-  const create = async () => { try { await api("/admin/roles", { method: "POST", body: { name: nn, description: nd, permissions: [] } }); setNn(""); setNd(""); toast("Role created — now grant it permissions"); bump(); } catch (e) { toast(e.message, 1); } };
+  const create = async () => { try { await api("/admin/roles", { method: "POST", body: { name: nn, description: nd, permissions: [] } }); setNn(""); setNd(""); toast("Role created - now grant it permissions"); bump(); } catch (e) { toast(e.message, 1); } };
   const del = async (r) => { try { await api("/admin/roles/" + r.name, { method: "DELETE" }); toast("Role deleted"); bump(); } catch (e) { toast(e.message, 1); } };
   return html`<div class="stack"><p class="mut">Tick what each role may do. Changes apply immediately. The <code>admin</code> role always keeps full access.</p>
     <div class="list tscroll"><table class="matrix"><thead><tr><th>Permission</th>${roles.map((r) => html`<th key=${r.name} style="text-align:center"><div>${r.name}</div><div class="xs mut3" style="font-weight:400">${r.users} ${r.users === 1 ? "person" : "people"}</div></th>`)}</tr></thead><tbody>
@@ -388,7 +475,7 @@ function Groups() {
   const manageable = (g) => g.can_manage;
   return html`<div class="stack"><h1>Groups</h1><p class="lead">${c.is_admin ? "All groups on this hub." : "Groups you own or belong to."} Share repositories with a group and every member gets access.</p>
     <div class="two" style="align-items:start"><div class="stack"><div class="list">${d.d.groups.length ? d.d.groups.map((g) => html`<button class="li pick" key=${g.name} onClick=${() => setSel(g.name)} style=${sel === g.name ? "background:var(--fill)" : ""}><span class="av" style="width:36px;height:36px;background:var(--fg-3)">👥</span><div class="t"><b>${g.name}</b><span>${g.members} ${g.members === 1 ? "member" : "members"} · ${g.packages} shared ${g.packages === 1 ? "repo" : "repos"}${manageable(g) ? "" : " · member"}</span></div></button>`)
-        : html`<div class="li mut">${c.can_create ? "No groups yet — create your first one." : "You’re not in any groups."}</div>`}</div>
+        : html`<div class="li mut">${c.can_create ? "No groups yet - create your first one." : "You’re not in any groups."}</div>`}</div>
       ${c.can_create && html`<div class="card stack"><h3>New group</h3><input class="field" placeholder="name, e.g. data-team" value=${nn} onInput=${(e) => setNn(e.target.value)} /><input class="field" placeholder="Description (optional)" value=${nd} onInput=${(e) => setNd(e.target.value)} />
         <button class="btn" disabled=${!nn.trim()} onClick=${create}>Create group</button></div>`}</div>
       ${sel ? html`<${GroupDetail} name=${sel} key=${sel} bump=${bump} onGone=${() => setSel(null)} />` : html`<${Empty} t="Select a group" d="Pick a group to see its members." />`}</div></div>`;
@@ -519,15 +606,20 @@ function Dashboard() {
 function App() {
   const s = useStore(); const path = s.route.split("?")[0], seg = path.split("/").filter(Boolean);
   useEffect(() => { loadMe(); }, []);
+  const lk = useRef(), ind = useRef();
+  const place = () => { const n = lk.current, i = ind.current; if (!n || !i) return; const a = n.querySelector("a.on"); if (!a) { i.style.opacity = 0; return; } i.style.opacity = 1; i.style.transform = `translateX(${a.offsetLeft}px) scaleX(${a.offsetWidth})`; };
+  useEffect(() => { place(); }, [path]);
+  useEffect(() => { addEventListener("resize", place); return () => removeEventListener("resize", place); }, []);
   const logout = async () => { try { await api("/auth/logout", { method: "POST" }); } catch {} try { localStorage.removeItem("aihub_token"); } catch {} set({ me: null }); nav("/"); };
   const on = (k) => (seg[0] === k ? "on" : "");
   const page = { "": html`<${Home} />`, browse: html`<${Browse} key=${s.route} />`, package: html`<${Package} name=${seg[1]} key=${seg[1]} />`, rankings: html`<${Rankings} />`, docs: html`<${Docs} slug=${seg[1]} key=${seg[1]} />`, start: html`<${Start} />`,
     login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, dashboard: html`<${Dashboard} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
   return html`<div><header class="nav"><div class="nav-in"><a class="brand" href="#/">AI Hub</a>
-    <nav class="links" aria-label="Main"><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
+    <nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
     <div class="r">${s.me ? html`<a href="#/account" class="me-link"><${Avatar} p=${s.me} size=${24} /><span>${shown(s.me)}</span></a>${s.showGroups ? html`<a class=${on("groups")} href="#/groups">Groups</a>` : ""}${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}${can("audit") ? html`<a class=${on("audit")} href="#/audit">Audit</a>` : ""}${can("admin") || can("reset_password") ? html`<a href="#/admin">Admin</a>` : ""}<a href="#/" onClick=${logout}>Sign out</a>` :
       html`<a href="#/login">Sign in</a>`}</div></div></header>
-    <main>${page}</main><footer class="foot">AI Hub · internal registry for AI tooling</footer>
+    <main><div class="page" key=${path}>${page}</div></main>
+    <footer class="foot"><b>AI Hub</b><span>Skills, agents and MCP servers for your team.</span><nav aria-label="Footer"><a href="#/browse">Browse</a><a href="#/rankings">Rankings</a><a href="#/start">Get started</a><a href="#/docs">Docs</a></nav></footer>
     ${s.toast && html`<div class=${"toast " + (s.toast.err ? "err" : "")} role="status">${s.toast.m}</div>`}</div>`;
 }
 render(html`<${App} />`, document.getElementById("app"));

@@ -1,5 +1,6 @@
 import json
 import os
+from typing import Optional
 import re
 import tempfile
 import time
@@ -17,8 +18,12 @@ from pydantic import BaseModel
 
 from ..core import archive, manifest as M, naming, redact, version as V
 from . import image, markdown, sheet
+from .categories import category_of
 from .db import ALL_PERMS
 from .deps import can_develop, can_manage, current_user, require_any, require_perm, require_user, viewer_of
+from .uploads import UploadError
+from . import signed_link
+from .ranged import stream_file
 from .security import hash_password, hash_token, new_token, verify_password
 
 r = APIRouter(prefix="/api/v1")
@@ -220,6 +225,7 @@ def _ser(request, p, detail=False):
     live = [v for v in vs if not v["yanked"]]
     out = {k: p[k] for k in ("name", "type", "description", "tags", "latest_version", "hidden", "visibility", "updated")}
     out["downloads"] = sum(v["downloads"] for v in vs)
+    out["category"] = category_of(p["tags"], p["type"])
     out["rating"] = repos.rating(p["id"])
     if detail:
         lm = next((v["manifest"] for v in live), {})
@@ -262,18 +268,18 @@ def _cache_scope(v):
 
 
 @r.get("/packages")
-def packages(request: Request, q: str = "", type: str = None, tag: str = None, sort: str = "",
+def packages(request: Request, q: str = "", type: str = None, tag: str = None, sort: str = "", category: str = None,
              page: int = 1, per_page: int = 20, mine: bool = False, u=Depends(current_user)):
     need_login_unless(request, u, "public_browse")
     if sort not in ("", "relevance", "updated", "created", "name", "downloads", "rating", "reviews"):
         raise HTTPException(400, "sort must be one of: relevance, updated, created, name, downloads, rating, reviews")
     v = viewer(request, u)
     per_page = min(max(per_page, 1), 100)
-    key = "pkg:list:%s:%s|%s|%s|%s|%s|%s|%s" % (_cache_scope(v), q, type, tag, sort, page, per_page, mine)
+    key = "pkg:list:%s:%s|%s|%s|%s|%s|%s|%s|%s" % (_cache_scope(v), q, type, tag, sort, page, per_page, mine, category)
     hit = C(request).get(key)
     if hit:
         return hit
-    total, rows = R(request).packages(q, type, tag, sort, page, per_page, viewer=v, mine=mine)
+    total, rows = R(request).packages(q, type, tag, sort, page, per_page, viewer=v, mine=mine, category=category)
     res = {"total": total, "page": page, "per_page": per_page, "items": [_ser(request, p) for p in rows]}
     C(request).set(key, res, TTL)
     return res
@@ -314,6 +320,39 @@ def package(name: str, request: Request, u=Depends(current_user)):
     return out
 
 
+@r.get("/packages/{name}/related")
+def related(name: str, request: Request, u=Depends(current_user)):
+    need_login_unless(request, u, "public_browse")
+    p = _pkg_or_404(request, name, u)
+    v = viewer(request, u)
+    key = "pkg:related:%s:%s" % (_cache_scope(v), p["name"])
+    hit = C(request).get(key)
+    if hit:
+        return hit
+    items = []
+    for n in R(request).related(p["name"], v):
+        q = R(request).package(n)
+        if q:
+            items.append(_ser(request, q))
+    res = {"items": items}
+    C(request).set(key, res, TTL)
+    return res
+
+
+@r.get("/activity")
+def activity(request: Request, u=Depends(current_user)):
+    """Anonymised recent install/use/update feed for the home page. No usernames or client ids ever leave this endpoint."""
+    need_login_unless(request, u, "public_browse")
+    v = viewer(request, u)
+    key = "pkg:activity:" + _cache_scope(v)
+    hit = C(request).get(key)
+    if hit:
+        return hit
+    res = {"items": R(request).recent_activity(v, 15)}
+    C(request).set(key, res, 5)
+    return res
+
+
 @r.get("/packages/{name}/versions")
 def versions(name: str, request: Request, u=Depends(current_user)):
     need_login_unless(request, u, "public_browse")
@@ -349,22 +388,58 @@ def resolve(name: str, request: Request, spec: str = "", u=Depends(current_user)
     raise HTTPException(404, "no matching version")
 
 
-@r.get("/packages/{name}/versions/{version}/download")
-def download_version(name: str, version: str, request: Request, u=Depends(current_user)):
-    """Browser download of one version's archive. Turned off by the `allow_source_download` setting; `aihub install` is unaffected."""
+def _version_for_download(request, name, version, u):
+    """Shared gate for the browser download and its signed link: setting, sign-in policy, visibility, existence."""
     if setting(request, "allow_source_download") != "1":
         raise HTTPException(403, "source download is turned off by the administrator")
     need_login_unless(request, u, "public_install")
     p = _pkg_or_404(request, name, u)
     v = next((x for x in R(request).versions(p["id"]) if x["version"] == version), None)
-    st = request.app.state.storage
-    if not v or not st.exists(p["name"], v["file"]):
+    if not v or not request.app.state.storage.exists(p["name"], v["file"]):
         raise HTTPException(404, "version not found")
-    R(request).version_download(p["id"], v["version"])
+    return p, v
+
+
+def _serve_version(request, p, v):
+    st = request.app.state.storage
+    size = st.size(p["name"], v["file"])
+    hdr = {"X-Content-Type-Options": "nosniff", "Content-Disposition": 'attachment; filename="%s"' % os.path.basename(v["file"])}
+    rng = request.headers.get("range")
+    if not rng or rng.strip().startswith("bytes=0-"):        # count a download once, not once per resumed piece
+        R(request).version_download(p["id"], v["version"])
     f = st.open(p["name"], v["file"])
+    if hasattr(f, "seek"):                                   # local storage: Range support, so big downloads can resume
+        return stream_file(f, size, rng, hdr)
     return StreamingResponse(iter(lambda: f.read(1 << 20), b""), media_type="application/octet-stream", background=BackgroundTask(f.close),
-                             headers={"Content-Length": str(st.size(p["name"], v["file"])), "X-Content-Type-Options": "nosniff",
-                                      "Content-Disposition": 'attachment; filename="%s"' % os.path.basename(v["file"])})
+                             headers=dict(hdr, **{"Content-Length": str(size)}))
+
+
+@r.get("/packages/{name}/versions/{version}/download")
+def download_version(name: str, version: str, request: Request, u=Depends(current_user)):
+    """Download one version's archive with an Authorization header (scripts, curl). Browsers use the signed link below."""
+    p, v = _version_for_download(request, name, version, u)
+    return _serve_version(request, p, v)
+
+
+@r.post("/packages/{name}/versions/{version}/download-link")
+def download_link(name: str, version: str, request: Request, u=Depends(current_user)):
+    """A 2-minute signed URL for exactly this archive. The web UI points the browser at it, so the file streams straight
+    to disk (with the browser's own pause/resume) instead of being held in page memory, and no token goes in the URL."""
+    p, v = _version_for_download(request, name, version, u)
+    return {"url": "/api/v1/dl/" + signed_link.make(request.app.state.settings.data_dir, p["name"], v["version"]), "expires_in": signed_link.TTL}
+
+
+@r.get("/dl/{token}")
+def download_signed(token: str, request: Request):
+    nv = signed_link.check(request.app.state.settings.data_dir, token)
+    if not nv:
+        raise HTTPException(403, "download link expired or invalid; reload the page and try again")
+    name, version = nv
+    p = R(request).package(name)
+    v = p and next((x for x in R(request).versions(p["id"]) if x["version"] == version), None)
+    if not v or not request.app.state.storage.exists(p["name"], v["file"]):
+        raise HTTPException(404, "version not found")
+    return _serve_version(request, p, v)
 
 
 @r.patch("/packages/{name}")
@@ -430,11 +505,59 @@ def access_delete(name: str, ptype: str, pname: str, request: Request, u=Depends
 
 
 # ---------------- publish
+def _publish_file(request, u, tmp, ext, size, fallback_manifest, visibility):
+    """Validate and store an archive that is already on disk at `tmp` (consumed on success). Shared by /upload and chunked uploads."""
+    raw = archive.read_member(tmp, "aihub.toml")
+    if raw is None:
+        if not fallback_manifest:
+            raise HTTPException(400, "aihub.toml not found in archive")
+        m = M.normalize(json.loads(fallback_manifest) if isinstance(fallback_manifest, str) else fallback_manifest)
+    else:
+        try:
+            m = M.parse(raw.decode())
+        except (ValueError, KeyError) as e:
+            raise HTTPException(400, "invalid manifest: %s" % e)
+    pk = m["package"]
+    repos = R(request)
+    existing = repos.package(pk["name"])
+    if existing and not can_develop(repos, u, existing):
+        # a package the caller can't even see must not reveal that it exists
+        if repos.access_level(existing["id"], viewer(request, u)) is None:
+            raise HTTPException(409, "package name is not available")
+        raise HTTPException(403, "you need develop access to publish to " + pk["name"])
+    if existing and any(v["version"] == pk["version"] for v in repos.versions(existing["id"])):
+        raise HTTPException(409, "version already exists (immutable)")
+    try:
+        rd = (archive.read_member(tmp, pk["readme"]) or b"").decode("utf-8", "replace")
+    except Exception:
+        rd = ""
+    vis = visibility or setting(request, "default_visibility")
+    if vis not in ("public", "private"):
+        raise HTTPException(400, "visibility must be public or private")
+    if vis == "private" and not existing and setting(request, "allow_private") != "1" and "admin" not in repos.perms(u["role"]):
+        vis = "public"
+    pid = repos.package_upsert(pk["name"], pk["type"], pk["description"], pk["tags"], rd, visibility=None if existing else vis)
+    if not existing:
+        repos.maintainer_add(pid, u["id"], "owner")   # the creator is the repo admin by default
+    sha = archive.sha256_file(tmp)
+    stored = "%s-%s%s" % (pk["name"], pk["version"], ext)
+    request.app.state.storage.put(pk["name"], stored, tmp)
+    repos.version_add(pid, pk["version"], stored, sha, size, m)
+    repos.audit(u["username"], "upload", pk["name"], pk["version"])
+    C(request).invalidate("pkg")
+    return {"name": pk["name"], "version": pk["version"], "sha256": sha}
+
+
+def _ext(fname):
+    return ".whl" if fname.endswith(".whl") else ".zip" if fname.endswith(".zip") else ".tar.gz"
+
+
 @r.post("/upload")
 async def upload(request: Request, u=Depends(require_perm("publish"))):
+    """Single-request upload. For hubs behind a body-size-capped proxy, clients use the chunked /uploads API instead."""
     s = request.app.state.settings
     fname = request.headers.get("x-aihub-filename", "pkg.tar.gz")
-    ext = ".whl" if fname.endswith(".whl") else ".zip" if fname.endswith(".zip") else ".tar.gz"
+    ext = _ext(fname)
     fd, tmp = tempfile.mkstemp(suffix=ext, dir=s.data_dir)
     size, limit = 0, upload_limit_mb(request) * 1024 * 1024
     try:
@@ -444,49 +567,88 @@ async def upload(request: Request, u=Depends(require_perm("publish"))):
                 if size > limit:
                     raise HTTPException(413, "upload too large")
                 f.write(chunk)
-        raw = archive.read_member(tmp, "aihub.toml")
-        if raw is None:
-            hdr = request.headers.get("x-aihub-manifest")
-            if not hdr:
-                raise HTTPException(400, "aihub.toml not found in archive")
-            m = M.normalize(json.loads(hdr))
-        else:
-            try:
-                m = M.parse(raw.decode())
-            except (ValueError, KeyError) as e:
-                raise HTTPException(400, "invalid manifest: %s" % e)
-        pk = m["package"]
-        repos = R(request)
-        existing = repos.package(pk["name"])
-        if existing and not can_develop(repos, u, existing):
-            # a package the caller can't even see must not reveal that it exists
-            if repos.access_level(existing["id"], viewer(request, u)) is None:
-                raise HTTPException(409, "package name is not available")
-            raise HTTPException(403, "you need develop access to publish to " + pk["name"])
-        if existing and any(v["version"] == pk["version"] for v in repos.versions(existing["id"])):
-            raise HTTPException(409, "version already exists (immutable)")
-        try:
-            rd = (archive.read_member(tmp, pk["readme"]) or b"").decode("utf-8", "replace")
-        except Exception:
-            rd = ""
-        vis = request.headers.get("x-aihub-visibility") or setting(request, "default_visibility")
-        if vis not in ("public", "private"):
-            raise HTTPException(400, "visibility must be public or private")
-        if vis == "private" and not existing and setting(request, "allow_private") != "1" and "admin" not in repos.perms(u["role"]):
-            vis = "public"
-        pid = repos.package_upsert(pk["name"], pk["type"], pk["description"], pk["tags"], rd, visibility=None if existing else vis)
-        if not existing:
-            repos.maintainer_add(pid, u["id"], "owner")   # the creator is the repo admin by default
-        sha = archive.sha256_file(tmp)
-        stored = "%s-%s%s" % (pk["name"], pk["version"], ext)
-        request.app.state.storage.put(pk["name"], stored, tmp)
-        repos.version_add(pid, pk["version"], stored, sha, size, m)
-        repos.audit(u["username"], "upload", pk["name"], pk["version"])
-        C(request).invalidate("pkg")
-        return {"name": pk["name"], "version": pk["version"], "sha256": sha}
+        return await run_in_threadpool(_publish_file, request, u, tmp, ext, size,
+                                       request.headers.get("x-aihub-manifest"), request.headers.get("x-aihub-visibility"))
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
+
+
+# ---------------- chunked, resumable upload (for reverse proxies that cap request bodies)
+class UploadInit(BaseModel):
+    filename: str
+    size: int
+    sha256: str
+    manifest: Optional[dict] = None
+    visibility: Optional[str] = None
+
+
+def _uploads(request):
+    return request.app.state.uploads
+
+
+def _up_err(e):
+    return HTTPException(e.code, e.msg)
+
+
+@r.post("/uploads")
+def upload_init(body: UploadInit, request: Request, u=Depends(require_perm("publish"))):
+    try:
+        uid, m = _uploads(request).create(u["id"], os.path.basename(body.filename), body.size, body.sha256.lower(),
+                                          upload_limit_mb(request) * 1024 * 1024, body.manifest, body.visibility)
+    except UploadError as e:
+        raise _up_err(e)
+    return {"upload_id": uid, "chunk_size": m["chunk_size"], "chunks": _uploads(request).count(m)}
+
+
+@r.get("/uploads/{uid}")
+def upload_status(uid: str, request: Request, u=Depends(require_perm("publish"))):
+    try:
+        m, got = _uploads(request).status(uid, u["id"])
+    except UploadError as e:
+        raise _up_err(e)
+    return {"upload_id": uid, "size": m["size"], "chunk_size": m["chunk_size"], "chunks": _uploads(request).count(m), "received": got}
+
+
+@r.put("/uploads/{uid}/chunks/{n}")
+async def upload_chunk(uid: str, n: int, request: Request, u=Depends(require_perm("publish"))):
+    st = _uploads(request)
+    cap = st.chunk_size
+    buf = bytearray()
+    async for part in request.stream():
+        buf += part
+        if len(buf) > cap:
+            raise HTTPException(413, "chunk larger than the %d bytes announced at init" % cap)
+    try:
+        await run_in_threadpool(st.put_chunk, uid, u["id"], n, bytes(buf), request.headers.get("x-chunk-sha256"))
+    except UploadError as e:
+        raise _up_err(e)
+    return {"ok": True, "chunk": n}
+
+
+@r.post("/uploads/{uid}/complete")
+async def upload_complete(uid: str, request: Request, u=Depends(require_perm("publish"))):
+    st = _uploads(request)
+    try:
+        tmp, m = await run_in_threadpool(st.assemble, uid, u["id"])
+    except UploadError as e:
+        raise _up_err(e)
+    try:
+        res = await run_in_threadpool(_publish_file, request, u, tmp, _ext(m["filename"]), m["size"], m["manifest"], m["visibility"])
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    st.abort(uid, u["id"])                      # chunks are no longer needed; a failed publish keeps them so the client can retry
+    return res
+
+
+@r.delete("/uploads/{uid}")
+def upload_abort(uid: str, request: Request, u=Depends(require_perm("publish"))):
+    try:
+        _uploads(request).abort(uid, u["id"])
+    except UploadError as e:
+        raise _up_err(e)
+    return {"ok": True}
 
 
 def _yank(request, name, version, flag, u):
@@ -698,7 +860,7 @@ SETTINGS = {
 
 # Numeric admin settings: key -> (min, max, label, help). The value in the database overrides the AIHUB_* environment default.
 NUMERIC_SETTINGS = {
-    "max_upload_mb": (1, 2048, "Upload size limit (MiB)", "Largest package archive a publisher can upload. Keep your reverse proxy's body limit at least this high"),
+    "max_upload_mb": (1, 2048, "Upload size limit (MiB)", "Largest package archive a publisher can upload. Large archives are sent in chunks (see AIHUB_UPLOAD_CHUNK_MB), so the proxy's body limit only needs to exceed the chunk size"),
 }
 
 

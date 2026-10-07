@@ -88,7 +88,7 @@ Usage events are queued in memory and flushed in batches every `AIHUB_EVENT_FLUS
 
 ## Nginx reverse proxy
 
-Terminate TLS at the proxy, preserve the external host and scheme headers, and set the request body limit to match `AIHUB_MAX_UPLOAD_MB`. The example below assumes the default 200 MiB limit. Replace both values together if you change the setting.
+Terminate TLS at the proxy, preserve the external host and scheme headers, and set the request body limit above `AIHUB_UPLOAD_CHUNK_MB` (default 8 MiB). The CLI sends large packages as resumable chunks of that size, so the proxy never needs to accept a body as large as the package itself. Plain `POST /upload` (small packages, older CLIs) is still limited by the proxy, so the example below keeps 200 MiB for them; lower it if you only serve current CLIs.
 
 ```nginx
 server {
@@ -151,6 +151,6 @@ The web interface loads the pinned Preact/htm bundle from `cdn.jsdelivr.net` in 
 | --- | --- |
 | CLI reports `cannot reach hub` | Confirm `aihub config` shows the correct hub URL, that DNS/TLS and proxy routing work, and that `GET /api/v1/healthz` succeeds. Run `aihub doctor`. |
 | CLI reports `sha256 mismatch for download` | The archive received differs from the hash returned by the hub. Check proxy/CDN caching and that metadata and `files/` were restored from a consistent backup. Retry after correcting the source. |
-| Upload returns `413` | Raise the limit in Admin > Settings > Uploads (or `AIHUB_MAX_UPLOAD_MB`) and set nginx `client_max_body_size` at least as high; restart/reload both. |
+| Upload returns `413` | Large packages: update the CLI (it chunks automatically) and keep `client_max_body_size` above `AIHUB_UPLOAD_CHUNK_MB`. If the package exceeds the package size cap, raise it in Admin > Settings > Uploads (or `AIHUB_MAX_UPLOAD_MB`). Old CLIs still need a proxy limit as large as the package. |
 | Login returns `429` | The in-process limiter saw at least eight failed attempts for that IP and username within five minutes. Wait for the window to reset and verify credentials. |
 | Usage hook is not firing | Run `aihub doctor`, then `aihub hooks install`. Confirm the package component is registered with the tool and the CLI can reach the hub. Codex does not provide a general tool-call hook. |
