@@ -22,6 +22,7 @@ from .db import init_db
 from .repos import EventBuffer, Repos
 from .routers import r as api
 from .storage import init_storage
+from . import builtin
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -145,6 +146,9 @@ New-Item -ItemType Directory -Force -Path $Bin | Out-Null
 Say-Step "Downloading the CLI from $Hub"
 Invoke-WebRequest "$Hub/cli/aihub.pyz" -OutFile (Join-Path $Bin "aihub.pyz") -UseBasicParsing
 Set-Content -Path (Join-Path $Bin "aihub.cmd") -Encoding ASCII -Value ('@echo off' + "`r`n" + '"' + $Py + '" "%~dp0aihub.pyz" %*')
+# Extensionless twin for Git Bash / WSL-style shells (what Claude Code and Codex use on Windows): they ignore .cmd files.
+$PyPosix = $Py -replace '\\', '/'
+[IO.File]::WriteAllText((Join-Path $Bin "aihub"), ("#!/bin/sh`n" + 'exec "' + $PyPosix + '" "$(dirname "$0")/aihub.pyz" "$@"' + "`n"))
 & "$Bin\aihub.cmd" config set hub $Hub | Out-Null
 Say-Ok "Installed to $Bin"
 Say-Step "Connecting your AI tools"
@@ -178,6 +182,8 @@ def create_app(settings: Settings = None) -> FastAPI:
     app.state.storage = init_storage(s)
     app.state.uploads = UploadStore(s.data_dir, s.upload_chunk_mb * 1024 * 1024)
     app.state.events = EventBuffer(app.state.repos, s.event_flush_rows, s.event_flush_secs)
+    if s.seed_builtin:
+        builtin.seed(app.state.repos, app.state.storage, s.data_dir)
     app.add_middleware(GZipMiddleware, minimum_size=800)
     app.include_router(api)
 
@@ -239,7 +245,7 @@ def create_app(settings: Settings = None) -> FastAPI:
         lvl = repos.access_level(p["id"], viewer_of(repos, u))
         if lvl is None:
             raise HTTPException(401 if not u else 404, "sign in required" if not u else "not found")
-        if not u and (repos.setting("public_install") or "0") != "1":
+        if not u and (repos.setting("public_install") or "0") != "1" and not builtin.is_builtin(name):
             raise HTTPException(401, "sign in required")
         st = app.state.storage
         for v in repos.versions(p["id"]):

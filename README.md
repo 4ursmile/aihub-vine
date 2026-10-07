@@ -54,7 +54,7 @@ aihub dev publish
 aihub install hello-world
 ```
 
-To have Claude Code or Codex package a new or existing project for you, run `aihub skill install` (the hub installer does this automatically) and ask "package this project for AI Hub".
+To have Claude Code or Codex package a new or existing project for you, install the `aihub-package` skill from the hub with `aihub install aihub-package` (the hub installer already does this) and ask "package this project for AI Hub".
 
 ## Backends
 

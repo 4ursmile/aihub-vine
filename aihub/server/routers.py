@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from ..core.release import VERSION
 from ..core import archive, manifest as M, naming, redact, version as V
-from . import image, markdown, sheet
+from . import builtin, image, markdown, sheet
 from .categories import category_of
 from .db import ALL_PERMS
 from .deps import can_develop, can_manage, current_user, require_any, require_perm, require_user, viewer_of
@@ -414,10 +414,11 @@ def resolve_tree(body: dict, request: Request, u=Depends(current_user)):
     body: {"roots": [{"name", "spec"}], "installed": {name: version}}. Constraints from every dependent are
     combined, so a package shared by two others gets one version that satisfies both. Installed packages
     that already satisfy their constraints are left out (they are not roots, so nothing to do)."""
-    need_login_unless(request, u, "public_install")
     roots, have = body.get("roots"), body.get("installed") or {}
     if not isinstance(roots, list) or not roots or len(roots) > 200 or not isinstance(have, dict):
         raise HTTPException(400, "roots must be a list of 1-200 {name, spec}")
+    if not all(isinstance(x, dict) and builtin.is_builtin(naming.normalize(str(x.get("name") or ""))) for x in roots):
+        need_login_unless(request, u, "public_install")     # built-in packages install before any account exists
     base = public_url(request)
     need, chosen, queue, rootset = {}, {}, [], set()
 
@@ -445,6 +446,8 @@ def resolve_tree(body: dict, request: Request, u=Depends(current_user)):
         if name not in rootset and inst and V.satisfies(str(inst), spec):
             chosen[name] = {"keep": True, "version": str(inst)}
             continue
+        if not builtin.is_builtin(name):
+            need_login_unless(request, u, "public_install")     # anonymous callers get built-ins only, dependencies included
         try:
             p = _pkg_or_404(request, name, u)
         except HTTPException as e:
@@ -482,7 +485,8 @@ def resolve_tree(body: dict, request: Request, u=Depends(current_user)):
 
 @r.get("/resolve")
 def resolve(name: str, request: Request, spec: str = "", u=Depends(current_user)):
-    need_login_unless(request, u, "public_install")
+    if not builtin.is_builtin(naming.normalize(name)):      # built-in packages install before any account exists
+        need_login_unless(request, u, "public_install")
     p = _pkg_or_404(request, name, u)
     for v in R(request).versions(p["id"]):
         if not v["yanked"] and V.satisfies(v["version"], spec):

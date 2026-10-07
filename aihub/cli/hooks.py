@@ -10,7 +10,7 @@ from . import integrations, paths, telemetry
 
 def hook_cmd():
     shim = paths.p("bin", "aihub")
-    base = [shim] if os.path.exists(shim) else telemetry.self_cmd()
+    base = [shim] if os.name != "nt" and os.path.exists(shim) else telemetry.self_cmd()
     return " ".join(shlex.quote(x) for x in base) + " hook"
 
 

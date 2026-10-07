@@ -169,14 +169,15 @@ See [Publishing to AI Hub](publishing.md) for end-to-end package authoring and t
 
 ## Built-in skills
 
-The CLI bundles two skills. `aihub-guide` tells the assistant to fetch the latest Markdown docs from the hub (`GET /api/v1/docs/{slug}/raw`) before using AI Hub or setting up a project for a custom case. `aihub-package` (below) is the packaging skill; it teaches Claude Code and Codex how to turn a new or existing project into a valid AI Hub package: choosing the type, restructuring files, writing `aihub.toml`, install scripts, and validating/publishing. The hub installer runs it automatically for detected tools.
+The two built-in skills are ordinary hub packages, not code inside the CLI: `aihub-guide` (tells the assistant to fetch the latest Markdown docs from `GET /api/v1/docs/{slug}/raw` before using AI Hub) and `aihub-package` (turns a new or existing project into a valid package). Neither contains the instructions themselves for packaging: `aihub-package` fetches the *Assistant packaging workflow* section of [publishing.md](publishing.md#assistant-packaging-workflow) from the hub, so editing that document changes the behaviour without a new release. Their sources live in `aihub/builtin_packages/<name>/`. On startup the server publishes any version the registry does not have yet (bump `version` in the package's `aihub.toml` to roll out a change), and they can be resolved and downloaded without signing in, so a brand-new CLI can fetch them. The hub installer and `aihub welcome` install them automatically with the normal installer, so `aihub list`, `aihub update`, `aihub disable` and `aihub uninstall` manage them like any other package.
 
 ```sh
-aihub skill install                      # user scope, every detected tool
-aihub skill install --tool claude        # only Claude Code (~/.claude/skills/aihub-package)
-aihub skill install --scope project      # into the current project (.claude/skills, .agents/skills)
-aihub skill remove
+aihub skill install                      # (re)install both, registered with every detected tool
+aihub skill install --tool claude        # only Claude Code
+aihub skill remove                       # same as: aihub uninstall aihub-guide aihub-package
 ```
+
+On Windows the installer writes both `aihub.cmd` (PowerShell, cmd) and an extensionless `aihub` script (Git Bash, which Claude Code uses to run commands) into `%USERPROFILE%\.aihub\bin`. The skills also tell the assistant how to fall back to the full path if `aihub` is not on the shell's PATH yet.
 
 Then ask the assistant, e.g. "package this project for AI Hub".
 

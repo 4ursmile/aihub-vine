@@ -561,3 +561,28 @@ def sync_actions(lock):
     flips = [(n, x.get("enabled", True)) for n, x in want.items() if n in st and n not in {p["name"] for p in todo} and enabled(st[n]) != x.get("enabled", True)]
     extras = sorted(n for n in st if n not in want and n not in by)
     return pkgs, todo, flips, extras, want
+
+
+# ---------- built-in packages (aihub-guide, aihub-package): ordinary hub packages installed on first run
+
+def install_builtin(names=None, remove=False, tools=None):
+    """Install (or remove) the built-in packages through the normal installer. -> [(name, status)]"""
+    from ..core.release import BUILTIN_PACKAGES
+    out = []
+    for n in names or BUILTIN_PACKAGES:
+        try:
+            if remove:
+                if n in state()["packages"]:
+                    uninstall(n, quiet=True)
+                    out.append((n, "removed"))
+                else:
+                    out.append((n, "not installed"))
+            elif n in state()["packages"] and enabled(state()["packages"][n]) and state()["packages"][n].get("tools") \
+                    and V.compare(api.call("GET", "/resolve?name=%s" % n)["version"], state()["packages"][n]["version"]) <= 0:
+                out.append((n, "already installed"))
+            else:
+                install(n, "", True, tools)
+                out.append((n, "installed"))
+        except (api.ApiError, ValueError, OSError) as e:
+            out.append((n, "failed: %s" % e))
+    return out

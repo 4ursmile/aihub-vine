@@ -313,8 +313,8 @@ def cmd_welcome(a):
         for label, status in hooks.ensure():
             ui.good("%s hook: %s" % (label, status))
     if do_skill:
-        for label, status in integrations.install_builtin_skill():
-            (ui.good if status.startswith("installed") else ui.info)("%s skill: %s" % (label, status))
+        for name, status in installer.install_builtin(tools=[t.name for t in tools]):
+            (ui.good if status in ("installed", "already installed") else ui.note)("skill package %s: %s" % (name, status))
     if ask and not paths.load("credentials.json", {}).get("token"):
         ui.out()
         choice = ui.select("Account", [("login", "I have an account - sign in"), ("register", "Create an account"),
@@ -358,10 +358,9 @@ def cmd_flush(a):
 
 
 def cmd_skill(a):
-    """Install the built-in packaging skill into Claude Code and/or Codex (user or project scope)."""
-    from . import integrations
-    for label, status in integrations.install_builtin_skill(a.tool, a.scope, a.path, remove=a.action == "remove"):
-        ui.good("%-12s %s" % (label, status))
+    """(Re)install or remove the built-in packages (aihub-guide, aihub-package) from the hub."""
+    for name, status in installer.install_builtin(remove=a.action == "remove", tools=a.tool):
+        (ui.bad if status.startswith("failed") else ui.good)("%-14s %s" % (name, status))
 
 
 def cmd_hooks(a):
@@ -656,13 +655,11 @@ def build_parser():
         "Examples:\n  aihub hooks install\n  aihub hooks install --tool claude\n  aihub hooks remove",
         arg("action", nargs="?", choices=["install", "remove"], default="install", metavar="ACTION", help="Install hooks (default) or remove them."),
         arg("--tool", action="append", metavar="TOOL", help="Only process this detected tool; repeat to filter multiple tools."))
-    add("skill", cmd_skill, "Install or remove the built-in packaging skill.",
-        "Install or remove the bundled aihub-package skill for Claude Code and/or Codex. User scope installs under the selected tools' user directories. Project scope installs into the project selected by --path; --path is only used with project scope.",
-        "Examples:\n  aihub skill install\n  aihub skill install --tool claude\n  aihub skill install --scope project --path ./my-project",
-        arg("action", nargs="?", choices=["install", "remove"], default="install", metavar="ACTION", help="Install the skill (default) or remove it."),
-        arg("--tool", action="append", choices=["claude", "codex"], metavar="TOOL", help="Target Claude Code or Codex; repeat to select both (default: detected tools for user scope, both for project scope)."),
-        arg("--scope", choices=["user", "project"], default="user", metavar="SCOPE", help="Install for the user (default) or into a project."),
-        arg("--path", default=".", metavar="DIR", help="Project root when --scope project (default: current directory)."))
+    add("skill", cmd_skill, "Install or remove the built-in skill packages.",
+        "Install, repair or remove the built-in packages (aihub-guide and aihub-package). They are ordinary hub packages, published by the server on startup and installed automatically by the hub installer; this command re-runs that step. Use `aihub update` to upgrade them and `aihub uninstall <name>` to remove one.",
+        "Examples:\n  aihub skill install\n  aihub skill install --tool claude\n  aihub skill remove",
+        arg("action", nargs="?", choices=["install", "remove"], default="install", metavar="ACTION", help="Install the packages (default) or remove them."),
+        arg("--tool", action="append", choices=["claude", "codex", "opencode"], metavar="TOOL", help="Register only with this tool; repeat for several (default: detected tools)."))
 
     dev = sp.add_parser("dev", help="Create, validate, build, publish, and inspect packages.",
                         description="Develop an AI Hub package from an aihub.toml project: generate starter files, lint the manifest, build an archive, publish releases, or inspect usage statistics.",

@@ -103,7 +103,7 @@ class RedisCacheTests(unittest.TestCase):
         from fastapi.testclient import TestClient
         from aihub.server.main import create_app
         d = tempfile.mkdtemp()
-        mk = lambda: TestClient(create_app(Settings(data_dir=d, cache_backend="redis", redis_url="redis://127.0.0.1:%d/0" % self.port, redis_prefix="app:")))
+        mk = lambda: TestClient(create_app(Settings(seed_builtin=False, data_dir=d, cache_backend="redis", redis_url="redis://127.0.0.1:%d/0" % self.port, redis_prefix="app:")))
         w1, w2 = mk(), mk()     # two app instances sharing one database + one Redis = two workers
         h = lambda c: {"Authorization": "Bearer " + c.post("/api/v1/auth/login", json={"username": "root", "password": "secret1"}).json()["token"]}
         w1.post("/api/v1/auth/register", json={"username": "root", "password": "secret1"})
@@ -176,7 +176,7 @@ class S3StorageTests(unittest.TestCase):
         from fastapi.testclient import TestClient
         from aihub.server.main import create_app
         d = tempfile.mkdtemp()
-        c = TestClient(create_app(Settings(data_dir=d, storage_backend="s3", s3_bucket="aihub-test", s3_endpoint=self.endpoint,
+        c = TestClient(create_app(Settings(seed_builtin=False, data_dir=d, storage_backend="s3", s3_bucket="aihub-test", s3_endpoint=self.endpoint,
                                            s3_access_key="testkey", s3_secret_key="testsecret123", s3_prefix="app/", public_url="http://t")))
         c.post("/api/v1/auth/register", json={"username": "root", "password": "secret1"})
         H = {"Authorization": "Bearer " + c.post("/api/v1/auth/login", json={"username": "root", "password": "secret1"}).json()["token"]}
@@ -216,7 +216,7 @@ class PostgresTests(unittest.TestCase):
     def test_full_app_on_postgres(self):
         from fastapi.testclient import TestClient
         from aihub.server.main import create_app
-        c = TestClient(create_app(Settings(data_dir=tempfile.mkdtemp(), db_backend="postgres", database_url=self.uri)))
+        c = TestClient(create_app(Settings(seed_builtin=False, data_dir=tempfile.mkdtemp(), db_backend="postgres", database_url=self.uri)))
         c.post("/api/v1/auth/register", json={"username": "root", "password": "secret1"})
         H = {"Authorization": "Bearer " + c.post("/api/v1/auth/login", json={"username": "root", "password": "secret1"}).json()["token"]}
         toml = b'[package]\nname = "pgpkg"\nversion = "1.0.0"\ntype = "skill"\ndescription = "invoices tool"\ntags = ["fin"]\n'
@@ -243,16 +243,30 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class BuiltinSkillTest(unittest.TestCase):
-    def test_install_and_remove(self):
+class BuiltinPackageTest(unittest.TestCase):
+    def test_bundled_packages_are_valid_and_seeded(self):
         import os, tempfile
-        from aihub.cli import integrations
-        with tempfile.TemporaryDirectory() as d:
-            r = integrations.install_builtin_skill(["claude", "codex"], "project", d)
-            self.assertEqual(len(r), 4)
-            for sub in (".claude/skills", ".agents/skills"):
-                for name in ("aihub-package", "aihub-guide"):
-                    self.assertTrue(os.path.isfile(os.path.join(d, sub, name, "SKILL.md")))
-            integrations.install_builtin_skill(["claude"], "project", d, remove=True)
-            for name in ("aihub-package", "aihub-guide"):
-                self.assertFalse(os.path.exists(os.path.join(d, ".claude/skills", name)))
+        from aihub.core import manifest as M
+        from aihub.core.release import BUILTIN_PACKAGES
+        from aihub.server import builtin
+        self.assertEqual(sorted(BUILTIN_PACKAGES), builtin.names())
+        for n in builtin.names():
+            root = os.path.join(builtin.DIR, n)
+            m = M.parse(open(os.path.join(root, "aihub.toml")).read())
+            errs, _ = M.lint(m, root)
+            self.assertEqual(errs, [], n)
+            self.assertTrue(os.path.isfile(os.path.join(root, "skills", n, "SKILL.md")))
+
+    def test_server_seeds_and_serves_without_login(self):
+        import tempfile
+        from fastapi.testclient import TestClient
+        from aihub.server.config import Settings
+        from aihub.server.main import create_app
+        d = tempfile.mkdtemp()
+        for _ in range(2):                                   # second start must be a no-op
+            with TestClient(create_app(Settings(data_dir=d))) as c:
+                for n in ("aihub-guide", "aihub-package"):
+                    r = c.get("/api/v1/resolve", params={"name": n})      # anonymous, public_install is off
+                    self.assertEqual(r.status_code, 200, r.text)
+                    self.assertEqual(c.get(r.json()["url"].replace("http://testserver", "")).status_code, 200)
+                self.assertEqual(c.get("/api/v1/resolve", params={"name": "nope"}).status_code, 401)

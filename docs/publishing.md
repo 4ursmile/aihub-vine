@@ -29,15 +29,83 @@ The first publish requires a logged-in account with the server's `publish` permi
 
 ## Let your assistant package it for you
 
-AI Hub ships a built-in skill, `aihub-package`, for Claude Code and Codex. It handles both new and existing projects: it picks the package type, restructures files into the standard layout, writes `aihub.toml`, creates install/uninstall scripts for each OS, then runs `aihub dev validate` and `aihub dev build`. It asks before `aihub dev publish`.
+`aihub-package` is a skill package published on AI Hub itself, so you install it like any other package. It works with Claude Code, Codex, and OpenCode. It reads [Assistant packaging workflow](#assistant-packaging-workflow) from the hub, then handles both new and existing projects: it picks the package type, restructures files into the standard layout, writes `aihub.toml`, creates install/uninstall scripts for each OS, and runs `aihub dev validate` and `aihub dev build`. It asks before `aihub dev publish`.
 
 ```sh
-aihub skill install                   # all detected tools (the hub installer already does this)
-aihub skill install --tool codex      # one tool
-aihub skill install --scope project   # only for the current project
+aihub install aihub-package           # add it to every detected tool
+aihub install aihub-package --tool codex   # or one tool
+aihub update                          # upgrade it like any other package
+aihub uninstall aihub-package         # remove it
 ```
 
-Then, inside the project, ask: "package this project for AI Hub". See [CLI reference](cli.md#built-in-packaging-skill) for all options.
+The hub installer and `aihub welcome` already install it, together with `aihub-guide` (a skill that makes the assistant read the latest hub docs before it answers), so on a normal setup there is nothing to do. It needs no sign-in to install. If `aihub list` does not show it, run the `aihub install` line above.
+
+Then, inside the project, ask: "package this project for AI Hub". See [CLI reference](cli.md#built-in-skills) for details.
+
+## Assistant packaging workflow
+
+The `aihub-package` skill fetches this section and follows it, so it is the single place to change how an assistant packages a project. Work in the project root and never publish without the user's OK.
+
+
+### Step 1: Detect the situation
+
+- `aihub.toml` exists -> existing package: run `aihub dev validate`, fix every error and warning, go to step 5.
+- No `aihub.toml`, folder has code/skills/agents -> **existing project**: follow step 3 (restructure).
+- Empty or new folder -> **new project**: pick a type (step 2) and run `aihub dev init . --type <type> --name <name>`.
+
+### Step 2: Choose the package type
+
+| type | use when | required |
+| --- | --- | --- |
+| skill | instructions the assistant loads on demand | `[[skills]]` + `skills/<name>/SKILL.md` |
+| agent | a delegated sub-agent prompt | `[[agents]]` + `agents/<name>.md` |
+| mcp | an MCP server the assistant can call | `[[mcp_servers]]` + install scripts |
+| tool | a command line program | `[bin]` + install scripts |
+| setup | changes env/config on the machine | `[[setup.steps]]` |
+
+One package may combine sections (e.g. skill + tool); `type` is the main purpose.
+
+### Step 3: Restructure an existing project
+
+Do not move user code blindly: show the planned moves, then apply them (use `git mv` in a repo).
+
+```
+<project>/
+  aihub.toml
+  README.md                 # shown on the package page
+  skills/<name>/SKILL.md    # + optional reference files next to it
+  agents/<name>.md
+  server/ or bin/           # MCP server / executables
+  scripts/install.sh  install.ps1  uninstall.sh  uninstall.ps1
+  .gitignore
+```
+
+- Existing `.claude/skills/*`, `.claude/agents/*.md`, `.codex/skills/*` -> copy into `skills/` and `agents/` and list each in `aihub.toml`.
+- Existing MCP config (`.mcp.json`, `mcpServers`) -> `[[mcp_servers]]`; use `${PKG}` for paths inside the package, never absolute paths or secrets.
+- Remove build output, `.env`, credentials, `node_modules`, virtualenvs from the package (`.gitignore` is honoured by `aihub dev build`).
+
+### Step 4: Write `aihub.toml` and the files
+
+Field reference: [The manifest](#the-manifest) and the [manifest reference](manifest.md). Scripts: [Install and uninstall scripts](#install-and-uninstall-scripts).
+
+Quality rules:
+- SKILL.md: front matter `name` (matches the folder) and a `description` that starts with "Use when ..."; body under ~500 lines, long references in sibling files.
+- Agent .md: front matter `name`, `description`, optional `tools`.
+- Scripts: idempotent, no `sudo`, no admin rights, POSIX `sh` + PowerShell twin; print what they do. `chmod +x` shell scripts and executables.
+- Every `path` in the manifest must exist and stay inside the project. Declare every external command under `[requires]`.
+- README: install line (`aihub install <name>`), what it does, a usage example, uninstall line.
+- No secrets, tokens, or machine-specific paths anywhere in the package.
+- Setup steps (`env`, `json_merge`, `file`, `block`, `command`) are shown to the user and reversible; prefer `file`/`json_merge`/`block` over `command`.
+
+### Step 5: Validate, build, publish
+
+```
+aihub dev validate     # fix all errors; treat warnings as TODOs
+aihub dev build        # dist/<name>-<version>.tar.gz
+aihub dev publish --bump patch    # ask the user first; needs `aihub login` + publish permission
+```
+
+Finish by reporting: package name/version/type, files moved, warnings left, and the install command `aihub install <name>`.
 
 ## Choosing a package type
 

@@ -54,7 +54,7 @@ class Core(unittest.TestCase):
 class Server(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
-        self.c = TestClient(create_app(Settings(data_dir=self.d, event_flush_secs=0.2)))
+        self.c = TestClient(create_app(Settings(seed_builtin=False, data_dir=self.d, event_flush_secs=0.2)))
 
     def auth(self, name="alice"):
         self.c.post("/api/v1/auth/register", json={"username": name, "password": "secret1"})
@@ -184,7 +184,7 @@ class Migrate(unittest.TestCase):
         import aihub.server.migrate as mg
         from aihub.server.db import init_db
         a, b = tempfile.mkdtemp(), tempfile.mkdtemp()
-        c = TestClient(create_app(Settings(data_dir=a)))
+        c = TestClient(create_app(Settings(seed_builtin=False, data_dir=a)))
         c.post("/api/v1/auth/register", json={"username": "alice", "password": "secret1"})
         h = {"Authorization": "Bearer " + c.post("/api/v1/auth/login", json={"username": "alice", "password": "secret1"}).json()["token"]}
         body = io.BytesIO()
@@ -334,7 +334,7 @@ class MarkdownRich(unittest.TestCase):
         self.assertNotIn("<b>", h)
 
     def test_docs_endpoints(self):
-        c = TestClient(create_app(Settings(data_dir=tempfile.mkdtemp())))
+        c = TestClient(create_app(Settings(seed_builtin=False, data_dir=tempfile.mkdtemp())))
         self.assertEqual(c.get("/api/v1/readyz").status_code, 200)
         self.assertEqual(c.get("/api/v1/docs/..%2Fetc").status_code, 404)
         self.assertEqual(c.get("/api/v1/docs/nope").status_code, 404)
@@ -342,7 +342,7 @@ class MarkdownRich(unittest.TestCase):
 
 class AdminFeatures(unittest.TestCase):
     def setUp(self):
-        self.c = TestClient(create_app(Settings(data_dir=tempfile.mkdtemp(), event_flush_secs=0.2)))
+        self.c = TestClient(create_app(Settings(seed_builtin=False, data_dir=tempfile.mkdtemp(), event_flush_secs=0.2)))
         self.admin = self.login("root", register=True)
 
     def login(self, name, pw="secret1", register=False):
@@ -457,7 +457,7 @@ class Profiles(unittest.TestCase):
     def setUp(self):
         from aihub.server import routers
         routers._fails.clear()                       # the throttle is per-process state; isolate tests from each other
-        self.c = TestClient(create_app(Settings(data_dir=tempfile.mkdtemp())))
+        self.c = TestClient(create_app(Settings(seed_builtin=False, data_dir=tempfile.mkdtemp())))
         self.c.post("/api/v1/auth/register", json={"username": "root", "password": "secret1"})
         self.h = self.login("root", "secret1")
 
@@ -532,7 +532,7 @@ class Access(unittest.TestCase):
         from aihub.server import routers
         routers._fails.clear()
         self.d = tempfile.mkdtemp()
-        self.c = TestClient(create_app(Settings(data_dir=self.d, event_flush_secs=0.2)))
+        self.c = TestClient(create_app(Settings(seed_builtin=False, data_dir=self.d, event_flush_secs=0.2)))
         self.admin = self.user("root")
         self.alice, self.bob, self.carol = self.user("alice"), self.user("bob"), self.user("carol")
 
@@ -810,7 +810,7 @@ class GroupsPageAndBulk(unittest.TestCase):
     def setUp(self):
         from aihub.server import routers
         routers._fails.clear()
-        self.c = TestClient(create_app(Settings(data_dir=tempfile.mkdtemp())))
+        self.c = TestClient(create_app(Settings(seed_builtin=False, data_dir=tempfile.mkdtemp())))
         self.admin = self.user("root")
         self.ann = self.user("ann")
 
@@ -891,7 +891,7 @@ class ReviewRankings(unittest.TestCase):
     def setUp(self):
         from aihub.server import routers
         routers._fails.clear()
-        self.c = TestClient(create_app(Settings(data_dir=tempfile.mkdtemp())))
+        self.c = TestClient(create_app(Settings(seed_builtin=False, data_dir=tempfile.mkdtemp())))
         self.r = self.c.app.state.repos
         self.users = {}
         self.admin = self.reg("root")

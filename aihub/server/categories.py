@@ -2,7 +2,7 @@
 
 CATEGORIES = [
     ("development", "Development", "Code review, git and everyday engineering helpers.",
-     {"review", "quality", "git", "code", "lint", "test", "testing", "refactor", "debug", "dev", "ci"}),
+     {"review", "quality", "git", "code", "lint", "test", "testing", "refactor", "debug", "dev", "ci", "publish"}),
     ("data", "Data and SQL", "Query, explain and explore databases.",
      {"sql", "database", "db", "data", "analytics", "postgres", "mysql", "sqlite"}),
     ("docs", "Docs and Writing", "Summarize, draft and organize documents.",
@@ -12,7 +12,7 @@ CATEGORIES = [
     ("ops", "Ops and Runbooks", "Team procedures, infrastructure and incident help.",
      {"ops", "runbook", "devops", "infra", "deploy", "incident", "security", "team", "onboarding"}),
     ("starters", "Starters", "Demos and first packages to learn the format.",
-     {"demo", "example", "starter", "hello", "tutorial"}),
+     {"demo", "example", "starter", "hello", "tutorial", "builtin"}),
 ]
 
 # when no tag matches, fall back on the package type
