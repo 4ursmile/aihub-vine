@@ -17,6 +17,7 @@ const set = (p) => { Object.assign(store, p); subs.forEach((f) => f({})); };
 const useStore = () => { const [, f] = useState({}); useEffect(() => { subs.add(f); return () => subs.delete(f); }, []); return store; };
 addEventListener("hashchange", () => { set({ route: location.hash.slice(1) || "/" }); scrollTo(0, 0); });
 let tt; const toast = (m, err) => { set({ toast: { m, err } }); clearTimeout(tt); tt = setTimeout(() => set({ toast: null }), 3200); };
+async function loadBrand() { try { const m = await api("/meta"); set({ brand: m }); document.title = m.name; } catch {} }
 async function loadMe() { try { const me = tok() ? await api("/auth/me") : null; let showGroups = false; if (me) { try { showGroups = (await api("/groups/capabilities")).show_page; } catch {} } set({ me, showGroups }); } catch { try { localStorage.removeItem("aihub_token"); } catch {} set({ me: null }); } }
 const initials = (n) => (String(n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("") || "?").toUpperCase();
 const hue = (n) => { let h = 0; for (const c of String(n)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
@@ -450,14 +451,31 @@ function NumSetting({ x, v, busy, save }) {
     <div class="row"><input type="number" min=${x.min} max=${x.max} value=${t} aria-label=${x.label} style="width:7rem" onInput=${(e) => setT(e.target.value)} />
     <button class="btn sm" disabled=${busy || !ok || t === v} onClick=${() => save(n)}>Save</button></div></div>`;
 }
+function TextSetting({ x, v, busy, save }) {
+  const [t, setT] = useState(v || "");
+  return html`<div class="li"><div class="t"><b>${x.label}</b><span>${x.help}</span></div>
+    <div class="row"><input class="field" type=${x.kind === "email" ? "email" : x.kind === "url" ? "url" : "text"} maxlength=${x.max} value=${t} aria-label=${x.label} style="width:min(16rem,100%)" onInput=${(e) => setT(e.target.value)} />
+    <button class="btn sm" disabled=${busy || t.trim() === (v || "")} onClick=${() => save(t)}>Save</button></div></div>`;
+}
+function LogoSetting({ url, bump }) {
+  const f = useRef(null); const [busy, setBusy] = useState(false);
+  const pick = async (e) => { const file = e.target.files[0]; e.target.value = ""; if (!file) return; setBusy(true);
+    try { const blob = file.type === "image/png" || file.type === "image/jpeg" || file.type === "image/webp" ? file : await toAvatarBlob(file);
+      const r = await fetch("/api/v1/admin/logo", { method: "POST", headers: { Authorization: "Bearer " + tok() }, body: blob });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "Upload failed"); toast("Logo updated"); await loadBrand(); bump(); } catch (x) { toast(x.message, 1); } finally { setBusy(false); } };
+  const rm = async () => { try { await api("/admin/logo", { method: "DELETE" }); toast("Logo removed"); await loadBrand(); bump(); } catch (x) { toast(x.message, 1); } };
+  return html`<div class="li"><div class="t"><b>Logo</b><span>PNG, JPEG or WebP, up to 256 KB and 1024 px. Shown beside the site name.</span></div>
+    <div class="row">${url && html`<img class="logo" src=${url} alt="Current logo" />`}<button class="btn sec sm" disabled=${busy} onClick=${() => f.current.click()}>${url ? "Change" : "Upload"}</button>
+    ${url && html`<button class="btn danger sm" onClick=${rm}>Remove</button>`}<input ref=${f} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange=${pick} /></div></div>`;
+}
 function AdminSettings() {
   const [tick, setTick] = useState(0); const d = useLoad(() => api("/admin/settings"), [tick]); const [busy, setBusy] = useState("");
   if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
   const set1 = async (k, v) => { setBusy(k); try { await api("/admin/settings", { method: "PUT", body: { [k]: v } }); toast("Saved"); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
-  const sections = [["Access", ["signup", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility", "allow_source_download"]], ["Groups", ["allow_group_creation"]], ["Uploads", ["max_upload_mb"]]];
+  const sections = [["Site", ["site_name", "contact_name", "contact_email", "contact_url", "contact_phone"]], ["Access", ["signup", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility", "allow_source_download"]], ["Groups", ["allow_group_creation"]], ["Uploads", ["max_upload_mb"]]];
   const by = Object.fromEntries(d.d.schema.map((x) => [x.key, x]));
   const warn = d.d.values.public_install === "1";
-  return html`<div class="stack">${sections.map(([title, keys]) => html`<div class="stack" key=${title}><h3>${title}</h3><div class="list">${keys.filter((k) => by[k]).map((k) => { const x = by[k], v = d.d.values[k]; if (x.type === "number") return html`<${NumSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; const onoff = x.options.length === 2 && x.options[0] === "0";
+  return html`<div class="stack"><div class="card row"><b>Server version</b><span class="mono">v${d.d.server_version}</span><span class="sp"></span><span class="xs mut3">CLIs on this hub self-update to this version (<code>aihub upgrade</code>)</span></div>${sections.map(([title, keys]) => html`<div class="stack" key=${title}><h3>${title}</h3><div class="list">${title === "Site" && html`<${LogoSetting} url=${d.d.logo_url} bump=${() => setTick(tick + 1)} />`}${keys.filter((k) => by[k]).map((k) => { const x = by[k], v = d.d.values[k]; if (x.type === "text") return html`<${TextSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; if (x.type === "number") return html`<${NumSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; const onoff = x.options.length === 2 && x.options[0] === "0";
       return html`<div class="li" key=${k}><div class="t"><b>${x.label}</b><span>${x.help}</span></div>
         ${onoff ? html`<label class="switch"><input type="checkbox" role="switch" checked=${v === "1"} disabled=${busy === k} onChange=${(e) => set1(k, e.target.checked ? "1" : "0")} aria-label=${x.label} /><i></i></label>`
         : html`<div class="seg">${x.options.map((o) => html`<button key=${o} class=${v === o ? "on" : ""} disabled=${busy === k} onClick=${() => v !== o && set1(k, o)}>${o}</button>`)}</div>`}</div>`; })}</div></div>`)}
@@ -605,21 +623,34 @@ function Dashboard() {
 // ---------- shell
 function App() {
   const s = useStore(); const path = s.route.split("?")[0], seg = path.split("/").filter(Boolean);
-  useEffect(() => { loadMe(); }, []);
+  useEffect(() => { loadMe(); loadBrand(); }, []);
   const lk = useRef(), ind = useRef();
   const place = () => { const n = lk.current, i = ind.current; if (!n || !i) return; const a = n.querySelector("a.on"); if (!a) { i.style.opacity = 0; return; } i.style.opacity = 1; i.style.transform = `translateX(${a.offsetLeft}px) scaleX(${a.offsetWidth})`; };
   useEffect(() => { place(); }, [path]);
   useEffect(() => { addEventListener("resize", place); return () => removeEventListener("resize", place); }, []);
   const logout = async () => { try { await api("/auth/logout", { method: "POST" }); } catch {} try { localStorage.removeItem("aihub_token"); } catch {} set({ me: null }); nav("/"); };
   const on = (k) => (seg[0] === k ? "on" : "");
+  const br = s.brand || {}, ct = br.contact || {};
   const page = { "": html`<${Home} />`, browse: html`<${Browse} key=${s.route} />`, package: html`<${Package} name=${seg[1]} key=${seg[1]} />`, rankings: html`<${Rankings} />`, docs: html`<${Docs} slug=${seg[1]} key=${seg[1]} />`, start: html`<${Start} />`,
     login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, dashboard: html`<${Dashboard} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
-  return html`<div><header class="nav"><div class="nav-in"><a class="brand" href="#/">AI Hub</a>
+  return html`<div><header class="nav"><div class="nav-in"><a class="brand glow" href="#/">${br.logo_url && html`<img class="logo" src=${br.logo_url} alt="" />`}<span>${br.name || "AI Hub"}</span></a>
     <nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
     <div class="r">${s.me ? html`<a href="#/account" class="me-link"><${Avatar} p=${s.me} size=${24} /><span>${shown(s.me)}</span></a>${s.showGroups ? html`<a class=${on("groups")} href="#/groups">Groups</a>` : ""}${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}${can("audit") ? html`<a class=${on("audit")} href="#/audit">Audit</a>` : ""}${can("admin") || can("reset_password") ? html`<a href="#/admin">Admin</a>` : ""}<a href="#/" onClick=${logout}>Sign out</a>` :
       html`<a href="#/login">Sign in</a>`}</div></div></header>
     <main><div class="page" key=${path}>${page}</div></main>
-    <footer class="foot"><b>AI Hub</b><span>Skills, agents and MCP servers for your team.</span><nav aria-label="Footer"><a href="#/browse">Browse</a><a href="#/rankings">Rankings</a><a href="#/start">Get started</a><a href="#/docs">Docs</a></nav></footer>
+    <footer class="foot"><b class="glow">${br.logo_url && html`<img class="logo sm" src=${br.logo_url} alt="" />`}${br.name || "AI Hub"}</b><span>Skills, agents and MCP servers for your team.</span>
+      ${(ct.name || ct.email || ct.url || ct.phone) && html`<span class="contact" aria-label="Contact">${ct.name && html`<span>${ct.name}</span>`}${ct.email && html`<a href=${"mailto:" + ct.email}>${ct.email}</a>`}${ct.phone && html`<span>${ct.phone}</span>`}${ct.url && /^https?:\/\//i.test(ct.url) && html`<a href=${ct.url} target="_blank" rel="noopener noreferrer">Support</a>`}</span>`}<nav aria-label="Footer"><a href="#/browse">Browse</a><a href="#/rankings">Rankings</a><a href="#/start">Get started</a><a href="#/docs">Docs</a></nav>${br.server_version && html`<span class="ver xs">v${br.server_version}</span>`}</footer>
     ${s.toast && html`<div class=${"toast " + (s.toast.err ? "err" : "")} role="status">${s.toast.m}</div>`}</div>`;
 }
 render(html`<${App} />`, document.getElementById("app"));
+
+// ambient dot field: ease the highlight toward the pointer; the loop stops itself once it has caught up
+(() => {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const root = document.documentElement.style; let tx = innerWidth / 2, ty = innerHeight * 0.3, x = tx, y = ty, raf = 0;
+  const step = () => { x += (tx - x) * 0.14; y += (ty - y) * 0.14;
+    root.setProperty("--bx", x.toFixed(1) + "px"); root.setProperty("--by", y.toFixed(1) + "px");
+    root.setProperty("--px", ((x - innerWidth / 2) * -0.02).toFixed(1) + "px"); root.setProperty("--py", ((y - innerHeight / 2) * -0.02).toFixed(1) + "px");
+    raf = Math.abs(tx - x) + Math.abs(ty - y) > 0.5 ? requestAnimationFrame(step) : 0; };
+  addEventListener("pointermove", (e) => { tx = e.clientX; ty = e.clientY; if (!raf) raf = requestAnimationFrame(step); }, { passive: true });
+})();

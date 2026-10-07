@@ -13,6 +13,7 @@ from starlette.background import BackgroundTask
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from ..core.release import VERSION
 from .cache import init_cache
 from .uploads import UploadStore
 from .ranged import stream_file
@@ -169,7 +170,7 @@ def create_app(settings: Settings = None) -> FastAPI:
         except Exception:
             pass
 
-    app = FastAPI(title="AI Hub", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="AI Hub", version=VERSION, lifespan=lifespan)
     db = init_db(s)
     app.state.settings = s
     app.state.repos = Repos(db)
@@ -265,19 +266,27 @@ def create_app(settings: Settings = None) -> FastAPI:
     def install_ps1():
         return INSTALL_PS1.replace("__HUB__", s.public_url.rstrip("/"))
 
-    @app.get("/cli/version")
-    def cli_version():
-        return {"version": "0.1.0"}
-
-    @app.get("/cli/aihub.pyz")
-    def cli_pyz():
+    def _pyz():
         from ..core import zipapp
         out = os.path.join(s.data_dir, "aihub.pyz")
         src = os.path.dirname(HERE)
         newest = max(os.path.getmtime(os.path.join(d, f)) for d, _, fs in os.walk(src) for f in fs if f.endswith(".py"))
         if not os.path.exists(out) or os.path.getmtime(out) < newest:
             zipapp.build(out)
-        return FileResponse(out, media_type="application/octet-stream")
+        return out
+
+    @app.get("/cli/version")
+    def cli_version():
+        """Polled by `aihub` for auto-update. `sha256` lets the client verify the zipapp before replacing itself."""
+        import hashlib
+        out = _pyz()
+        with open(out, "rb") as f:
+            sha = hashlib.sha256(f.read()).hexdigest()
+        return {"version": VERSION, "sha256": sha, "url": "/cli/aihub.pyz", "size": os.path.getsize(out)}
+
+    @app.get("/cli/aihub.pyz")
+    def cli_pyz():
+        return FileResponse(_pyz(), media_type="application/octet-stream")
 
     @app.get("/", response_class=HTMLResponse)
     def index():

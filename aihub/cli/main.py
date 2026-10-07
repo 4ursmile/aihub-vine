@@ -7,7 +7,7 @@ import tempfile
 import urllib.parse
 
 from ..core import archive, ignore, manifest as M, version as V
-from . import api, installer, paths, ui
+from . import api, installer, paths, ui, updater
 
 def cmd_config(a):
     c = paths.load("config.json", {})
@@ -259,7 +259,7 @@ def cmd_menu():
     ui.banner()
     while True:
         choice = ui.select("What would you like to do?", [
-            ("search", "Search the hub"), ("list", "Installed packages"), ("update", "Update everything"),
+            ("search", "Search the hub"), ("list", "Installed packages"), ("update", "Update everything"), ("upgrade", "Upgrade aihub itself"),
             ("doctor", "Check my setup"), ("init", "Start a new package"), ("exit", "Exit")])
         if choice in (None, "exit"):
             return
@@ -271,6 +271,8 @@ def cmd_menu():
                 cmd_list(None)
             elif choice == "update":
                 cmd_update(argparse.Namespace(name=None))
+            elif choice == "upgrade":
+                updater.cmd_upgrade(argparse.Namespace(check=False, force=False, rollback=False))
             elif choice == "doctor":
                 cmd_doctor(None)
             elif choice == "init":
@@ -417,7 +419,7 @@ def build_parser():
         ("Install", ["install", "uninstall", "update", "list", "download"]),
         ("Account", ["config", "login", "register"]),
         ("Publish", ["dev"]),
-        ("Setup and maintenance", ["welcome", "doctor", "hook", "flush", "hooks", "skill"]),
+        ("Setup and maintenance", ["welcome", "doctor", "version", "upgrade", "hook", "flush", "hooks", "skill"]),
     ]
 
     def add(name, fn, help, description, epilog, *args):
@@ -476,6 +478,15 @@ def build_parser():
     add("doctor", cmd_doctor, "Check hub connectivity and local CLI setup.",
         "Check whether the configured hub is reachable, whether you are signed in, which supported tools are detected and have usage hooks, whether Python is available, and how many packages are installed.",
         "Example:\n  aihub doctor")
+    add("version", updater.cmd_version, "Show the CLI version and whether the hub has a newer one.",
+        "Print the installed CLI version and compare it with the version the hub distributes.",
+        "Example:\n  aihub version")
+    add("upgrade", updater.cmd_upgrade, "Upgrade the aihub CLI itself to the hub's version.",
+        "Download the CLI from the configured hub, verify its SHA-256, and replace the running copy. The previous copy is kept so --rollback can restore it. The CLI also checks once a day on its own; turn that off with 'aihub config set auto_update false' or AIHUB_NO_UPDATE=1.",
+        "Examples:\n  aihub upgrade\n  aihub upgrade --check\n  aihub upgrade --rollback",
+        arg("--check", action="store_true", help="Only report whether a newer version exists."),
+        arg("--force", action="store_true", help="Reinstall even when already current."),
+        arg("--rollback", action="store_true", help="Restore the version that was installed before the last upgrade."))
     add("welcome", cmd_welcome, "Run first-time setup for detected AI tools.",
         "Check the hub and detected tools, offer or install usage hooks and the built-in packaging skill, and optionally sign in or register. Interactive setup lets you choose; --yes accepts defaults without prompting.",
         "Examples:\n  aihub welcome\n  aihub welcome --yes",
@@ -555,6 +566,7 @@ def main(argv=None):
         if ui.INTERACTIVE and a.cmd not in ("hook", "flush", "welcome", "config") and not os.path.exists(paths.p(".welcomed")):
             cmd_welcome(argparse.Namespace(yes=False))
         a.fn(a)
+        updater.auto(a.cmd)
     except (api.ApiError, ValueError, KeyError, OSError) as e:
         ui.error(e, ui.hint_for(e))
         return 1

@@ -162,3 +162,17 @@ aihub skill remove
 ```
 
 Then ask the assistant, e.g. "package this project for AI Hub".
+
+## Versions and self-update
+
+The release number lives in `aihub/core/release.py` and is shared by the server, the CLI zipapp and the web UI (shown in the footer and in Admin > Settings).
+
+- `aihub version` shows the installed CLI version and the version the hub offers.
+- `aihub upgrade` downloads the CLI from the hub, verifies its SHA-256, and swaps it in. The old copy is kept as `aihub.pyz.prev`. `--check` only reports, `--force` reinstalls, `--rollback` restores the previous copy.
+- Auto-update: at most once a day an interactive `aihub` command checks the hub and upgrades itself. Turn it off with `aihub config set auto_update false` or `AIHUB_NO_UPDATE=1`. It never runs for `hook`/`flush` or in non-interactive shells.
+
+To ship a new CLI, bump `VERSION` in `aihub/core/release.py` and restart the server.
+
+## Site identity (admin)
+
+Admin > Settings > Site sets the site name, logo (PNG/JPEG/WebP, max 256 KB), and contact name/email/support link/phone. They appear in the nav and footer. API: `PUT /api/v1/admin/settings`, `POST|DELETE /api/v1/admin/logo`; public read via `GET /api/v1/meta`.

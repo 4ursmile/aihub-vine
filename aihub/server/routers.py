@@ -16,6 +16,7 @@ from starlette.responses import StreamingResponse
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 
+from ..core.release import VERSION
 from ..core import archive, manifest as M, naming, redact, version as V
 from . import image, markdown, sheet
 from .categories import category_of
@@ -236,12 +237,37 @@ def _ser(request, p, detail=False):
     return out
 
 
+def branding(request):
+    """Public, admin-editable identity of this hub: name, contact details, logo."""
+    rp = R(request)
+    v = rp.setting("logo_v")
+    return {"name": rp.setting("site_name") or "AI Hub", "logo_url": "/api/v1/logo?v=%s" % v if v else None,
+            "contact": {k[8:]: rp.setting(k) for k in TEXT_SETTINGS if k.startswith("contact_") and rp.setting(k)}}
+
+
 @r.get("/meta")
 def meta(request: Request, u=Depends(current_user)):
-    return {"name": "AI Hub", "public_url": request.app.state.settings.public_url, "cli_version": "0.1.0",
+    b = branding(request)
+    return {"name": b["name"], "logo_url": b["logo_url"], "contact": b["contact"], "public_url": request.app.state.settings.public_url,
+            "cli_version": VERSION, "server_version": VERSION,
             "overview": R(request).overview(viewer(request, u)),
             "public_browse": setting(request, "public_browse") == "1", "public_install": setting(request, "public_install") == "1",
             "allow_private": setting(request, "allow_private") == "1", "allow_source_download": setting(request, "allow_source_download") == "1", "default_visibility": setting(request, "default_visibility")}
+
+
+@r.get("/version")
+def version_info():
+    return {"server": VERSION, "cli": VERSION}
+
+
+@r.get("/logo")
+def logo_get(request: Request):
+    import base64
+    d = R(request).setting("logo_data")
+    if not d:
+        raise HTTPException(404, "no logo")
+    return Response(base64.b64decode(d), media_type=R(request).setting("logo_mime") or "image/png",
+                    headers={"Cache-Control": "public, max-age=86400", "X-Content-Type-Options": "nosniff"})
 
 
 @r.get("/healthz")
@@ -864,6 +890,27 @@ NUMERIC_SETTINGS = {
 }
 
 
+# Free-text admin settings: key -> (max length, kind, label, help). Shown on the site and in the footer.
+TEXT_SETTINGS = {
+    "site_name": (40, "text", "Site name", "Shown next to the logo and in the browser tab. Blank = AI Hub"),
+    "contact_name": (80, "text", "Contact name", "Person or team to reach for help with this hub"),
+    "contact_email": (120, "email", "Contact email", "Shown in the footer as a mail link"),
+    "contact_url": (200, "url", "Support link", "Help desk, chat or wiki address (http:// or https://)"),
+    "contact_phone": (40, "text", "Contact phone", "Optional"),
+}
+_EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
+
+
+def _check_text(k, v):
+    n, kind = TEXT_SETTINGS[k][:2]
+    v = _clean(v, n)
+    if v and kind == "email" and not _EMAIL_RE.match(v):
+        raise HTTPException(400, "%s is not a valid email address" % k)
+    if v and kind == "url" and not re.match(r"^https?://[^\s]+$", v, re.I):
+        raise HTTPException(400, "%s must start with http:// or https://" % k)
+    return v
+
+
 def upload_limit_mb(request):
     try:
         return int(R(request).setting("max_upload_mb", "") or request.app.state.settings.max_upload_mb)
@@ -878,15 +925,21 @@ def a_settings(request: Request, u=admin):
         if k != "signup":
             cur[k] = setting(request, k) if setting(request, k) is not None else R(request).setting(k, "0")
     cur["max_upload_mb"] = str(upload_limit_mb(request))
+    for k in TEXT_SETTINGS:
+        cur[k] = R(request).setting(k) or ""
     schema = [{"key": k, "options": list(v[0]), "label": v[1], "help": v[2]} for k, v in SETTINGS.items()]
     schema += [{"key": k, "type": "number", "min": v[0], "max": v[1], "label": v[2], "help": v[3]} for k, v in NUMERIC_SETTINGS.items()]
-    return {"values": cur, "schema": schema}
+    schema += [{"key": k, "type": "text", "kind": v[1], "max": v[0], "label": v[2], "help": v[3]} for k, v in TEXT_SETTINGS.items()]
+    return {"values": cur, "schema": schema, "logo_url": branding(request)["logo_url"], "server_version": VERSION}
 
 
 @r.put("/admin/settings")
 def a_settings_put(body: dict, request: Request, u=admin):
     done = {}
     for k, v in body.items():
+        if k in TEXT_SETTINGS:
+            done[k] = _check_text(k, v)
+            continue
         if k in NUMERIC_SETTINGS:
             lo, hi = NUMERIC_SETTINGS[k][:2]
             if not str(v).isdigit() or not lo <= int(v) <= hi:
@@ -900,6 +953,35 @@ def a_settings_put(body: dict, request: Request, u=admin):
         R(request).set_setting(k, v)
     R(request).audit(u["username"], "settings.update", "", json.dumps(done))
     C(request).invalidate("pkg")
+    return {"ok": True}
+
+
+@r.post("/admin/logo")
+async def logo_set(request: Request, u=admin):
+    import base64
+    data = b""
+    async for chunk in request.stream():
+        data += chunk
+        if len(data) > image.MAX_BYTES:
+            raise HTTPException(413, "image too large (max %d KB)" % (image.MAX_BYTES // 1024))
+    try:
+        mime, _, _ = image.sniff(data)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    rp = R(request)
+    rp.set_setting("logo_data", base64.b64encode(data).decode())
+    rp.set_setting("logo_mime", mime)
+    rp.set_setting("logo_v", int(time.time()))
+    rp.audit(u["username"], "settings.logo", "", "set")
+    return {"logo_url": branding(request)["logo_url"]}
+
+
+@r.delete("/admin/logo")
+def logo_clear(request: Request, u=admin):
+    rp = R(request)
+    for k in ("logo_data", "logo_mime", "logo_v"):
+        rp.set_setting(k, "")
+    rp.audit(u["username"], "settings.logo", "", "removed")
     return {"ok": True}
 
 

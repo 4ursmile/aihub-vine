@@ -218,3 +218,25 @@ a.badge.tag:hover{background:var(--fill-2);text-decoration:none}
 .foot{display:flex;flex-wrap:wrap;gap:8px 24px;justify-content:center;align-items:center;border-top:1px solid var(--sep);max-width:1024px;margin:0 auto}
 .foot b{color:var(--fg);font-weight:600}.foot nav{display:flex;gap:16px}.foot a{color:var(--fg-3)}.foot a:hover{color:var(--fg)}
 @media(prefers-reduced-motion:reduce){.rv{opacity:1;transform:none}.typed::after{animation:none}}
+
+/* brand: logo + title glow on interaction */
+.brand{display:inline-flex;align-items:center;gap:9px}
+.logo{height:26px;width:auto;max-width:96px;object-fit:contain;border-radius:6px;display:block;transition:filter .3s var(--ease),transform .3s var(--ease)}.logo.sm{height:18px}
+.glow{transition:text-shadow .3s var(--ease),color .3s}
+.glow:hover,.glow:focus-visible,.glow:active{text-decoration:none;text-shadow:0 0 14px color-mix(in srgb,var(--blue) 70%,transparent),0 0 32px color-mix(in srgb,var(--blue) 40%,transparent)}
+.glow:hover .logo,.glow:focus-visible .logo,.glow:active .logo,.logo:hover{filter:drop-shadow(0 0 7px color-mix(in srgb,var(--blue) 75%,transparent)) drop-shadow(0 0 16px color-mix(in srgb,var(--blue) 45%,transparent));transform:scale(1.06)}
+.foot b.glow{display:inline-flex;align-items:center;gap:7px;cursor:default}
+.contact{display:inline-flex;flex-wrap:wrap;gap:4px 14px;align-items:center}.contact>span:first-child{color:var(--fg-2)}
+.ver{color:var(--fg-3);font-variant-numeric:tabular-nums}
+@media(prefers-reduced-motion:reduce){.glow:hover .logo{transform:none}}
+
+/* ambient dot field: faint grid everywhere, a brighter copy revealed around the pointer, slow parallax drift */
+:root{--dot:rgba(60,60,67,.16);--dot-hi:color-mix(in srgb,var(--blue) 70%,transparent);--bx:50vw;--by:30vh;--px:0px;--py:0px}
+@media(prefers-color-scheme:dark){:root{--dot:rgba(235,235,245,.13)}}
+body::before,body::after{content:"";position:fixed;inset:-40px;z-index:-1;pointer-events:none;background-size:28px 28px;background-position:var(--px) var(--py)}
+body::before{background-image:radial-gradient(circle,var(--dot) 1.2px,transparent 1.7px)}
+body::after{background-image:radial-gradient(circle,var(--dot-hi) 1.6px,transparent 2.1px);
+  -webkit-mask-image:radial-gradient(240px circle at calc(var(--bx) + 40px) calc(var(--by) + 40px),#000,transparent 70%);
+  mask-image:radial-gradient(240px circle at calc(var(--bx) + 40px) calc(var(--by) + 40px),#000,transparent 70%)}
+@media(prefers-reduced-motion:reduce){body::after{display:none}}
+@media print{body::before,body::after{display:none}}
