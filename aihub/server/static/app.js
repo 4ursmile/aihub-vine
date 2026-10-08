@@ -294,7 +294,8 @@ function Start() {
   const cfg = useLoad(() => fetch("/api/v1/client-config").then((r) => r.ok ? r.json() : null).catch(() => null), []);
   const OS = { mac: "macOS", linux: "Linux", windows: "Windows" };
   const cmd = os === "windows" ? `irm ${o}/install.ps1 | iex` : `curl -fsSL ${o}/install.sh | sh`;
-    const pip = `pip install "aihub-cli @ git+${(m.d && m.d.cli_git_url) || "<your-repo-url>"}"`;
+    const gitBranch = (m.d && m.d.cli_git_branch || "").trim(), gitSubdir = (m.d && m.d.cli_git_subdir || "").trim();
+    const pip = `pip install "aihub-cli @ git+${(m.d && m.d.cli_git_url) || "<your-repo-url>"}${gitBranch ? "@" + gitBranch : ""}${gitSubdir ? "#subdirectory=" + gitSubdir : ""}"`;
   const note = os === "windows" ? "Run in PowerShell. Needs Python 3.9+ (python.org or `winget install Python.Python.3.12`). PATH is updated automatically; open a new terminal afterwards."
     : os === "mac" ? "Run in Terminal. Needs Python 3.9+ (preinstalled with Xcode tools, or `brew install python`). Then add it to PATH:"
     : "Run in your shell. Needs Python 3.9+ and curl (e.g. `sudo apt install python3 curl`). Then add it to PATH:";
@@ -513,11 +514,11 @@ function AdminSync() {
     <div class="stack"><h3>Langfuse</h3><div class="list">${env.langfuse && html`<div class="li mut">Keys are set in the server environment, and those win over the values below.</div>`}
       ${T("langfuse_host", "Host", "e.g. https://us.cloud.langfuse.com")}${T("langfuse_public_key", "Public key", "pk-lf-…")}
       <${SecretField} label="Secret key" help="sk-lf-… Write-only: never shown again." v=${c.langfuse_secret_key} onSave=${(v) => save("langfuse_secret_key", v)} /></div></div>
-    <div class="stack"><h3>Package index</h3><div class="list">${T("index_url", "Git URL", "Repository holding the index file (or an https URL to the json)")}${T("index_branch", "Branch", "default: main")}${T("index_path", "File", "default: index.json")}</div></div>
+    <div class="stack"><h3>Package index</h3><div class="list">${T("index_url", "Git URL", "Repository holding the package index")}${T("index_branch", "Branch", "default: main")}${T("index_path", "Folder", "default: index (a folder index; an old index.json file also works)")}</div></div>
     <div class="stack"><h3>CLI setup</h3><div class="list">
       <div class="li"><div class="t"><b>Share Langfuse credentials with CLIs</b><span>When on, <code>aihub setup</code> hands the Langfuse keys (never git credentials) to signed-in users and to anyone with the enrollment code. Sent over HTTPS only; every hand-out is audited.</span></div><label class="switch"><input type="checkbox" role="switch" checked=${c.share_credentials === "1"} disabled=${busy === "share_credentials"} onChange=${(e) => save("share_credentials", e.target.checked ? "1" : "0")} aria-label="Share credentials" /><i></i></label></div>
       <${SecretField} label="Enrollment code" help="Give this to teammates: aihub setup --code <code>. Leave unset to share only with signed-in users." v=${c.enroll_code} onSave=${(v) => save("enroll_code", v)} />
-      ${T("cli_git_url", "CLI git URL", "Where to pip install the CLI from when this server is unreachable")}${T("client_refresh_hours", "CLI refresh (hours)", "How often installed CLIs re-pull these settings (default 24)")}</div></div></div>`;
+      ${T("cli_git_url", "CLI git URL", "Where to pip install the CLI from when this server is unreachable")}${T("cli_git_branch", "Branch (optional)", "Leave empty to hide. Install from this branch instead of the default")}${T("cli_git_subdir", "Sub folder (optional)", "Leave empty to hide. Install from this folder of the repo")}${T("client_refresh_hours", "CLI refresh (hours)", "How often installed CLIs re-pull these settings (default 24)")}</div></div></div>`;
 }
 function Groups() {
   const { me } = useStore(); const [tick, setTick] = useState(0); const bump = () => setTick((x) => x + 1);

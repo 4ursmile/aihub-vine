@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 
 from ..cli import gitx, langfuse
-from ..core import naming, redact
+from ..core import naming, pkgindex, redact
 
 log = logging.getLogger("aihub")
 OVERLAP = 300          # seconds re-read behind the cursor; ext_id makes the overlap harmless
@@ -200,29 +200,47 @@ class Sync:
 
     def index_source(self):
         return (self.cfg("index_url", "AIHUB_INDEX_URL"), self.cfg("index_branch", "AIHUB_INDEX_BRANCH", "main"),
-                self.cfg("index_path", "AIHUB_INDEX_PATH", "index.json"))
+                self.cfg("index_path", "AIHUB_INDEX_PATH", "index"))
 
     def read_index(self):
+        """(reader, revision) of the package index, or (None, None) when none is configured."""
         url, branch, path = self.index_source()
         if not url:
-            return None
+            return None, None
         if os.path.isfile(url):
-            return json.load(open(url))
+            with open(url) as f:
+                return pkgindex.Legacy(json.load(f)), os.path.getmtime(url)
+        if os.path.isdir(url):
+            rd = pkgindex.open_source(url, path)
+            return rd, getattr(rd, "root", {}).get("digest")
         d = gitx.fetch(url, branch, base=os.path.join(self.s.data_dir, "repos"))
-        return json.load(open(os.path.join(d, path)))
+        return pkgindex.open_source(d, path), gitx.run(["rev-parse", "HEAD"], cwd=d)
 
     def pull_index(self):
         try:
-            idx = self.read_index()
+            idx, rev = self.read_index()
         except Exception as e:
             self.repos.set_setting("sync_index_dirty", "1")            # retry next pass
             raise RuntimeError("index: " + gitx.redact_url(str(e)))
         if idx is None:
             return
-        names = set()
-        for p in idx.get("packages", []):
-            name = naming.normalize(p["name"])
+        if rev is not None and str(rev) == self.repos.setting("sync_index_rev") and self.repos.setting("sync_index_dirty") != "1":
+            return                                                     # same commit as last time: nothing to read
+        try:
+            seen = json.loads(self.repos.setting("sync_index_hashes") or "{}")
+        except ValueError:
+            seen = {}
+        names, hashes = set(), {}
+        for row in idx.catalog():
+            name = naming.normalize(row["name"])
             names.add(name)
+            h = row.get("h")
+            hashes[name] = h or ""
+            if h and seen.get(name) == h:
+                continue                                               # catalog hash unchanged: this entry file is not even opened
+            p = idx.entry(name) if h else row
+            if not p:
+                continue
             # new packages start with the site default (or the index's choice); admins change it afterwards in the UI
             vis = self.repos.initial_visibility(p.get("visibility"))
             pid = self.repos.package_upsert(name, p.get("type") or "tool", p.get("description") or "", p.get("tags") or [],
@@ -233,5 +251,8 @@ class Sync:
                 man["repo"] = dict(p.get("repo") or {}, ref=v.get("ref"))
                 self.repos.version_sync(pid, v["version"], man)
         self.repos.package_hide_missing(names)
+        self.repos.set_setting("sync_index_hashes", json.dumps(hashes, separators=(",", ":")))
+        if rev is not None:
+            self.repos.set_setting("sync_index_rev", str(rev))
         self.repos.set_setting("sync_index_dirty", "0")
         self.status["index_packages"] = len(names)

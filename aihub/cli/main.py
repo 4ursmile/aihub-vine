@@ -277,7 +277,7 @@ def _check_backends(detail=False):
             sp.problem("no package index configured. run: aihub setup   (or: aihub config set index_url <git url>)")
         else:
             try:
-                n = len(registry.index(refresh=True).get("packages", []))
+                n = registry.count(refresh=True)
                 sp.text("Package index OK (%d packages)" % n)
             except Exception as e:
                 sp.problem("package index unreachable: %s" % gitx.redact_url(str(e)))

@@ -228,5 +228,7 @@ These can be set here or in Admin > Sync. The environment takes priority.
 | `AIHUB_INDEX_URL` | empty | Git URL of the repo holding the index, an `https://...json` URL, or a local file. |
 | `AIHUB_INDEX_BRANCH` / `AIHUB_INDEX_PATH` | `main` / `index.json` | Branch and file inside that repo. |
 | `AIHUB_CLI_GIT_URL` | empty | Repo to `pip install` the CLI from when this server is unreachable (shown on Get started). |
+| `AIHUB_CLI_GIT_BRANCH` | empty | Optional branch to install from. Shown as `git+<url>@<branch>`; empty hides it. |
+| `AIHUB_CLI_GIT_SUBDIR` | empty | Optional sub folder of the repo to install from. Shown as `#subdirectory=<dir>`; empty hides it. Cannot contain spaces, `#`, `?`, `..` or a leading `/`. |
 
 The pull schedule (seconds or a cron expression such as `*/5 * * * *`), the credential-sharing switch, the enrollment code and the CLI refresh interval are admin settings stored in the database: Admin > Sync.

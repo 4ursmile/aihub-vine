@@ -254,6 +254,8 @@ def meta(request: Request, u=Depends(current_user)):
     b = branding(request)
     return {"name": b["name"], "theme": b["theme"], "logo_url": b["logo_url"], "contact": b["contact"], "public_url": public_url(request),
             "cli_version": VERSION, "server_version": VERSION, "cli_git_url": R(request).setting("cli_git_url", "") or os.environ.get("AIHUB_CLI_GIT_URL", ""),
+            "cli_git_branch": R(request).setting("cli_git_branch", "") or os.environ.get("AIHUB_CLI_GIT_BRANCH", ""),
+            "cli_git_subdir": R(request).setting("cli_git_subdir", "") or os.environ.get("AIHUB_CLI_GIT_SUBDIR", ""),
             "overview": R(request).overview(viewer(request, u)),
             "public_browse": setting(request, "public_browse") == "1", "public_install": setting(request, "public_install") == "1",
             "allow_private": setting(request, "allow_private") == "1", "allow_source_download": setting(request, "allow_source_download") == "1", "default_visibility": setting(request, "default_visibility")}
@@ -1285,8 +1287,16 @@ def dashboard_events(request: Request, days: int = 30, page: int = 1, per_page: 
 
 # ---------------- sync (Langfuse + git index -> SQLite)
 SYNC_KEYS = ("langfuse_host", "langfuse_public_key", "langfuse_secret_key", "index_url", "index_branch", "index_path", "sync_interval",
-             "share_credentials", "enroll_code", "cli_git_url", "client_refresh_hours")
+             "share_credentials", "enroll_code", "cli_git_url", "cli_git_branch", "cli_git_subdir", "client_refresh_hours")
 SECRET_KEYS = ("langfuse_secret_key", "enroll_code")
+
+
+def _check_cli_git(k, v):
+    """Branch and sub folder end up inside a pip spec (git+URL@branch#subdirectory=dir), so reject anything that would break it."""
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in v):
+        raise HTTPException(400, f"{k} must not contain spaces or control characters")
+    if k == "cli_git_subdir" and (any(ch in v for ch in "#?") or ".." in v or v.startswith("/")):
+        raise HTTPException(400, "cli_git_subdir must be a relative folder without '#', '?', '..' or a leading '/'")
 
 
 @r.get("/admin/sync")
@@ -1310,6 +1320,8 @@ def sync_update(body: dict, request: Request, u=admin):
                 continue                                 # blank/echo = keep the stored secret
             if k == "share_credentials" and v not in ("0", "1"):
                 raise HTTPException(400, "share_credentials must be 0 or 1")
+            if k in ("cli_git_branch", "cli_git_subdir"):
+                _check_cli_git(k, v)
             if k == "sync_interval":
                 try:
                     parse_schedule(v)
@@ -1374,6 +1386,7 @@ def sync_run(request: Request, full: bool = False, u=admin):
     if full:
         repos.set_setting("sync_cursor", "")
         repos.set_setting("sync_index_dirty", "1")
+        repos.set_setting("sync_index_hashes", "")
     try:
         request.app.state.sync.run_once()
     except Exception as e:
@@ -1389,7 +1402,7 @@ def client_config(request: Request, code: str = "", u=Depends(current_user)):
     never cached."""
     repos = R(request)
     out = {"index": {"url": repos.setting("index_url", "") or os.environ.get("AIHUB_INDEX_URL", ""),
-                     "branch": repos.setting("index_branch", "") or "main", "path": repos.setting("index_path", "") or "index.json"},
+                     "branch": repos.setting("index_branch", "") or "main", "path": repos.setting("index_path", "") or "index"},
            "refresh_hours": int(repos.setting("client_refresh_hours", "") or 24), "credentials": None}
     if repos.setting("share_credentials", "0") == "1":
         want = repos.setting("enroll_code", "")

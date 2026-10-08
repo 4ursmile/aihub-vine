@@ -1,4 +1,4 @@
-"""Package registry backed by an index file in git (see core/defaults.json for the schema).
+"""Package registry backed by a folder index in git (see core/pkgindex.py; the old single index.json still works).
 
 Index entry = the package row derived from its manifest, plus where its files live:
   {"name", "type", "description", "tags", "latest_version", "readme",
@@ -14,7 +14,7 @@ import shutil
 import time
 import urllib.request
 
-from ..core import manifest as M, naming, version as V
+from ..core import manifest as M, naming, pkgindex, version as V
 from . import api, gitx, paths
 
 TTL = 300
@@ -38,62 +38,72 @@ def source():
             "path": c.get("index_path") or d.get("path") or "index.json"}
 
 
-def _read(src, refresh=False):
+def _reader(src, refresh=False):
+    """A pkgindex reader for the configured source. Git sources are fetched at most every TTL seconds; if the network is down
+    the last checkout is used (a stale index beats none)."""
     u = src["url"]
     if not u:
         raise api.ApiError("no package index configured; run: aihub config set index_url <git url>")
     if os.path.isfile(u):
         with open(u) as f:
-            return json.load(f)
+            return pkgindex.Legacy(json.load(f))
+    if os.path.isdir(u):
+        return pkgindex.open_source(u, src["path"])
     if u.startswith(("http://", "https://")) and u.rstrip("/").endswith(".json"):
-        with urllib.request.urlopen(u, timeout=20) as r:
-            return json.loads(r.read())
-    try:
-        d = gitx.fetch(u, src["branch"])
-    except gitx.GitError as e:
-        raise api.ApiError("cannot fetch package index: %s" % gitx.redact_url(str(e)))
-    with open(os.path.join(d, src["path"])) as f:
-        return json.load(f)
-
-
-def index(refresh=False):
-    cache = paths.p("index-cache.json")
-    src = source()
-    if not refresh and os.path.isfile(cache) and time.time() - os.path.getmtime(cache) < TTL:
         try:
-            c = json.load(open(cache))
-            if c.get("_src") == src["url"]:
-                return c
-        except Exception:
-            pass
+            with urllib.request.urlopen(u, timeout=20) as r:
+                data = json.loads(r.read())
+            paths.save("index-cache.json", data)
+        except (OSError, ValueError):
+            if not os.path.isfile(paths.p("index-cache.json")):
+                raise
+            data = json.load(open(paths.p("index-cache.json")))
+        return pkgindex.Legacy(data)
+    stamp = os.path.join(gitx.cache_dir(u), ".aihub-index-fetched")
+    d = gitx.cache_dir(u)
+    fresh = not refresh and os.path.isfile(stamp) and time.time() - os.path.getmtime(stamp) < TTL
+    if not fresh:
+        try:
+            d = gitx.fetch(u, src["branch"])
+            open(stamp, "w").close()
+        except gitx.GitError as e:
+            if not os.path.isdir(os.path.join(d, ".git")):
+                raise api.ApiError("cannot fetch package index: %s" % gitx.redact_url(str(e)))
     try:
-        data = _read(src, refresh)
-    except (OSError, ValueError, api.ApiError) as e:
-        if os.path.isfile(cache):                      # offline: stale index beats none
-            return json.load(open(cache))
-        raise api.ApiError(str(e))
-    data = dict(data, _src=src["url"])
-    paths.save("index-cache.json", data)
-    return data
+        return pkgindex.open_source(d, src["path"])
+    except (OSError, ValueError) as e:
+        raise api.ApiError("cannot read package index: %s" % e)
 
 
-def packages():
-    return {naming.normalize(p["name"]): p for p in index().get("packages", [])}
+_cache = {}
+
+
+def reader(refresh=False):
+    src = source()
+    key = (src["url"], src["branch"], src["path"])
+    if refresh or key not in _cache or time.time() - _cache[key][0] > TTL:
+        _cache[key] = (time.time(), _reader(src, refresh))
+    return _cache[key][1]
+
+
+def count(refresh=False):
+    return reader(refresh).count
 
 
 def get(name):
-    p = packages().get(naming.normalize(name))
+    p = reader().entry(name)
     if not p:
         raise api.ApiError("package '%s' is not in the index (aihub search)" % name)
     return p
 
 
 def search(term=""):
-    t = (term or "").lower()
+    """Matches on name, description and tags using the catalog only (no per-package files are opened)."""
+    words = (term or "").lower().split()
     out = []
-    for p in packages().values():
+    for p in reader().catalog():
         hay = " ".join([p["name"], p.get("description") or "", " ".join(p.get("tags") or [])]).lower()
-        if all(w in hay for w in t.split()):
+        if all(w in hay for w in words):
             out.append(p)
     return sorted(out, key=lambda p: p["name"])
 

@@ -3,7 +3,7 @@
   "index": {
     "git_url": "https://github.com/4ursmile/aftest",
     "branch": "main",
-    "path": "index.json",
+    "path": "index",
     "langfuse_host": "",
     "langfuse_project": "aihub"
   },
