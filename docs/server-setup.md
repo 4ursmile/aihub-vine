@@ -154,3 +154,12 @@ The web interface loads the pinned Preact/htm bundle from `cdn.jsdelivr.net` in 
 | Upload returns `413` | Large packages: update the CLI (it chunks automatically) and keep `client_max_body_size` above `AIHUB_UPLOAD_CHUNK_MB`. If the package exceeds the package size cap, raise it in Admin > Settings > Uploads (or `AIHUB_MAX_UPLOAD_MB`). Old CLIs still need a proxy limit as large as the package. |
 | Login returns `429` | The in-process limiter saw at least eight failed attempts for that IP and username within five minutes. Wait for the window to reset and verify credentials. |
 | Usage hook is not firing | Run `aihub doctor`, then `aihub hooks install`. Confirm the package component is registered with the tool and the CLI can reach the hub. Codex does not provide a general tool-call hook. |
+
+## Scheduled database backup to git
+
+The server can push a credential-safe copy of its database into the same git repository as the package index, under `backups/`. Enable it with `AIHUB_BACKUP_ENABLED=true` or Admin settings (`backup_enabled=1`). It needs the index URL and push access for the server's git credentials.
+
+- Schedule: `backup_schedule`, a 5-field cron expression or seconds (default `0 3 * * *`). Run now with `POST /api/v1/admin/backup/run`; read or change settings with `GET`/`PUT /api/v1/admin/backup`.
+- Layout: `backups/index.json` lists every file with table, row count, sha256 and size. `backups/db/<table>.sqlite.gz` holds one table per file. `events` and `audit_log` are split by id range into `<table>-000001.sqlite.gz`, ... (`backup_events_chunk` rows each, default 20000), and full chunks are never rewritten, so files and git history stay small.
+- Credentials: password hashes and token hashes are kept only in hashed form; secret-looking `app_settings` values (Langfuse secret key, enrollment code, ...) are replaced by a SHA-256 hash and are **not restorable** (re-enter them after a restore); free text in events and the audit log passes through the credential redactor.
+- Restore: stop the server, `gunzip` the files you need and copy rows back with `sqlite3`/your tool of choice; check each file against `sha256` in `index.json`.

@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from ..core.release import VERSION
 from .cache import init_cache
 from .sync import Sync
+from .backup import Backup
 from .config import Settings
 from .db import init_db
 from .repos import EventBuffer, Repos
@@ -193,8 +194,10 @@ def create_app(settings: Settings = None) -> FastAPI:
         logging.getLogger("aihub").info("backends: %s", json.dumps(s.describe()))
         if s.sync_enabled:
             _app.state.sync.start()
+            _app.state.backup.start()
         yield
         _app.state.sync.close()
+        _app.state.backup.close()
         _app.state.events.close()  # drain queued usage events on shutdown
         try:
             db.close()
@@ -208,6 +211,7 @@ def create_app(settings: Settings = None) -> FastAPI:
     app.state.cache = init_cache(s)
     app.state.events = EventBuffer(app.state.repos, s.event_flush_rows, s.event_flush_secs)
     app.state.sync = Sync(app.state.repos, s)
+    app.state.backup = Backup(app.state.repos, s, app.state.sync)
     app.add_middleware(GZipMiddleware, minimum_size=800)
     app.include_router(api)
 

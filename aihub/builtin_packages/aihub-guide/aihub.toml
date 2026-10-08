@@ -1,6 +1,6 @@
 [package]
 name = "aihub-guide"
-version = "2.1.0"
+version = "2.2.0"
 type = "skill"
 description = "Teaches Claude Code and Codex to use AI Hub: it fetches the latest docs from the hub API before answering or setting up a project."
 tags = ["aihub", "docs", "guide"]

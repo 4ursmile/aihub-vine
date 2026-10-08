@@ -1321,6 +1321,52 @@ def sync_update(body: dict, request: Request, u=admin):
     return sync_status(request, u)
 
 
+BACKUP_KEYS = ("backup_enabled", "backup_schedule", "backup_events_chunk")
+
+
+def _backup_view(request, u):
+    bk, repos = request.app.state.backup, R(request)
+    return {"config": {"backup_enabled": "1" if bk.enabled() else "0", "backup_schedule": bk.schedule_text(), "backup_events_chunk": str(bk.chunk())},
+            "status": dict(bk.status, next_in=round(bk.delay()))}
+
+
+@r.get("/admin/backup")
+def backup_status(request: Request, u=admin):
+    return _backup_view(request, u)
+
+
+@r.put("/admin/backup")
+def backup_update(body: dict, request: Request, u=admin):
+    repos = R(request)
+    for k in BACKUP_KEYS:
+        if k in body and body[k] is not None:
+            v = str(body[k]).strip()
+            if k == "backup_enabled" and v not in ("0", "1"):
+                raise HTTPException(400, "backup_enabled must be 0 or 1")
+            if k == "backup_schedule":
+                try:
+                    parse_schedule(v)
+                except ValueError as e:
+                    raise HTTPException(400, str(e))
+            if k == "backup_events_chunk" and not (v.isdigit() and 1000 <= int(v) <= 1000000):
+                raise HTTPException(400, "backup_events_chunk must be between 1000 and 1000000")
+            repos.set_setting(k, v)
+    repos.audit(u["username"], "settings.backup", "", ",".join(k for k in BACKUP_KEYS if k in body))
+    request.app.state.backup.wake.set()
+    return _backup_view(request, u)
+
+
+@r.post("/admin/backup/run")
+def backup_run(request: Request, u=admin):
+    """Back up now (to the index git repo), whether or not the schedule is enabled."""
+    try:
+        request.app.state.backup.run_once()
+    except Exception as e:
+        raise HTTPException(502, "backup failed: %s" % str(e)[:300])
+    R(request).audit(u["username"], "backup.run", "", "")
+    return _backup_view(request, u)
+
+
 @r.post("/admin/sync/run")
 def sync_run(request: Request, full: bool = False, u=admin):
     """Poll now. full=true forgets the cursor and looks back over everything (safe: events are deduplicated)."""

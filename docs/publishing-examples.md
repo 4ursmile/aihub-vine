@@ -1,6 +1,6 @@
 # Publishing examples
 
-These examples assume `aihub` is configured for the target hub and you are logged in with the `publish` permission. The generated project trees were compared with `aihub dev init` output and each starter passed `aihub dev validate`. Replace the generated placeholder content before publishing.
+These examples assume `aihub` is configured with an index and Langfuse (`aihub setup`) and that your git credentials can push to each project's `[git]` repository. The generated project trees were compared with `aihub dev init` output and each starter passed `aihub dev validate`. Replace the generated placeholder content before publishing.
 
 ## Skill package
 

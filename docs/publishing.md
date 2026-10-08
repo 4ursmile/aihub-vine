@@ -111,7 +111,7 @@ Quality rules:
 ```
 aihub dev validate     # fix all errors; treat warnings as TODOs
 aihub dev build        # dist/<name>-<version>.tar.gz
-aihub dev publish --bump patch    # ask the user first; needs `aihub login` + publish permission
+aihub dev publish --bump patch    # ask the user first; needs push access to the [git] repository
 ```
 
 Finish by reporting: package name/version/type, files moved, warnings left, and the install command `aihub install <name>`.
@@ -379,7 +379,7 @@ content = "hub=${HUB}\n"
 
 ## Versioning and releases
 
-Published versions are immutable. If the version exists already, the server rejects it. Make a new release by bumping one version component:
+Published versions are immutable: the same version number should not be pushed twice, because installs and the lock file pin the commit. Make a new release by bumping one version component:
 
 ```sh
 aihub dev publish --bump patch
@@ -387,7 +387,7 @@ aihub dev publish --bump minor
 aihub dev publish --bump major
 ```
 
-The publish command updates the manifest version before committing and pushing. Review the resulting manifest change and archive before release. You can yank a release to exclude it from version resolution, then unyank it later. Yank and unyank require develop access or site-admin permission and are available through `POST /api/v1/packages/{name}/versions/{version}/yank` and `/unyank`.
+The publish command updates the manifest version before committing and pushing. Review the resulting manifest change and archive before release. Yanking a release to exclude it from version resolution is a hub operation: it requires develop access or site-admin permission and uses `POST /api/v1/packages/{name}/versions/{version}/yank` and `/unyank`. The CLI itself does not yank.
 
 Package dependency strings accept comma-separated constraints using `==`, `!=`, `>=`, `<=`, `>`, `<`, and `~=`; an omitted operator means equality. Examples:
 
@@ -445,7 +445,7 @@ The dashboard aggregates usage events by package, event kind, actor/client, comp
 - [ ] Review scripts and setup commands for side effects; avoid elevated privileges and unexpected networking.
 - [ ] Run `aihub dev validate` and resolve all errors; review every warning.
 - [ ] Build with `aihub dev build`, inspect the archive (for example, `tar -tzf dist/<name>-<version>.tar.gz`), and test installation/uninstallation on the OSes you claim to support.
-- [ ] Confirm login, `publish` permission, repository access, and intended visibility.
+- [ ] Confirm push access to the repository and that the `[git]` remote and branch are the ones you intend.
 - [ ] Keep secrets and local build artifacts out of the archive.
 
 ## Troubleshooting
@@ -453,7 +453,9 @@ The dashboard aggregates usage events by package, event kind, actor/client, comp
 | Message or symptom | Meaning and next step |
 | --- | --- |
 | Same version pushed twice | Git accepts it, but installs and `aihub lock` pin by commit and the index lists one entry per version. Bump the version for every release (`aihub dev publish --bump patch`). |
-| `package name is not available` | A package with that name exists but is not visible to you. Choose a different name or ask its owner/admin. |
+| `git is not installed` | Install git; `dev publish` runs it. |
+| `git-lfs is not installed` (`N file(s) over 50 MB ... but git-lfs is not installed`) | A file over 50 MB needs git-lfs. Install it or shrink the file. |
+| `cannot find '<ref>' in <repo>` or `cannot fetch package index` | The index or the package repository is unreachable, or the ref does not exist. Check the git URL and your git credentials. |
 | `git remote origin is X but aihub.toml says Y` | The project's remote changed. Fix `[git] url` in `aihub.toml` or the remote, then publish again. |
 | `you are on branch 'X' but aihub.toml publishes 'Y'` | Switch branch, or change `[git] branch`. |
 | `script not found in package: <path>` | A script path ending in a supported extension is missing from the extracted archive. Include it or correct the manifest. |
