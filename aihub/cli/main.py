@@ -7,7 +7,7 @@ import tempfile
 import urllib.parse
 
 from ..core import archive, ignore, manifest as M, naming, version as V
-from . import api, installer, paths, ui, updater
+from . import api, installer, paths, publish as pub, registry, remote_config, ui, updater
 from .installer import _spec
 
 def cmd_config(a):
@@ -39,28 +39,28 @@ def cmd_register(a):
 
 def cmd_search(a):
     with ui.Spinner("Searching for '%s'" % a.term if a.term else "Loading packages") as sp:
-        r = api.call("GET", "/packages?q=%s&per_page=30" % urllib.parse.quote(a.term))
-        sp.text("%d result%s" % (len(r["items"]), "" if len(r["items"]) == 1 else "s"))
-    if not r["items"]:
+        items = registry.search(a.term)[:30]
+        sp.text("%d result%s" % (len(items), "" if len(items) == 1 else "s"))
+    if not items:
         ui.note("Nothing matches '%s'." % a.term)
         ui.info("try a shorter word, or publish your own: aihub dev init")
         return
     ui.out()
     ui.table(["NAME", "TYPE", "VERSION", "DESCRIPTION"],
-             [[ui.bold(ui.highlight(p["name"], a.term)), ui.badge(p["type"]), p["latest_version"] or "-",
-               ui.highlight((p["description"] or "").replace("\n", " "), a.term)] for p in r["items"]])
+             [[ui.bold(ui.highlight(p["name"], a.term)), ui.badge(p["type"]), p.get("latest_version") or "-",
+               ui.highlight((p.get("description") or "").replace("\n", " "), a.term)] for p in items])
     ui.out()
     ui.info("install one with: aihub install <name>      details: aihub info <name>")
 
 
 def cmd_info(a):
     with ui.Spinner("Fetching %s" % a.name):
-        d = api.call("GET", "/packages/" + a.name)
+        d = dict(registry.get(a.name))
+        d["versions"] = [{"version": v} for v in reversed(registry.versions(d))]
     if not ui.TTY:
         print(json.dumps(d, indent=2))
         return
-    meta = ["%s  v%s" % (ui.badge(d["type"]), d.get("latest_version") or "-"),
-            "%s downloads" % d.get("downloads", 0)]
+    meta = ["%s  v%s" % (ui.badge(d["type"]), d.get("latest_version") or "-")]
     r = (d.get("rating") or {}).get("avg")
     if r:
         meta.append("rating %s" % r)
@@ -71,7 +71,7 @@ def cmd_info(a):
     if vs:
         lines.append(ui.dim("versions: ") + ", ".join(v["version"] + (" (yanked)" if v.get("yanked") else "") for v in vs[:6])
                      + (" ..." if len(vs) > 6 else ""))
-    req = d.get("requires") or {}
+    req = ((d.get("versions") or [{}])[0].get("manifest") or d.get("manifest") or {}).get("requires") or {}
     if req.get("packages"):
         lines.append(ui.dim("needs: ") + ", ".join(req["packages"]))
     ui.out()
@@ -85,19 +85,13 @@ def cmd_install(a):
 
 
 def cmd_download(a):
-    """Save a package archive without installing it. Resumable: re-run the same command after an interruption."""
+    """Copy a package's files out of git into a folder, without installing."""
     n, s = _spec(a.name.replace("@", "==", 1) if "@" in a.name else a.name)
-    r = api.call("GET", "/resolve?name=%s&spec=%s" % (n.lower(), s.replace("=", "%3D").replace(">", "%3E").replace("<", "%3C")))
-    d = os.path.abspath(a.output or ".")
-    os.makedirs(d, exist_ok=True)
-    dest = os.path.join(d, r["url"].rsplit("/", 1)[-1])
-    ui.info("%s %s (%s)" % (r["name"], r["version"], ui.human(r.get("size", 0))))
-    pg = ui.Progress("downloading")
-    try:
-        api.download(r["url"], dest, r["sha256"], progress=pg)
-    finally:
-        pg.finish()
-    ui.good("Saved %s (sha256 verified)" % dest)
+    r = registry.resolve(n, s)
+    dest = os.path.join(os.path.abspath(a.output or "."), "%s-%s" % (r["name"], r["version"]))
+    with ui.Spinner("Fetching %s %s" % (r["name"], r["version"])):
+        registry.checkout(r, dest)
+    ui.good("Saved %s" % dest)
 
 
 def cmd_uninstall(a):
@@ -243,7 +237,7 @@ def cmd_update(a):
     for n, r in pk:
         spec = installer.constraint_on(st, n)        # never move a package outside what its dependents allow
         with ui.Spinner("Checking %s" % n) as sp:
-            latest = api.call("GET", "/resolve?name=%s&spec=%s" % (n, urllib.parse.quote(spec)))["version"]
+            latest = registry.resolve(n, spec)["version"]
             newer = V.compare(latest, r["version"]) > 0
             sp.text("%s %s" % (n, "-> " + latest if newer else "is up to date (%s)" % r["version"]))
         if newer:
@@ -258,17 +252,7 @@ def cmd_doctor(a):
     import shutil
     from . import integrations
     ui.heading("aihub doctor")
-    hub = paths.config()["hub"]
-    ui.good("hub: %s" % hub)
-    reach = False
-    with ui.Spinner("Reaching the hub") as sp:
-        try:
-            api.call("GET", "/healthz", timeout=5)
-            reach = True
-        except Exception as e:
-            sp.problem("hub unreachable: %s" % e, "bad")
-    if not reach:
-        ui.info("fix: aihub config set hub https://your-hub.example.com")
+    _check_backends(detail=True)
     cred = paths.load("credentials.json", {})
     (ui.good if cred.get("token") else ui.note)("signed in as %s" % cred["username"] if cred.get("token") else "not signed in (aihub login)")
     tools = integrations.detected()
@@ -284,19 +268,45 @@ def cmd_doctor(a):
     ui.good("%d package(s) installed" % len(installer.state()["packages"]))
 
 
+def _check_backends(detail=False):
+    """Package index (git) and Langfuse are what the CLI depends on now; the hub is optional."""
+    from . import langfuse, gitx
+    idx = registry.source()
+    with ui.Spinner("Checking the package index") as sp:
+        if not idx["url"]:
+            sp.problem("no package index configured. run: aihub setup   (or: aihub config set index_url <git url>)")
+        else:
+            try:
+                n = len(registry.index(refresh=True).get("packages", []))
+                sp.text("Package index OK (%d packages)" % n)
+            except Exception as e:
+                sp.problem("package index unreachable: %s" % gitx.redact_url(str(e)))
+    s = langfuse.settings()
+    with ui.Spinner("Checking Langfuse") as sp:
+        if not langfuse.configured(s):
+            sp.problem("Langfuse is not configured, so usage reporting is paused. run: aihub setup")
+        else:
+            try:
+                langfuse._req(s, "GET", "/api/public/projects", timeout=6)
+                sp.text("Langfuse reachable (%s)" % s["host"])
+            except Exception as e:
+                sp.problem("Langfuse unreachable: %s" % e)
+    if detail:
+        hub = paths.config()["hub"]
+        try:
+            api.call("GET", "/healthz", timeout=4)
+            ui.good("hub (optional, for the web dashboard): %s" % hub)
+        except Exception:
+            ui.info("hub not reachable (optional): %s" % hub)
+
+
 def cmd_welcome(a):
     """First-run onboarding. Interactive on a tty, plain and safe otherwise (-y accepts the defaults)."""
     from . import hooks, integrations
     ask = ui.INTERACTIVE and not a.yes
     ui.banner()
     ui.heading("Let's get you set up")
-    hub = paths.config()["hub"]
-    with ui.Spinner("Checking the hub at %s" % hub) as sp:
-        try:
-            api.call("GET", "/healthz", timeout=5)
-            sp.text("Hub is reachable (%s)" % hub)
-        except Exception:
-            sp.problem("Hub not reachable yet (%s). Change it with: aihub config set hub <url>" % hub)
+    _check_backends()
     tools = integrations.detected()
     if tools:
         ui.good("Found: " + ", ".join(t.label for t in tools))
@@ -307,14 +317,15 @@ def cmd_welcome(a):
         ui.out()
         picks = ui.select("What should I connect?", [
             ("hooks", "Usage hooks - show what your team really uses"),
-            ("skill", "Packaging skill - lets your AI tool help you publish")], multi=True, preset=("hooks", "skill"))
+            ("skill", "Recommend the packaging skills (not installed automatically)")], multi=True, preset=("hooks", "skill"))
         do_hooks, do_skill = "hooks" in picks, "skill" in picks
     if do_hooks:
         for label, status in hooks.ensure():
             ui.good("%s hook: %s" % (label, status))
     if do_skill:
-        for name, status in installer.install_builtin(tools=[t.name for t in tools]):
-            (ui.good if status in ("installed", "already installed") else ui.note)("skill package %s: %s" % (name, status))
+        from ..core.release import BUILTIN_PACKAGES
+        ui.out()
+        ui.info("recommended: " + ", ".join("aihub install " + n for n in BUILTIN_PACKAGES))
     if ask and not paths.load("credentials.json", {}).get("token"):
         ui.out()
         choice = ui.select("Account", [("login", "I have an account - sign in"), ("register", "Create an account"),
@@ -352,7 +363,7 @@ def cmd_hook(a):
 
 def cmd_flush(a):
     from . import telemetry
-    n = telemetry.flush(linger=0 if a.verbose else 10)
+    n = telemetry.flush(force=not getattr(a, "background", False))     # --background: the detached sender, one pass per window
     if a.verbose:
         print("sent %d events" % n)
 
@@ -412,12 +423,16 @@ def dev_init(a):
     from ..core import naming
     name = naming.validate(name)
     f = os.path.join(d, "aihub.toml")
-    if os.path.exists(f) and not a.force:
-        sys.exit("aihub.toml already exists here (use --force to overwrite the starter files)")
-    manifest, files, execs = templates.render(a.type, name, a.description or "")
-    with open(f, "w") as fh:
-        fh.write(manifest)
-    made = ["aihub.toml"]
+    existing = os.path.exists(f) and not a.force
+    made = []
+    if not existing:
+        manifest, files, execs = templates.render(a.type, name, a.description or "")
+        with open(f, "w") as fh:
+            fh.write(manifest)
+        made.append("aihub.toml")
+    else:
+        files, execs = {}, set()
+        ui.note("aihub.toml already exists; keeping it (use --force to regenerate starter files)")
     for rel, content in files.items():
         p = os.path.join(d, rel)
         if os.path.exists(p) and not a.force:
@@ -428,7 +443,17 @@ def dev_init(a):
         if rel in execs:
             os.chmod(p, 0o755)
         made.append(rel)
-    ui.celebrate("Created a %s project: %s" % (a.type, name))
+    if pub.ensure_gitignore(d):
+        made.append(".gitignore")
+    m = M.parse(open(f, encoding="utf-8").read())
+    if not (m["git"].get("url") and m["git"].get("branch")):
+        try:
+            git = pub.detect(d, m["git"])
+            pub.write_git_table(f, git)
+            made.append("[git] in aihub.toml")
+        except ValueError as e:
+            ui.note("%s - set it before publishing" % e)
+    ui.celebrate("Project ready: %s" % name)
     ui.tree(d, made)
     ui.out()
     ui.info("next: edit the files, then  aihub dev validate  &&  aihub dev publish")
@@ -466,32 +491,47 @@ def dev_build(a):
 
 
 def dev_publish(a):
+    root = _root(a)
     if a.bump:
         m = _load(a)
-        p = os.path.join(_root(a), "aihub.toml")
+        p = os.path.join(root, "aihub.toml")
         t = open(p).read()
         old = m["package"]["version"]
         open(p, "w").write(t.replace('version = "%s"' % old, 'version = "%s"' % V.bump(old, a.bump), 1))
-    dest = dev_build(a)
-    pg = ui.Progress("uploading")
-    try:
-        r = api.upload_package(dest, progress=pg)
-    finally:
-        pg.finish()
-    ui.celebrate("Published %s %s" % (r["name"], r["version"]))
-    ui.info("page:    %s/#/package/%s" % (paths.config()["hub"].rstrip("/"), r["name"]))
-    ui.info("install: aihub install %s" % r["name"])
+    m = dev_validate(a, quiet=True)
+    info = pub.publish(root, m)
+    sent = pub.report(info)
+    ui.celebrate("Published %s %s" % (info["package"], info["version"]))
+    ui.info("repo:    %s @ %s (%s)" % (info["git_url"], info["git_branch"], info["commit"][:8]))
+    ui.info("install: aihub install %s" % info["package"])
+    if not sent:
+        ui.note("publish event queued; it will be sent when Langfuse is reachable (aihub flush)")
 
 
 def dev_stats(a):
+    """Usage of this package, read from Langfuse (the same events the hub dashboard shows)."""
+    from . import langfuse
     name = _load(a)["package"]["name"]
-    d = api.call("GET", "/packages/%s/stats" % name)
+    s = langfuse.settings()
+    if not langfuse.configured(s):
+        raise ValueError("Langfuse is not configured. run: aihub setup")
+    by, users = {}, set()
+    since = langfuse.now_minus(30 * 86400)
+    with ui.Spinner("Reading events from Langfuse"):
+        for o in langfuse.fetch_observations("aihub.", since=since, s=s):
+            m = o.get("metadata") or {}
+            if m.get("package") != name:
+                continue
+            k = (o.get("name") or "").split(".", 1)[-1]
+            by[k] = by.get(k, 0) + 1
+            users.add(o.get("userId") or m.get("client_id") or "")
+    d = {"days": 30, "by_kind": by, "active_users": len(users)}
     if not ui.TTY:
         print(json.dumps(d, indent=2))
         return
-    ui.card("%s - last %s days" % (name, d.get("days", 30)),
-            ["%-10s %s" % (k, v) for k, v in sorted((d.get("by_kind") or {}).items())] or ["no events yet"],
-            ui.dim("active users: ") + str(d.get("active_users", 0)))
+    ui.card("%s - last 30 days" % name,
+            ["%-10s %s" % (k, v) for k, v in sorted(by.items())] or ["no events yet"],
+            ui.dim("active users: ") + str(len(users)))
 
 
 class _CommandGroupAction(argparse.Action):
@@ -638,6 +678,12 @@ def build_parser():
         arg("--check", action="store_true", help="Only report whether a newer version exists."),
         arg("--force", action="store_true", help="Reinstall even when already current."),
         arg("--rollback", action="store_true", help="Restore the version that was installed before the last upgrade."))
+    add("setup", remote_config.cmd_setup, "Pull the package index and Langfuse settings from the hub.",
+        "Ask the hub for the package index location and, when the admin shares them, the Langfuse keys and git credentials. Values come over HTTPS, are stored in your aihub config (git tokens go to your git credential helper), and are refreshed automatically on the interval the admin sets. If the hub cannot be reached, you are asked for the values instead; environment variables LANGFUSE_BASE_URL, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY and AIHUB_INDEX_URL are picked up automatically.",
+        "Examples:\n  aihub setup\n  aihub setup --hub https://hub.example.com --code TEAM-CODE",
+        arg("--hub", metavar="URL", help="Hub to ask (default: the configured hub)."),
+        arg("--code", metavar="CODE", help="Enrollment code from your admin, needed when credential sharing is code-protected."),
+        arg("--manual", action="store_true", help="Skip the hub and enter the values by hand."))
     add("welcome", cmd_welcome, "Run first-time setup for detected AI tools.",
         "Check the hub and detected tools, offer or install usage hooks and the built-in packaging skill, and optionally sign in or register. Interactive setup lets you choose; --yes accepts defaults without prompting.",
         "Examples:\n  aihub welcome\n  aihub welcome --yes",
@@ -647,9 +693,10 @@ def build_parser():
         "Example:\n  printf '{}' | aihub hook --source claude",
         arg("--source", default="claude", metavar="TOOL", help="Source label recorded with the event (default: claude)."))
     add("flush", cmd_flush, "Send queued usage events to the hub.",
-        "Flush locally queued usage telemetry to the configured hub. The default allows a short linger for more events; --verbose skips that linger and prints the number sent.",
+        "Send queued usage events to Langfuse now, including the window still open. Events are normally sent in the background once per telemetry interval (aihub config set telemetry_interval 60).",
         "Examples:\n  aihub flush\n  aihub flush --verbose",
-        arg("-v", "--verbose", action="store_true", help="Skip the linger period and print the number of events sent."))
+        arg("-v", "--verbose", action="store_true", help="Print the number of events sent."),
+        arg("--background", action="store_true", help=argparse.SUPPRESS))
     add("hooks", cmd_hooks, "Install or remove usage hooks for detected tools.",
         "Install or remove AI-tool hooks that report usage of components from installed packages. The optional tool filter is repeatable; only detected tools are processed, and Codex has no tool-call hook.",
         "Examples:\n  aihub hooks install\n  aihub hooks install --tool claude\n  aihub hooks remove",
@@ -716,6 +763,7 @@ def main(argv=None):
             cmd_welcome(argparse.Namespace(yes=False))
         a.fn(a)
         updater.auto(a.cmd)
+        remote_config.auto(a.cmd)
     except (api.ApiError, ValueError, KeyError, OSError) as e:
         ui.error(e, ui.hint_for(e))
         return 1

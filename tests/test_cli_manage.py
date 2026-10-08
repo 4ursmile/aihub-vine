@@ -3,31 +3,16 @@ import contextlib
 import io
 import json
 import os
-import socket
-import tarfile
+import subprocess
 import tempfile
-import threading
 import time
 import unittest
-import urllib.request
-
-import uvicorn
 
 from aihub.cli import api, hooks, installer, main, paths
-from aihub.server.config import Settings
-from aihub.server.main import create_app
 
 
-def pkg(name, ver, deps=()):
-    toml = '[package]\nname="%s"\nversion="%s"\ntype="skill"\ndescription="d"\n[requires]\npackages=%s\n[[skills]]\nname="%s"\npath="skills/%s"\n' % (
-        name, ver, json.dumps(list(deps)), name, name)
-    b = io.BytesIO()
-    with tarfile.open(fileobj=b, mode="w:gz") as t:
-        for fn, data in (("aihub.toml", toml.encode()), ("skills/%s/SKILL.md" % name, ("---\nname: %s\ndescription: Use when x\n---\nhi" % name).encode())):
-            ti = tarfile.TarInfo(fn)
-            ti.size = len(data)
-            t.addfile(ti, io.BytesIO(data))
-    return b.getvalue()
+def git(cwd, *a):
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t"] + list(a), cwd=cwd, check=True, capture_output=True)
 
 
 def run(*argv):
@@ -40,42 +25,38 @@ def run(*argv):
 class CliManage(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.env = {k: os.environ.get(k) for k in ("HOME", "AIHUB_HOME", "AIHUB_URL")}
+        cls.env = {k: os.environ.get(k) for k in ("HOME", "AIHUB_HOME", "AIHUB_INDEX_URL")}
         cls.T = tempfile.mkdtemp()
         os.environ["HOME"], os.environ["AIHUB_HOME"] = cls.T, cls.T + "/.aihub"
-        sock = socket.socket()
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-        sock.close()
-        s = Settings()
-        s.data_dir, s.public_url, s.open_registration = cls.T + "/data", "http://127.0.0.1:%d" % port, True
-        os.makedirs(s.data_dir, exist_ok=True)
-        cls.srv = uvicorn.Server(uvicorn.Config(create_app(s), host="127.0.0.1", port=port, log_level="error"))
-        threading.Thread(target=cls.srv.run, daemon=True).start()
-        for _ in range(50):
-            try:
-                urllib.request.urlopen(s.public_url + "/api/v1/healthz")
-                break
-            except OSError:
-                time.sleep(0.1)
-        os.environ["AIHUB_URL"] = s.public_url
-
-        def post(path, body=None, tok=None, raw=None):
-            rq = urllib.request.Request(s.public_url + path, data=raw if raw is not None else json.dumps(body).encode(), method="POST",
-                                        headers={"Content-Type": "application/json", **({"Authorization": "Bearer " + tok} if tok else {})})
-            return json.loads(urllib.request.urlopen(rq).read())
-        post("/api/v1/auth/register", {"username": "admin", "password": "password123"})
-        tok = post("/api/v1/auth/login", {"username": "admin", "password": "password123"})["token"]
-        paths.save("credentials.json", {"token": tok, "username": "admin"})
-        for n, v, d in [("base", "1.0.0", []), ("base", "1.5.0", []), ("base", "2.0.0", []),
-                        ("left", "1.0.0", ["base>=1,<2"]), ("right", "1.0.0", ["base>=1.2,<3"]), ("top", "1.0.0", ["left", "right"]),
-                        ("solo", "1.0.0", []), ("bad", "1.0.0", ["base>=3"]),
-                        ("clash-a", "1.0.0", ["base<1.2"]), ("clash-b", "1.0.0", ["base>=1.5"]), ("clash", "1.0.0", ["clash-a", "clash-b"])]:
-            post("/api/v1/upload", None, tok, pkg(n, v, d))
+        repo = cls.T + "/repo"
+        os.makedirs(repo)
+        git(repo, "init", "-q", "-b", "main")
+        specs = [("base", "1.0.0", []), ("base", "1.5.0", []), ("base", "2.0.0", []),
+                 ("left", "1.0.0", ["base>=1,<2"]), ("right", "1.0.0", ["base>=1.2,<3"]), ("top", "1.0.0", ["left", "right"]),
+                 ("solo", "1.0.0", []), ("bad", "1.0.0", ["base>=3"]),
+                 ("clash-a", "1.0.0", ["base<1.2"]), ("clash-b", "1.0.0", ["base>=1.5"]), ("clash", "1.0.0", ["clash-a", "clash-b"])]
+        pk = {}
+        for n, v, d in specs:                                   # one commit per version, tagged v<name>-<ver>
+            toml = '[package]\nname="%s"\nversion="%s"\ntype="skill"\ndescription="d"\n[requires]\npackages=%s\n[[skills]]\nname="%s"\npath="skills/%s"\n' % (
+                n, v, json.dumps(d), n, n)
+            sub = os.path.join(repo, n)
+            os.makedirs(sub + "/skills/" + n, exist_ok=True)
+            open(sub + "/aihub.toml", "w").write(toml)
+            open(sub + "/skills/%s/SKILL.md" % n, "w").write("---\nname: %s\ndescription: Use when x\n---\nhi" % n)
+            git(repo, "add", "-A")
+            git(repo, "commit", "-q", "-m", "%s %s" % (n, v))
+            tag = "%s-%s" % (n, v)
+            git(repo, "tag", tag)
+            e = pk.setdefault(n, {"name": n, "type": "skill", "description": "d", "versions": [],
+                                  "repo": {"url": repo, "branch": "main", "subdir": n}})
+            e["versions"].append({"version": v, "ref": tag, "requires": {"os": [], "commands": [], "packages": d}})
+            e["latest_version"] = v
+        cls.index = cls.T + "/index.json"
+        json.dump({"packages": list(pk.values())}, open(cls.index, "w"))
+        os.environ["AIHUB_INDEX_URL"] = cls.index
 
     @classmethod
     def tearDownClass(cls):
-        cls.srv.should_exit = True
         for k, v in cls.env.items():
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
@@ -92,8 +73,6 @@ class CliManage(unittest.TestCase):
         self.assertIn("base", str(c.exception)); self.assertIn("clash-", str(c.exception))
         with self.assertRaises(api.ApiError) as c: installer.plan([{"name": "bad", "spec": ""}], {})
         self.assertIn("no version of base", str(c.exception))
-        # legacy fallback gives the same plan
-        self.assertEqual([p["name"] for p in installer._legacy_plan([{"name": "top"}], {})], ["base", "left", "right", "top"])
         # install with deps
         rc, o = run("install", "top", "--yes", "--tool", "claude"); self.assertEqual(rc, 0, o)
         s = self.st(); self.assertEqual(set(s), {"base", "left", "right", "top"})
@@ -139,11 +118,14 @@ class CliManage(unittest.TestCase):
         rc, o = run("sync", "-f", lf, "--yes", "--tool", "claude"); self.assertEqual(rc, 0, o)
         s = self.st(); self.assertEqual({n: r["version"] for n, r in s.items()}, {x["name"]: x["version"] for x in lock["packages"]})
         self.assertTrue(s["top"]["requested"] and not s["base"]["requested"])
-        # tampered lock sha refused
-        lock["packages"][0]["sha256"] = "0" * 64
+        # a lock pinning a commit that does not exist is refused, nothing is installed
+        for n in list(self.st()): installer.uninstall(n, quiet=True)
+        lock["packages"][0]["rev"] = "0" * 40
         with open(lf, "w") as f:
             json.dump(lock, f)
-        rc, o = run("sync", "-f", lf, "--yes"); self.assertEqual(rc, 1); self.assertIn("sha256", o)
+        rc, o = run("sync", "-f", lf, "--yes", "--tool", "claude"); self.assertEqual(rc, 1)
+        self.assertEqual(self.st(), {})                                            # the refused sync installed nothing
+        rc, o = run("install", "top", "--yes", "--tool", "claude"); self.assertEqual(rc, 0, o)
         # uninstall of a dependency warns
         rc, o = run("uninstall", "base", "--force"); self.assertEqual(rc, 0)
         self.assertIn("still needed by", o)

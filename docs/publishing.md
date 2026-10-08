@@ -2,7 +2,7 @@
 
 ## The 60-second path
 
-Create a project, replace the generated starter content, validate it, publish it, then install it to test the published archive:
+Create a project, replace the generated starter content, validate it, publish it, then install it to test what you pushed:
 
 ```sh
 aihub dev init ./my-tool --type tool --name my-tool --description "A short description"
@@ -25,7 +25,16 @@ For a new release, edit the files, bump the immutable version, and publish again
 aihub dev publish --bump patch
 ```
 
-The first publish requires a logged-in account with the server's `publish` permission. Publishing another version requires develop access to that repository or the site-level `manage_all` permission (held by site admins).
+`aihub dev publish` is a wrapper around git. It needs no hub account: access is whatever your git host grants you, and the publish is recorded in Langfuse under your account name, or `~<your-os-username>` when you are not signed in.
+
+What it does, in order:
+
+1. Reads `[git]` (`url`, `branch`, `subdir`) from `aihub.toml`. `aihub dev init` fills this in from the repo's `origin` and current branch; it asks only for what is still missing.
+2. Checks that the repo's remote and branch still match, and stops if they do not.
+3. Runs `git init` and adds `origin` if the project is not a repo yet, tracks files over 50 MB with git-lfs (it stops if git-lfs is missing), commits, and pushes, setting the upstream the first time.
+4. Records an `aihub.publish` event in Langfuse with the package, version and commit.
+
+Git credentials are yours alone: they come from your git credential helper, and the hub never sends or stores them. If none are stored, git (or the CLI, in a terminal) asks you once. The package appears in the catalogue when the index lists it (the index repo owner adds it, for example from CI on the publish event).
 
 ## Let your assistant package it for you
 
@@ -378,7 +387,7 @@ aihub dev publish --bump minor
 aihub dev publish --bump major
 ```
 
-The publish command updates the manifest version before building and uploading. Review the resulting manifest change and archive before release. You can yank a release to exclude it from version resolution, then unyank it later. Yank and unyank require develop access or site-admin permission and are available through `POST /api/v1/packages/{name}/versions/{version}/yank` and `/unyank`.
+The publish command updates the manifest version before committing and pushing. Review the resulting manifest change and archive before release. You can yank a release to exclude it from version resolution, then unyank it later. Yank and unyank require develop access or site-admin permission and are available through `POST /api/v1/packages/{name}/versions/{version}/yank` and `/unyank`.
 
 Package dependency strings accept comma-separated constraints using `==`, `!=`, `>=`, `<=`, `>`, `<`, and `~=`; an omitted operator means equality. Examples:
 
@@ -391,9 +400,9 @@ An empty constraint or `*` matches any version. See [manifest version rules](man
 
 ## Visibility and sharing
 
-New repositories use the server's `default_visibility` (default `public`). The first uploader becomes the repository admin. A repository is public or private; administrators can disable private repositories globally. Public repositories are visible according to the server's public browsing/install settings; the defaults allow anonymous browsing but require sign-in to install. Private packages are visible only to their maintainers, directly shared users, members of shared groups, and site admins. Unauthorized private packages are hidden from lists and reported as not found on package lookups, so the package name is not exposed.
+Visibility on the web catalogue is a display setting kept on the server; who can actually fetch the files is decided by your git host. New repositories use the server's `default_visibility` (default `public`). A repository is public or private; administrators can disable private repositories globally. Public repositories are visible according to the server's public browsing/install settings; the defaults allow anonymous browsing but require sign-in to install. Private packages are visible only to their maintainers, directly shared users, members of shared groups, and site admins. Unauthorized private packages are hidden from lists and reported as not found on package lookups, so the package name is not exposed.
 
-An uploader can request private visibility on first publish with the `X-Aihub-Visibility: private` HTTP header. `aihub dev publish` does not expose a visibility flag. To change visibility later, a repository admin or site admin sends `PATCH /api/v1/packages/{name}` with `{"visibility":"private"}` or `{"visibility":"public"}`; the access API below manages shares, not visibility. On first upload, if private repositories are disabled, a non-admin's `private` header is changed to public. On an existing package, the upload header does not change the repository's visibility.
+To change visibility, a repository admin or site admin sends `PATCH /api/v1/packages/{name}` with `{"visibility":"private"}` or `{"visibility":"public"}`; the access API below manages shares, not visibility. If private repositories are disabled site-wide, new packages are public.
 
 Use `GET /api/v1/packages/{name}/access` to inspect visibility and current shares. Repository admins or site admins can use `PUT` on that path to share with a user or group at `view` or `develop`; the request body is `{"type":"user","name":"alice","access":"view"}` (use `type: "group"` for a group). Use `DELETE /api/v1/packages/{name}/access/{ptype}/{pname}` to revoke a share. The package page's access controls use the same API.
 
@@ -443,9 +452,10 @@ The dashboard aggregates usage events by package, event kind, actor/client, comp
 
 | Message or symptom | Meaning and next step |
 | --- | --- |
-| `version already exists (immutable)` | That version was published previously. Bump the version and publish a new release. |
+| Same version pushed twice | Git accepts it, but installs and `aihub lock` pin by commit and the index lists one entry per version. Bump the version for every release (`aihub dev publish --bump patch`). |
 | `package name is not available` | A package with that name exists but is not visible to you. Choose a different name or ask its owner/admin. |
-| `you need develop access to publish to <name>` | You can see the repository but lack develop access. Ask a repository admin to grant it. |
+| `git remote origin is X but aihub.toml says Y` | The project's remote changed. Fix `[git] url` in `aihub.toml` or the remote, then publish again. |
+| `you are on branch 'X' but aihub.toml publishes 'Y'` | Switch branch, or change `[git] branch`. |
 | `script not found in package: <path>` | A script path ending in a supported extension is missing from the extracted archive. Include it or correct the manifest. |
 | `script path escapes the package: <path>` | A script path resolves outside the installed package. Use an in-package relative path. |
 | `[bin] <command> points outside the package or to a missing file: <path>` | The binary target is missing or escapes the package root. Fix the `[bin]` path. |

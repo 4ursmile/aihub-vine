@@ -38,10 +38,9 @@ class Settings:
     # --- server
     data_dir: str = "./aihub-data"
     public_url: str = "http://localhost:8000"
-    max_upload_mb: int = 200
-    upload_chunk_mb: int = 8              # chunk size for resumable uploads; keep below your reverse proxy's body limit
     open_registration: bool = True
-    seed_builtin: bool = True             # publish the built-in packages (aihub-guide, aihub-package) into the registry at startup
+    sync_enabled: bool = True             # poll Langfuse + the git index (disable in tests)
+    seed_builtin: bool = False             # publish the built-in packages (aihub-guide, aihub-package) into the registry at startup
     log_level: str = "INFO"
     # --- database:  sqlite (default, a file in data_dir)  |  postgres
     db_backend: str = "sqlite"

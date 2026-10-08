@@ -26,6 +26,34 @@ os = ["macos"]
 '''
 
 
+_SEQ = [0]
+
+
+def push_events(client, events, headers=None):
+    """Feed events through the same path the Langfuse poller uses (the server no longer has POST /events)."""
+    from aihub.server.sync import to_row
+    repos = client.app.state.repos
+    who = None
+    if headers:
+        who = client.get("/api/v1/auth/me", headers=headers).json().get("username")
+    rows = []
+    for e in events:
+        _SEQ[0] += 1
+        meta = {k: v for k, v in e.items() if v not in (None, "")}
+        o = {"id": "t%d" % _SEQ[0], "name": "aihub." + e["kind"], "startTime": "2026-10-08T10:00:00.000Z",
+             "userId": who or ("~" + e["local_user"] if e.get("local_user") else ""), "metadata": meta}
+        r = to_row(o)
+        if r:
+            if e.get("ts"):
+                r["ts"] = float(e["ts"])
+            rows.append(r)
+    repos.events_insert_ext(rows)
+
+    class _R:
+        status_code = 200
+    return _R()
+
+
 class Core(unittest.TestCase):
     def test_version(self):
         self.assertEqual(V.compare("1.0", "1.0.0"), 0)
@@ -54,7 +82,7 @@ class Core(unittest.TestCase):
 class Server(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
-        self.c = TestClient(create_app(Settings(seed_builtin=False, data_dir=self.d, event_flush_secs=0.2)))
+        self.c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=self.d, event_flush_secs=0.2)))
 
     def auth(self, name="alice"):
         self.c.post("/api/v1/auth/register", json={"username": name, "password": "secret1"})
@@ -63,20 +91,12 @@ class Server(unittest.TestCase):
 
     def test_flow(self):
         h = self.auth()
-        p = os.path.join(self.d, "s.tar.gz")
-        with tarfile.open(p, "w:gz") as t:
-            ti = tarfile.TarInfo("aihub.toml")
-            ti.size = len(TOML)
-            t.addfile(ti, io.BytesIO(TOML))
-            r = b"# Hello\n**bold**"
-            ti = tarfile.TarInfo("README.md")
-            ti.size = len(r)
-            t.addfile(ti, io.BytesIO(r))
-        body = open(p, "rb").read()
-        self.assertEqual(self.c.post("/api/v1/upload", content=body).status_code, 401)
-        r = self.c.post("/api/v1/upload", content=body, headers=h)
-        self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(self.c.post("/api/v1/upload", content=body, headers=h).status_code, 409)
+        repos = self.c.app.state.repos
+        pid = repos.package_upsert("demo-tool", "tool", "d", [], "# Hello\n**bold**", visibility="public")
+        repos.maintainer_add(pid, repos.user_by_name("alice")["id"], "owner")
+        repos.version_sync(pid, "1.0.0", {"package": {"name": "demo-tool", "version": "1.0.0", "type": "tool"},
+                                          "requires": {"packages": ["other"]}, "repo": {"url": "https://example/x.git", "branch": "main"}})
+        self.assertEqual(self.c.post("/api/v1/upload", content=b"x", headers=h).status_code, 404)           # no uploads any more
         d = self.c.get("/api/v1/packages/demo-tool").json()
         self.assertEqual(d["latest_version"], "1.0.0")
         self.assertEqual(d["requires"]["packages"], ["other"])
@@ -84,11 +104,8 @@ class Server(unittest.TestCase):
         self.assertEqual(self.c.get("/api/v1/packages?q=demo").json()["total"], 1)
         self.assertEqual(self.c.get("/api/v1/resolve", params={"name": "demo-tool"}).status_code, 401)   # public install is off by default
         res = self.c.get("/api/v1/resolve", params={"name": "demo-tool", "spec": ">=1"}, headers=h).json()
-        self.assertEqual(self.c.get(res["url"].replace("http://localhost:8000", "")).status_code, 401)  # ...and so are downloads
-        f = self.c.get(res["url"].replace("http://localhost:8000", ""), headers=h)
-        self.assertEqual(f.status_code, 200)
-        self.assertEqual(hashlib.sha256(f.content).hexdigest(), res["sha256"])
-        self.c.post("/api/v1/events", json={"events": [{"kind": "use", "package": "demo-tool", "client_id": "c1"}]})
+        self.assertEqual(res["repo"]["url"], "https://example/x.git")
+        push_events(self.c, [{"kind": "use", "package": "demo-tool", "client_id": "c1"}])
         self.assertEqual(self.c.get("/api/v1/packages/demo-tool/stats").json()["by_kind"]["use"], 1)
         self.assertEqual(self.c.post("/api/v1/packages/demo-tool/reviews", json={"rating": 5}, headers=h).status_code, 200)
         self.assertEqual(self.c.get("/api/v1/packages?q=demo").json()["items"][0]["rating"]["avg"], 5)
@@ -101,28 +118,6 @@ class Server(unittest.TestCase):
         self.assertEqual(self.c.get("/").status_code, 200)
         self.assertIn("aihub", self.c.get("/install.sh").text)
         self.assertEqual(self.c.get("/cli/aihub.pyz").status_code, 200)
-
-    def test_source_download_setting(self):
-        h = self.auth()
-        body = io.BytesIO()
-        with tarfile.open(fileobj=body, mode="w:gz") as t:
-            ti = tarfile.TarInfo("aihub.toml")
-            ti.size = len(TOML)
-            t.addfile(ti, io.BytesIO(TOML))
-        self.assertEqual(self.c.post("/api/v1/upload", content=body.getvalue(), headers=h).status_code, 200)
-        sha = self.c.get("/api/v1/packages/demo-tool").json()["versions"][0]["sha256"]
-        url = "/api/v1/packages/demo-tool/versions/1.0.0/download"
-        self.assertTrue(self.c.get("/api/v1/meta").json()["allow_source_download"])        # default on
-        self.assertEqual(self.c.get(url).status_code, 401)                                 # signed out: needs sign-in
-        r = self.c.get(url, headers=h)
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(hashlib.sha256(r.content).hexdigest(), sha)
-        self.assertEqual(self.c.get("/api/v1/packages/demo-tool/versions/9.9.9/download", headers=h).status_code, 404)
-        self.c.put("/api/v1/admin/settings", json={"allow_source_download": "0"}, headers=h)
-        self.assertEqual(self.c.get(url, headers=h).status_code, 403)
-        self.assertFalse(self.c.get("/api/v1/meta").json()["allow_source_download"])
-        f = self.c.get("/files/demo-tool/" + self.c.get("/api/v1/resolve?name=demo-tool", headers=h).json()["url"].rsplit("/", 1)[1], headers=h)
-        self.assertEqual(f.status_code, 200)                                               # CLI installs still work
 
     def test_reset_password_and_audit(self):
         from aihub.core import redact
@@ -164,8 +159,8 @@ class Server(unittest.TestCase):
         # tool events: anonymous install shows the local OS user; params are re-scrubbed by the server
         ev = {"kind": "use", "package": "demo-tool", "component": "mcp__db__query", "client_id": "c" * 32, "local_user": "dan",
               "host": "dan-mbp", "detail": "token=hunter2 select 1", "cwd": "/work/app"}
-        self.c.post("/api/v1/events", json={"events": [ev]})
-        self.c.post("/api/v1/events", json={"events": [dict(ev, local_user="", kind="install")]})
+        push_events(self.c, [ev])
+        push_events(self.c, [dict(ev, local_user="", kind="install")])
         t = self.c.get("/api/v1/audit?source=tools&q=select", headers=h).json()
         self.assertEqual(t["total"], 2)
         self.assertEqual({x["actor"] for x in t["items"]}, {"dan (local)", "anon-" + "c" * 6})
@@ -177,39 +172,6 @@ class Server(unittest.TestCase):
         csv_ = self.c.get("/api/v1/audit/export?source=tools", headers=h)
         self.assertIn("dan (local)", csv_.text)
         self.assertEqual(self.c.get("/api/v1/audit/export", headers=hb).status_code, 403)
-
-
-class Migrate(unittest.TestCase):
-    def test_db_and_storage_roundtrip(self):
-        import aihub.server.migrate as mg
-        from aihub.server.db import init_db
-        a, b = tempfile.mkdtemp(), tempfile.mkdtemp()
-        c = TestClient(create_app(Settings(seed_builtin=False, data_dir=a)))
-        c.post("/api/v1/auth/register", json={"username": "alice", "password": "secret1"})
-        h = {"Authorization": "Bearer " + c.post("/api/v1/auth/login", json={"username": "alice", "password": "secret1"}).json()["token"]}
-        body = io.BytesIO()
-        with tarfile.open(fileobj=body, mode="w:gz") as t:
-            ti = tarfile.TarInfo("aihub.toml")
-            ti.size = len(TOML)
-            t.addfile(ti, io.BytesIO(TOML))
-        self.assertEqual(c.post("/api/v1/upload", content=body.getvalue(), headers=h).status_code, 200)
-        env = os.path.join(b, "dest.env")
-        open(env, "w").write("AIHUB_DATA_DIR=%s\nAIHUB_SQLITE_PATH=%s\nAIHUB_STORAGE_BACKEND=local\n" % (b, os.path.join(b, "new.db")))
-        src = Settings(data_dir=a)
-        dst = Settings.load(env={}, env_file=env)
-        mg.migrate_db(src, dst)
-        self.assertTrue(mg.migrate_storage(src, dst))
-        self.assertTrue(mg.migrate_storage(src, dst))                       # re-run is a no-op
-        d = init_db(dst).conn()
-        self.assertEqual(d.execute("SELECT username FROM users").fetchone()[0], "alice")
-        self.assertEqual(d.execute("SELECT name FROM packages").fetchone()[0], "demo-tool")
-        self.assertTrue(os.path.isdir(os.path.join(b, "files", "demo-tool")))
-        c2 = TestClient(create_app(dst))                                    # the migrated hub serves search + download
-        self.assertEqual(c2.get("/api/v1/packages?q=demo").json()["total"], 1)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class Search(unittest.TestCase):
@@ -319,11 +281,12 @@ class Integrations(unittest.TestCase):
         paths.save("state.json", {"packages": {"pk": {"components": ["skill:s1", "mcp:srv"]}}})
         telemetry.kick = lambda: None
         hooks.handle(json.dumps({"tool_name": "Skill", "tool_input": {"skill": "s1"}}))
+        hooks.handle(json.dumps({"tool_name": "Skill", "tool_input": {"skill": "s1"}}))        # same call twice: both are counted
         hooks.handle(json.dumps({"tool_name": "mcp__srv__do", "tool_input": {}}))
         hooks.handle(json.dumps({"tool_name": "Bash", "tool_input": {}}))
         hooks.handle("garbage{")
         lines = open(paths.p("queue", "events.jsonl")).read().strip().split("\n")
-        self.assertEqual([json.loads(l)["package"] for l in lines], ["pk", "pk"])
+        self.assertEqual([json.loads(l)["package"] for l in lines], ["pk", "pk", "pk"])
 
 
 class MarkdownRich(unittest.TestCase):
@@ -334,7 +297,7 @@ class MarkdownRich(unittest.TestCase):
         self.assertNotIn("<b>", h)
 
     def test_docs_endpoints(self):
-        c = TestClient(create_app(Settings(seed_builtin=False, data_dir=tempfile.mkdtemp())))
+        c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=tempfile.mkdtemp())))
         self.assertEqual(c.get("/api/v1/readyz").status_code, 200)
         self.assertEqual(c.get("/api/v1/docs/..%2Fetc").status_code, 404)
         self.assertEqual(c.get("/api/v1/docs/nope").status_code, 404)
@@ -342,7 +305,7 @@ class MarkdownRich(unittest.TestCase):
 
 class AdminFeatures(unittest.TestCase):
     def setUp(self):
-        self.c = TestClient(create_app(Settings(seed_builtin=False, data_dir=tempfile.mkdtemp(), event_flush_secs=0.2)))
+        self.c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=tempfile.mkdtemp(), event_flush_secs=0.2)))
         self.admin = self.login("root", register=True)
 
     def login(self, name, pw="secret1", register=False):
@@ -425,9 +388,9 @@ class AdminFeatures(unittest.TestCase):
     def test_dashboard_numbers(self):
         for n in ("p1", "p2"):
             self.c.app.state.repos.package_upsert(n, "skill", "d", [])
-        self.c.post("/api/v1/events", json={"events": [
+        push_events(self.c, [
             {"kind": "install", "package": "p1", "client_id": "c1"}, {"kind": "use", "package": "p1", "client_id": "c1", "source": "claude"},
-            {"kind": "use", "package": "p1", "client_id": "c2"}, {"kind": "error", "package": "p2", "client_id": "c2"}]})
+            {"kind": "use", "package": "p1", "client_id": "c2"}, {"kind": "error", "package": "p2", "client_id": "c2"}])
         d = self.c.get("/api/v1/dashboard?days=7", headers=self.admin).json()
         self.assertEqual(d["totals"], {"install": 1, "use": 2, "error": 1})
         self.assertEqual(d["active_users"], 2); self.assertEqual(len(d["daily"]), 7)
@@ -442,7 +405,7 @@ class AdminFeatures(unittest.TestCase):
             r.package_upsert(n, t, "d", [])
         ev = lambda p, src=None, u=None, cid="c": {"kind": "use", "package": p, "client_id": cid, "source": src, "username": u}
         # anonymous client tries to impersonate 'root'
-        self.c.post("/api/v1/events", json={"events": [ev("s1", "claude", "root", "c1"), ev("s2", "opencode", "root", "c2"), ev("m1", "claude", "root", "c3")]})
+        push_events(self.c, [ev("s1", "claude", "root", "c1"), ev("s2", "opencode", "root", "c2"), ev("m1", "claude", "root", "c3")])
         d = self.c.get("/api/v1/dashboard?days=7", headers=a).json()
         self.assertEqual(sorted((x["name"], x["count"]) for x in d["by_type"]), [("mcp", 1), ("skill", 2)])   # grouped, not per-package
         self.assertEqual(sorted((x["name"], x["count"]) for x in d["by_source"]), [("claude", 2), ("opencode", 1)])
@@ -457,7 +420,7 @@ class Profiles(unittest.TestCase):
     def setUp(self):
         from aihub.server import routers
         routers._fails.clear()                       # the throttle is per-process state; isolate tests from each other
-        self.c = TestClient(create_app(Settings(seed_builtin=False, data_dir=tempfile.mkdtemp())))
+        self.c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=tempfile.mkdtemp())))
         self.c.post("/api/v1/auth/register", json={"username": "root", "password": "secret1"})
         self.h = self.login("root", "secret1")
 
@@ -532,7 +495,7 @@ class Access(unittest.TestCase):
         from aihub.server import routers
         routers._fails.clear()
         self.d = tempfile.mkdtemp()
-        self.c = TestClient(create_app(Settings(seed_builtin=False, data_dir=self.d, event_flush_secs=0.2)))
+        self.c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=self.d, event_flush_secs=0.2)))
         self.admin = self.user("root")
         self.alice, self.bob, self.carol = self.user("alice"), self.user("bob"), self.user("carol")
 
@@ -540,14 +503,23 @@ class Access(unittest.TestCase):
         self.c.post("/api/v1/auth/register", json={"username": n, "password": "secret1"})
         return {"Authorization": "Bearer " + self.c.post("/api/v1/auth/login", json={"username": n, "password": "secret1"}).json()["token"]}
 
-    def publish(self, h, name, visibility=None, version="1.0.0"):
-        b = io.BytesIO()
-        with tarfile.open(fileobj=b, mode="w:gz") as t:
-            toml = (self.TOML % name.encode()).replace(b"1.0.0", version.encode())
-            ti = tarfile.TarInfo("aihub.toml"); ti.size = len(toml); t.addfile(ti, io.BytesIO(toml))
-            r = b"# readme for " + name.encode(); ti = tarfile.TarInfo("README.md"); ti.size = len(r); t.addfile(ti, io.BytesIO(r))
-        hd = dict(h, **({"X-Aihub-Visibility": visibility} if visibility else {}))
-        return self.c.post("/api/v1/upload", content=b.getvalue(), headers=hd)
+    def publish(self, h, name, visibility=None, version="1.0.0", tags=()):
+        """Seed a package the way the index sync does (the server no longer accepts uploads)."""
+        r = self.c.app.state.repos
+        existing = r.package(name)
+        pid = r.package_upsert(name, "skill", "d", list(tags), "# readme for " + name, visibility=None if existing else r.initial_visibility(visibility))
+        user = r.user_by_name(self.who(h))
+        if not existing and user:
+            r.maintainer_add(pid, user["id"], "owner")
+        r.version_sync(pid, version, {"package": {"name": name, "version": version, "type": "skill"}, "requires": {}})
+        class _R:
+            status_code = 200
+            def json(_): return {"name": name, "version": version}
+        return _R()
+
+    def who(self, h):
+        tok = h["Authorization"].split()[1]
+        return self.c.get("/api/v1/auth/me", headers=h).json().get("username")
 
     def names(self, h=None):
         return sorted(p["name"] for p in self.c.get("/api/v1/packages", headers=h or {}).json()["items"])
@@ -555,7 +527,7 @@ class Access(unittest.TestCase):
     def test_private_is_invisible_everywhere_until_shared(self):
         self.assertEqual(self.publish(self.alice, "pub-one").status_code, 200)
         self.assertEqual(self.publish(self.alice, "secret-one", "private").status_code, 200)
-        self.c.post("/api/v1/events", json={"events": [{"kind": "use", "package": "secret-one", "client_id": "x"}]}, headers=self.alice)
+        push_events(self.c, [{"kind": "use", "package": "secret-one", "client_id": "x"}], headers=self.alice)
         H = {"bob": self.bob, "anon": {}}
         for who, h in H.items():
             self.assertEqual(self.names(h), ["pub-one"], who)                                               # list
@@ -583,10 +555,7 @@ class Access(unittest.TestCase):
         self.assertEqual(self.names(self.bob), ["secret-one"])
         self.assertEqual(self.c.get("/api/v1/packages/secret-one", headers=self.bob).json()["access"], "view")
         self.assertEqual(self.c.get("/api/v1/packages/secret-one/access", headers=self.bob).status_code, 403)   # viewers can't see the ACL
-        # view access can't publish; develop can
-        self.assertEqual(self.publish(self.bob, "secret-one", version="1.1.0").status_code, 403)
         put(self.alice, {"type": "user", "name": "bob", "access": "develop"})
-        self.assertEqual(self.publish(self.bob, "secret-one", version="1.1.0").status_code, 200)
         self.assertEqual(self.c.patch("/api/v1/packages/secret-one", json={"visibility": "public"}, headers=self.bob).status_code, 403)  # develop != admin
         # group share
         self.assertEqual(self.c.post("/api/v1/groups", json={"name": "team-x"}, headers=self.admin).status_code, 200)
@@ -603,8 +572,7 @@ class Access(unittest.TestCase):
         # revoke user
         self.c.delete("/api/v1/packages/secret-one/access/user/bob", headers=self.alice)
         self.assertEqual(self.names(self.bob), [])
-        self.assertEqual(self.c.get("/files/secret-one/secret-one-1.0.0.tar.gz", headers=self.bob).status_code, 404)
-
+        
     def test_visibility_change_and_repo_admin_boundaries(self):
         self.publish(self.alice, "pub-one")
         self.assertEqual(self.c.patch("/api/v1/packages/pub-one", json={"visibility": "private"}, headers=self.bob).status_code, 403)
@@ -617,12 +585,6 @@ class Access(unittest.TestCase):
         self.assertEqual(self.c.delete("/api/v1/packages/pub-one/maintainers/alice", headers=self.bob).status_code, 200)
         self.assertEqual(self.c.delete("/api/v1/packages/pub-one/maintainers/bob", headers=self.bob).status_code, 400)   # last admin stays
         self.assertEqual(self.c.patch("/api/v1/packages/pub-one", json={"visibility": "private"}, headers=self.admin).status_code, 200)  # site admin override
-
-    def test_name_squatting_does_not_leak_private_packages(self):
-        self.publish(self.alice, "secret-one", "private")
-        r = self.publish(self.bob, "secret-one")
-        self.assertEqual(r.status_code, 409)                                                                    # same message as a public name clash
-        self.assertNotIn("private", r.text.lower())
 
     def _big_archive(self, name, version="1.0.0", pad=300_000):
         b = io.BytesIO()
@@ -639,112 +601,6 @@ class Access(unittest.TestCase):
         self.assertEqual(init.status_code, 200, init.text)
         return init.json()
 
-    def test_chunked_upload_resume_and_download_range(self):
-        data = self._big_archive("bigpkg")
-        init = self._chunked(self.alice, data)
-        uid, cs, n = init["upload_id"], init["chunk_size"], init["chunks"]
-        self.assertEqual(n, -(-len(data) // cs))
-        put = lambda i, body, h=None: self.c.put("/api/v1/uploads/%s/chunks/%d" % (uid, i), content=body, headers=h or self.alice)
-        # out of order, with a bad chunk first, then re-sent
-        self.assertEqual(put(1, data[cs:2 * cs], dict(self.alice, **{"X-Chunk-Sha256": "0" * 64})).status_code, 400)
-        self.assertEqual(put(n - 1, data[(n - 1) * cs:]).status_code, 200)
-        self.assertEqual(put(0, data[:cs - 1]).status_code, 400)                    # wrong length
-        self.assertEqual(put(n, b"x").status_code, 400)                              # out of range
-        self.assertEqual(put(0, data[:cs]).status_code, 200)
-        self.assertEqual(self.c.post("/api/v1/uploads/%s/complete" % uid, headers=self.alice).status_code, 400)   # still missing
-        st = self.c.get("/api/v1/uploads/" + uid, headers=self.alice).json()
-        self.assertEqual(st["received"], [0, n - 1])
-        for i in range(1, n - 1):                                                    # resume: only the missing ones
-            self.assertEqual(put(i, data[i * cs:(i + 1) * cs]).status_code, 200)
-        self.assertEqual(put(2, data[2 * cs:3 * cs]).status_code, 200)               # idempotent re-send
-        r = self.c.post("/api/v1/uploads/%s/complete" % uid, headers=self.alice)
-        self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(r.json()["sha256"], hashlib.sha256(data).hexdigest())
-        self.assertEqual(self.c.get("/api/v1/uploads/" + uid, headers=self.alice).status_code, 404)   # session cleaned up
-        # immutable version still enforced on the chunked path
-        again = self._chunked(self.alice, data)
-        for i in range(again["chunks"]):
-            self.c.put("/api/v1/uploads/%s/chunks/%d" % (again["upload_id"], i), content=data[i * cs:(i + 1) * cs], headers=self.alice)
-        self.assertEqual(self.c.post("/api/v1/uploads/%s/complete" % again["upload_id"], headers=self.alice).status_code, 409)
-        # ranged download: resume from the middle and a suffix, and a bad range
-        url = "/api/v1/packages/bigpkg/versions/1.0.0/download"
-        full = self.c.get(url, headers=self.alice)
-        self.assertEqual(full.content, data)
-        self.assertEqual(full.headers["accept-ranges"], "bytes")
-        part = self.c.get(url, headers=dict(self.alice, Range="bytes=1000-"))
-        self.assertEqual(part.status_code, 206)
-        self.assertEqual(part.content, data[1000:])
-        self.assertEqual(part.headers["content-range"], "bytes 1000-%d/%d" % (len(data) - 1, len(data)))
-        self.assertEqual(self.c.get(url, headers=dict(self.alice, Range="bytes=-50")).content, data[-50:])
-        self.assertEqual(self.c.get(url, headers=dict(self.alice, Range="bytes=%d-" % (len(data) + 5))).status_code, 416)
-
-    def test_chunked_init_accepts_null_optionals_and_signed_link(self):
-        data = self._big_archive("nullopt", pad=150_000)
-        self.c.app.state.uploads.chunk_size = 100_000
-        r = self.c.post("/api/v1/uploads", headers=self.alice, json={"filename": "x.tar.gz", "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
-                                                                       "visibility": None, "manifest": None})
-        self.assertEqual(r.status_code, 200, r.text)
-        uid, cs = r.json()["upload_id"], r.json()["chunk_size"]
-        for i in range(r.json()["chunks"]):
-            self.c.put("/api/v1/uploads/%s/chunks/%d" % (uid, i), content=data[i * cs:(i + 1) * cs], headers=self.alice)
-        self.assertEqual(self.c.post("/api/v1/uploads/%s/complete" % uid, headers=self.alice).status_code, 200)
-        # browser download: signed link needs the same access as the direct download, and only works for that file
-        lk = self.c.post("/api/v1/packages/nullopt/versions/1.0.0/download-link", headers=self.alice)
-        self.assertEqual(lk.status_code, 200)
-        self.assertEqual(self.c.get(lk.json()["url"]).content, data)                    # link itself needs no header
-        self.assertEqual(self.c.get(lk.json()["url"][:-2] + "00").status_code, 403)     # tampered signature
-        self.assertEqual(self.c.post("/api/v1/packages/nullopt/versions/9.9.9/download-link", headers=self.alice).status_code, 404)
-
-    def test_chunked_upload_security(self):
-        data = self._big_archive("secpkg")
-        good = hashlib.sha256(data).hexdigest()
-        bad = lambda **kw: self.c.post("/api/v1/uploads", headers=self.alice, json=dict({"filename": "x.tar.gz", "size": len(data), "sha256": good}, **kw))
-        self.assertEqual(self.c.post("/api/v1/uploads", json={"filename": "x", "size": 5, "sha256": good}).status_code, 401)
-        self.assertEqual(bad(size=0).status_code, 400)
-        self.assertEqual(bad(sha256="zz").status_code, 400)
-        self.assertEqual(bad(size=10 ** 12).status_code, 413)                         # over the limit: rejected before any bytes
-        init = self._chunked(self.alice, data)
-        uid = init["upload_id"]
-        # another user can neither see, feed, complete nor abort it - and gets the same 404 as for a missing id
-        for call in (lambda: self.c.get("/api/v1/uploads/" + uid, headers=self.bob),
-                     lambda: self.c.put("/api/v1/uploads/%s/chunks/0" % uid, content=b"x", headers=self.bob),
-                     lambda: self.c.post("/api/v1/uploads/%s/complete" % uid, headers=self.bob),
-                     lambda: self.c.delete("/api/v1/uploads/" + uid, headers=self.bob),
-                     lambda: self.c.get("/api/v1/uploads/..%2f..%2fetc", headers=self.alice)):
-            self.assertEqual(call().status_code, 404)
-        # a chunk bigger than announced is refused
-        self.assertEqual(self.c.put("/api/v1/uploads/%s/chunks/0" % uid, content=b"x" * (init["chunk_size"] + 1), headers=self.alice).status_code, 413)
-        # tampered content: all chunks right length but wrong bytes -> final sha256 check rejects it
-        cs = init["chunk_size"]
-        for i in range(init["chunks"]):
-            piece = data[i * cs:(i + 1) * cs]
-            self.c.put("/api/v1/uploads/%s/chunks/%d" % (uid, i), content=bytes(len(piece)) if i == 1 else piece, headers=self.alice)
-        r = self.c.post("/api/v1/uploads/%s/complete" % uid, headers=self.alice)
-        self.assertEqual(r.status_code, 400)
-        self.assertIn("sha256", r.text)
-        self.assertEqual(self.c.delete("/api/v1/uploads/" + uid, headers=self.alice).status_code, 200)
-        # per-user session cap
-        for _ in range(5):
-            self.assertEqual(bad().status_code, 200)
-        self.assertEqual(bad().status_code, 429)
-
-    def test_upload_sweep_removes_stale_sessions(self):
-        data = self._big_archive("sweepy")
-        uid = self._chunked(self.alice, data)["upload_id"]
-        d = os.path.join(self.c.app.state.uploads.root, uid)
-        old = time.time() - 48 * 3600
-        os.utime(d, (old, old))
-        self.c.app.state.uploads.sweep()
-        self.assertFalse(os.path.exists(d))
-
-    def test_settings_upload_limit(self):
-        put = lambda v, h=None: self.c.put("/api/v1/admin/settings", json={"max_upload_mb": v}, headers=h or self.admin)
-        self.assertEqual(put(5, self.alice).status_code, 403)
-        for bad in (0, -1, "abc", 99999):
-            self.assertEqual(put(bad).status_code, 400)
-        self.assertEqual(put(7).status_code, 200)
-        self.assertEqual(self.c.get("/api/v1/admin/settings", headers=self.admin).json()["values"]["max_upload_mb"], "7")
-
     def test_settings_public_install_and_browse_and_private_switch(self):
         self.publish(self.alice, "pub-one")
         self.assertEqual(self.c.get("/api/v1/resolve", params={"name": "pub-one"}).status_code, 401)
@@ -754,7 +610,7 @@ class Access(unittest.TestCase):
         self.c.put("/api/v1/admin/settings", json={"public_install": "1"}, headers=self.admin)
         res = self.c.get("/api/v1/resolve", params={"name": "pub-one"})
         self.assertEqual(res.status_code, 200)                                                                  # anonymous install works
-        self.assertEqual(self.c.get(res.json()["url"].replace("http://localhost:8000", "")).status_code, 200)
+        self.assertEqual(res.json()["repo"], None)                                                               # no files are served any more
         self.publish(self.alice, "secret-one", "private")
         self.assertIn(self.c.get("/api/v1/resolve", params={"name": "secret-one"}).status_code, (401, 404))     # public install never exposes private
         self.c.put("/api/v1/admin/settings", json={"public_browse": "0"}, headers=self.admin)
@@ -774,7 +630,7 @@ class Access(unittest.TestCase):
         self.publish(self.alice, "pub-one"); self.publish(self.alice, "secret-one", "private")
         self.c.put("/api/v1/admin/roles/user", json={"permissions": ["publish", "review", "view_dashboard"]}, headers=self.admin)
         ev = lambda p, k="use", s="claude": {"kind": k, "package": p, "client_id": "c", "source": s}
-        self.c.post("/api/v1/events", json={"events": [ev("pub-one"), ev("pub-one", "install", "opencode"), ev("secret-one"), ev("secret-one")]}, headers=self.alice)
+        push_events(self.c, [ev("pub-one"), ev("pub-one", "install", "opencode"), ev("secret-one"), ev("secret-one")], headers=self.alice)
         bob = self.c.get("/api/v1/dashboard?days=7", headers=self.bob).json()
         self.assertEqual(bob["totals"], {"use": 1, "install": 1})                                             # the two secret events are excluded
         self.assertEqual([x["name"] for x in bob["top_packages"]], ["pub-one"])
@@ -810,7 +666,7 @@ class GroupsPageAndBulk(unittest.TestCase):
     def setUp(self):
         from aihub.server import routers
         routers._fails.clear()
-        self.c = TestClient(create_app(Settings(seed_builtin=False, data_dir=tempfile.mkdtemp())))
+        self.c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=tempfile.mkdtemp())))
         self.admin = self.user("root")
         self.ann = self.user("ann")
 
@@ -891,7 +747,7 @@ class ReviewRankings(unittest.TestCase):
     def setUp(self):
         from aihub.server import routers
         routers._fails.clear()
-        self.c = TestClient(create_app(Settings(seed_builtin=False, data_dir=tempfile.mkdtemp())))
+        self.c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=tempfile.mkdtemp())))
         self.r = self.c.app.state.repos
         self.users = {}
         self.admin = self.reg("root")
@@ -949,7 +805,7 @@ class ReviewRankings(unittest.TestCase):
     def test_dashboard_has_top_used_and_top_reviewed(self):
         self.rate(self.pkg("liked"), [5, 5, 4]); self.pkg("used-a"); self.pkg("used-b")
         ev = lambda p, k="use": {"kind": k, "package": p, "client_id": "c1"}
-        self.c.post("/api/v1/events", json={"events": [ev("used-a")] * 5 + [ev("used-b")] * 2 + [ev("liked")]})
+        push_events(self.c, [ev("used-a")] * 5 + [ev("used-b")] * 2 + [ev("liked")])
         d = self.c.get("/api/v1/dashboard?days=7", headers=self.admin).json()
         self.assertEqual([x["name"] for x in d["top_packages"]][:2], ["used-a", "used-b"])       # top using
         self.assertEqual(d["top_reviewed"][0]["name"], "liked"); self.assertEqual(d["top_reviewed"][0]["count"], 3)
@@ -959,14 +815,9 @@ class ReviewRankings(unittest.TestCase):
 
 class Discovery(Access):
     """Categories, related packages and the anonymised activity feed."""
-    TOML = b'[package]\nname = "%s"\nversion = "1.0.0"\ntype = "skill"\ndescription = "d"\ntags = %s\n'
-
     def publish(self, h, name, visibility=None, version="1.0.0", tags=b'["demo"]'):
-        b = io.BytesIO()
-        with tarfile.open(fileobj=b, mode="w:gz") as t:
-            toml = (self.TOML % (name.encode(), tags)).replace(b"1.0.0", version.encode())
-            ti = tarfile.TarInfo("aihub.toml"); ti.size = len(toml); t.addfile(ti, io.BytesIO(toml))
-        return self.c.post("/api/v1/upload", content=b.getvalue(), headers=dict(h, **({"X-Aihub-Visibility": visibility} if visibility else {})))
+        import json as _j
+        return Access.publish(self, h, name, visibility, version, tags=_j.loads(tags))
 
     def test_categories_and_filter(self):
         self.publish(self.alice, "q-one", tags=b'["sql"]'); self.publish(self.alice, "q-two", tags=b'["database"]')
@@ -992,7 +843,7 @@ class Discovery(Access):
         import time
         self.publish(self.alice, "open-one"); self.publish(self.alice, "secret-one", "private")
         ev = [{"kind": "use", "package": "open-one", "client_id": "cid-xyz"}, {"kind": "use", "package": "secret-one", "client_id": "cid-xyz"}]
-        self.c.post("/api/v1/events", json={"events": ev}, headers=self.alice)
+        push_events(self.c, ev, headers=self.alice)
         time.sleep(0.8)
         for h in ({}, self.bob):
             res = self.c.get("/api/v1/activity", headers=h)

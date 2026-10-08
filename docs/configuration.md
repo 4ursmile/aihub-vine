@@ -1,6 +1,6 @@
 # Server configuration
 
-AI Hub selects its database, cache, and package-file storage independently. The defaults run on one machine without external services: SQLite metadata, an in-process memory cache, and local package archives.
+AI Hub selects its database, cache, and package-file storage independently. The defaults run on one machine without external services: SQLite metadata and an in-process memory cache. Packages are not stored by the server: they live in git, and usage events live in Langfuse (see [architecture](architecture.md)).
 
 ## Configuration sources
 
@@ -25,8 +25,6 @@ The check prints a redacted settings summary and an `ok` or `FAIL` result for ea
 | `AIHUB_DATA_DIR` | `./aihub-data` | Data root; local storage is under `<data dir>/files`, and the default SQLite database is under this directory. | Server, SQLite, local storage |
 | `AIHUB_PUBLIC_URL` | `http://localhost:8000` | External base URL (set it to your reverse-proxy URL, including any path prefix). Embedded in download links, `/install.sh`, `/install.ps1`, the install commands shown on the web UI's Get started page, and the default `hub` the installer saves in the CLI. If the loaded value remains at the default and neither `--public-url` nor a process `AIHUB_PUBLIC_URL` is set, the server derives it from host and port. | Server An admin can override it without a restart in Admin > Settings > Site > "CLI default endpoint"; that value is then used for these links instead. |
 | `AIHUB_SEED_BUILTIN` | `true` | Publish the built-in packages (`aihub-guide`, `aihub-package`) into the registry at startup if their version is missing. | Server |
-| `AIHUB_UPLOAD_CHUNK_MB` | `8` | Chunk size in MiB for resumable uploads. The reverse proxy's body limit only has to be larger than this, not larger than the biggest package. | Server |
-| `AIHUB_MAX_UPLOAD_MB` | `200` | Default maximum upload body size in MiB. Admins can override it in Admin > Settings > Uploads (stored in the database; takes effect immediately). | Server |
 | `AIHUB_OPEN_REGISTRATION` | `true` | Default signup policy before an administrator changes the persisted signup setting. | Server/auth |
 | `AIHUB_LOG_LEVEL` | `INFO` | Python server log level. | Server |
 | `AIHUB_DB_BACKEND` | `sqlite` | `sqlite` or `postgres`. | Database |
@@ -44,7 +42,7 @@ The check prints a redacted settings summary and an `ok` or `FAIL` result for ea
 | `AIHUB_CACHE_MAX_ITEMS` | `2048` | Maximum in-process memory-cache entries. | Memory cache |
 | `AIHUB_REDIS_URL` | empty | Redis URL, such as `redis://:password@host:6379/0`; use `rediss://` for TLS. Required for the Redis backend. | Redis cache |
 | `AIHUB_REDIS_PREFIX` | `aihub:` | Prefix used for Redis cache keys and invalidation generations. | Redis cache |
-| `AIHUB_STORAGE_BACKEND` | `local` | `local` or `s3`. | Package storage |
+| `AIHUB_STORAGE_BACKEND` | `local` | Legacy. Used only by the migration tool for deployments that still have a package store. | Migration |
 | `AIHUB_S3_BUCKET` | empty | Bucket name. Required for S3 storage. | S3-compatible storage |
 | `AIHUB_S3_REGION` | `us-east-1` | S3 region. | S3-compatible storage |
 | `AIHUB_S3_ENDPOINT` | empty | Custom endpoint; empty uses AWS's standard endpoint resolution. | S3-compatible storage |
@@ -218,3 +216,17 @@ docker compose up -d --build
 ```
 
 The Compose file's bundled-service fallback variables are intended for the matching profiles; for external services, supply explicit `AIHUB_DATABASE_URL` (recommended for external PostgreSQL), `AIHUB_REDIS_URL`, and S3-compatible endpoint/credentials in `.env`. Compose explicitly sets `AIHUB_PG_PASSWORD` from `POSTGRES_PASSWORD`, so when using external PostgreSQL connection parts instead of `AIHUB_DATABASE_URL`, set `POSTGRES_PASSWORD` in the Compose `.env` file as well as `AIHUB_PG_HOST` and other parts. `AIHUB_S3_ENDPOINT` is empty by default (AWS S3); set it to `http://minio:9000` in `.env` when you use the bundled MinIO profile, or to your provider's URL for R2/Ceph. Review `docker compose config` to see the effective configuration before launch. Keep credentials out of shell history and version control.
+
+## Langfuse and package index
+
+These can be set here or in Admin > Sync. The environment takes priority.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LANGFUSE_BASE_URL` | empty | Langfuse host, e.g. `https://us.cloud.langfuse.com`. `LANGFUSE_HOST` also works. |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | empty | Project keys. The server only reads from Langfuse. |
+| `AIHUB_INDEX_URL` | empty | Git URL of the repo holding the index, an `https://...json` URL, or a local file. |
+| `AIHUB_INDEX_BRANCH` / `AIHUB_INDEX_PATH` | `main` / `index.json` | Branch and file inside that repo. |
+| `AIHUB_CLI_GIT_URL` | empty | Repo to `pip install` the CLI from when this server is unreachable (shown on Get started). |
+
+The pull schedule (seconds or a cron expression such as `*/5 * * * *`), the credential-sharing switch, the enrollment code and the CLI refresh interval are admin settings stored in the database: Admin > Sync.

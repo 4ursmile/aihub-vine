@@ -119,4 +119,5 @@ def normalize(d: dict) -> dict:
         "bin": d.get("bin", {}),                 # {cmd: relative/path}
         "scripts": d.get("scripts", {}),         # {install_<os>: "...", uninstall_<os>: "..."}
         "setup": setup,
+        "git": {k: str(g.get(k, "")) for k in ("url", "branch", "subdir")} if (g := d.get("git") or {}) is not None else {},
     }

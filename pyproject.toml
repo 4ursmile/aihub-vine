@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aihub-cli"
+dynamic = ["version"]
+description = "AI Hub command line: install, publish and track skills, agents and MCP servers backed by git and Langfuse."
+requires-python = ">=3.9"
+dependencies = []            # the CLI is standard-library only; `pip install aihub-cli[certs]` adds CA certificates
+
+[project.optional-dependencies]
+certs = ["certifi"]
+
+[project.scripts]
+aihub = "aihub.cli.entry:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["aihub", "aihub.cli", "aihub.core"]
+exclude = ["aihub.server*", "aihub.builtin_packages*"]
+
+[tool.setuptools.package-data]
+"aihub.core" = ["defaults.json"]
+
+[tool.setuptools.dynamic]
+version = { attr = "aihub.core.release.VERSION" }

@@ -257,3 +257,11 @@ body::after{background-image:radial-gradient(circle,var(--dot-hi) 1.6px,transpar
   mask-image:radial-gradient(240px circle at calc(var(--bx) + 40px) calc(var(--by) + 40px),#000,transparent 70%)}
 @media(prefers-reduced-motion:reduce){body::after{display:none}}
 @media print{body::before,body::after{display:none}}
+
+/* dashboard v2 */
+.heat{display:grid;grid-template-columns:34px repeat(24,minmax(0,1fr));gap:3px;align-items:center}
+.heat i{display:block;aspect-ratio:1;border-radius:4px;min-height:12px}
+.chip .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.three{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}
+@media(max-width:640px){.heat{grid-template-columns:28px repeat(24,minmax(0,1fr));gap:2px}}
+@media(prefers-reduced-motion:reduce){.heat i{transition:none}}

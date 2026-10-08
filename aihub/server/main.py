@@ -15,13 +15,11 @@ from fastapi.staticfiles import StaticFiles
 
 from ..core.release import VERSION
 from .cache import init_cache
-from .uploads import UploadStore
-from .ranged import stream_file
+from .sync import Sync
 from .config import Settings
 from .db import init_db
 from .repos import EventBuffer, Repos
 from .routers import r as api
-from .storage import init_storage
 from . import builtin
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -193,7 +191,10 @@ def create_app(settings: Settings = None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(_app):
         logging.getLogger("aihub").info("backends: %s", json.dumps(s.describe()))
+        if s.sync_enabled:
+            _app.state.sync.start()
         yield
+        _app.state.sync.close()
         _app.state.events.close()  # drain queued usage events on shutdown
         try:
             db.close()
@@ -205,11 +206,8 @@ def create_app(settings: Settings = None) -> FastAPI:
     app.state.settings = s
     app.state.repos = Repos(db)
     app.state.cache = init_cache(s)
-    app.state.storage = init_storage(s)
-    app.state.uploads = UploadStore(s.data_dir, s.upload_chunk_mb * 1024 * 1024)
     app.state.events = EventBuffer(app.state.repos, s.event_flush_rows, s.event_flush_secs)
-    if s.seed_builtin:
-        builtin.seed(app.state.repos, app.state.storage, s.data_dir)
+    app.state.sync = Sync(app.state.repos, s)
     app.add_middleware(GZipMiddleware, minimum_size=800)
     app.include_router(api)
 
@@ -249,46 +247,14 @@ def create_app(settings: Settings = None) -> FastAPI:
         h = resp.headers
         h.setdefault("X-Content-Type-Options", "nosniff")
         h.setdefault("Referrer-Policy", "same-origin")
-        if not request.url.path.startswith("/files/"):
-            h.setdefault("Content-Security-Policy", CSP)
-            h.setdefault("X-Frame-Options", "DENY")
+        h.setdefault("Content-Security-Policy", CSP)
+        h.setdefault("X-Frame-Options", "DENY")
         p = request.url.path
         if p.startswith("/static/"):
             h["Cache-Control"] = "no-cache"  # always revalidate (ETag); updates show on next load
         elif p.startswith("/api/") and "cache-control" not in h:
             h["Cache-Control"] = "no-store" if request.method != "GET" else "no-cache"
         return resp
-
-    @app.get("/files/{name}/{filename}")
-    def download(name: str, filename: str, request: Request):
-        from .deps import current_user, viewer_of
-        u = current_user(request)
-        repos = app.state.repos
-        p = repos.package(name)
-        # one error for "missing" and "not allowed", so private package names can't be probed
-        if not p or not app.state.storage.exists(name, filename):
-            raise HTTPException(404)
-        lvl = repos.access_level(p["id"], viewer_of(repos, u))
-        if lvl is None:
-            raise HTTPException(401 if not u else 404, "sign in required" if not u else "not found")
-        if not u and (repos.setting("public_install") or "0") != "1" and not builtin.is_builtin(name):
-            raise HTTPException(401, "sign in required")
-        st = app.state.storage
-        for v in repos.versions(p["id"]):
-            if v["file"] == filename:
-                repos.version_download(p["id"], v["version"])
-        signed = st.url(name, filename, expires=300)       # S3: let the client fetch straight from the bucket
-        if signed:
-            return RedirectResponse(signed, status_code=302, headers={"Cache-Control": "no-store"})
-        from starlette.responses import StreamingResponse
-        f = st.open(name, filename)
-        hdr = {"Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff", "Content-Length": str(st.size(name, filename)),
-               "Content-Disposition": 'attachment; filename="%s"' % os.path.basename(filename)}
-        if hasattr(f, "seek"):                              # local files: honour Range so interrupted installs resume
-            hdr.pop("Content-Length")
-            return stream_file(f, st.size(name, filename), request.headers.get("range"), hdr)
-        return StreamingResponse(iter(lambda: f.read(1 << 20), b""), media_type="application/octet-stream", headers=hdr,
-                                 background=BackgroundTask(f.close))
 
     def _cli_url():
         """Admin-set CLI endpoint (Settings > Site), else the configured public URL."""
@@ -364,7 +330,7 @@ def check(s):
     ok = True
     for name, fn in (("database", lambda: init_db(s).conn().execute("SELECT 1").fetchone()),
                      ("cache", lambda: init_cache(s).health() or (_ for _ in ()).throw(RuntimeError("unhealthy"))),
-                     ("storage", lambda: init_storage(s).health() or (_ for _ in ()).throw(RuntimeError("bucket/dir not accessible")))):
+                     ):
         try:
             fn()
             print("  ok    %s" % name)

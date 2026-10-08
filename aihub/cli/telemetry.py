@@ -11,7 +11,7 @@ import time
 
 from . import paths
 
-STALE = 15      # heartbeat age after which a flusher is considered dead
+STALE = 30      # heartbeat age after which a flusher is considered dead (it beats every 5s)
 MAX_SPOOL = 5 * 1024 * 1024
 
 
@@ -68,26 +68,128 @@ def self_cmd():
     return [sys.executable, "-m", "aihub.cli"]
 
 
-def kick():
-    """Spawn a detached flusher unless one is alive."""
+def _lock():
+    return paths.p("queue", "flush.lock")
+
+
+def _acquire():
+    """Atomically become the one flusher (O_EXCL). A lock whose heartbeat is stale belonged to a dead process: take it over."""
+    lock = _lock()
+    for _ in range(2):
+        try:
+            fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock) < STALE:
+                    return False
+                os.remove(lock)                          # stale: retry once
+            except OSError:
+                return False
+        except OSError:
+            return False
+    return False
+
+
+def _release():
     try:
-        lock = paths.p("queue", "flush.lock")
-        if os.path.exists(lock) and time.time() - os.path.getmtime(lock) < STALE:
+        os.remove(_lock())
+    except OSError:
+        pass
+
+
+def kick():
+    """Start the detached flusher unless one is alive. The lock is taken here, before the process starts, so a burst
+    of hook calls spawns exactly one flusher instead of one per call."""
+    try:
+        paths.ensure("queue")
+        if not _acquire():
             return
-        kw = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+        kw = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
+                  env=dict(os.environ, AIHUB_FLUSH_LOCKED="1"))
         if os.name == "nt":
             kw["creationflags"] = 0x00000008 | 0x00000200  # DETACHED | NEW_GROUP
         else:
             kw["start_new_session"] = True
-        subprocess.Popen(self_cmd() + ["flush"], **kw)
+        try:
+            subprocess.Popen(self_cmd() + ["flush", "--background"], **kw)
+        except Exception:
+            _release()
     except Exception:
         pass
 
 
-def _send_once(timeout):
-    """Move the spool aside and POST everything pending as batches. Returns count sent."""
+def interval():
+    """Seconds per flush window. `aihub config set telemetry_interval 120` or AIHUB_TELEMETRY_INTERVAL. 10..3600, default 60."""
+    try:
+        v = float(os.environ.get("AIHUB_TELEMETRY_INTERVAL") or paths.config().get("telemetry_interval") or 60)
+    except (TypeError, ValueError):
+        v = 60
+    return max(10.0, min(v, 3600.0))
+
+
+def _user(ev, cred):
+    return cred.get("username") or "~" + (ev.get("local_user") or "unknown")
+
+
+def to_items(ev, count=1, window=None):
+    """One Langfuse span. Identity is the hub user, else ~<os user>. `count` calls rolled into it; `window` is the
+    bucket start, part of the dedup key so a resend of the same bucket reuses the same ids."""
+    from . import langfuse
+    cred = paths.load("credentials.json", {})
+    user = _user(ev, cred)
+    kind = ev.get("kind", "use")
+    meta = {k: v for k, v in ev.items() if k not in ("ts", "session") and v not in (None, "")}
+    meta.update(user=user, anonymous=not cred.get("username"), os=sys.platform, count=count)
+    cid = ev.get("client_id", "")
+    if kind == "use":
+        key = (cid, ev.get("package", ""), ev.get("component", ""), str(window))
+    elif kind == "publish":
+        key = (ev.get("package", ""), ev.get("version", ""), kind, ev.get("commit", ""))
+    else:
+        key = (cid, ev.get("package", ""), ev.get("version", ""), kind, str(ev.get("ts")))
+    return langfuse.make_span(langfuse_name(kind), key, meta, user, ts=window if window is not None else ev.get("ts"))
+
+
+def aggregate(events, secs, now=None, force=False):
+    """Roll raw events into spans. Every `use` call is counted; calls to the same package component by the same
+    client inside one window become one span with a count. Windows still open stay behind (-> leftover) so a
+    window is only ever sent once with its final count. force=True sends open windows too.
+    -> (spans, leftover_events)"""
+    now = now or time.time()
+    spans, left, groups = [], [], {}
+    for e in events:
+        if e.get("kind", "use") != "use":
+            spans.append(to_items(e))
+            continue
+        w = int(float(e.get("ts") or now) // secs * secs)
+        if not force and w + secs > now:
+            left.append(e)
+            continue
+        g = groups.setdefault((e.get("client_id", ""), e.get("package", ""), e.get("component", ""), w), [])
+        g.append(e)
+    for (_, _, _, w), g in groups.items():
+        spans.append(to_items(g[-1], count=len(g), window=w))          # last call's detail/cwd stand for the window
+    return spans, left
+
+
+def langfuse_name(kind):
+    try:
+        import json as _j
+        here = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "core", "defaults.json")
+        return _j.load(open(here))["event_names"].get(kind, "aihub." + kind)
+    except Exception:
+        return "aihub." + kind
+
+
+def _send_once(timeout, force=False):
+    """Send what is due. Returns the number of events (calls) sent. Open windows go back to the spool."""
     import glob
-    from . import api
+    from . import langfuse
+    if not langfuse.configured():
+        return 0                                         # keep the spool until keys are set
     if os.path.exists(_spool()):
         os.replace(_spool(), paths.p("queue", "sending.%d.%d.jsonl" % (os.getpid(), time.time() * 1000)))
     files = glob.glob(paths.p("queue", "sending.*.jsonl"))
@@ -98,43 +200,46 @@ def _send_once(timeout):
                 events.append(json.loads(line))
             except ValueError:
                 pass
+    spans, left = aggregate(events, interval(), force=force)
     try:
-        for i in range(0, len(events), 400):
-            api.call("POST", "/events", {"events": events[i:i + 400]}, timeout=timeout)
+        for i in range(0, len(spans), 100):
+            langfuse.send(spans[i:i + 100], timeout=timeout)
     except Exception:
         return 0  # keep files; retried on the next pass
+    for e in left:                                       # still-open windows wait in the spool for the next pass
+        enqueue(e)
     for f in files:
         os.remove(f)
-    return len(events)
+    return len(events) - len(left)
 
 
-def flush(timeout=5, linger=10):
-    """Detached flusher. Sends the spool, then lingers `linger`s polling for more so a burst of hook calls
-    reuses this one process instead of each spawning its own. Lock mtime is a heartbeat."""
-    lock = paths.p("queue", "flush.lock")
+def flush(timeout=5, linger=None, force=False):
+    """The one flusher. Wakes once per window, sends the closed windows, and exits after a pass with nothing left.
+    A burst of hook calls therefore costs one request per window. The lock's mtime is a heartbeat.
+    force=True (aihub flush) sends open windows too and returns; it waits for no one, so if a background flusher is
+    alive it leaves the spool to it."""
     total = 0
+    owned = os.environ.pop("AIHUB_FLUSH_LOCKED", "") == "1"     # kick() already took the lock for this process
     try:
         paths.ensure("queue")
-        if os.path.exists(lock) and time.time() - os.path.getmtime(lock) < STALE:
+        if not owned and not _acquire():
             return 0
-        open(lock, "w").write(str(os.getpid()))
-        idle_since = time.time()
+        if force:
+            return _send_once(timeout, force=True)
+        secs = interval()
         while True:
+            end = time.time() + secs + 1                 # let the window close, keeping the heartbeat alive
+            while time.time() < end:
+                os.utime(_lock(), None)
+                time.sleep(min(5, max(0.1, end - time.time())))
             n = _send_once(timeout)
             total += n
-            if n:
-                idle_since = time.time()
-            elif time.time() - idle_since > linger:
+            if not n and not (os.path.exists(_spool()) and os.path.getsize(_spool())):
                 break
-            os.utime(lock, None)
-            time.sleep(0.5)
     except Exception:
         pass
     finally:
-        try:
-            os.remove(lock)
-        except OSError:
-            pass
+        _release()
     return total
 
 

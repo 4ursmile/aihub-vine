@@ -310,6 +310,17 @@ class Repos:
             (name,)).fetchone()
         return self._pkg(r) if r else None
 
+    def initial_visibility(self, requested=None):
+        """Visibility for a package that first appears: the request, else the site default, never private when the site disallows it."""
+        vis = requested or self.setting("default_visibility") or "public"
+        if vis not in ("public", "private") or (vis == "private" and self.setting("allow_private", "1") != "1"):
+            return "public"
+        return vis
+
+    def package_readme(self, pid):
+        r = self.db.conn().execute("SELECT readme FROM packages WHERE id=?", (pid,)).fetchone()
+        return (r[0] if r else "") or ""
+
     def package_names_visible(self, viewer):
         sql, a = self.visible_sql(viewer)
         return {r[0] for r in self.db.conn().execute("SELECT name FROM packages WHERE " + sql, a)}
@@ -641,6 +652,52 @@ class Repos:
                           "VALUES(:ts,:kind,:package,:version,:client_id,:username,:component,:duration,:source,:local_user,:host,:detail,:cwd,:ip)", rows)
             c.commit()
 
+    def events_insert_ext(self, rows):
+        """Insert events keyed by ext_id (a Langfuse observation id). Already-seen ids are skipped. -> number inserted."""
+        if not rows:
+            return 0
+        with self.lock:
+            c = self.db.conn()
+            before = c.execute("SELECT COUNT(*) FROM events WHERE ext_id IS NOT NULL").fetchone()[0]
+            for r in rows:
+                for k in ("source", "local_user", "host", "detail", "cwd", "ip", "version", "client_id", "component", "duration"):
+                    r.setdefault(k, None)
+            c.executemany("INSERT OR IGNORE INTO events(ts,kind,package,version,client_id,username,component,duration,source,local_user,host,detail,cwd,ip,ext_id) "
+                          "VALUES(:ts,:kind,:package,:version,:client_id,:username,:component,:duration,:source,:local_user,:host,:detail,:cwd,:ip,:ext_id)", rows)
+            c.commit()
+            return c.execute("SELECT COUNT(*) FROM events WHERE ext_id IS NOT NULL").fetchone()[0] - before
+
+    def version_sync(self, pid, version, manifest, sha="", file=None):
+        """Add a version from the git index if new; refresh its manifest if it changed. -> True when new."""
+        with self.lock:
+            c = self.db.conn()
+            row = c.execute("SELECT id,manifest FROM versions WHERE package_id=? AND version=?", (pid, version)).fetchone()
+            js = json.dumps(manifest)
+            if row:
+                if row[1] != js:
+                    c.execute("UPDATE versions SET manifest=? WHERE id=?", (js, row[0]))
+                    c.commit()
+                return False
+            c.execute("INSERT INTO versions(package_id,version,file,sha256,size,manifest,signature,created) VALUES(?,?,?,?,?,?,?,?)",
+                      (pid, version, file, sha, 0, js, None, time.time()))
+            self._relatest(c, pid)
+            c.commit()
+            return True
+
+    def package_hide_missing(self, keep_names):
+        """Hide packages that were synced from the index earlier but are no longer in it (set recorded in app_settings)."""
+        prev = [x for x in (self.setting("sync_names", "") or "").split(",") if x]
+        gone = [n for n in prev if n not in keep_names]
+        with self.lock:
+            c = self.db.conn()
+            for n in gone:
+                c.execute("UPDATE packages SET hidden=1 WHERE name=?", (n,))
+            for n in keep_names:
+                c.execute("UPDATE packages SET hidden=0 WHERE name=? AND hidden=1", (n,))
+            c.commit()
+        self.set_setting("sync_names", ",".join(sorted(keep_names)))
+        return gone
+
     def stats(self, package, days=30):
         since = time.time() - days * 86400
         c = self.db.conn()
@@ -682,18 +739,31 @@ class Repos:
             "FROM reviews r JOIN packages p ON p.id=r.package_id WHERE %s AND p.hidden=0 "
             "GROUP BY p.id, p.name ORDER BY %s LIMIT ?" % (BAYES_C, BAYES_C, vsql, order), [mean] + va + [limit]))
 
-    def dashboard(self, days=30, package=None, viewer=None, type=None, user=None, source=None, kind=None):
-        """Aggregated usage for the dashboard. All times UTC; `days` daily buckets ending today."""
+    def _window(self, days, date_from=None, date_to=None):
+        """-> (days, start_day, since, until). A custom from/to (YYYY-MM-DD, UTC) overrides the preset `days`."""
         import datetime
-        days = max(1, min(int(days), 365))
         now = time.time()
         today = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).date()
-        start_day = today - datetime.timedelta(days=days - 1)
-        since = datetime.datetime(start_day.year, start_day.month, start_day.day,
-                                  tzinfo=datetime.timezone.utc).timestamp()
-        prev = since - days * 86400
-        c = self.db.conn()
-        # scope: events of packages the viewer may see (deleted/unknown packages are excluded), plus optional filters
+        try:
+            end = datetime.date.fromisoformat(date_to) if date_to else today
+            start = datetime.date.fromisoformat(date_from) if date_from else None
+        except ValueError:
+            raise ValueError("dates must be YYYY-MM-DD")
+        end = min(end, today)
+        if start is None:
+            start = end - datetime.timedelta(days=max(1, min(int(days), 365)) - 1)
+        if start > end:
+            raise ValueError("'from' must not be after 'to'")
+        if (end - start).days >= 366:
+            raise ValueError("range is limited to 366 days")
+        utc = datetime.timezone.utc
+        since = datetime.datetime(start.year, start.month, start.day, tzinfo=utc).timestamp()
+        until = datetime.datetime(end.year, end.month, end.day, tzinfo=utc).timestamp() + 86400
+        return (end - start).days + 1, start, since, until
+
+    def _dash_filter(self, viewer, type=None, package=None, user=None, source=None, kind=None,
+                     identity=None, host=None, q=None):
+        """-> (sql, args) appended to `... WHERE e.ts>=? ...`. Only events of packages the viewer may see."""
         vsql, va = self.visible_sql(viewer, "vp")
         pf = " AND e.package IN (SELECT vp.name FROM packages vp WHERE %s%s)" % (vsql, " AND vp.type=?" if type else "")
         pa = list(va) + ([type] if type else [])
@@ -705,6 +775,27 @@ class Repos:
             pf += " AND COALESCE(e.source,'cli')=?"; pa.append(source)
         if kind:
             pf += " AND e.kind=?"; pa.append(kind)
+        if identity == "anonymous":
+            pf += " AND e.username IS NULL"
+        elif identity == "signed-in":
+            pf += " AND e.username IS NOT NULL"
+        if host:
+            pf += " AND e.host=?"; pa.append(host)
+        if q:
+            pf += " AND (e.package LIKE ? ESCAPE '\\' OR e.component LIKE ? ESCAPE '\\')"
+            pa += [self._like(q)] * 2
+        return pf, pa
+
+    def dashboard(self, days=30, package=None, viewer=None, type=None, user=None, source=None, kind=None,
+                  identity=None, host=None, q=None, date_from=None, date_to=None):
+        """Aggregated usage for the dashboard. All times UTC; one daily bucket per day of the window."""
+        import datetime
+        days, start_day, since, until = self._window(days, date_from, date_to)
+        now = until - 1
+        prev = since - days * 86400
+        c = self.db.conn()
+        pf, pa = self._dash_filter(viewer, type, package, user, source, kind, identity, host, q)
+        pf += " AND e.ts<?"; pa.append(until)
         actor = "COALESCE(e.username, e.client_id)"
 
         def kinds(a, b):
@@ -724,7 +815,7 @@ class Repos:
         daily = []
         for i in range(days):
             d = (start_day + datetime.timedelta(days=i)).isoformat()
-            daily.append(dict({"date": d, "install": 0, "use": 0, "update": 0, "uninstall": 0, "error": 0}, **series.get(d, {})))
+            daily.append(dict({"date": d, "install": 0, "use": 0, "update": 0, "uninstall": 0, "error": 0, "publish": 0}, **series.get(d, {})))
         rows = lambda q, a: [dict(r) for r in c.execute(q, a)]
         vs2, va2 = self.visible_sql(viewer, "vp")
         scope = " e.package IN (SELECT vp.name FROM packages vp WHERE %s) AND e.ts>=?" % vs2
@@ -733,10 +824,24 @@ class Repos:
                                               + scope + " ORDER BY n LIMIT 200", va2 + [since])],
             "sources": [r[0] for r in c.execute("SELECT DISTINCT COALESCE(e.source,'cli') n FROM events e WHERE" + scope + " ORDER BY n", va2 + [since])],
             "types": [r[0] for r in c.execute("SELECT DISTINCT p.type FROM packages p WHERE " + vs2.replace("vp.", "p.") + " ORDER BY 1", va2)],
+            "hosts": [r[0] for r in c.execute("SELECT DISTINCT e.host n FROM events e WHERE e.host IS NOT NULL AND" + scope + " ORDER BY n LIMIT 200", va2 + [since])],
         }
+        stamps = [r[0] for r in c.execute("SELECT e.ts FROM events e WHERE e.ts>=?" + pf + " LIMIT 50000", [since] + pa)]
+        heat = [[0] * 24 for _ in range(7)]                              # [weekday Mon..Sun][hour UTC]
+        for t in stamps:
+            d = datetime.datetime.fromtimestamp(t, datetime.timezone.utc)
+            heat[d.weekday()][d.hour] += 1
         return {
             "days": days, "package": package,
-            "filters": {"type": type, "user": user, "source": source, "kind": kind},
+            "filters": {"type": type, "user": user, "source": source, "kind": kind, "identity": identity, "host": host, "q": q,
+                        "from": start_day.isoformat(), "to": (start_day + datetime.timedelta(days=days - 1)).isoformat()},
+            "heatmap": heat,
+            "top_components": rows("SELECT e.component AS name,e.package AS package,COUNT(*) AS count FROM events e "
+                                   "WHERE e.component IS NOT NULL AND e.ts>=?" + pf + " GROUP BY e.component,e.package ORDER BY count DESC LIMIT 10", [since] + pa),
+            "by_host": rows("SELECT COALESCE(e.host,'unknown') AS name,COUNT(*) AS count FROM events e WHERE e.ts>=?" + pf +
+                            " GROUP BY 1 ORDER BY count DESC LIMIT 10", [since] + pa),
+            "by_identity": rows("SELECT CASE WHEN e.username IS NULL THEN 'anonymous' ELSE 'signed in' END AS name,COUNT(*) AS count FROM events e "
+                                "WHERE e.ts>=?" + pf + " GROUP BY 1 ORDER BY count DESC", [since] + pa),
             "options": options,
             "totals": cur, "previous": old,
             "active_users": distinct(since, now + 1, actor), "active_users_prev": distinct(prev, since, actor),
@@ -757,6 +862,20 @@ class Repos:
             "recent": rows("SELECT e.ts,e.kind,e.package,e.version,e.component," + ACTOR + " AS actor,"
                            "e.source FROM events e WHERE e.ts>=?" + pf + " ORDER BY e.id DESC LIMIT 20", [since] + pa),
         }
+
+    def dashboard_events(self, viewer, days=30, date_from=None, date_to=None, page=1, per_page=25, **flt):
+        """Paginated activity log under the same filters. Deliberately omits detail/cwd/ip (those stay on the audit page)."""
+        days, start_day, since, until = self._window(days, date_from, date_to)
+        pf, pa = self._dash_filter(viewer, **flt)
+        pf += " AND e.ts<?"; pa.append(until)
+        c = self.db.conn()
+        total = c.execute("SELECT COUNT(*) FROM events e WHERE e.ts>=?" + pf, [since] + pa).fetchone()[0]
+        per_page = max(1, min(int(per_page), 100)); page = max(1, int(page))
+        items = [dict(r) for r in c.execute(
+            "SELECT e.ts,e.kind,e.package,e.version,e.component," + ACTOR + " AS actor,COALESCE(e.source,'cli') AS source,e.host "
+            "FROM events e WHERE e.ts>=?" + pf + " ORDER BY e.ts DESC,e.id DESC LIMIT ? OFFSET ?",
+            [since] + pa + [per_page, (page - 1) * per_page])]
+        return {"total": total, "page": page, "per_page": per_page, "items": items}
 
     def overview(self, viewer=None):
         c = self.db.conn()

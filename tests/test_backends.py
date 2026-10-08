@@ -103,98 +103,18 @@ class RedisCacheTests(unittest.TestCase):
         from fastapi.testclient import TestClient
         from aihub.server.main import create_app
         d = tempfile.mkdtemp()
-        mk = lambda: TestClient(create_app(Settings(seed_builtin=False, data_dir=d, cache_backend="redis", redis_url="redis://127.0.0.1:%d/0" % self.port, redis_prefix="app:")))
+        mk = lambda: TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=d, cache_backend="redis", redis_url="redis://127.0.0.1:%d/0" % self.port, redis_prefix="app:")))
         w1, w2 = mk(), mk()     # two app instances sharing one database + one Redis = two workers
         h = lambda c: {"Authorization": "Bearer " + c.post("/api/v1/auth/login", json={"username": "root", "password": "secret1"}).json()["token"]}
         w1.post("/api/v1/auth/register", json={"username": "root", "password": "secret1"})
         H1, H2 = h(w1), h(w2)
         self.assertEqual(w2.get("/api/v1/packages", headers=H2).json()["total"], 0)       # w2 caches the empty list
-        toml = b'[package]\nname = "cc"\nversion = "1.0.0"\ntype = "skill"\ndescription = "d"\n'
-        b = io.BytesIO()
-        with tarfile.open(fileobj=b, mode="w:gz") as t:
-            ti = tarfile.TarInfo("aihub.toml"); ti.size = len(toml); t.addfile(ti, io.BytesIO(toml))
-        self.assertEqual(w1.post("/api/v1/upload", content=b.getvalue(), headers=H1).status_code, 200)     # w1 publishes
+        r = w1.app.state.repos
+        pid = r.package_upsert("cc", "skill", "d", [], "")
+        r.version_sync(pid, "1.0.0", {"package": {"name": "cc", "version": "1.0.0", "type": "skill"}})
+        w1.app.state.cache.invalidate("pkg")                                                             # what the index sync does after a change
         self.assertEqual(w2.get("/api/v1/packages", headers=H2).json()["total"], 1)       # w2 must NOT serve its stale cached list
 
-
-@unittest.skipUnless(shutil.which("minio"), "minio not installed")
-class S3StorageTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.data = tempfile.mkdtemp()
-        env = dict(os.environ, MINIO_ROOT_USER="testkey", MINIO_ROOT_PASSWORD="testsecret123")
-        for _ in range(5):
-            cls.port = free_port()
-            cls.p = subprocess.Popen(["minio", "server", cls.data, "--address", "127.0.0.1:%d" % cls.port, "--console-address", "127.0.0.1:%d" % free_port()],
-                                     env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if wait_port(cls.port, 30) and cls.p.poll() is None:
-                break
-            cls.p.terminate()
-        else:
-            raise AssertionError("minio did not start after 5 attempts")
-        import boto3
-        cls.endpoint = "http://127.0.0.1:%d" % cls.port
-        boto3.client("s3", endpoint_url=cls.endpoint, aws_access_key_id="testkey", aws_secret_access_key="testsecret123", region_name="us-east-1").create_bucket(Bucket="aihub-test")
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.p.terminate(); cls.p.wait(); shutil.rmtree(cls.data, ignore_errors=True)
-
-    def st(self, prefix="packages/"):
-        from aihub.server.storage import S3Storage
-        return S3Storage("aihub-test", "us-east-1", self.endpoint, "testkey", "testsecret123", prefix)
-
-    def test_put_open_exists_size_delete_and_path_safety(self):
-        st = self.st()
-        f = tempfile.mktemp(); open(f, "wb").write(b"hello" * 1000)
-        st.put("pkg-a", "pkg-a-1.0.0.tar.gz", f)
-        self.assertFalse(os.path.exists(f))                                    # source consumed, like LocalStorage
-        self.assertTrue(st.exists("pkg-a", "pkg-a-1.0.0.tar.gz")); self.assertFalse(st.exists("pkg-a", "nope.tgz"))
-        self.assertEqual(st.size("pkg-a", "pkg-a-1.0.0.tar.gz"), 5000)
-        with st.open("pkg-a", "pkg-a-1.0.0.tar.gz") as r:
-            self.assertEqual(r.read(), b"hello" * 1000)
-        with st.local_copy("pkg-a", "pkg-a-1.0.0.tar.gz") as p:
-            self.assertEqual(open(p, "rb").read()[:5], b"hello")
-        self.assertFalse(os.path.exists(p))                                    # temp copy cleaned up
-        for bad in (("../x", "f"), ("a", "../../etc/passwd"), ("a/b", "f"), ("", "f"), ("a", "")):
-            with self.assertRaises(ValueError): st.put(bad[0], bad[1], f)
-            self.assertFalse(st.exists(*bad))
-        st.delete("pkg-a", "pkg-a-1.0.0.tar.gz"); self.assertFalse(st.exists("pkg-a", "pkg-a-1.0.0.tar.gz"))
-
-    def test_signed_url_downloads_and_wrong_credentials_fail(self):
-        import urllib.request
-        from aihub.server.storage import S3Storage
-        st = self.st(); f = tempfile.mktemp(); open(f, "wb").write(b"payload"); st.put("pkg-b", "pkg-b-1.0.0.tar.gz", f)
-        url = st.url("pkg-b", "pkg-b-1.0.0.tar.gz", expires=60)
-        self.assertEqual(urllib.request.urlopen(url).read(), b"payload")
-        self.assertIn("X-Amz-Signature", url)
-        bad = S3Storage("aihub-test", "us-east-1", self.endpoint, "testkey", "WRONG", "packages/")
-        self.assertFalse(bad.health())
-        self.assertTrue(st.health())
-
-    def test_full_app_on_s3_publish_search_readme_download(self):
-        from fastapi.testclient import TestClient
-        from aihub.server.main import create_app
-        d = tempfile.mkdtemp()
-        c = TestClient(create_app(Settings(seed_builtin=False, data_dir=d, storage_backend="s3", s3_bucket="aihub-test", s3_endpoint=self.endpoint,
-                                           s3_access_key="testkey", s3_secret_key="testsecret123", s3_prefix="app/", public_url="http://t")))
-        c.post("/api/v1/auth/register", json={"username": "root", "password": "secret1"})
-        H = {"Authorization": "Bearer " + c.post("/api/v1/auth/login", json={"username": "root", "password": "secret1"}).json()["token"]}
-        toml = b'[package]\nname = "s3pkg"\nversion = "1.0.0"\ntype = "skill"\ndescription = "d"\n'
-        b = io.BytesIO()
-        with tarfile.open(fileobj=b, mode="w:gz") as t:
-            for n, data in (("aihub.toml", toml), ("README.md", b"# from s3 readme")):
-                ti = tarfile.TarInfo(n); ti.size = len(data); t.addfile(ti, io.BytesIO(data))
-        self.assertEqual(c.post("/api/v1/upload", content=b.getvalue(), headers=H).status_code, 200)
-        self.assertEqual(os.listdir(d).count("files"), 0 if not os.path.isdir(d + "/files") else len(os.listdir(d + "/files")) and 0)   # nothing stored on local disk
-        self.assertIn("<h1>from s3 readme</h1>", c.get("/api/v1/packages/s3pkg/readme", headers=H).json()["html"])
-        r = c.get("/files/s3pkg/s3pkg-1.0.0.tar.gz", headers=H, follow_redirects=False)
-        self.assertEqual(r.status_code, 302); self.assertIn("X-Amz-Signature", r.headers["location"])           # signed redirect after the access check
-        import urllib.request, hashlib
-        body = urllib.request.urlopen(r.headers["location"]).read()
-        self.assertEqual(hashlib.sha256(body).hexdigest(), c.get("/api/v1/resolve", params={"name": "s3pkg"}, headers=H).json()["sha256"])
-        self.assertEqual(c.get("/files/s3pkg/s3pkg-1.0.0.tar.gz", follow_redirects=False).status_code, 401)   # no access check bypass
-        self.assertEqual(c.get("/api/v1/readyz").json()["storage"], True)
 
 
 try:
@@ -216,20 +136,20 @@ class PostgresTests(unittest.TestCase):
     def test_full_app_on_postgres(self):
         from fastapi.testclient import TestClient
         from aihub.server.main import create_app
-        c = TestClient(create_app(Settings(seed_builtin=False, data_dir=tempfile.mkdtemp(), db_backend="postgres", database_url=self.uri)))
+        c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=tempfile.mkdtemp(), db_backend="postgres", database_url=self.uri)))
         c.post("/api/v1/auth/register", json={"username": "root", "password": "secret1"})
         H = {"Authorization": "Bearer " + c.post("/api/v1/auth/login", json={"username": "root", "password": "secret1"}).json()["token"]}
-        toml = b'[package]\nname = "pgpkg"\nversion = "1.0.0"\ntype = "skill"\ndescription = "invoices tool"\ntags = ["fin"]\n'
-        b = io.BytesIO()
-        with tarfile.open(fileobj=b, mode="w:gz") as t:
-            ti = tarfile.TarInfo("aihub.toml"); ti.size = len(toml); t.addfile(ti, io.BytesIO(toml))
-        self.assertEqual(c.post("/api/v1/upload", content=b.getvalue(), headers=H).status_code, 200)
+        r = c.app.state.repos
+        pid = r.package_upsert("pgpkg", "skill", "invoices tool", ["fin"], "")
+        r.version_sync(pid, "1.0.0", {"package": {"name": "pgpkg", "version": "1.0.0", "type": "skill"}})
         self.assertEqual(c.post("/api/v1/auth/register", json={"username": "root", "password": "secret1"}).status_code, 409)
         self.assertEqual(c.get("/api/v1/packages?q=invoice", headers=H).json()["total"], 1)       # full text, prefix
         self.assertEqual(c.get("/api/v1/packages?q=nomatch", headers=H).json()["total"], 0)
         self.assertEqual(c.post("/api/v1/packages/pgpkg/reviews", json={"rating": 5}, headers=H).status_code, 200)
         self.assertEqual(c.get("/api/v1/packages?sort=rating", headers=H).json()["items"][0]["rating"], {"avg": 5.0, "count": 1})
-        self.assertEqual(c.post("/api/v1/events", json={"events": [{"kind": "use", "package": "pgpkg", "client_id": "c"}]}, headers=H).status_code, 200)
+        ev = {"ts": __import__("time").time(), "kind": "use", "package": "pgpkg", "client_id": "c", "username": None, "ext_id": "obs-1"}
+        self.assertEqual(r.events_insert_ext([dict(ev)]), 1)
+        self.assertEqual(r.events_insert_ext([dict(ev)]), 0)                      # same Langfuse observation twice: skipped
         self.assertEqual(c.get("/api/v1/dashboard?days=7", headers=H).json()["totals"], {"use": 1})
         self.assertEqual(c.get("/api/v1/readyz").json()["database"], "postgres")
 
@@ -257,16 +177,3 @@ class BuiltinPackageTest(unittest.TestCase):
             self.assertEqual(errs, [], n)
             self.assertTrue(os.path.isfile(os.path.join(root, "skills", n, "SKILL.md")))
 
-    def test_server_seeds_and_serves_without_login(self):
-        import tempfile
-        from fastapi.testclient import TestClient
-        from aihub.server.config import Settings
-        from aihub.server.main import create_app
-        d = tempfile.mkdtemp()
-        for _ in range(2):                                   # second start must be a no-op
-            with TestClient(create_app(Settings(data_dir=d))) as c:
-                for n in ("aihub-guide", "aihub-package"):
-                    r = c.get("/api/v1/resolve", params={"name": n})      # anonymous, public_install is off
-                    self.assertEqual(r.status_code, 200, r.text)
-                    self.assertEqual(c.get(r.json()["url"].replace("http://testserver", "")).status_code, 200)
-                self.assertEqual(c.get("/api/v1/resolve", params={"name": "nope"}).status_code, 401)

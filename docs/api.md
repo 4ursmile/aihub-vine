@@ -43,44 +43,15 @@ Routes marked **No** are public. **User** means an active account token is requi
 
 ## Publishing and version control
 
+The server stores no package files and has no upload or download routes (`/upload`, `/uploads`, `/files/...` and `/dl/...` return 404). Packages are published with `aihub dev publish`, which pushes to git; see [architecture](architecture.md).
+
 | Method | Path | Auth required | Purpose |
 | --- | --- | --- | --- |
-| POST | `/api/v1/upload` | `publish` permission; package manager for existing package | Upload an archive and publish a version. |
 | POST | `/api/v1/packages/{name}/versions/{version}/yank` | User + package manager | Yank a version from resolution. |
 | POST | `/api/v1/packages/{name}/versions/{version}/unyank` | User + package manager | Make a yanked version resolvable again. |
-
-### Upload protocol
-
-Send the archive as the raw HTTP request body. This is not a multipart form upload. The filename header determines the archive extension used by the server:
-
-```sh
-curl -X POST \
-  -H 'Authorization: Bearer <token>' \
-  -H 'X-Aihub-Filename: package-1.0.0.tar.gz' \
-  -H 'Content-Type: application/octet-stream' \
-  --data-binary @package-1.0.0.tar.gz \
-  https://hub.example.com/api/v1/upload
-```
-
-`X-Aihub-Filename` is optional and defaults to `pkg.tar.gz`. If the archive does not contain `aihub.toml`, send a JSON manifest in `X-Aihub-Manifest`. Uploads larger than `AIHUB_MAX_UPLOAD_MB` return HTTP 413. The response contains the package `name`, `version`, and archive `sha256`. A version cannot be published twice for the same package.
-
-### Chunked, resumable upload
-
-For packages too large for a reverse proxy's body limit. All calls need the `publish` permission; a session belongs to the user who created it and expires after 24 hours idle (max 5 open per user).
-
-| Call | Purpose |
-|---|---|
-| `POST /api/v1/uploads` `{filename, size, sha256, visibility?, manifest?}` | Start. Returns `{upload_id, chunk_size, chunks}`. Rejects with 413 if `size` is over the limit. |
-| `GET /api/v1/uploads/{id}` | `{received: [chunk numbers]}`, to resume. |
-| `PUT /api/v1/uploads/{id}/chunks/{n}` | Raw body, exactly `chunk_size` bytes (the last may be shorter). Optional `X-Chunk-Sha256`. Re-sending is safe. |
-| `POST /api/v1/uploads/{id}/complete` | Assembles, verifies size and sha256, then publishes exactly like `/upload`. |
-| `DELETE /api/v1/uploads/{id}` | Abort and delete the chunks. |
-
-The CLI uses this automatically above 8 MiB and falls back to `POST /upload` against older hubs.
-
-### Downloads
-
-`GET /api/v1/packages/{name}/versions/{version}/download` and `GET /files/{name}/{file}` honour `Range` (206 / 416), so interrupted downloads resume. `aihub download <name>[@version] [-o dir]` saves the archive with resume and sha256 verification. The web Download button requests a 2-minute signed link (`POST .../download-link`) and lets the browser stream the file to disk.
+| GET | `/api/v1/resolve?name=&spec=` | Per `public_install` | Pick a version. The response carries `repo` (`url`, `branch`, `subdir`, `ref`) and the manifest, not a download URL. |
+| POST | `/api/v1/resolve/tree` | Per `public_install` | Resolve several packages and their dependencies, constraints merged. |
+| GET | `/api/v1/client-config` | No (credentials gated) | Index location for the CLI. Langfuse credentials (never git credentials) are included only when an admin enabled sharing and the caller is signed in or sends `?code=<enrollment code>`. Never cached. |
 
 ## Reviews
 
@@ -91,32 +62,26 @@ The CLI uses this automatically above 8 MiB and falls back to `POST /upload` aga
 
 ## Usage events, statistics, and rankings
 
+The server no longer accepts events (`POST /api/v1/events` is gone). The CLI writes them to Langfuse as OpenTelemetry spans, and the server pulls them on a schedule into the same `events` table, keyed by Langfuse's observation id so re-reads never duplicate. Event kinds: `use`, `install`, `update`, `uninstall`, `error`, `publish`.
+
 | Method | Path | Auth required | Purpose |
 | --- | --- | --- | --- |
-| POST | `/api/v1/events` | No (optional bearer token) | Queue usage events. |
 | GET | `/api/v1/packages/{name}/stats?days=30` | No | Aggregate package usage statistics. |
 | GET | `/api/v1/packages/{name}/events` | User + package manager | List recent package events. |
 | GET | `/api/v1/rankings/{what}?days=30` | No | Rank `packages`, `developers`, or `users`. |
 | GET | `/api/v1/stats/overview` | No | Aggregate package, version, user, event, and download counts. |
+| GET | `/api/v1/dashboard` | `view_dashboard` | Aggregates for the dashboard. |
+| GET | `/api/v1/dashboard/events` | `view_dashboard` | Paginated activity log (no command detail or working directory). |
 
-The event request accepts an array or an object containing an `events` array. The server considers at most 500 events. Each event needs a supported `kind` and a nonempty `package`; `ts`, `version`, `client_id`, `username`, `component`, and `duration` are optional.
+Dashboard filters (query parameters): `days` (7, 14, 30, 90, 180, 365) or a custom `from` / `to` (`YYYY-MM-DD`, UTC, at most 366 days); `package`, `type`, `user`, `source`, `kind`, `identity` (`anonymous` or `signed-in`), `host`, and `q` (substring of package or component). The log also takes `page` and `per_page` (max 100). Results only include packages the caller may see.
 
-```json
-{
-  "events": [
-    {
-      "kind": "use",
-      "package": "git-helper",
-      "version": "1.0.0",
-      "client_id": "client-id",
-      "component": "skill:git-helper",
-      "duration": 0.4
-    }
-  ]
-}
-```
+### Sync administration
 
-Accepted kinds are `install`, `update`, `uninstall`, `use`, and `error`. `ts` is a Unix timestamp in seconds; if omitted or falsy, server time is used. Package names are normalized. When a valid active bearer token is supplied, its username overrides `username` in the event. The response gives the number of accepted rows.
+| Method | Path | Auth required | Purpose |
+| --- | --- | --- | --- |
+| GET | `/api/v1/admin/sync` | `admin` | Sync status and settings. Secrets are reported as `"set"`, never returned. |
+| PUT | `/api/v1/admin/sync` | `admin` | Update Langfuse and index settings, the schedule (`sync_interval`: seconds or a 5-field cron expression), credential sharing, the enrollment code and the CLI refresh interval. Sending `""` or `"set"` for a secret keeps the stored value. |
+| POST | `/api/v1/admin/sync/run?full=false` | `admin` | Run a sync now. `full=true` forgets the cursor and looks back over everything (duplicates are skipped). |
 
 ## Administration
 

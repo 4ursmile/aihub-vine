@@ -290,23 +290,31 @@ function Rankings() {
 const detectOS = () => { const u = (navigator.userAgentData && navigator.userAgentData.platform || navigator.platform || "") + " " + navigator.userAgent; return /win/i.test(u) && !/darwin/i.test(u) ? "windows" : /mac|iphone|ipad/i.test(u) ? "mac" : "linux"; };
 
 function Start() {
-  const m = useLoad(() => api("/meta"), []); const o = ((m.d && m.d.public_url) || location.origin).replace(/\/+$/, ""); const auto = detectOS(); const [os, setOs] = useState(auto);
+  const m = useLoad(() => api("/meta"), []); const o = ((m.d && m.d.public_url) || location.origin).replace(/\/+$/, ""); const auto = detectOS(); const [os, setOs] = useState(auto); const [alt, setAlt] = useState(false);
+  const cfg = useLoad(() => fetch("/api/v1/client-config").then((r) => r.ok ? r.json() : null).catch(() => null), []);
   const OS = { mac: "macOS", linux: "Linux", windows: "Windows" };
   const cmd = os === "windows" ? `irm ${o}/install.ps1 | iex` : `curl -fsSL ${o}/install.sh | sh`;
+    const pip = `pip install "aihub-cli @ git+${(m.d && m.d.cli_git_url) || "<your-repo-url>"}"`;
   const note = os === "windows" ? "Run in PowerShell. Needs Python 3.9+ (python.org or `winget install Python.Python.3.12`). PATH is updated automatically; open a new terminal afterwards."
     : os === "mac" ? "Run in Terminal. Needs Python 3.9+ (preinstalled with Xcode tools, or `brew install python`). Then add it to PATH:"
     : "Run in your shell. Needs Python 3.9+ and curl (e.g. `sudo apt install python3 curl`). Then add it to PATH:";
   const path = os === "mac" ? `echo 'export PATH="$HOME/.aihub/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc` : os === "linux" ? `echo 'export PATH="$HOME/.aihub/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc` : null;
+  const envs = os === "windows" ? `$env:LANGFUSE_BASE_URL="https://…"; $env:LANGFUSE_PUBLIC_KEY="pk-lf-…"; $env:LANGFUSE_SECRET_KEY="sk-lf-…"` : `export LANGFUSE_BASE_URL="https://…" LANGFUSE_PUBLIC_KEY="pk-lf-…" LANGFUSE_SECRET_KEY="sk-lf-…"`;
   const step = (n, t, d, c) => html`<div class="card stack"><div class="row"><span class="rank top">${n}</span><h3>${t}</h3></div><p class="mut">${d}</p>${c && html`<${Cmd} text=${c} />`}</div>`;
   if (m.loading) return html`<div class="skel"></div>`;
-  return html`<div class="stack"><h1>Get started</h1><p class="lead">Up and running in under a minute. Python 3.9 or later.</p>
+  const idx = cfg.d && cfg.d.index && cfg.d.index.url;
+  return html`<div class="stack"><h1>Get started</h1><p class="lead">Up and running in under a minute. Python 3.9 or later, and git.</p>
     <div class="card stack"><div class="row"><span class="rank top">1</span><h3>Install the CLI</h3><span class="sp"></span>
       <div class="seg" role="tablist">${Object.keys(OS).map((k) => html`<button key=${k} class=${os === k ? "on" : ""} onClick=${() => setOs(k)}>${OS[k]}${k === auto ? " (detected)" : ""}</button>`)}</div></div>
       <p class="mut">Installs aihub and sets up usage reporting for Claude Code and OpenCode. ${note}</p>
-      <${Cmd} text=${cmd} />${path && html`<${Cmd} text=${path} />`}</div>
-    ${step(2, "Sign in", "Create an account on this site, then log in from your terminal.", "aihub login")}
+      <${Cmd} text=${cmd} />${path && html`<${Cmd} text=${path} />`}
+      <button class="btn sec sm" style="align-self:flex-start" onClick=${() => setAlt(!alt)} aria-expanded=${alt}>${alt ? "Hide" : "Can’t reach this server from your machine?"}</button>
+      ${alt && html`<div class="stack"><p class="mut">Install straight from git instead. It needs only git and Python, not this website.</p><${Cmd} text=${pip} />
+        <p class="mut">Then give the CLI your Langfuse settings. Export them (the CLI picks these up automatically), or run <code>aihub setup --manual</code> and it asks for each one:</p><${Cmd} text=${envs} /><${Cmd} text="aihub setup --manual" />
+        <p class="mut">${idx ? html`The package index is <code>${idx}</code>; ` : ""}if git asks for a login, enter your username and an access token once. Your git credential helper remembers it.</p></div>`}</div>
+    ${step(2, "Connect to Langfuse and the package index", "Pulls the index location and, if your admin shares them, the Langfuse keys. Asks you for anything missing. Refreshes itself later.", "aihub setup")}
     ${step(3, "Install something", "You'll be asked which tools to connect it to. Everything is reversible.", "aihub install <package>")}
-    ${step(4, "Publish your own", "Scaffold a manifest, then publish. Versions are immutable.", "aihub dev init && aihub dev publish")}</div>`;
+    ${step(4, "Publish your own", "Scaffold a manifest, then publish. aihub commits and pushes to your git repo for you.", "aihub dev init && aihub dev publish")}</div>`;
 }
 
 function Auth({ mode }) {
@@ -387,10 +395,10 @@ function Account() {
 function Admin() {
   const { me } = useStore(); const [tab, setTab] = useState("People"); const [tick, setTick] = useState(0); const bump = () => setTick((x) => x + 1);
   if (!can("admin") && !can("reset_password")) return html`<${Empty} t="Admins only" d="You don’t have access to this page." />`;
-  const tabs = can("admin") ? ["People", "Roles", "Settings"] : ["People"];
+  const tabs = can("admin") ? ["People", "Roles", "Sync", "Settings"] : ["People"];
   return html`<div class="stack"><h1>Admin</h1>${tabs.length > 1 && html`<div class="seg">${tabs.map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} onClick=${() => setTab(t)}>${t}</button>`)}</div>`}
     ${tab === "People" && html`<${People} me=${me} tick=${tick} bump=${bump} />`}${tab === "Roles" && can("admin") && html`<${Roles} tick=${tick} bump=${bump} />`}
-    ${tab === "Settings" && can("admin") && html`<${AdminSettings} />`}</div>`;
+    ${tab === "Sync" && can("admin") && html`<${AdminSync} />`}${tab === "Settings" && can("admin") && html`<${AdminSettings} />`}</div>`;
 }
 const SC = { active: "green", pending: "orange", disabled: "red" };
 function People({ me, tick, bump }) {
@@ -472,7 +480,7 @@ function AdminSettings() {
   const [tick, setTick] = useState(0); const d = useLoad(() => api("/admin/settings"), [tick]); const [busy, setBusy] = useState("");
   if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
   const set1 = async (k, v) => { setBusy(k); if (k === "cli_endpoint" && v) toast("Checking endpoint…"); try { await api("/admin/settings", { method: "PUT", body: { [k]: v } }); toast("Saved"); if (k === "theme_color") loadBrand(); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
-  const sections = [["Site", ["site_name", "theme_color", "cli_endpoint", "contact_name", "contact_email", "contact_url", "contact_phone"]], ["Access", ["signup", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility", "allow_source_download"]], ["Groups", ["allow_group_creation"]], ["Uploads", ["max_upload_mb"]]];
+  const sections = [["Site", ["site_name", "theme_color", "cli_endpoint", "contact_name", "contact_email", "contact_url", "contact_phone"]], ["Access", ["signup", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility"]], ["Groups", ["allow_group_creation"]]];
   const by = Object.fromEntries(d.d.schema.map((x) => [x.key, x]));
   const warn = d.d.values.public_install === "1";
   return html`<div class="stack"><div class="card row"><b>Server version</b><span class="mono">v${d.d.server_version}</span><span class="sp"></span><span class="xs mut3">CLIs on this hub self-update to this version (<code>aihub upgrade</code>)</span></div>${sections.map(([title, keys]) => html`<div class="stack" key=${title}><h3>${title}</h3><div class="list">${title === "Site" && html`<${LogoSetting} url=${d.d.logo_url} bump=${() => setTick(tick + 1)} />`}${keys.filter((k) => by[k]).map((k) => { const x = by[k], v = d.d.values[k]; if (x.type === "text") return html`<${TextSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; if (x.type === "number") return html`<${NumSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; const onoff = x.options.length === 2 && x.options[0] === "0";
@@ -480,6 +488,36 @@ function AdminSettings() {
         ${onoff ? html`<label class="switch"><input type="checkbox" role="switch" checked=${v === "1"} disabled=${busy === k} onChange=${(e) => set1(k, e.target.checked ? "1" : "0")} aria-label=${x.label} /><i></i></label>`
         : html`<div class="seg">${x.options.map((o) => html`<button key=${o} class=${v === o ? "on" : ""} disabled=${busy === k} onClick=${() => v !== o && set1(k, o)}>${o}</button>`)}</div>`}</div>`; })}</div></div>`)}
     ${warn && html`<div class="card" style="border:1px solid var(--orange)"><b>Public install is on.</b> <span class="mut">Anyone who can reach this server can download <u>public</u> packages without signing in. Private packages always require access.</span></div>`}</div>`;
+}
+
+const SCHEDULES = [["Every minute", "60"], ["Every 5 min", "*/5 * * * *"], ["Hourly", "0 * * * *"], ["Daily 03:00", "0 3 * * *"]];
+function SecretField({ label, help, v, onSave }) {
+  const [t, setT] = useState("");
+  return html`<div class="li"><div class="t"><b>${label}</b><span>${help}</span></div><div class="row"><input class="field" type="password" autocomplete="off" placeholder=${v === "set" ? "•••••••• (set)" : "not set"} value=${t} aria-label=${label} style="width:min(16rem,100%)" onInput=${(e) => setT(e.target.value)} /><button class="btn sm" disabled=${!t} onClick=${async () => { await onSave(t); setT(""); }}>Save</button></div></div>`;
+}
+function AdminSync() {
+  const [tick, setTick] = useState(0); const d = useLoad(() => api("/admin/sync"), [tick]); const [busy, setBusy] = useState("");
+  if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
+  const { config: c, status: st, from_env: env } = d.d;
+  const save = async (k, v) => { setBusy(k); try { await api("/admin/sync", { method: "PUT", body: { [k]: v } }); toast("Saved"); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
+  const run = async (full) => { setBusy("run"); try { toast(full ? "Full re-sync…" : "Syncing…"); await api("/admin/sync/run" + (full ? "?full=true" : ""), { method: "POST" }); toast("Sync finished"); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
+  const T = (k, label, help, ph) => html`<${TextSetting} x=${{ label, help, kind: "text", max: 300 }} v=${c[k]} busy=${busy === k} save=${(n) => save(k, n)} key=${k} />`;
+  const when = (t) => t ? new Date(t * 1000).toLocaleString() : "never";
+  return html`<div class="stack">
+    <div class="card stack"><div class="row"><h3>Sync status</h3><span class="sp"></span><button class="btn sec sm" disabled=${busy === "run"} onClick=${() => run(false)}>Sync now</button><button class="btn sec sm" disabled=${busy === "run"} onClick=${() => run(true)} title="Forget the cursor and look back over everything; duplicates are skipped">Full re-sync</button></div>
+      <div class="kpis"><div class="stat"><b>${st.events_total || 0}</b><span>events this run</span></div><div class="stat"><b>${st.index_packages || 0}</b><span>packages in index</span></div><div class="stat"><b>${st.next_in != null ? st.next_in + "s" : "-"}</b><span>next sync in</span></div></div>
+      <p class="mut sm">Last run: ${when(st.last_run)}${st.last_error ? html` · <b style="color:var(--red)">${st.last_error}</b>` : html` · <span style="color:var(--green)">OK</span>`}</p></div>
+    <div class="stack"><h3>Schedule</h3><div class="list"><div class="li"><div class="t"><b>Pull interval</b><span>Seconds (10-86400) or a cron expression: <code>*/5 * * * *</code> every 5 min, <code>0 3 * * *</code> daily at 03:00. Applies immediately.</span></div>
+      <div class="row"><input class="field" id="sched" defaultValue=${c.sync_interval} style="width:11rem" aria-label="Pull interval" /><button class="btn sm" disabled=${busy === "sync_interval"} onClick=${() => save("sync_interval", document.getElementById("sched").value)}>Save</button></div></div>
+      <div class="li"><div class="t"><b>Presets</b></div><div class="seg">${SCHEDULES.map(([n, v]) => html`<button key=${v} class=${c.sync_interval === v ? "on" : ""} onClick=${() => save("sync_interval", v)}>${n}</button>`)}</div></div></div></div>
+    <div class="stack"><h3>Langfuse</h3><div class="list">${env.langfuse && html`<div class="li mut">Keys are set in the server environment, and those win over the values below.</div>`}
+      ${T("langfuse_host", "Host", "e.g. https://us.cloud.langfuse.com")}${T("langfuse_public_key", "Public key", "pk-lf-…")}
+      <${SecretField} label="Secret key" help="sk-lf-… Write-only: never shown again." v=${c.langfuse_secret_key} onSave=${(v) => save("langfuse_secret_key", v)} /></div></div>
+    <div class="stack"><h3>Package index</h3><div class="list">${T("index_url", "Git URL", "Repository holding the index file (or an https URL to the json)")}${T("index_branch", "Branch", "default: main")}${T("index_path", "File", "default: index.json")}</div></div>
+    <div class="stack"><h3>CLI setup</h3><div class="list">
+      <div class="li"><div class="t"><b>Share Langfuse credentials with CLIs</b><span>When on, <code>aihub setup</code> hands the Langfuse keys (never git credentials) to signed-in users and to anyone with the enrollment code. Sent over HTTPS only; every hand-out is audited.</span></div><label class="switch"><input type="checkbox" role="switch" checked=${c.share_credentials === "1"} disabled=${busy === "share_credentials"} onChange=${(e) => save("share_credentials", e.target.checked ? "1" : "0")} aria-label="Share credentials" /><i></i></label></div>
+      <${SecretField} label="Enrollment code" help="Give this to teammates: aihub setup --code <code>. Leave unset to share only with signed-in users." v=${c.enroll_code} onSave=${(v) => save("enroll_code", v)} />
+      ${T("cli_git_url", "CLI git URL", "Where to pip install the CLI from when this server is unreachable")}${T("client_refresh_hours", "CLI refresh (hours)", "How often installed CLIs re-pull these settings (default 24)")}</div></div></div>`;
 }
 function Groups() {
   const { me } = useStore(); const [tick, setTick] = useState(0); const bump = () => setTick((x) => x + 1);
@@ -556,7 +594,7 @@ function Docs({ slug }) {
 
 
 // ---------- dashboard (charts are plain SVG: no library, theme-aware)
-const KC = { use: "var(--blue)", install: "var(--green)", update: "var(--orange)", error: "var(--red)", uninstall: "var(--fg-3)" };
+const KC = { use: "var(--blue)", install: "var(--green)", update: "var(--orange)", error: "var(--red)", uninstall: "var(--fg-3)", publish: "var(--fg-2)" };
 const delta = (a, b) => { if (!b) return a ? { t: "new", c: "green" } : null; const p = Math.round((a - b) / b * 100); return { t: (p >= 0 ? "▲ " : "▼ ") + Math.abs(p) + "%", c: p >= 0 ? "green" : "red" }; };
 const Kpi = ({ label, value, prev, invert }) => { const d = delta(value, prev);
   return html`<div class="card stat"><span>${label}</span><b>${fmt(value)}</b>${d ? html`<span class=${"badge " + (invert ? (d.c === "green" ? "red" : "green") : d.c)}>${d.t} vs prior</span>` : html`<span class="xs mut3">no prior data</span>`}</div>`; };
@@ -585,39 +623,67 @@ const Donut = ({ items }) => { const tot = items.reduce((a, b) => a + b.count, 0
     ${items.map((it, i) => { const len = it.count / tot * C, el = html`<circle key=${it.name} cx="50" cy="50" r=${R} fill="none" stroke=${pal[i % 5]} stroke-width="14" stroke-dasharray=${`${len} ${C - len}`} stroke-dashoffset=${-acc}/>`; acc += len; return el; })}</svg>
     <div class="sm" style="min-width:0">${items.map((it, i) => html`<div key=${it.name}><i class="dot" style=${"background:" + pal[i % 5]}></i>${it.name} <b>${Math.round(it.count / tot * 100)}%</b> <span class="mut3">${fmt(it.count)}</span></div>`)}</div></div>`; };
 
+const DASH_KEYS = ["package", "type", "user", "source", "kind", "identity", "host", "q"];
+const DASH_LABEL = { package: "Package", type: "Type", user: "Person", source: "Tool", kind: "Event", identity: "Identity", host: "Device", q: "Search" };
+const DASH_KINDS = ["use", "install", "update", "uninstall", "error", "publish"];
+const dashParams = () => { const q = new URLSearchParams((store.route.split("?")[1]) || ""); const o = { days: +q.get("days") || 30, from: q.get("from") || "", to: q.get("to") || "", tab: q.get("tab") || "overview", page: +q.get("page") || 1 }; DASH_KEYS.forEach((k) => (o[k] = q.get(k) || "")); return o; };
+const dashHash = (o) => { const q = new URLSearchParams(); if (o.from || o.to) { if (o.from) q.set("from", o.from); if (o.to) q.set("to", o.to); } else if (o.days !== 30) q.set("days", o.days); DASH_KEYS.forEach((k) => o[k] && q.set(k, o[k])); if (o.tab !== "overview") q.set("tab", o.tab); if (o.page > 1) q.set("page", o.page); const t = q.toString(); return "/dashboard" + (t ? "?" + t : ""); };
+
+function Heatmap({ grid }) {
+  const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], mx = Math.max(1, ...grid.flat());
+  const cells = [];                                   // flat list (no fragments): label, then 24 hour cells per weekday
+  grid.forEach((row, d) => { cells.push(html`<span key=${"l" + d} class="xs mut3">${days[d]}</span>`); row.forEach((v, h) => cells.push(html`<i key=${d + "-" + h} title=${`${days[d]} ${String(h).padStart(2, "0")}:00 UTC: ${v}`} style=${`background:color-mix(in srgb,var(--blue) ${v ? 14 + Math.round(v / mx * 76) : 0}%,var(--fill))`}></i>`)); });
+  return html`<div class="heat" role="img" aria-label="Activity by weekday and hour, UTC"><span></span>${[0, 6, 12, 18].map((h) => html`<span key=${h} class="xs mut3" style=${`grid-column:${h + 2} / span 6`}>${String(h).padStart(2, "0")}:00</span>`)}${cells}</div>`;
+}
+
 function Dashboard() {
-  const { me } = useStore(); const [days, setDays] = useState(30); const [pkg, setPkg] = useState(""); const [tick, setTick] = useState(0);
-  const [fl, setFl] = useState({ type: "", user: "", source: "", kind: "" }); const setF = (k) => (e) => setFl({ ...fl, [k]: e.target.value });
-  const qs = `days=${days}` + (pkg ? "&package=" + encodeURIComponent(pkg) : "") + Object.entries(fl).filter(([, v]) => v).map(([k, v]) => `&${k}=${encodeURIComponent(v)}`).join("");
+  const { me } = useStore(); const f = dashParams(); const [tick, setTick] = useState(0); const [open, setOpen] = useState(false);
+  const go = (patch) => nav(dashHash({ ...f, page: 1, ...patch }));
+  const ser = new URLSearchParams(); if (f.from || f.to) { f.from && ser.set("from", f.from); f.to && ser.set("to", f.to); } ser.set("days", f.days); DASH_KEYS.forEach((k) => f[k] && ser.set(k, f[k]));
+  const qs = ser.toString();
   const d = useLoad(() => me && can("view_dashboard") ? api("/dashboard?" + qs) : Promise.resolve(null), [me, qs, tick]);
-  const nFilters = Object.values(fl).filter(Boolean).length + (pkg ? 1 : 0);
-  useEffect(() => { const t = setInterval(() => setTick((x) => x + 1), 60000); return () => clearInterval(t); }, []);
+  const log = useLoad(() => me && can("view_dashboard") && f.tab === "activity" ? api("/dashboard/events?per_page=25&page=" + f.page + "&" + qs) : Promise.resolve(null), [me, qs, f.tab, f.page, tick]);
   const pk = useLoad(() => api("/packages?per_page=100&sort=name"), []);
+  const [series, setSeries] = useState({ use: true, install: true, error: true, update: false, publish: false });
+  const [qd, setQd] = useState(f.q); useEffect(() => setQd(f.q), [f.q]);
+  useEffect(() => { const t = setInterval(() => setTick((x) => x + 1), 60000); return () => clearInterval(t); }, []);
   if (!me) return html`<${Empty} t="Sign in required" d="Sign in to view the dashboard." />`;
   if (!can("view_dashboard")) return html`<${Empty} t="No access" d="Your role doesn’t include the usage dashboard. Ask an admin to grant “View the usage dashboard”." />`;
-  const D = d.d, t = (D && D.totals) || {}, pv = (D && D.previous) || {};
-  const exportCsv = () => { const rows = ["date,install,use,update,uninstall,error", ...D.daily.map((x) => [x.date, x.install, x.use, x.update, x.uninstall, x.error].join(","))]; saveBlob(new Blob([rows.join("\n")], { type: "text/csv" }), `usage-${days}d${pkg ? "-" + pkg : ""}.csv`); };
+  const D = d.d, t = (D && D.totals) || {}, pv = (D && D.previous) || {}, o = (D && D.options) || {};
+  const custom = !!(f.from || f.to), active = DASH_KEYS.filter((k) => f[k]);
+  const sel = (k, label, opts, any) => html`<select class="field" aria-label=${label} value=${f[k]} onChange=${(e) => go({ [k]: e.target.value })}><option value="">${any}</option>${opts.map((x) => html`<option value=${x} key=${x} selected=${x === f[k]}>${x}</option>`)}</select>`;
+  const exportCsv = () => { const ks = ["install", "use", "update", "uninstall", "error", "publish"]; saveBlob(new Blob([["date," + ks.join(","), ...D.daily.map((x) => [x.date, ...ks.map((k) => x[k] || 0)].join(","))].join("\n")], { type: "text/csv" }), `usage-${D.filters.from}_${D.filters.to}.csv`); };
+  const seriesOn = Object.keys(series).filter((k) => series[k]);
   return html`<div class="stack"><div class="row"><h1>Dashboard</h1><span class="sp"></span>
-      <select class="field" aria-label="Package" value=${pkg} onChange=${(e) => setPkg(e.target.value)}><option value="">All packages</option>${(pk.d ? pk.d.items : []).map((p) => html`<option value=${p.name} key=${p.name} selected=${p.name === pkg}>${p.name}</option>`)}</select>
-      <div class="seg">${[7, 30, 90, 365].map((n) => html`<button key=${n} class=${days === n ? "on" : ""} onClick=${() => setDays(n)}>${n === 365 ? "1y" : n + "d"}</button>`)}</div>
-      <button class="btn sec sm" onClick=${exportCsv} disabled=${!D}>Export CSV</button></div>
-    <div class="row filters" role="group" aria-label="Filters"><span class="sm mut">Filter</span>
-      <select class="field" aria-label="Type" value=${fl.type} onChange=${setF("type")}><option value="">Any type</option>${((D && D.options.types) || []).map((x) => html`<option value=${x} key=${x} selected=${x === fl.type}>${x}</option>`)}</select>
-      <select class="field" aria-label="Person" value=${fl.user} onChange=${setF("user")}><option value="">Anyone</option>${((D && D.options.users) || []).map((x) => html`<option value=${x} key=${x} selected=${x === fl.user}>${x}</option>`)}</select>
-      <select class="field" aria-label="Tool" value=${fl.source} onChange=${setF("source")}><option value="">Any tool</option>${((D && D.options.sources) || []).map((x) => html`<option value=${x} key=${x} selected=${x === fl.source}>${x}</option>`)}</select>
-      <select class="field" aria-label="Event" value=${fl.kind} onChange=${setF("kind")}><option value="">Any event</option>${["use", "install", "update", "uninstall", "error"].map((x) => html`<option value=${x} key=${x} selected=${x === fl.kind}>${x}</option>`)}</select>
-      ${nFilters > 0 && html`<button class="btn sec sm" onClick=${() => { setFl({ type: "", user: "", source: "", kind: "" }); setPkg(""); }}>Clear ${nFilters}</button>`}</div>
-    ${d.loading && !D ? html`<${Skels} n=4 />` : d.e ? html`<${Err} e=${d.e} />` : D && html`<div class="stack">
+      <div class="seg" role="group" aria-label="Period">${[7, 30, 90, 365].map((n) => html`<button key=${n} class=${!custom && f.days === n ? "on" : ""} onClick=${() => go({ days: n, from: "", to: "" })}>${n === 365 ? "1y" : n + "d"}</button>`)}<button class=${custom ? "on" : ""} onClick=${() => setOpen(!open)} aria-expanded=${open}>Custom</button></div>
+      <button class="btn sec sm" onClick=${() => setTick(tick + 1)} title="Reload now">Refresh</button><button class="btn sec sm" onClick=${exportCsv} disabled=${!D}>Export CSV</button></div>
+    ${(open || custom) && html`<div class="row filters" role="group" aria-label="Date range"><label class="sm mut" for="df">From</label><input id="df" class="field" type="date" value=${f.from || (D && D.filters.from) || ""} max=${D && D.filters.to} onChange=${(e) => go({ from: e.target.value, to: f.to || (D && D.filters.to) || "" })} /><label class="sm mut" for="dt">To</label><input id="dt" class="field" type="date" value=${f.to || (D && D.filters.to) || ""} onChange=${(e) => go({ to: e.target.value, from: f.from || (D && D.filters.from) || "" })} />${custom && html`<button class="btn sec sm" onClick=${() => go({ from: "", to: "" })}>Back to presets</button>`}</div>`}
+    <div class="row filters" role="group" aria-label="Filters">
+      <form class="row" style="gap:6px" onSubmit=${(e) => { e.preventDefault(); go({ q: qd.trim() }); }}><input class="field" type="search" placeholder="Search package or component" aria-label="Search package or component" value=${qd} onInput=${(e) => setQd(e.target.value)} style="width:15rem" /></form>
+      <select class="field" aria-label="Package" value=${f.package} onChange=${(e) => go({ package: e.target.value })}><option value="">All packages</option>${(pk.d ? pk.d.items : []).map((p) => html`<option value=${p.name} key=${p.name} selected=${p.name === f.package}>${p.name}</option>`)}</select>
+      ${sel("type", "Type", o.types || [], "Any type")}${sel("kind", "Event", DASH_KINDS, "Any event")}${sel("source", "Tool", o.sources || [], "Any tool")}
+      <select class="field" aria-label="Identity" value=${f.identity} onChange=${(e) => go({ identity: e.target.value })}><option value="">Anyone</option><option value="signed-in" selected=${f.identity === "signed-in"}>Signed-in only</option><option value="anonymous" selected=${f.identity === "anonymous"}>Anonymous only</option></select>
+      ${sel("user", "Person", o.users || [], "Any person")}${sel("host", "Device", o.hosts || [], "Any device")}</div>
+    ${active.length > 0 && html`<div class="row" style="gap:8px" aria-label="Active filters">${active.map((k) => html`<button key=${k} class="chip" onClick=${() => go({ [k]: "" })} aria-label=${`Remove ${DASH_LABEL[k]} filter`}>${DASH_LABEL[k]}: <b>${f[k]}</b> ✕</button>`)}<button class="btn sec sm" onClick=${() => go(Object.fromEntries(DASH_KEYS.map((k) => [k, ""])))}>Clear all</button></div>`}
+    <div class="seg" role="tablist" style="align-self:flex-start">${[["overview", "Overview"], ["activity", "Activity"]].map(([k, l]) => html`<button key=${k} role="tab" aria-selected=${f.tab === k} class=${f.tab === k ? "on" : ""} onClick=${() => go({ tab: k })}>${l}</button>`)}</div>
+    ${d.loading && !D ? html`<${Skels} n=4 />` : d.e ? html`<${Err} e=${d.e} />` : D && f.tab === "overview" && html`<div class="stack">
       <div class="kpis"><${Kpi} label="Tool calls" value=${t.use || 0} prev=${pv.use || 0} /><${Kpi} label="Active people" value=${D.active_users} prev=${D.active_users_prev} />
-        <${Kpi} label="Installs" value=${t.install || 0} prev=${pv.install || 0} /><${Kpi} label="Errors" value=${t.error || 0} prev=${pv.error || 0} invert=${true} /></div>
-      <div class="card stack"><div class="row"><h3>Activity</h3><span class="sp"></span><span class="xs mut3">${D.active_packages} active packages · ${D.clients} devices · UTC</span></div>
-        ${Object.values(t).some((v) => v) ? html`<${LineChart} daily=${D.daily} series=${["use", "install", "error"]} />` : html`<${Empty} t="No activity yet" d="Events appear here as people install and use packages." />`}</div>
-      <div class="two"><div class="card stack"><h3>Most used</h3><${Bars} items=${D.top_packages} link=${true} /></div>
-        <div class="card stack"><div class="row"><h3>Top rated</h3><span class="sp"></span><span class="xs mut3">all time</span></div>${D.top_reviewed.length ? html`<div>${D.top_reviewed.slice(0, 8).map((x) => html`<div class="hb" key=${x.name}><span class="hl"><a href=${"#/package/" + x.name}>${x.name}</a></span><span class="ht"><i style=${`width:${x.score / 5 * 100}%;background:var(--orange)`}></i></span><span class="hn" title=${x.count + " reviews · ranked by weighted score " + x.score}>★ ${x.avg} <span class="mut3">(${x.count})</span></span></div>`)}</div>` : html`<p class="mut sm">No reviews yet.</p>`}</div></div>
-      <div class="two"><div class="card stack"><h3>Top people</h3><${Bars} items=${D.top_users} color="var(--green)" /></div><div class="card stack"><h3>By type</h3><${Donut} items=${D.by_type} /></div></div>
-      <div class="card stack"><h3>By tool</h3><${Donut} items=${D.by_source} /></div>
-      <div class="card stack"><h3>Recent activity</h3>${D.recent.length ? html`<div class="tscroll"><table><thead><tr><th>When</th><th>Who</th><th>Event</th><th>Package</th><th>Component</th></tr></thead><tbody>
-        ${D.recent.map((e, i) => html`<tr key=${i}><td class="mut sm">${ago(e.ts)}</td><td>${e.actor}</td><td><span class=${"badge " + ({ use: "blue", install: "green", error: "red", update: "orange" }[e.kind] || "")}>${e.kind}</span></td><td><a href=${"#/package/" + e.package}>${e.package}</a></td><td class="mono mut">${e.component || ""}</td></tr>`)}</tbody></table></div>` : html`<p class="mut sm">Nothing yet.</p>`}</div></div>`}</div>`;
+        <${Kpi} label="Installs" value=${t.install || 0} prev=${pv.install || 0} /><${Kpi} label="Publishes" value=${t.publish || 0} prev=${pv.publish || 0} /><${Kpi} label="Errors" value=${t.error || 0} prev=${pv.error || 0} invert=${true} /></div>
+      <div class="card stack"><div class="row"><h3>Activity</h3><span class="sp"></span>
+        <div class="row" style="gap:6px">${Object.keys(series).map((k) => html`<button key=${k} class=${"chip" + (series[k] ? " on" : "")} aria-pressed=${series[k]} onClick=${() => setSeries({ ...series, [k]: !series[k] })}><i class="dot" style=${`background:${KC[k]}`}></i>${k}</button>`)}</div></div>
+        <p class="xs mut3">${D.filters.from} to ${D.filters.to} · ${D.active_packages} active packages · ${D.clients} devices · UTC</p>
+        ${Object.values(t).some((v) => v) && seriesOn.length ? html`<${LineChart} daily=${D.daily} series=${seriesOn} />` : html`<${Empty} t=${seriesOn.length ? "No activity in this view" : "Pick a series"} d=${seriesOn.length ? "Widen the period or clear a filter." : "Turn on at least one series above."} />`}</div>
+      <div class="two"><div class="card stack"><h3>Most used packages</h3><${Bars} items=${D.top_packages} link=${true} /></div>
+        <div class="card stack"><h3>Most used components</h3><${Bars} items=${(D.top_components || []).map((x) => ({ ...x, name: x.name }))} color="var(--green)" /></div></div>
+      <div class="card stack"><div class="row"><h3>When people work</h3><span class="sp"></span><span class="xs mut3">weekday by hour, UTC</span></div><${Heatmap} grid=${D.heatmap} /></div>
+      <div class="two"><div class="card stack"><h3>Top people</h3><${Bars} items=${D.top_users} color="var(--green)" /></div><div class="card stack"><h3>Devices</h3><${Bars} items=${D.by_host || []} color="var(--orange)" /></div></div>
+      <div class="three"><div class="card stack"><h3>By type</h3><${Donut} items=${D.by_type} /></div><div class="card stack"><h3>By tool</h3><${Donut} items=${D.by_source} /></div><div class="card stack"><h3>Signed in vs anonymous</h3><${Donut} items=${D.by_identity || []} /></div></div>
+      <div class="card stack"><div class="row"><h3>Top rated</h3><span class="sp"></span><span class="xs mut3">all time</span></div>${D.top_reviewed.length ? html`<div>${D.top_reviewed.slice(0, 8).map((x) => html`<div class="hb" key=${x.name}><span class="hl"><a href=${"#/package/" + x.name}>${x.name}</a></span><span class="mut sm">${x.reviews} ${x.reviews === 1 ? "review" : "reviews"}</span><b>${x.avg}</b></div>`)}</div>` : html`<p class="mut sm">No reviews yet.</p>`}</div></div>`}
+    ${f.tab === "activity" && (log.loading && !log.d ? html`<${Skels} n=2 />` : log.e ? html`<${Err} e=${log.e} /> ` : log.d && html`<div class="card stack"><div class="row"><h3>Activity log</h3><span class="sp"></span><span class="xs mut3">${log.d.total} events</span></div>
+      ${log.d.items.length ? html`<div class="tscroll"><table><thead><tr><th>When</th><th>Who</th><th>Event</th><th>Package</th><th>Component</th><th>Tool</th><th>Device</th></tr></thead><tbody>
+        ${log.d.items.map((e, i) => html`<tr key=${i}><td class="mut sm" title=${new Date(e.ts * 1000).toISOString()}>${ago(e.ts)}</td><td>${e.actor}</td><td><span class=${"badge " + ({ use: "blue", install: "green", error: "red", update: "orange" }[e.kind] || "")}>${e.kind}</span></td><td><a href=${"#/package/" + e.package}>${e.package}</a>${e.version ? html` <span class="mut sm">${e.version}</span>` : ""}</td><td class="mono sm">${e.component || ""}</td><td class="sm">${e.source}</td><td class="sm mut">${e.host || ""}</td></tr>`)}</tbody></table></div>
+        <div class="row"><button class="btn sec sm" disabled=${f.page <= 1} onClick=${() => nav(dashHash({ ...f, page: f.page - 1 }))}>Previous</button><span class="sm mut">Page ${log.d.page} of ${Math.max(1, Math.ceil(log.d.total / log.d.per_page))}</span><button class="btn sec sm" disabled=${f.page * log.d.per_page >= log.d.total} onClick=${() => nav(dashHash({ ...f, page: f.page + 1 }))}>Next</button></div>`
+        : html`<${Empty} t="No events match" d="Widen the period or clear a filter." />`}</div>`)}</div>`;
 }
 
 // ---------- shell

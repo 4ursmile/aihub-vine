@@ -68,6 +68,7 @@ LATE_COLUMNS = [
     ("packages", "readme", "TEXT DEFAULT ''"), ("packages", "visibility", "TEXT NOT NULL DEFAULT 'public'"),
     ("events", "source", "TEXT"),
     ("events", "local_user", "TEXT"), ("events", "host", "TEXT"), ("events", "detail", "TEXT"), ("events", "cwd", "TEXT"), ("events", "ip", "TEXT"),
+    ("events", "ext_id", "TEXT"),
 ]
 
 # a quoted string literal | a positional ? | a named :param (not the :: cast operator)
@@ -250,6 +251,9 @@ class DB:
         """Rewrite the one SQL dialect repos.py uses for this engine."""
         if self.engine == "sqlite":
             return sql
+        if re.match(r"\s*INSERT\s+OR\s+IGNORE\s+INTO\s+events\b.*\bext_id\b", sql, re.I | re.S):
+            # events dedupe on their unique ext_id (not the primary key); the generic rewrite below only knows primary keys
+            sql = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO", "INSERT INTO", sql, count=1, flags=re.I).rstrip() + " ON CONFLICT (ext_id) DO NOTHING"
         m = re.match(r"\s*INSERT\s+OR\s+(IGNORE|REPLACE)\s+INTO\s+(\w+)(\s*\([^)]*\))?\s*VALUES\s*(\(.*\))\s*$", sql, re.I | re.S)
         if m:
             kind, table, cols, vals = m.groups()
@@ -328,6 +332,7 @@ class DB:
             for table, col, ddl in LATE_COLUMNS:
                 if col not in self._columns(c, table):
                     c.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, col, ddl))
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ev_ext ON events(ext_id)")   # Langfuse observation id: re-polling never duplicates
             c.commit()
             self._init_fts(c)
             if not c.execute("SELECT 1 FROM app_settings WHERE key='perms_seeded'").fetchone():

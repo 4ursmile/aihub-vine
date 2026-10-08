@@ -1,0 +1,27 @@
+{
+  "_comment": "Defaults for the Git/Langfuse-backed AI Hub. Override any key with: aihub config set <key> <value>",
+  "index": {
+    "git_url": "https://github.com/4ursmile/aftest",
+    "branch": "main",
+    "path": "index.json",
+    "langfuse_host": "",
+    "langfuse_project": "aihub"
+  },
+  "event_names": {
+    "use": "aihub.use",
+    "install": "aihub.install",
+    "uninstall": "aihub.uninstall",
+    "update": "aihub.update",
+    "error": "aihub.error",
+    "publish": "aihub.publish"
+  },
+  "index_schema": {
+    "packages": [{
+      "requires": {"os": ["macos|linux|windows"], "commands": ["name or {name,hint}"], "packages": ["dep>=1"]},
+      "python": {"requires": ["pkg"], "requirements_file": "str"},
+      "name": "str", "type": "skill|agent|mcp|tool|setup", "description": "str", "tags": ["str"],
+      "latest_version": "str",
+      "repo": {"url": "str", "branch": "str", "subdir": "str (optional)", "ref": "tag or commit (optional)"}
+    }]
+  }
+}

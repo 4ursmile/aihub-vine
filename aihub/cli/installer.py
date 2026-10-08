@@ -9,7 +9,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 from ..core import archive, manifest as M, naming, version as V
-from . import api, hooks, integrations, paths, setup as setupmod, telemetry, ui
+from . import api, hooks, integrations, paths, registry, setup as setupmod, telemetry, ui
 
 OS = {"Darwin": "macos", "Linux": "linux", "Windows": "windows"}.get(platform.system(), "linux")
 
@@ -110,37 +110,9 @@ def dependents(st, name, only_enabled=True):
 
 # ---------- dependency resolution
 
-def _legacy_plan(roots, have):
-    """Resolution for hubs without /resolve/tree: one request per package."""
-    seen, out = set(), []
-
-    def go(name, spec, root):
-        name = naming.normalize(name)
-        if name in seen:
-            return
-        seen.add(name)
-        r = api.call("GET", "/resolve?name=%s&spec=%s" % (name, urllib.parse.quote(spec or "")))
-        deps = (r["manifest"].get("requires") or {}).get("packages") or []
-        for d in deps:
-            dn, ds = _spec(d)
-            if naming.normalize(dn) not in have or not V.satisfies(have[naming.normalize(dn)], ds):
-                go(dn, ds, False)
-        out.append(dict(r, requires=list(deps), root=root))
-    for x in roots:
-        go(x["name"], x.get("spec", ""), True)
-    return out
-
-
 def plan(roots, installed=None):
-    """-> [resolved package dicts, dependencies first]. One round trip on current hubs.
-    roots: [{"name", "spec"}]; installed: {name: version} of packages that need no work if they satisfy a constraint."""
-    try:
-        return api.call("POST", "/resolve/tree", {"roots": roots, "installed": installed or {}})["packages"]
-    except api.ApiError as e:
-        msg = str(e)
-        if msg.startswith("405 ") or (msg.startswith("404 ") and msg.rstrip().endswith("Not Found")):
-            return _legacy_plan(roots, installed or {})
-        raise
+    """-> [resolved package dicts, dependencies first], from the git-backed index."""
+    return registry.plan(roots, installed or {})
 
 
 def installed_versions(st=None):
@@ -218,43 +190,36 @@ def _load_manifest(rec):
 # ---------- install
 
 def _fetch(r, td):
-    fn = os.path.join(td, r["name"] + "-" + r["url"].rsplit("/", 1)[-1])
-    api.download(r["url"], fn, r["sha256"])
-    return fn
+    dest = os.path.join(td, r["name"])
+    r["rev"] = registry.checkout(r, dest)
+    return dest
 
 
 def _install_one(r, assume_yes, tools, requested, archive_path=None):
     name = r["name"].lower()
-    m = M.normalize(r["manifest"]) if r["manifest"].get("package") else None
-    if not m:
-        raise api.ApiError("server returned invalid manifest")
-    req = m["requires"]
-    if req["os"] and OS not in req["os"]:
-        raise api.ApiError("%s supports only: %s" % (name, ", ".join(req["os"])))
-    for c in req["commands"]:
-        cn, hint = (c, "") if isinstance(c, str) else (c.get("name"), c.get("hint", ""))
-        if not shutil.which(cn):
-            ui.note("missing command '%s'. %s" % (cn, hint))
-    old = state()["packages"].get(name)
-    if old:
-        uninstall(name, quiet=True)
-    root = paths.ensure("packages")
-    with tempfile.TemporaryDirectory() as td:
-        fn = archive_path
-        if not fn:
-            fn = os.path.join(td, r["url"].rsplit("/", 1)[-1])
-            pg = ui.Progress("downloading %s" % name)
-            try:
-                api.download(r["url"], fn, r["sha256"], progress=pg)
-            finally:
-                pg.finish()
-        ui.good("%s %s downloaded and verified (sha256)" % (name, r["version"]))
-        with ui.Spinner("Unpacking"):
-            dest = os.path.join(root, name)
-            shutil.rmtree(dest, ignore_errors=True)
-            top = archive.safe_extract(fn, os.path.join(td, "x"))
-            shutil.move(top, dest)
-    rec = {"version": r["version"], "path": dest, "reverts": [], "shims": [], "venv": None, "sha256": r["sha256"],
+    td = tempfile.mkdtemp()
+    try:
+        with ui.Spinner("Fetching %s from git" % name):
+            src = archive_path or _fetch(r, td)
+        toml = os.path.join(src, "aihub.toml")          # the repo's aihub.toml is authoritative
+        m = M.normalize(M.parse(open(toml, encoding="utf-8").read()))
+        req = m["requires"]
+        if req["os"] and OS not in req["os"]:
+            raise api.ApiError("%s supports only: %s" % (name, ", ".join(req["os"])))
+        for c in req["commands"]:
+            cn, hint = (c, "") if isinstance(c, str) else (c.get("name"), c.get("hint", ""))
+            if not shutil.which(cn):
+                ui.note("missing command '%s'. %s" % (cn, hint))
+        old = state()["packages"].get(name)
+        if old:
+            uninstall(name, quiet=True)
+        dest = os.path.join(paths.ensure("packages"), name)
+        shutil.rmtree(dest, ignore_errors=True)
+        shutil.move(src, dest)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    ui.good("%s %s fetched" % (name, r["version"]))
+    rec = {"version": r["version"], "path": dest, "reverts": [], "shims": [], "venv": None, "rev": r.get("rev"), "repo": r.get("repo"),
            "deps": list(req["packages"]), "requested": bool(requested or (old or {}).get("requested"))}
     py = m["python"]
     if py["requires"] or py["requirements_file"]:
@@ -289,24 +254,12 @@ def install_plan(pkgs, assume_yes=False, tools=None, roots=()):
     if not pkgs:
         return []
     roots = {naming.normalize(x) for x in roots}
-    cache, done = None, []
-    try:
+    done = []
+    for r in pkgs:
         if len(pkgs) > 1:
-            cache = tempfile.mkdtemp(prefix="aihub-dl-")
-            with ui.Spinner("Downloading %d packages" % len(pkgs)) as sp:
-                with ThreadPoolExecutor(max_workers=min(4, len(pkgs))) as ex:
-                    files = dict(zip([p["name"] for p in pkgs], ex.map(lambda p: _fetch(p, cache), pkgs)))
-                sp.text("Downloaded %d packages" % len(pkgs))
-        else:
-            files = {}
-        for r in pkgs:
-            if len(pkgs) > 1:
-                ui.step("%s %s" % (ui.accent(r["name"]), r["version"]) + ("" if r["name"] in roots else ui.dim("  (dependency)")))
-            _install_one(r, assume_yes, tools, r["name"] in roots, files.get(r["name"]))
-            done.append(r)
-    finally:
-        if cache:
-            shutil.rmtree(cache, ignore_errors=True)
+            ui.step("%s %s" % (ui.accent(r["name"]), r["version"]) + ("" if r["name"] in roots else ui.dim("  (dependency)")))
+        _install_one(r, assume_yes, tools, r["name"] in roots)
+        done.append(r)
     return done
 
 
@@ -318,7 +271,7 @@ def install(name, spec="", assume_yes=False, tools=None):
         latest = None
         with ui.Spinner("Checking %s" % name):
             try:
-                latest = api.call("GET", "/resolve?name=%s&spec=%s" % (name, urllib.parse.quote(spec)))["version"]
+                latest = registry.resolve(name, spec)["version"]
             except api.ApiError:
                 pass
         if latest is None or V.compare(latest, cur["version"]) <= 0:      # nothing newer: just switch it back on
@@ -489,7 +442,7 @@ def remote_tree(name, spec=""):
         mark = ui.dim("(installed)") if have.get(n) == p["version"] else (ui.dim("(installed %s)" % have[n]) if n in have else ui.accent("(new)"))
         return "%s %s  %s" % (ui.bold(n), p["version"], mark)
     root = naming.normalize(name)
-    return tree_lines([root], lambda n: [naming.normalize(_spec(d)[0]) for d in by[n]["requires"]] if n in by else [], label), pkgs
+    return tree_lines([root], lambda n: [naming.normalize(_spec(d)[0]) for d in by[n]["requires"]["packages"]] if n in by else [], label), pkgs
 
 
 # ---------- lock / sync
@@ -517,7 +470,7 @@ def make_lock():
     items = []
     for n in _topo(pk):
         r = pk[n]
-        items.append({"name": n, "version": r["version"], "sha256": r.get("sha256", ""), "requested": bool(r.get("requested")),
+        items.append({"name": n, "version": r["version"], "rev": r.get("rev") or "", "requested": bool(r.get("requested")),
                       "enabled": enabled(r), "dependencies": sorted(r.get("deps", []))})
     return {"lockfile_version": LOCK_VERSION, "hub": paths.config()["hub"].rstrip("/"), "packages": items}
 
@@ -542,21 +495,23 @@ def read_lock(path):
 
 
 def sync_actions(lock):
-    """Compare a lock with this machine. -> (resolved plan, install list, enable/disable changes, extras)."""
+    """Compare a lock with this machine. -> (resolved plan, install list, enable/disable changes, extras).
+    The lock pins each package to the git commit that was installed."""
     want = {naming.normalize(x["name"]): x for x in lock["packages"]}
     pkgs = plan([{"name": n, "spec": "==" + x["version"]} for n, x in want.items()], {})
     by = {p["name"]: p for p in pkgs}
     for n, x in want.items():
         got = by.get(n)
         if not got or got["version"] != x["version"]:
-            raise api.ApiError("hub cannot provide %s==%s" % (n, x["version"]))
-        if x.get("sha256") and got["sha256"] != x["sha256"]:
-            raise api.ApiError("%s %s on the hub does not match the lock file (sha256 differs); refusing to install" % (n, x["version"]))
+            raise api.ApiError("the index cannot provide %s==%s" % (n, x["version"]))
+        if x.get("rev"):
+            got["repo"] = dict(got["repo"], ref=x["rev"])           # install exactly the locked commit
     st = state()["packages"]
     todo = []
     for p in pkgs:
         cur = st.get(p["name"])
-        if not cur or cur["version"] != p["version"] or (cur.get("sha256") and cur["sha256"] != p["sha256"]) or not os.path.isdir(cur["path"]):
+        locked = want.get(p["name"], {}).get("rev")
+        if not cur or cur["version"] != p["version"] or (locked and cur.get("rev") != locked) or not os.path.isdir(cur["path"]):
             todo.append(p)
     flips = [(n, x.get("enabled", True)) for n, x in want.items() if n in st and n not in {p["name"] for p in todo} and enabled(st[n]) != x.get("enabled", True)]
     extras = sorted(n for n in st if n not in want and n not in by)
@@ -578,7 +533,7 @@ def install_builtin(names=None, remove=False, tools=None):
                 else:
                     out.append((n, "not installed"))
             elif n in state()["packages"] and enabled(state()["packages"][n]) and state()["packages"][n].get("tools") \
-                    and V.compare(api.call("GET", "/resolve?name=%s" % n)["version"], state()["packages"][n]["version"]) <= 0:
+                    and V.compare(registry.resolve(n)["version"], state()["packages"][n]["version"]) <= 0:
                 out.append((n, "already installed"))
             else:
                 install(n, "", True, tools)

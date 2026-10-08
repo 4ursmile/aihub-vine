@@ -9,7 +9,7 @@ import csv
 import io
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import Query, APIRouter, Depends, HTTPException, Request
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import StreamingResponse
@@ -18,13 +18,11 @@ from pydantic import BaseModel
 
 from ..core.release import VERSION
 from ..core import archive, manifest as M, naming, redact, version as V
+from .sync import parse_schedule
 from . import builtin, image, markdown, sheet
 from .categories import category_of
 from .db import ALL_PERMS
 from .deps import can_develop, can_manage, current_user, require_any, require_perm, require_user, viewer_of
-from .uploads import UploadError
-from . import signed_link
-from .ranged import stream_file
 from .security import hash_password, hash_token, new_token, verify_password
 
 r = APIRouter(prefix="/api/v1")
@@ -255,7 +253,7 @@ def branding(request):
 def meta(request: Request, u=Depends(current_user)):
     b = branding(request)
     return {"name": b["name"], "theme": b["theme"], "logo_url": b["logo_url"], "contact": b["contact"], "public_url": public_url(request),
-            "cli_version": VERSION, "server_version": VERSION,
+            "cli_version": VERSION, "server_version": VERSION, "cli_git_url": R(request).setting("cli_git_url", "") or os.environ.get("AIHUB_CLI_GIT_URL", ""),
             "overview": R(request).overview(viewer(request, u)),
             "public_browse": setting(request, "public_browse") == "1", "public_install": setting(request, "public_install") == "1",
             "allow_private": setting(request, "allow_private") == "1", "allow_source_download": setting(request, "allow_source_download") == "1", "default_visibility": setting(request, "default_visibility")}
@@ -288,9 +286,7 @@ def readyz(request: Request):
     except Exception:
         raise HTTPException(503, "database unavailable")
     st = request.app.state
-    checks = {"cache": st.cache.health(), "storage": st.storage.health()}
-    if not all(checks.values()) and checks["storage"] is False:
-        raise HTTPException(503, "storage unavailable")
+    checks = {"cache": st.cache.health()}
     return {"ok": True, "queued_events": len(st.events.buf), "database": st.settings.db_backend, "cache": st.cache.name, **checks}
 
 
@@ -395,16 +391,7 @@ def versions(name: str, request: Request, u=Depends(current_user)):
 def readme(name: str, request: Request, u=Depends(current_user)):
     need_login_unless(request, u, "public_browse")
     p = _pkg_or_404(request, name, u)
-    vs = [v for v in R(request).versions(p["id"]) if not v["yanked"]]
-    if not vs:
-        return {"markdown": "", "html": ""}
-    rd = vs[0]["manifest"].get("package", {}).get("readme", "README.md")
-    try:
-        with request.app.state.storage.local_copy(p["name"], vs[0]["file"]) as path:     # works for local disk and S3
-            raw = archive.read_member(path, rd) or b""
-    except Exception:
-        raw = b""
-    md = raw.decode("utf-8", "replace")
+    md = R(request).package_readme(p["id"])
     return {"markdown": md, "html": markdown.render(md)}
 
 
@@ -476,7 +463,7 @@ def resolve_tree(body: dict, request: Request, u=Depends(current_user)):
             visit(naming.normalize(V.split_spec(d)[0]))
         v = c["row"]
         out.append({"name": c["pkg"]["name"], "version": v["version"], "sha256": v["sha256"], "size": v["size"],
-                    "url": "%s/files/%s/%s" % (base, c["pkg"]["name"], v["file"]), "manifest": v["manifest"],
+                    "repo": (v["manifest"] or {}).get("repo"), "manifest": v["manifest"],
                     "requires": deps, "root": name in rootset})
     for name in sorted(rootset):
         visit(name)
@@ -491,63 +478,9 @@ def resolve(name: str, request: Request, spec: str = "", u=Depends(current_user)
     for v in R(request).versions(p["id"]):
         if not v["yanked"] and V.satisfies(v["version"], spec):
             return {"name": p["name"], "version": v["version"], "sha256": v["sha256"], "size": v["size"],
-                    "url": "%s/files/%s/%s" % (public_url(request), p["name"], v["file"]),
+                    "repo": (v["manifest"] or {}).get("repo"),
                     "manifest": v["manifest"]}
     raise HTTPException(404, "no matching version")
-
-
-def _version_for_download(request, name, version, u):
-    """Shared gate for the browser download and its signed link: setting, sign-in policy, visibility, existence."""
-    if setting(request, "allow_source_download") != "1":
-        raise HTTPException(403, "source download is turned off by the administrator")
-    need_login_unless(request, u, "public_install")
-    p = _pkg_or_404(request, name, u)
-    v = next((x for x in R(request).versions(p["id"]) if x["version"] == version), None)
-    if not v or not request.app.state.storage.exists(p["name"], v["file"]):
-        raise HTTPException(404, "version not found")
-    return p, v
-
-
-def _serve_version(request, p, v):
-    st = request.app.state.storage
-    size = st.size(p["name"], v["file"])
-    hdr = {"X-Content-Type-Options": "nosniff", "Content-Disposition": 'attachment; filename="%s"' % os.path.basename(v["file"])}
-    rng = request.headers.get("range")
-    if not rng or rng.strip().startswith("bytes=0-"):        # count a download once, not once per resumed piece
-        R(request).version_download(p["id"], v["version"])
-    f = st.open(p["name"], v["file"])
-    if hasattr(f, "seek"):                                   # local storage: Range support, so big downloads can resume
-        return stream_file(f, size, rng, hdr)
-    return StreamingResponse(iter(lambda: f.read(1 << 20), b""), media_type="application/octet-stream", background=BackgroundTask(f.close),
-                             headers=dict(hdr, **{"Content-Length": str(size)}))
-
-
-@r.get("/packages/{name}/versions/{version}/download")
-def download_version(name: str, version: str, request: Request, u=Depends(current_user)):
-    """Download one version's archive with an Authorization header (scripts, curl). Browsers use the signed link below."""
-    p, v = _version_for_download(request, name, version, u)
-    return _serve_version(request, p, v)
-
-
-@r.post("/packages/{name}/versions/{version}/download-link")
-def download_link(name: str, version: str, request: Request, u=Depends(current_user)):
-    """A 2-minute signed URL for exactly this archive. The web UI points the browser at it, so the file streams straight
-    to disk (with the browser's own pause/resume) instead of being held in page memory, and no token goes in the URL."""
-    p, v = _version_for_download(request, name, version, u)
-    return {"url": "/api/v1/dl/" + signed_link.make(request.app.state.settings.data_dir, p["name"], v["version"]), "expires_in": signed_link.TTL}
-
-
-@r.get("/dl/{token}")
-def download_signed(token: str, request: Request):
-    nv = signed_link.check(request.app.state.settings.data_dir, token)
-    if not nv:
-        raise HTTPException(403, "download link expired or invalid; reload the page and try again")
-    name, version = nv
-    p = R(request).package(name)
-    v = p and next((x for x in R(request).versions(p["id"]) if x["version"] == version), None)
-    if not v or not request.app.state.storage.exists(p["name"], v["file"]):
-        raise HTTPException(404, "version not found")
-    return _serve_version(request, p, v)
 
 
 @r.patch("/packages/{name}")
@@ -612,153 +545,7 @@ def access_delete(name: str, ptype: str, pname: str, request: Request, u=Depends
     return {"ok": True}
 
 
-# ---------------- publish
-def _publish_file(request, u, tmp, ext, size, fallback_manifest, visibility):
-    """Validate and store an archive that is already on disk at `tmp` (consumed on success). Shared by /upload and chunked uploads."""
-    raw = archive.read_member(tmp, "aihub.toml")
-    if raw is None:
-        if not fallback_manifest:
-            raise HTTPException(400, "aihub.toml not found in archive")
-        m = M.normalize(json.loads(fallback_manifest) if isinstance(fallback_manifest, str) else fallback_manifest)
-    else:
-        try:
-            m = M.parse(raw.decode())
-        except (ValueError, KeyError) as e:
-            raise HTTPException(400, "invalid manifest: %s" % e)
-    pk = m["package"]
-    repos = R(request)
-    existing = repos.package(pk["name"])
-    if existing and not can_develop(repos, u, existing):
-        # a package the caller can't even see must not reveal that it exists
-        if repos.access_level(existing["id"], viewer(request, u)) is None:
-            raise HTTPException(409, "package name is not available")
-        raise HTTPException(403, "you need develop access to publish to " + pk["name"])
-    if existing and any(v["version"] == pk["version"] for v in repos.versions(existing["id"])):
-        raise HTTPException(409, "version already exists (immutable)")
-    try:
-        rd = (archive.read_member(tmp, pk["readme"]) or b"").decode("utf-8", "replace")
-    except Exception:
-        rd = ""
-    vis = visibility or setting(request, "default_visibility")
-    if vis not in ("public", "private"):
-        raise HTTPException(400, "visibility must be public or private")
-    if vis == "private" and not existing and setting(request, "allow_private") != "1" and "admin" not in repos.perms(u["role"]):
-        vis = "public"
-    pid = repos.package_upsert(pk["name"], pk["type"], pk["description"], pk["tags"], rd, visibility=None if existing else vis)
-    if not existing:
-        repos.maintainer_add(pid, u["id"], "owner")   # the creator is the repo admin by default
-    sha = archive.sha256_file(tmp)
-    stored = "%s-%s%s" % (pk["name"], pk["version"], ext)
-    request.app.state.storage.put(pk["name"], stored, tmp)
-    repos.version_add(pid, pk["version"], stored, sha, size, m)
-    repos.audit(u["username"], "upload", pk["name"], pk["version"])
-    C(request).invalidate("pkg")
-    return {"name": pk["name"], "version": pk["version"], "sha256": sha}
-
-
-def _ext(fname):
-    return ".whl" if fname.endswith(".whl") else ".zip" if fname.endswith(".zip") else ".tar.gz"
-
-
-@r.post("/upload")
-async def upload(request: Request, u=Depends(require_perm("publish"))):
-    """Single-request upload. For hubs behind a body-size-capped proxy, clients use the chunked /uploads API instead."""
-    s = request.app.state.settings
-    fname = request.headers.get("x-aihub-filename", "pkg.tar.gz")
-    ext = _ext(fname)
-    fd, tmp = tempfile.mkstemp(suffix=ext, dir=s.data_dir)
-    size, limit = 0, upload_limit_mb(request) * 1024 * 1024
-    try:
-        with os.fdopen(fd, "wb") as f:
-            async for chunk in request.stream():
-                size += len(chunk)
-                if size > limit:
-                    raise HTTPException(413, "upload too large")
-                f.write(chunk)
-        return await run_in_threadpool(_publish_file, request, u, tmp, ext, size,
-                                       request.headers.get("x-aihub-manifest"), request.headers.get("x-aihub-visibility"))
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-
-
-# ---------------- chunked, resumable upload (for reverse proxies that cap request bodies)
-class UploadInit(BaseModel):
-    filename: str
-    size: int
-    sha256: str
-    manifest: Optional[dict] = None
-    visibility: Optional[str] = None
-
-
-def _uploads(request):
-    return request.app.state.uploads
-
-
-def _up_err(e):
-    return HTTPException(e.code, e.msg)
-
-
-@r.post("/uploads")
-def upload_init(body: UploadInit, request: Request, u=Depends(require_perm("publish"))):
-    try:
-        uid, m = _uploads(request).create(u["id"], os.path.basename(body.filename), body.size, body.sha256.lower(),
-                                          upload_limit_mb(request) * 1024 * 1024, body.manifest, body.visibility)
-    except UploadError as e:
-        raise _up_err(e)
-    return {"upload_id": uid, "chunk_size": m["chunk_size"], "chunks": _uploads(request).count(m)}
-
-
-@r.get("/uploads/{uid}")
-def upload_status(uid: str, request: Request, u=Depends(require_perm("publish"))):
-    try:
-        m, got = _uploads(request).status(uid, u["id"])
-    except UploadError as e:
-        raise _up_err(e)
-    return {"upload_id": uid, "size": m["size"], "chunk_size": m["chunk_size"], "chunks": _uploads(request).count(m), "received": got}
-
-
-@r.put("/uploads/{uid}/chunks/{n}")
-async def upload_chunk(uid: str, n: int, request: Request, u=Depends(require_perm("publish"))):
-    st = _uploads(request)
-    cap = st.chunk_size
-    buf = bytearray()
-    async for part in request.stream():
-        buf += part
-        if len(buf) > cap:
-            raise HTTPException(413, "chunk larger than the %d bytes announced at init" % cap)
-    try:
-        await run_in_threadpool(st.put_chunk, uid, u["id"], n, bytes(buf), request.headers.get("x-chunk-sha256"))
-    except UploadError as e:
-        raise _up_err(e)
-    return {"ok": True, "chunk": n}
-
-
-@r.post("/uploads/{uid}/complete")
-async def upload_complete(uid: str, request: Request, u=Depends(require_perm("publish"))):
-    st = _uploads(request)
-    try:
-        tmp, m = await run_in_threadpool(st.assemble, uid, u["id"])
-    except UploadError as e:
-        raise _up_err(e)
-    try:
-        res = await run_in_threadpool(_publish_file, request, u, tmp, _ext(m["filename"]), m["size"], m["manifest"], m["visibility"])
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-    st.abort(uid, u["id"])                      # chunks are no longer needed; a failed publish keeps them so the client can retry
-    return res
-
-
-@r.delete("/uploads/{uid}")
-def upload_abort(uid: str, request: Request, u=Depends(require_perm("publish"))):
-    try:
-        _uploads(request).abort(uid, u["id"])
-    except UploadError as e:
-        raise _up_err(e)
-    return {"ok": True}
-
-
+# ---------------- versions, maintainers, reviews
 def _yank(request, name, version, flag, u):
     p = _pkg_or_404(request, name, u, need="develop")
     R(request).version_yank(p["id"], version, flag)
@@ -830,29 +617,9 @@ def review_post(name: str, body: dict, request: Request, u=Depends(require_perm(
 
 
 # ---------------- telemetry
-@r.post("/events")
-async def events(request: Request, u=Depends(current_user)):
-    body = await request.json()
-    items = body.get("events", body) if isinstance(body, dict) else body
-    rows, now = [], time.time()
-    for e in items[:500]:
-        if e.get("kind") not in ("install", "update", "uninstall", "use", "error") or not e.get("package"):
-            continue
-        rows.append({"ts": float(e.get("ts") or now), "kind": e["kind"], "package": naming.normalize(e["package"]),
-                     "version": e.get("version"), "client_id": e.get("client_id"),
-                     # identity comes only from the token; anonymous clients can't claim a username
-                     "username": u["username"] if u else None,
-                     "component": str(e["component"])[:120] if e.get("component") else None,
-                     "duration": e.get("duration"),
-                     # who/where on the machine that ran it. Self-reported, so shown as "claimed" in the audit page.
-                     "local_user": redact.text(e.get("local_user"), 64), "host": redact.text(e.get("host"), 128),
-                     "detail": redact.text(e.get("detail"), 2200), "cwd": redact.text(e.get("cwd"), 200),
-                     "ip": request.client.host if request.client else None,
-                     "source": e.get("source") if e.get("source") in ("claude", "opencode", "codex", "cli") else None})
-    request.app.state.events.add(rows)
-    return {"accepted": len(rows)}
 
 
+# ---------------- telemetry
 @r.get("/packages/{name}/stats")
 def pkg_stats(name: str, request: Request, days: int = 30, u=Depends(current_user)):
     need_login_unless(request, u, "public_browse")
@@ -972,7 +739,6 @@ SETTINGS = {
 
 # Numeric admin settings: key -> (min, max, label, help). The value in the database overrides the AIHUB_* environment default.
 NUMERIC_SETTINGS = {
-    "max_upload_mb": (1, 2048, "Upload size limit (MiB)", "Largest package archive a publisher can upload. Large archives are sent in chunks (see AIHUB_UPLOAD_CHUNK_MB), so the proxy's body limit only needs to exceed the chunk size"),
 }
 
 
@@ -1021,13 +787,6 @@ def probe_hub(url, timeout=6):
         raise HTTPException(400, "CLI endpoint check failed: %s does not serve the CLI download (/cli/version)" % url)
 
 
-def upload_limit_mb(request):
-    try:
-        return int(R(request).setting("max_upload_mb", "") or request.app.state.settings.max_upload_mb)
-    except ValueError:
-        return request.app.state.settings.max_upload_mb
-
-
 @r.get("/admin/settings")
 def a_settings(request: Request, u=admin):
     cur = {"signup": R(request).setting("signup", "open" if request.app.state.settings.open_registration else "closed")}
@@ -1036,7 +795,6 @@ def a_settings(request: Request, u=admin):
             cur[k] = branding(request)["theme"]
         elif k != "signup":
             cur[k] = setting(request, k) if setting(request, k) is not None else R(request).setting(k, "0")
-    cur["max_upload_mb"] = str(upload_limit_mb(request))
     for k in TEXT_SETTINGS:
         cur[k] = R(request).setting(k) or ""
     schema = [{"key": k, "options": list(v[0]), "label": v[1], "help": v[2]} for k, v in SETTINGS.items()]
@@ -1474,21 +1232,129 @@ def docs_raw(slug: str):
 
 
 # ---------------- usage dashboard (permission: view_dashboard, grantable per role)
-@r.get("/dashboard")
-def dashboard(request: Request, days: int = 30, package: str = None, type: str = None, user: str = None, source: str = None,
-              kind: str = None, u=Depends(require_perm("view_dashboard"))):
+_DASH_KINDS = ("install", "update", "uninstall", "use", "error", "publish")
+
+
+def _dash_args(days, kind, identity, date_from, date_to):
     if days not in (7, 14, 30, 90, 180, 365):
         raise HTTPException(400, "days must be one of 7, 14, 30, 90, 180, 365")
-    if kind and kind not in ("install", "update", "uninstall", "use", "error"):
+    if kind and kind not in _DASH_KINDS:
         raise HTTPException(400, "unknown event kind")
+    if identity and identity not in ("anonymous", "signed-in"):
+        raise HTTPException(400, "identity must be anonymous or signed-in")
+
+
+@r.get("/dashboard")
+def dashboard(request: Request, days: int = 30, package: str = None, type: str = None, user: str = None, source: str = None,
+              kind: str = None, identity: str = None, host: str = None, q: str = None, date_from: str = Query(None, alias="from"),
+              date_to: str = Query(None, alias="to"), u=Depends(require_perm("view_dashboard"))):
+    _dash_args(days, kind, identity, date_from, date_to)
     v = viewer(request, u)
     if package:
         package = _pkg_or_404(request, package, u)["name"]      # also enforces that the viewer may see it
     request.app.state.events.flush()
-    key = "dash:%s:%s" % (_cache_scope(v), "|".join(str(x) for x in (days, package, type, user, source, kind)))
+    key = "dash:%s:%s" % (_cache_scope(v), "|".join(str(x) for x in (days, package, type, user, source, kind, identity, host, q, date_from, date_to)))
     hit = C(request).get(key)
     if hit:
         return hit
-    res = R(request).dashboard(days, package, viewer=v, type=type, user=user, source=source, kind=kind)
+    try:
+        res = R(request).dashboard(days, package, viewer=v, type=type, user=user, source=source, kind=kind,
+                                   identity=identity, host=host, q=(q or "").strip()[:80] or None, date_from=date_from, date_to=date_to)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     C(request).set(key, res, 15)
     return res
+
+
+@r.get("/dashboard/events")
+def dashboard_events(request: Request, days: int = 30, page: int = 1, per_page: int = 25, package: str = None, type: str = None,
+                     user: str = None, source: str = None, kind: str = None, identity: str = None, host: str = None, q: str = None,
+                     date_from: str = Query(None, alias="from"), date_to: str = Query(None, alias="to"),
+                     u=Depends(require_perm("view_dashboard"))):
+    _dash_args(days, kind, identity, date_from, date_to)
+    v = viewer(request, u)
+    if package:
+        package = _pkg_or_404(request, package, u)["name"]
+    request.app.state.events.flush()
+    try:
+        return R(request).dashboard_events(v, days, date_from, date_to, page, per_page, type=type, package=package, user=user,
+                                           source=source, kind=kind, identity=identity, host=host, q=(q or "").strip()[:80] or None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# ---------------- sync (Langfuse + git index -> SQLite)
+SYNC_KEYS = ("langfuse_host", "langfuse_public_key", "langfuse_secret_key", "index_url", "index_branch", "index_path", "sync_interval",
+             "share_credentials", "enroll_code", "cli_git_url", "client_refresh_hours")
+SECRET_KEYS = ("langfuse_secret_key", "enroll_code")
+
+
+@r.get("/admin/sync")
+def sync_status(request: Request, u=admin):
+    sy, repos = request.app.state.sync, R(request)
+    cfg = {k: repos.setting(k, "") for k in SYNC_KEYS}
+    for k in SECRET_KEYS:
+        cfg[k] = "set" if cfg[k] else ""                                         # never echo secrets
+    cfg["sync_interval"] = cfg["sync_interval"] or "60"
+    return {"config": cfg, "status": dict(sy.status, next_in=round(sy.delay())), "cursor": repos.setting("sync_cursor"),
+            "from_env": {"langfuse": bool(os.environ.get("LANGFUSE_SECRET_KEY")), "index": bool(os.environ.get("AIHUB_INDEX_URL"))}}
+
+
+@r.put("/admin/sync")
+def sync_update(body: dict, request: Request, u=admin):
+    repos = R(request)
+    for k in SYNC_KEYS:
+        if k in body and body[k] is not None:
+            v = str(body[k]).strip()
+            if k in SECRET_KEYS and v in ("", "set"):
+                continue                                 # blank/echo = keep the stored secret
+            if k == "share_credentials" and v not in ("0", "1"):
+                raise HTTPException(400, "share_credentials must be 0 or 1")
+            if k == "sync_interval":
+                try:
+                    parse_schedule(v)
+                except ValueError as e:
+                    raise HTTPException(400, str(e))
+            repos.set_setting(k, v)
+    repos.audit(u["username"], "settings.sync", "", ",".join(k for k in SYNC_KEYS if k in body))
+    request.app.state.sync.wake.set()                    # re-plan with the new schedule now
+    return sync_status(request, u)
+
+
+@r.post("/admin/sync/run")
+def sync_run(request: Request, full: bool = False, u=admin):
+    """Poll now. full=true forgets the cursor and looks back over everything (safe: events are deduplicated)."""
+    repos = R(request)
+    if full:
+        repos.set_setting("sync_cursor", "")
+        repos.set_setting("sync_index_dirty", "1")
+    try:
+        request.app.state.sync.run_once()
+    except Exception as e:
+        raise HTTPException(502, "sync failed: %s" % str(e)[:300])
+    return sync_status(request, u)
+
+
+# ---------------- client config (what the CLI pulls to get set up)
+@r.get("/client-config")
+def client_config(request: Request, code: str = "", u=Depends(current_user)):
+    """Settings the CLI needs. The index location is public. Langfuse credentials are shared only when an admin
+    turned sharing on, and only with a signed-in user or a caller that presents the enrollment code. Served over TLS;
+    never cached."""
+    repos = R(request)
+    out = {"index": {"url": repos.setting("index_url", "") or os.environ.get("AIHUB_INDEX_URL", ""),
+                     "branch": repos.setting("index_branch", "") or "main", "path": repos.setting("index_path", "") or "index.json"},
+           "refresh_hours": int(repos.setting("client_refresh_hours", "") or 24), "credentials": None}
+    if repos.setting("share_credentials", "0") == "1":
+        want = repos.setting("enroll_code", "")
+        import hmac
+        if u or (want and hmac.compare_digest(want.encode(), (code or "").encode())):
+            out["credentials"] = {            # Langfuse only: git credentials are never stored on or sent by the server
+                "langfuse": {"host": repos.setting("langfuse_host", "") or os.environ.get("LANGFUSE_BASE_URL", ""),
+                             "public_key": repos.setting("langfuse_public_key", "") or os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
+                             "secret_key": repos.setting("langfuse_secret_key", "") or os.environ.get("LANGFUSE_SECRET_KEY", "")}}
+            repos.audit(u["username"] if u else "enroll-code", "client-config.credentials", "", request.client.host if request.client else "")
+        elif want:
+            out["credentials_hint"] = "enrollment code required"
+    from fastapi.responses import JSONResponse
+    return JSONResponse(out, headers={"Cache-Control": "no-store"})

@@ -69,7 +69,9 @@ def handle(stdin_text, source="claude"):
                     hit = (c, tool)
                     break
         if hit and hit[0] in comps:
-            telemetry.record({"kind": "use", "package": comps[hit[0]], "component": hit[1],
+            sess = str(data.get("session_id") or "")
+            comp = hit[0] if hit[0].startswith("mcp:") else hit[1]      # MCP tools roll up to their server
+            telemetry.record({"kind": "use", "package": comps[hit[0]], "component": comp, "session": sess,
                               "client_id": client_id(), "source": source,
                               "detail": redact.params(inp), "cwd": redact.text(data.get("cwd") or os.getcwd(), 200)})
     except Exception:
