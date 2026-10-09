@@ -73,6 +73,8 @@ class Settings:
     event_flush_secs: float = 5.0
     # --- where these values came from (filled by load(); not user-settable)
     env_file: str = field(default="", repr=False)
+    # real environment + .env file, as load() saw them (None = not loaded: env_get() reads os.environ)
+    _env_map: object = field(default=None, repr=False, compare=False)
 
     # ---------------------------------------------------------------- loading
     @classmethod
@@ -89,8 +91,9 @@ class Settings:
         merged.update({k: v for k, v in env.items() if k.startswith("AIHUB_")})   # real environment beats .env
         s = cls()
         s.env_file = used
+        s._env_map = {**file_vals, **env}                                          # env beats .env for every key (also LANGFUSE_*)
         for f in fields(cls):
-            if f.name == "env_file":
+            if f.name in ("env_file", "_env_map"):
                 continue
             key = "AIHUB_" + f.name.upper()
             val = merged.get(key)
@@ -121,6 +124,13 @@ class Settings:
             return type(current)(str(val).strip())
         except ValueError:
             raise ValueError("AIHUB_%s must be a %s, got %r" % (name.upper(), type(current).__name__, val))
+
+    def env_get(self, name, default=""):
+        """A deployment value (LANGFUSE_*, AIHUB_INDEX_URL, AIHUB_CLI_GIT_*, ...) from the real environment or the .env file.
+        Environment wins over .env. Settings built without load() read os.environ only."""
+        src = self._env_map if self._env_map is not None else os.environ
+        v = src.get(name)
+        return v if v not in (None, "") else default
 
     # ---------------------------------------------------------------- derived
     @property

@@ -1,6 +1,6 @@
 [package]
 name = "aihub-package"
-version = "2.1.0"
+version = "2.2.0"
 type = "skill"
 description = "Teaches Claude Code and Codex to turn a new or existing project into a valid AI Hub package; the workflow is read from the hub's publishing docs."
 tags = ["aihub", "packaging", "publish"]

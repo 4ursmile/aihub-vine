@@ -10,13 +10,13 @@ The selected `.env` file is not merged with later candidate files; the first exi
 
 For Docker or Kubernetes secrets, set a setting's `_FILE` counterpart, for example `AIHUB_PG_PASSWORD_FILE=/run/secrets/pg_password`. The loader reads and trims that file when the corresponding direct setting is not set. A direct environment value takes precedence over its `_FILE` value.
 
-Validate settings and try the configured database, cache, and storage connections without serving requests:
+Validate settings and try the configured database and cache connections without serving requests:
 
 ```sh
 python -m aihub.server --check
 ```
 
-The check prints a redacted settings summary and an `ok` or `FAIL` result for each backend. It exits nonzero if a connection check fails. The database check initializes the schema, so it is not a read-only operation.
+The check prints a redacted settings summary and an `ok` or `FAIL` result for the database and cache. It exits nonzero if a connection check fails. The database check initializes the schema, so it is not a read-only operation.
 
 ## All AIHUB settings
 
@@ -24,7 +24,7 @@ The check prints a redacted settings summary and an `ok` or `FAIL` result for ea
 | --- | --- | --- | --- |
 | `AIHUB_DATA_DIR` | `./aihub-data` | Data root; local storage is under `<data dir>/files`, and the default SQLite database is under this directory. | Server, SQLite, local storage |
 | `AIHUB_PUBLIC_URL` | `http://localhost:8000` | External base URL (set it to your reverse-proxy URL, including any path prefix). Embedded in download links, `/install.sh`, `/install.ps1`, the install commands shown on the web UI's Get started page, and the default `hub` the installer saves in the CLI. If the loaded value remains at the default and neither `--public-url` nor a process `AIHUB_PUBLIC_URL` is set, the server derives it from host and port. | Server An admin can override it without a restart in Admin > Settings > Site > "CLI default endpoint"; that value is then used for these links instead. |
-| `AIHUB_SEED_BUILTIN` | `true` | Publish the built-in packages (`aihub-guide`, `aihub-package`) into the registry at startup if their version is missing. | Server |
+| `AIHUB_SEED_BUILTIN` | `false` | Publish the built-in packages (`aihub-guide`, `aihub-package`) into the registry at startup if their version is missing. | Server |
 | `AIHUB_OPEN_REGISTRATION` | `true` | Default signup policy before an administrator changes the persisted signup setting. | Server/auth |
 | `AIHUB_LOG_LEVEL` | `INFO` | Python server log level. | Server |
 | `AIHUB_DB_BACKEND` | `sqlite` | `sqlite` or `postgres`. | Database |
@@ -107,6 +107,8 @@ Cache invalidation uses a Redis generation counter per key group. Invalidating a
 `AIHUB_CACHE_BACKEND=none` disables caching. This can be useful for debugging or small deployments.
 
 ## Package archive storage
+
+The server does not serve package files. This storage configuration is read only by the [migration tool](#migrating-between-backends) when it moves an older deployment.
 
 ### Local (default)
 
@@ -219,16 +221,47 @@ The Compose file's bundled-service fallback variables are intended for the match
 
 ## Langfuse and package index
 
-These can be set here or in Admin > Sync. The environment takes priority.
+These can be set here or in Admin > Sync. **Environment wins over Admin settings**: a value set in the real environment or the `.env` file is used everywhere (Get started, `/api/v1/client-config`, the sync job), and the saved Admin value is ignored. The admin page shows "Set by environment" next to such a field. Order for each value: environment (or `.env`) > Admin settings > `aihub/core/defaults.json`.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `LANGFUSE_BASE_URL` | empty | Langfuse host, e.g. `https://us.cloud.langfuse.com`. `LANGFUSE_HOST` also works. |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | empty | Project keys. The server only reads from Langfuse. |
 | `AIHUB_INDEX_URL` | empty | Git URL of the repo holding the index, an `https://...json` URL, or a local file. |
-| `AIHUB_INDEX_BRANCH` / `AIHUB_INDEX_PATH` | `main` / `index.json` | Branch and file inside that repo. |
+| `AIHUB_INDEX_BRANCH` / `AIHUB_INDEX_PATH` | `main` / `index` | Branch and folder inside that repo (a folder index; an old `index.json` file is still read). |
 | `AIHUB_CLI_GIT_URL` | empty | Repo to `pip install` the CLI from when this server is unreachable (shown on Get started). |
 | `AIHUB_CLI_GIT_BRANCH` | empty | Optional branch to install from. Shown as `git+<url>@<branch>`; empty hides it. |
 | `AIHUB_CLI_GIT_SUBDIR` | empty | Optional sub folder of the repo to install from. Shown as `#subdirectory=<dir>`; empty hides it. Cannot contain spaces, `#`, `?`, `..` or a leading `/`. |
 
 The pull schedule (seconds or a cron expression such as `*/5 * * * *`), the credential-sharing switch, the enrollment code and the CLI refresh interval are admin settings stored in the database: Admin > Sync.
+
+The server writes the index folder only from publish events, committing and pushing the change to the index branch. It needs git push access to the index repo for this and for backups. Git credentials are never sent to clients. A publish event may only name a repo on a public host or on the same host as the index; other events are ignored.
+
+## Database backup
+
+The server can back up its database into the index git repo, under `backups/`. It is off by default.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `AIHUB_BACKUP_ENABLED` | `0` (off) | Turns the schedule on. Read from the real process environment only, not from `.env`. When unset, the admin setting `backup_enabled` (`1` or `0`) applies. |
+| `backup_schedule` | `0 3 * * *` | Admin setting: a 5-field cron expression, or seconds (10 to 86400). |
+| `backup_events_chunk` | `20000` | Admin setting: rows per file for `events` and `audit_log`, from 1000 to 1000000. |
+
+- A backup needs the index git URL and push access for the server's git credentials. A local-file index is not backed up.
+- Layout: `backups/index.json` lists each file with row count, sha256 and size. `backups/db/<table>.sqlite.gz` holds one table per file. `events` and `audit_log` are split into `<table>-000001.sqlite.gz`, `<table>-000002.sqlite.gz`, and so on. Full chunks are not rewritten.
+- Passwords and tokens are written as one-way hashes. Secret-like settings are hashed, and event details are redacted.
+- Admin API: `GET`/`PUT /api/v1/admin/backup`, and `POST /api/v1/admin/backup/run` to back up now.
+
+### Recovery at startup
+
+`python -m aihub.server` compares the local database with the git backup before serving.
+
+- **Nothing to compare** (no index git URL, empty remote, git unreachable): starts normally. A git outage never blocks the server.
+- **Local database empty, backup has data** (lost data dir, new machine): restores the backup.
+- **Local already has at least what the backup has**: starts normally.
+- **They differ**: shows row counts per table and the last-activity time of each side, and asks which to keep. The newer side is marked `latest, default` and is chosen on Enter.
+- **No terminal** (service, container): nothing is overwritten and the local database is kept, with a warning. Choose explicitly with `--recover remote|latest` (or `AIHUB_RECOVER`).
+
+`--recover ask|local|remote|latest|skip` sets the behaviour. Before a restore, local data is copied to `<data>/pre-recover-<time>/`, so the side you did not pick is still recoverable. Restored secrets are hashes: a secret that already exists locally is kept, otherwise re-enter it in the admin page.
+
+A backup also runs once right after the first sync pass at startup (`AIHUB_BACKUP_ON_START=0` disables it). Events that Langfuse held while the server was down are pulled first, so they reach git before the next cron slot. If the cursor says events were pulled but none are stored (database replaced), the first pass re-reads Langfuse's full retention. A backup never overwrites a backup that holds data with an empty database.

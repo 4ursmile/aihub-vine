@@ -2,6 +2,8 @@
 
 These examples assume `aihub` is configured with an index and Langfuse (`aihub setup`) and that your git credentials can push to each project's `[git]` repository. The generated project trees were compared with `aihub dev init` output and each starter passed `aihub dev validate`. Replace the generated placeholder content before publishing.
 
+After `aihub dev publish` pushes the commit, the CLI sends a public `aihub.publish` event to Langfuse. The CLI never writes the package index, and you should not edit it by hand. The hub server reads the event on a sync pass (default every 60 seconds, so it can take one or two passes), fetches the repository at the published commit, verifies `aihub.toml`, writes the index entry with its README, and pushes an `index: ...` commit. The package page then shows a Source link for that version that points to the exact commit.
+
 ## Skill package
 
 Create a starter project:

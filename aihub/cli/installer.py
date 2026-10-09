@@ -135,7 +135,7 @@ def _activate(rec, m, dest, tools, assume_yes, name):
     if any(comps):
         avail = integrations.detected()
         chosen = [integrations.TOOLS[t] for t in tools] if tools else (
-            avail if assume_yes else [t for t in avail if input("Register into %s? [y/N] " % t.name).lower().startswith("y")])
+            avail if assume_yes else [t for t in avail if ui._ask("Register into %s? [y/N] " % t.name).lower().startswith("y")])
         for t in chosen:
             try:
                 reverts = []
@@ -162,7 +162,7 @@ def _activate(rec, m, dest, tools, assume_yes, name):
     rec["setup_reverts"] = []
     if steps:
         ctx = {"HOME": os.path.expanduser("~"), "PKG": dest, "HUB": paths.config()["hub"]}
-        ok = lambda text: assume_yes or input("  setup: %s\n  apply? [y/N] " % text).lower().startswith("y")
+        ok = lambda text: assume_yes or ui._ask("  setup: %s\n  apply? [y/N] " % text).lower().startswith("y")
         rec["setup_reverts"] = setupmod.apply(name, steps, ctx, ok)
     rec["enabled"] = True
 
@@ -235,7 +235,7 @@ def _install_one(r, assume_yes, tools, requested, archive_path=None):
     script = m["scripts"].get("install_" + OS)
     if script:
         _, _, shown = script_command(script, dest)             # validates the path before asking the user to approve it
-        if assume_yes or input("Run install script for %s?\n  %s\n[y/N] " % (name, shown)).lower().startswith("y"):
+        if assume_yes or ui._ask("Run install script for %s?\n  %s\n[y/N] " % (name, shown)).lower().startswith("y"):
             ui.step("running %s" % shown)
             run_script(script, dest)
             ui.good("Install script finished")

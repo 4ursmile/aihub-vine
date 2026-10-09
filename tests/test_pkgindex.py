@@ -81,6 +81,9 @@ class Layout(unittest.TestCase):
 class ServerSync(unittest.TestCase):
     def test_only_changed_entries_are_read(self):
         t = tempfile.mkdtemp()
+        cwd = os.getcwd()
+        os.chdir(t)                                # so Settings.load() cannot pick up the repo's .env
+        self.addCleanup(os.chdir, cwd)
         repo = os.path.join(t, "repo")
         os.makedirs(repo)
         g = lambda *a: subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t"] + list(a), check=True, capture_output=True)
@@ -91,7 +94,7 @@ class ServerSync(unittest.TestCase):
         P.rebuild(idx)
         g("add", "-A")
         g("commit", "-qm", "1")
-        s = Settings.load(data_dir=os.path.join(t, "data"), sync_enabled=False)
+        s = Settings.load(env={}, env_file=os.path.join(t, "none.env"), data_dir=os.path.join(t, "data"), sync_enabled=False)   # isolated; cwd is a temp dir (see setUp)
         r = Repos(init_db(s))
         r.set_setting("index_url", repo)
         sy = Sync(r, s)

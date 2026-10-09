@@ -21,7 +21,7 @@ If none exists, the CLI is not installed: ask the user to run the hub's installe
 
 ```
 aihub config        # JSON; the "hub" key is the URL
-aihub doctor        # checks the connection and prints the hub URL
+aihub doctor        # checks the package index and Langfuse, whether you are signed in, and python3 (the hub is optional)
 ```
 
 Use that value as `$HUB` (default `http://localhost:8000`). If the CLI is missing, ask the user for the hub address.
@@ -48,10 +48,12 @@ Fetch only what the task needs. If a slug is missing, use the list from the firs
 
 The live endpoint list is at `$HUB/openapi.json`.
 
+**Offline fallback.** If the hub cannot be reached (`curl` fails, times out, returns a non-200 status, or there is no hub URL), do not stop and do not guess. Read the bundled offline reference `offline.md`, which sits next to this SKILL.md in the same skill folder, and answer from it. Tell the user that the answer comes from a bundled snapshot that may be older than the hub, and suggest they re-run the question once the hub is reachable. Its content is condensed from the same docs, so the same rules apply.
+
 ## 3. Pick the workflow
 
 - **Use the hub**: search, info, install, update, uninstall, enable/disable, lock/sync. Take exact flags from the `cli` doc and run them. Confirm with the user before installing anything that runs scripts.
-- **Package a project**: if the `aihub-package` skill is installed, follow it; otherwise follow `publishing` and `manifest`.
+- **Package a project**: if the `aihub-package` skill is installed, follow it; otherwise follow `publishing` and `manifest`. Publishing is `aihub dev publish` (it pushes to git and sends an `aihub.publish` event). Nobody edits the package index by hand: the hub writes it on its next sync (1-2 minutes) and reads the README too.
 - **Dynamic case** (several components, an MCP server plus a skill, a team setup profile): read `manifest` and `publishing-examples`, adapt the closest example, then run `aihub dev validate` until clean.
 - **Admin/server questions**: read `server-setup` and `configuration`. Site settings are in the web UI under Admin > Settings (sign-up mode, public browse and install, private repositories, default visibility, source download, group creation, accent color, site name and contact). Admin API: `GET/PUT /api/v1/admin/settings`.
 - **Backups** (server-side, scheduled): the server keeps database backups in the same git repo as the package index, as split gzipped SQLite files plus `backups/index.json`. Admin API: `GET/PUT /api/v1/admin/backup` and `POST /api/v1/admin/backup/run`. Settings: `backup_enabled`, `backup_schedule` (cron, default `0 3 * * *`), `backup_events_chunk`. Read `server-setup` for the current procedure before changing these.

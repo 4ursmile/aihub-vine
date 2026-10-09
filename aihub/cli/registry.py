@@ -21,21 +21,17 @@ TTL = 300
 
 
 def _defaults():
-    here = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "core", "defaults.json")
-    try:
-        with open(here) as f:
-            return json.load(f)["index"]
-    except Exception:
-        return {}
+    from ..core import defaults
+    return defaults.load()["index"]
 
 
 def source():
-    """Where the index lives. Override with `aihub config set index_url|index_branch|index_path`
-    (index_url may be a git URL, an http(s) URL to the json itself, or a local file)."""
+    """Where the index lives. Lookup order: environment > ~/.aihub/config.json (`aihub config set index_url|index_branch|index_path`)
+    > aihub/core/defaults.json. index_url may be a git URL, an http(s) URL to the json itself, or a local file."""
     d, c = _defaults(), paths.config()
     return {"url": os.environ.get("AIHUB_INDEX_URL") or c.get("index_url") or d.get("git_url") or "",
-            "branch": c.get("index_branch") or d.get("branch") or "main",
-            "path": c.get("index_path") or d.get("path") or "index.json"}
+            "branch": os.environ.get("AIHUB_INDEX_BRANCH") or c.get("index_branch") or d.get("branch") or "main",
+            "path": os.environ.get("AIHUB_INDEX_PATH") or c.get("index_path") or d.get("path") or "index"}
 
 
 def _reader(src, refresh=False):
@@ -59,12 +55,13 @@ def _reader(src, refresh=False):
                 raise
             data = json.load(open(paths.p("index-cache.json")))
         return pkgindex.Legacy(data)
-    stamp = os.path.join(gitx.cache_dir(u), ".aihub-index-fetched")
-    d = gitx.cache_dir(u)
+    base = paths.ensure("repos", "_index")        # own folder: a package checkout of the same repo (pinned commit) must not replace the index
+    d = gitx.cache_dir(u, base)
+    stamp = os.path.join(d, ".aihub-index-fetched")
     fresh = not refresh and os.path.isfile(stamp) and time.time() - os.path.getmtime(stamp) < TTL
     if not fresh:
         try:
-            d = gitx.fetch(u, src["branch"])
+            d = gitx.fetch(u, src["branch"], base=base)
             open(stamp, "w").close()
         except gitx.GitError as e:
             if not os.path.isdir(os.path.join(d, ".git")):

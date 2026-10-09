@@ -180,15 +180,6 @@ function Package({ name }) {
   if (p.loading) return html`<div class="skel" style="min-height:300px"></div>`;
   if (p.e) return html`<${Err} e=${p.e} />`;
   const d = p.d, req = d.requires || {};
-  const dl = async (v) => {
-    try {
-      // ask for a short-lived signed link, then let the browser stream it to disk (no whole-file buffering, native resume)
-      const r = await fetch(`/api/v1/packages/${d.name}/versions/${v.version}/download-link`, { method: "POST", headers: tok() ? { Authorization: "Bearer " + tok() } : {} });
-      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-      const a = document.createElement("a"); a.href = (await r.json()).url; a.download = ""; document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => setTick((t) => t + 1), 1500);
-    } catch (e) { toast(e.message, true); }
-  };
   return html`<div class="stack">
     <div class="row"><h1>${d.name}</h1><span class=${"badge " + (TYPE[d.type] || "")}>${d.type}</span></div>
     <p class="lead">${d.description}</p>
@@ -203,7 +194,7 @@ function Package({ name }) {
       <div class="li"><div class="t"><b>Depends on</b><span>${(req.packages || []).length ? (req.packages || []).map((x) => html`<a href=${"#/package/" + x.split(/[<>=!~]/)[0]} style="margin-right:10px">${x}</a>`) : "No other packages"}</span></div></div>
       <div class="li"><div class="t"><b>Supported systems</b><span>${(req.os || []).length ? req.os.join(", ") : "All"}</span></div></div></div>`}
     ${tab === "Versions" && html`<div class="list tscroll"><table><thead><tr><th>Version</th><th>Released</th><th>Size</th><th>Downloads</th><th>SHA-256</th>${meta.allow_source_download ? html`<th></th>` : null}</tr></thead><tbody>
-      ${d.versions.map((v) => html`<tr key=${v.version}><td>${v.version} ${v.yanked ? html`<span class="badge red">yanked</span>` : ""}</td><td>${ago(v.created)}</td><td>${(v.size / 1024).toFixed(1)} KB</td><td>${fmt(v.downloads)}</td><td class="mono">${v.sha256.slice(0, 12)}</td>${meta.allow_source_download ? html`<td><button class="btn sec sm" onClick=${() => dl(v)}>Download</button></td>` : null}</tr>`)}</tbody></table></div>`}
+      ${d.versions.map((v) => html`<tr key=${v.version}><td>${v.version} ${v.yanked ? html`<span class="badge red">yanked</span>` : ""}</td><td>${ago(v.created)}</td><td>${(v.size / 1024).toFixed(1)} KB</td><td>${fmt(v.downloads)}</td><td class="mono">${v.sha256.slice(0, 12)}</td>${meta.allow_source_download ? html`<td>${v.source ? html`<a class="btn sec sm" href=${v.source} target="_blank" rel="noopener noreferrer">Source ↗</a>` : null}</td>` : null}</tr>`)}</tbody></table></div>`}
     ${tab === "Usage" && html`<${Usage} name=${name} />`}
     ${tab === "Sharing" && html`<${Sharing} name=${name} pkg=${d} onChange=${() => setTick(tick + 1)} />`}
     ${tab === "Reviews" && html`<${Reviews} name=${name} me=${me} onDone=${() => setTick(tick + 1)} />`}
@@ -460,12 +451,14 @@ function NumSetting({ x, v, busy, save }) {
     <div class="row"><input type="number" min=${x.min} max=${x.max} value=${t} aria-label=${x.label} style="width:7rem" onInput=${(e) => setT(e.target.value)} />
     <button class="btn sm" disabled=${busy || !ok || t === v} onClick=${() => save(n)}>Save</button></div></div>`;
 }
-function TextSetting({ x, v, busy, save }) {
+function TextSetting({ x, v, busy, save, fromEnv, envName }) {
   const [t, setT] = useState(v || "");
-  return html`<div class="li"><div class="t"><b>${x.label}</b><span>${x.help}</span></div>
-    <div class="row"><input class="field" type=${x.kind === "email" ? "email" : x.kind === "url" ? "url" : "text"} maxlength=${x.max} value=${t} aria-label=${x.label} style="width:min(16rem,100%)" onInput=${(e) => setT(e.target.value)} />
-    <button class="btn sm" disabled=${busy || t.trim() === (v || "")} onClick=${() => save(t)}>Save</button></div></div>`;
+  return html`<div class="li"><div class="t"><b>${x.label}</b><span>${x.help}</span>${fromEnv && html`<span class="mut sm" role="note">Set by environment (${envName}): that value is used, this saved setting is ignored.</span>`}</div>
+    <div class="row">${x.kind === "html" ? html`<textarea class="field" rows="3" maxlength=${x.max} value=${t} aria-label=${x.label} style="width:min(32rem,100%)" onInput=${(e) => setT(e.target.value)} />` : html`<input class="field" type=${x.kind === "email" ? "email" : x.kind === "url" ? "url" : "text"} maxlength=${x.max} value=${t} aria-label=${x.label} style="width:min(16rem,100%)" onInput=${(e) => setT(e.target.value)} />`}
+    <button class="btn sm" disabled=${busy || t.trim() === (v || "")} onClick=${() => save(t.trim())}>Save</button></div></div>`;
 }
+const ENV_NAME = { cli_git_url: "AIHUB_CLI_GIT_URL", cli_git_branch: "AIHUB_CLI_GIT_BRANCH", cli_git_subdir: "AIHUB_CLI_GIT_SUBDIR", langfuse_host: "LANGFUSE_BASE_URL",
+  langfuse_public_key: "LANGFUSE_PUBLIC_KEY", index_url: "AIHUB_INDEX_URL", index_branch: "AIHUB_INDEX_BRANCH", index_path: "AIHUB_INDEX_PATH" };
 function LogoSetting({ url, bump }) {
   const f = useRef(null); const [busy, setBusy] = useState(false);
   const pick = async (e) => { const file = e.target.files[0]; e.target.value = ""; if (!file) return; setBusy(true);
@@ -502,7 +495,7 @@ function AdminSync() {
   const { config: c, status: st, from_env: env } = d.d;
   const save = async (k, v) => { setBusy(k); try { await api("/admin/sync", { method: "PUT", body: { [k]: v } }); toast("Saved"); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
   const run = async (full) => { setBusy("run"); try { toast(full ? "Full re-sync…" : "Syncing…"); await api("/admin/sync/run" + (full ? "?full=true" : ""), { method: "POST" }); toast("Sync finished"); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
-  const T = (k, label, help, ph) => html`<${TextSetting} x=${{ label, help, kind: "text", max: 300 }} v=${c[k]} busy=${busy === k} save=${(n) => save(k, n)} key=${k} />`;
+  const T = (k, label, help, ph) => html`<${TextSetting} x=${{ label, help, kind: "text", max: 300 }} v=${c[k]} busy=${busy === k} save=${(n) => save(k, n)} key=${k} fromEnv=${env && env[k]} envName=${ENV_NAME[k]} />`;
   const when = (t) => t ? new Date(t * 1000).toLocaleString() : "never";
   return html`<div class="stack">
     <div class="card stack"><div class="row"><h3>Sync status</h3><span class="sp"></span><button class="btn sec sm" disabled=${busy === "run"} onClick=${() => run(false)}>Sync now</button><button class="btn sec sm" disabled=${busy === "run"} onClick=${() => run(true)} title="Forget the cursor and look back over everything; duplicates are skipped">Full re-sync</button></div>
@@ -700,7 +693,7 @@ function App() {
   const br = s.brand || {}, ct = br.contact || {};
   const page = { "": html`<${Home} />`, browse: html`<${Browse} key=${s.route} />`, package: html`<${Package} name=${seg[1]} key=${seg[1]} />`, rankings: html`<${Rankings} />`, docs: html`<${Docs} slug=${seg[1]} key=${seg[1]} />`, start: html`<${Start} />`,
     login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, dashboard: html`<${Dashboard} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
-  return html`<div><header class="nav"><div class="nav-in"><a class="brand glow" href="#/">${br.logo_url && html`<img class="logo" src=${br.logo_url} alt="" />`}<span>${br.name || "AI Hub"}</span></a>
+  return html`<div>${br.announcement && html`<div class="announce" role="status" dangerouslySetInnerHTML=${{ __html: br.announcement }}></div>`}<header class="nav"><div class="nav-in"><a class="brand glow" href="#/">${br.logo_url && html`<img class="logo" src=${br.logo_url} alt="" />`}<span>${br.name || "AI Hub"}</span></a>
     <nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
     <div class="r">${s.me ? html`<a href="#/account" class="me-link"><${Avatar} p=${s.me} size=${24} /><span>${shown(s.me)}</span></a>${s.showGroups ? html`<a class=${on("groups")} href="#/groups">Groups</a>` : ""}${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}${can("audit") ? html`<a class=${on("audit")} href="#/audit">Audit</a>` : ""}${can("admin") || can("reset_password") ? html`<a href="#/admin">Admin</a>` : ""}<a href="#/" onClick=${logout}>Sign out</a>` :
       html`<a href="#/login">Sign in</a>`}</div></div></header>

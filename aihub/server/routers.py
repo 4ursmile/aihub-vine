@@ -17,9 +17,10 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from pydantic import BaseModel
 
 from ..core.release import VERSION
+from ..cli import gitx
 from ..core import archive, manifest as M, naming, redact, version as V
 from .sync import parse_schedule
-from . import builtin, image, markdown, sheet
+from . import builtin, image, markdown, nethost, safehtml, sheet
 from .categories import category_of
 from .db import ALL_PERMS
 from .deps import can_develop, can_manage, current_user, require_any, require_perm, require_user, viewer_of
@@ -35,6 +36,11 @@ _fails = {}  # (ip, key) -> (count, window_start); per-process throttle for logi
 def R(request): return request.app.state.repos
 
 
+# admin setting key -> environment variable that overrides it (environment / .env wins; the UI shows "set by environment")
+CLI_GIT_ENV = {"cli_git_url": "AIHUB_CLI_GIT_URL", "cli_git_branch": "AIHUB_CLI_GIT_BRANCH", "cli_git_subdir": "AIHUB_CLI_GIT_SUBDIR"}
+SYNC_ENV = dict(CLI_GIT_ENV, langfuse_host="LANGFUSE_BASE_URL", langfuse_public_key="LANGFUSE_PUBLIC_KEY",
+                langfuse_secret_key="LANGFUSE_SECRET_KEY", index_url="AIHUB_INDEX_URL", index_branch="AIHUB_INDEX_BRANCH",
+                index_path="AIHUB_INDEX_PATH")
 SETTING_DEFAULTS = {"public_browse": "1", "public_install": "0", "default_visibility": "public", "allow_private": "1", "allow_source_download": "1",
                     "signup": None}
 
@@ -43,6 +49,20 @@ def setting(request, key):
     """Runtime setting (admin-editable). Falls back to SETTING_DEFAULTS."""
     v = R(request).setting(key)
     return v if v is not None else SETTING_DEFAULTS.get(key)
+
+
+def _cli_default(k):
+    from ..core import defaults
+    return defaults.load().get("cli", {}).get(k, "")
+
+
+def env_first(request, key, env_name, fallback=""):
+    """Deployment value with the precedence used across the Get started page and the CLI config:
+    server environment (or .env) > admin-saved setting `key` > `fallback` (e.g. defaults.json). Returns (value, from_env)."""
+    e = request.app.state.settings.env_get(env_name)
+    if e:
+        return e.strip(), True
+    return (R(request).setting(key, "") or fallback or "").strip(), False
 
 
 def public_url(request):
@@ -223,6 +243,29 @@ def token_delete(tid: str, request: Request, u=Depends(require_user)):
 
 
 # ---------------- catalogue
+def _index_public(request):
+    import re
+    from ..core import defaults
+    u = request.app.state.settings.env_get("AIHUB_INDEX_URL") or R(request).setting("index_url", "") or defaults.load().get("index", {}).get("git_url", "")
+    return re.sub(r"//[^/@]+@", "//", u) if u.startswith(("http", "ssh", "git@")) else ""
+
+
+def source_url(repo):
+    """Web link to the exact source of a version (host-style /tree/<ref>/<subdir>); credentials never appear."""
+    import re
+    repo = repo or {}
+    u = re.sub(r"//[^/@]+@", "//", str(repo.get("url") or "").strip())
+    m = re.match(r"^(?:ssh://)?git@([^:/]+)[:/](.+)$", u)
+    if m:
+        u = "https://%s/%s" % m.groups()
+    u = re.sub(r"(\.git)?/?$", "", u)
+    if not u.startswith(("http://", "https://")):
+        return ""
+    ref = repo.get("ref") or repo.get("branch") or ""
+    sub = str(repo.get("subdir") or "").strip("/")
+    return u if not ref else "%s/tree/%s%s" % (u, ref, "/" + sub if sub else "")
+
+
 def _ser(request, p, detail=False):
     repos = R(request)
     vs = repos.versions(p["id"])
@@ -236,7 +279,8 @@ def _ser(request, p, detail=False):
         out["requires"] = lm.get("requires", {})
         out["manifest"] = lm
         out["maintainers"] = [_public(m) | {"role": m["role"]} for m in repos.maintainers(p["id"])]
-        out["versions"] = [{k: v[k] for k in ("version", "sha256", "size", "downloads", "yanked", "created")} for v in vs]
+        out["versions"] = [{k: v[k] for k in ("version", "sha256", "size", "downloads", "yanked", "created")}
+                           | {"source": source_url((v["manifest"] or {}).get("repo"))} for v in vs]
     return out
 
 
@@ -246,16 +290,20 @@ def branding(request):
     v = rp.setting("logo_v")
     theme = rp.setting("theme_color")
     return {"name": rp.setting("site_name") or "AI Hub", "theme": theme if theme in THEME_COLORS else "blue", "logo_url": "/api/v1/logo?v=%s" % v if v else None,
-            "contact": {k[8:]: rp.setting(k) for k in TEXT_SETTINGS if k.startswith("contact_") and rp.setting(k)}}
+            "contact": {k[8:]: rp.setting(k) for k in TEXT_SETTINGS if k.startswith("contact_") and rp.setting(k)},
+            "announcement": safehtml.clean(rp.setting("announcement") or "")}
 
 
 @r.get("/meta")
 def meta(request: Request, u=Depends(current_user)):
     b = branding(request)
-    return {"name": b["name"], "theme": b["theme"], "logo_url": b["logo_url"], "contact": b["contact"], "public_url": public_url(request),
-            "cli_version": VERSION, "server_version": VERSION, "cli_git_url": R(request).setting("cli_git_url", "") or os.environ.get("AIHUB_CLI_GIT_URL", ""),
-            "cli_git_branch": R(request).setting("cli_git_branch", "") or os.environ.get("AIHUB_CLI_GIT_BRANCH", ""),
-            "cli_git_subdir": R(request).setting("cli_git_subdir", "") or os.environ.get("AIHUB_CLI_GIT_SUBDIR", ""),
+    return {"name": b["name"], "theme": b["theme"], "logo_url": b["logo_url"], "contact": b["contact"], "announcement": b.get("announcement", ""), "public_url": public_url(request),
+            "cli_version": VERSION, "server_version": VERSION,
+            "index_git_url": _index_public(request),
+            "cli_git_url": env_first(request, "cli_git_url", "AIHUB_CLI_GIT_URL", _cli_default("git_url"))[0],
+            "cli_git_branch": env_first(request, "cli_git_branch", "AIHUB_CLI_GIT_BRANCH", _cli_default("branch"))[0],
+            "cli_git_subdir": env_first(request, "cli_git_subdir", "AIHUB_CLI_GIT_SUBDIR", _cli_default("subdir"))[0],
+            "from_env": {k: env_first(request, k, e)[1] for k, e in CLI_GIT_ENV.items()},
             "overview": R(request).overview(viewer(request, u)),
             "public_browse": setting(request, "public_browse") == "1", "public_install": setting(request, "public_install") == "1",
             "allow_private": setting(request, "allow_private") == "1", "allow_source_download": setting(request, "allow_source_download") == "1", "default_visibility": setting(request, "default_visibility")}
@@ -389,11 +437,72 @@ def versions(name: str, request: Request, u=Depends(current_user)):
     return {"versions": _ser(request, _pkg_or_404(request, name, u), True)["versions"]}
 
 
+README_NAMES = ("README.md", "readme.md", "Readme.md", "README.markdown", "README")
+_readme_cache = {}                                  # raw url base -> (time, text); keeps the page fast and the git host unbothered
+README_TTL, README_MAX = 600, 200000
+
+
+def raw_urls(repo):
+    """Raw-file URLs of the README for a repo dict {url, branch, ref?, subdir?}. GitHub: raw.githubusercontent.com;
+    anything else is treated like GitLab (/-/raw/<ref>/...), which also covers self-hosted GitLab."""
+    import re
+    repo = repo or {}
+    u = re.sub(r"//[^/@]+@", "//", str(repo.get("url") or "").strip())
+    m = re.match(r"^(?:ssh://)?git@([^:/]+)[:/](.+)$", u)
+    if m:
+        u = "https://%s/%s" % m.groups()
+    u = re.sub(r"(\.git)?/?$", "", u)
+    m = re.match(r"^https://([^/]+)/(.+)$", u)
+    ref = repo.get("ref") or repo.get("branch") or "HEAD"
+    if not m:
+        return []
+    host, path = m.groups()
+    sub = str(repo.get("subdir") or "").strip("/")
+    sub = sub + "/" if sub else ""
+    from urllib.parse import quote
+    ref, sub = quote(ref, safe=""), quote(sub, safe="/")
+    if host in ("github.com", "www.github.com"):
+        return ["https://raw.githubusercontent.com/%s/%s/%s%s" % (path, ref, sub, n) for n in README_NAMES]
+    return ["https://%s/%s/-/raw/%s/%s%s" % (host, path, ref, sub, n) for n in README_NAMES]
+
+
+_public_host = nethost.public_host
+
+
+def fetch_readme(repo):
+    """README text from the repo itself (first name that exists), or ''."""
+    import time
+    import urllib.error
+    import urllib.request
+    for url in raw_urls(repo):
+        hit = _readme_cache.get(url)
+        if hit and time.time() - hit[0] < README_TTL:
+            if hit[1]:
+                return hit[1]
+            continue
+        text = ""
+        if _public_host(url):
+            try:
+                rq = urllib.request.Request(url, headers={"User-Agent": "aihub", "Accept": "text/plain"})
+                with urllib.request.urlopen(rq, timeout=6) as resp:
+                    text = resp.read(README_MAX).decode("utf-8", "replace")
+            except (urllib.error.URLError, OSError, ValueError):
+                text = ""
+        _readme_cache[url] = (time.time(), text)
+        if len(_readme_cache) > 500:
+            _readme_cache.pop(next(iter(_readme_cache)))
+        if text:
+            return text
+    return ""
+
+
 @r.get("/packages/{name}/readme")
 def readme(name: str, request: Request, u=Depends(current_user)):
     need_login_unless(request, u, "public_browse")
     p = _pkg_or_404(request, name, u)
-    md = R(request).package_readme(p["id"])
+    repos = R(request)
+    live = [v for v in repos.versions(p["id"]) if not v["yanked"]]
+    md = repos.package_readme(p["id"]) or fetch_readme(((live[0]["manifest"] or {}).get("repo")) if live else None)
     return {"markdown": md, "html": markdown.render(md)}
 
 
@@ -733,7 +842,7 @@ SETTINGS = {
     "public_install": (("0", "1"), "Public install (no sign-in)", "Let the CLI install public packages without logging in"),
     "allow_private": (("0", "1"), "Allow private repositories", "Let people make their repositories private and share them"),
     "default_visibility": (("public", "private"), "Default visibility for new repositories", "Applied when a package is first published"),
-    "allow_source_download": (("0", "1"), "Allow source download", "Show a Download button for each version, so people can fetch the package archive from the web"),
+    "allow_source_download": (("0", "1"), "Show source links", "Show a Source link for each version that points at its exact commit in the package's git repository"),
     "allow_group_creation": (("0", "1"), "Let members create groups", "People with the 'create groups' permission can make their own"),
     "theme_color": (THEME_COLORS, "Accent color", "Color of buttons, links and highlights across the site"),
 }
@@ -752,12 +861,15 @@ TEXT_SETTINGS = {
     "contact_email": (120, "email", "Contact email", "Shown in the footer as a mail link"),
     "contact_url": (200, "url", "Support link", "Help desk, chat or wiki address (http:// or https://)"),
     "contact_phone": (40, "text", "Contact phone", "Optional"),
+    "announcement": (2000, "html", "Announcement banner", "Shown as a banner above the header on every page. Basic HTML is kept (a, b, strong, i, em, u, s, br, span, code, small, mark; links must be http/https/mailto); everything else is removed. Blank = hidden"),
 }
 _EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
 
 
 def _check_text(k, v):
     n, kind = TEXT_SETTINGS[k][:2]
+    if kind == "html":
+        return safehtml.clean(v, n)
     v = _clean(v, n)
     if v and kind == "email" and not _EMAIL_RE.match(v):
         raise HTTPException(400, "%s is not a valid email address" % k)
@@ -1307,7 +1419,9 @@ def sync_status(request: Request, u=admin):
         cfg[k] = "set" if cfg[k] else ""                                         # never echo secrets
     cfg["sync_interval"] = cfg["sync_interval"] or "60"
     return {"config": cfg, "status": dict(sy.status, next_in=round(sy.delay())), "cursor": repos.setting("sync_cursor"),
-            "from_env": {"langfuse": bool(os.environ.get("LANGFUSE_SECRET_KEY")), "index": bool(os.environ.get("AIHUB_INDEX_URL"))}}
+            "from_env": {"langfuse": bool(request.app.state.settings.env_get("LANGFUSE_SECRET_KEY")),
+                         "index": bool(request.app.state.settings.env_get("AIHUB_INDEX_URL")),
+                         **{k: bool(request.app.state.settings.env_get(e)) for k, e in SYNC_ENV.items()}}}
 
 
 @r.put("/admin/sync")
@@ -1394,6 +1508,34 @@ def sync_run(request: Request, full: bool = False, u=admin):
     return sync_status(request, u)
 
 
+@r.post("/index/package")
+def index_package(body: dict, request: Request, u=Depends(require_perm("index"))):
+    """Force one package version into the index (for a publish event that was lost or never reached the hub).
+    Same checks as the event path: public host (or the index host), and the repo's aihub.toml at that commit decides what is stored."""
+    g = lambda k: str(body.get(k) or "").strip()
+    name, ver, gurl = naming.normalize(g("package")), g("version"), g("git_url")
+    if not name or not ver or not gurl:
+        raise HTTPException(400, "package, version and git_url are required")
+    ev = {"package": name, "version": ver, "git_url": gurl, "git_branch": g("git_branch") or "main",
+          "git_subdir": g("git_subdir"), "commit": g("commit")}
+    results = []
+    try:
+        changed = request.app.state.sync.update_index([ev], force=True, results=results)
+    except Exception as e:
+        raise HTTPException(502, "index update failed: %s" % gitx.redact_url(str(e))[:300])
+    R(request).audit(u["username"], "index.force", name, ver)
+    status = results[-1][2] if results else "nothing to do"
+    if changed:
+        request.app.state.sync.repos.set_setting("sync_index_dirty", "1")
+        try:
+            request.app.state.sync.pull_index()
+        except Exception as e:
+            raise HTTPException(502, "indexed, but the hub could not re-read the index: %s" % gitx.redact_url(str(e))[:200])
+    if status not in ("indexed", "already indexed"):
+        raise HTTPException(422, "not indexed: %s" % status)
+    return {"package": name, "version": ver, "status": status, "index_changed": bool(changed)}
+
+
 # ---------------- client config (what the CLI pulls to get set up)
 @r.get("/client-config")
 def client_config(request: Request, code: str = "", u=Depends(current_user)):
@@ -1401,17 +1543,21 @@ def client_config(request: Request, code: str = "", u=Depends(current_user)):
     turned sharing on, and only with a signed-in user or a caller that presents the enrollment code. Served over TLS;
     never cached."""
     repos = R(request)
-    out = {"index": {"url": repos.setting("index_url", "") or os.environ.get("AIHUB_INDEX_URL", ""),
-                     "branch": repos.setting("index_branch", "") or "main", "path": repos.setting("index_path", "") or "index"},
+    env = request.app.state.settings.env_get
+    from ..core import defaults
+    dx = defaults.load().get("index", {})
+    out = {"index": {"url": env("AIHUB_INDEX_URL") or repos.setting("index_url", "") or dx.get("git_url", ""),
+                     "branch": env("AIHUB_INDEX_BRANCH") or repos.setting("index_branch", "") or dx.get("branch", "main"),
+                     "path": env("AIHUB_INDEX_PATH") or repos.setting("index_path", "") or dx.get("path", "index")},
            "refresh_hours": int(repos.setting("client_refresh_hours", "") or 24), "credentials": None}
     if repos.setting("share_credentials", "0") == "1":
         want = repos.setting("enroll_code", "")
         import hmac
         if u or (want and hmac.compare_digest(want.encode(), (code or "").encode())):
             out["credentials"] = {            # Langfuse only: git credentials are never stored on or sent by the server
-                "langfuse": {"host": repos.setting("langfuse_host", "") or os.environ.get("LANGFUSE_BASE_URL", ""),
-                             "public_key": repos.setting("langfuse_public_key", "") or os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
-                             "secret_key": repos.setting("langfuse_secret_key", "") or os.environ.get("LANGFUSE_SECRET_KEY", "")}}
+                "langfuse": {"host": env("LANGFUSE_BASE_URL") or repos.setting("langfuse_host", "") or defaults.load().get("langfuse", {}).get("host", ""),
+                             "public_key": env("LANGFUSE_PUBLIC_KEY") or repos.setting("langfuse_public_key", ""),
+                             "secret_key": env("LANGFUSE_SECRET_KEY") or repos.setting("langfuse_secret_key", "")}}
             repos.audit(u["username"] if u else "enroll-code", "client-config.credentials", "", request.client.host if request.client else "")
         elif want:
             out["credentials_hint"] = "enrollment code required"

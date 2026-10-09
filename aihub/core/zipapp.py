@@ -13,6 +13,8 @@ def build(out_path):
         for sub in ("core", "cli"):
             shutil.copytree(os.path.join(pkg, sub), os.path.join(dst, sub),
                             ignore=shutil.ignore_patterns("__pycache__"))
+        # core/defaults.json is read through importlib.resources (zip-safe), and it must be inside the archive
+        assert os.path.isfile(os.path.join(dst, "core", "defaults.json")), "defaults.json missing from the CLI build"
         open(os.path.join(dst, "__init__.py"), "w").close()
         zipapp.create_archive(tmp, out_path, main="aihub.cli.entry:main", interpreter="/usr/bin/env python3")
     finally:

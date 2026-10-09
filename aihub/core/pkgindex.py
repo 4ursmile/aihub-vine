@@ -220,7 +220,11 @@ def migrate(src_json, out):
     return rebuild(out)
 
 
-def add(out, project, url, branch="main", subdir="", ref=""):
+README_MAX = 20000
+README_NAMES = ("README.md", "readme.md", "Readme.md", "README.markdown", "README")
+
+
+def add(out, project, url, branch="main", subdir="", ref="", readme=False):
     """Add or update one package version from its aihub.toml (what CI runs after a publish)."""
     from . import manifest as M, version as V
     with open(os.path.join(project, "aihub.toml"), encoding="utf-8") as f:
@@ -239,6 +243,14 @@ def add(out, project, url, branch="main", subdir="", ref=""):
     e.update(name=name, type=p["type"], description=p["description"], tags=p["tags"],
              latest_version=V.latest([v["version"] for v in versions]), versions=versions,
              repo={"url": url, "branch": branch, "subdir": subdir})
+    if readme and e["latest_version"] == p["version"]:
+        for n in README_NAMES:                       # the README of the newest version, read from the checkout (no web request)
+            try:
+                with open(os.path.join(project, n), encoding="utf-8", errors="replace") as f:
+                    e["readme"] = f.read(README_MAX)
+                break
+            except OSError:
+                continue
     if m.get("python", {}).get("requires") or m.get("python", {}).get("requirements_file"):
         e["python"] = m["python"]
     write_entry(out, e)

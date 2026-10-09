@@ -176,12 +176,8 @@ def aggregate(events, secs, now=None, force=False):
 
 
 def langfuse_name(kind):
-    try:
-        import json as _j
-        here = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "core", "defaults.json")
-        return _j.load(open(here))["event_names"].get(kind, "aihub." + kind)
-    except Exception:
-        return "aihub." + kind
+    from ..core import defaults
+    return defaults.load().get("event_names", {}).get(kind, "aihub." + kind)
 
 
 def _send_once(timeout, force=False):

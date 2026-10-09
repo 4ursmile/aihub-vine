@@ -37,7 +37,7 @@ Without `curl`, use `python3 -c "import urllib.request,sys;print(urllib.request.
 
 ## 3. Follow it
 
-Do the five steps of "Assistant packaging workflow": detect the situation, choose the type (skill, agent, mcp, tool, setup), restructure the project, write `aihub.toml` and the files, then validate, build and publish. Use `aihub dev init . --type <type> --name <name> --description "..."` for a new project and `aihub dev validate` for any project. Publish only with `aihub dev publish --bump patch` (or `minor`/`major`) after the user agrees, and only when signed in with publish permission.
+Do the five steps of "Assistant packaging workflow": detect the situation, choose the type (skill, agent, mcp, tool, setup), restructure the project, write `aihub.toml` and the files, then validate, build and publish. Use `aihub dev init . --type <type> --name <name> --description "..."` for a new project and `aihub dev validate` for any project. Publish only with `aihub dev publish --bump patch` (or `minor`/`major`) after the user agrees. It needs no hub account, only push access to the `[git]` repository. It pushes the repo and sends an `aihub.publish` event; never edit the package index by hand. The hub lists the package on its next sync (1-2 minutes) and reads the README from the repo.
 
 If the docs and this skill disagree, the docs win.
 

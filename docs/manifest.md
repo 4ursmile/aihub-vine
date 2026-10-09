@@ -4,7 +4,7 @@ Each package archive contains an `aihub.toml` manifest. The CLI's `aihub dev ini
 
 ## Package metadata
 
-`[package]` is required. `name` and `version` must be present and valid; other metadata fields have defaults.
+`[package]` is required. `name` and `version` must be present and valid; other metadata fields have defaults. The package index entry is built by the server from this file at the published commit, so the entry's name and version come from here.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -13,7 +13,7 @@ Each package archive contains an `aihub.toml` manifest. The CLI's `aihub dev ini
 | `type` | `tool` | One of `skill`, `agent`, `mcp`, `tool`, or `setup`. |
 | `description` | `""` | Short package description. |
 | `tags` | `[]` | Tags are converted to lowercase strings. |
-| `readme` | `"README.md"` | Archive path of the README displayed in the catalogue. |
+| `readme` | `"README.md"` | Path of the README inside the package; lint warns if the file is missing. The index entry does not use this path: it stores the text of the first README found in the package root (`README.md`, `readme.md`, `Readme.md`, `README.markdown`, or `README`), capped at 20000 characters. |
 | `license` | `""` | License identifier or text. |
 
 Example:
@@ -29,9 +29,20 @@ readme = "README.md"
 license = "MIT"
 ```
 
+## Git source
+
+`[git]` is optional. It tells the server where to fetch the package: `url`, `branch`, and `subdir` (the package folder inside the repository). Only public git hosts, or the index's own host, are followed.
+
+```toml
+[git]
+url = "https://git.example.com/team/git-helper.git"
+branch = "main"
+subdir = "packages/git-helper"
+```
+
 ## Requirements and Python dependencies
 
-`[requires]` is optional. The installer warns if a required command is missing, recursively installs package dependencies, and checks supported operating systems.
+`[requires]` is optional. The installer warns if a required command is missing, recursively installs package dependencies, and checks supported operating systems. In the package index, `requires` is stored on each version, not on the package.
 
 ```toml
 [requires]

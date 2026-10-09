@@ -26,16 +26,16 @@ Routes marked **No** are public. **User** means an active account token is requi
 
 | Method | Path | Auth required | Purpose |
 | --- | --- | --- | --- |
-| GET | `/api/v1/meta` | No | Hub name, public URL, CLI version, and overview counts. |
+| GET | `/api/v1/meta` | No | Hub name, public URL, CLI and server versions, and overview counts. Also `index_git_url` (credentials stripped), `cli_git_url`, `cli_git_branch`, `cli_git_subdir`, and `from_env` flags showing which CLI and index settings come from environment variables. |
 | GET | `/api/v1/healthz` | No | Health check; returns `{ "ok": true }`. |
-| GET | `/api/v1/packages` | No | Search/list packages. Query options: `q`, `type`, `tag`, `sort`, `page`, `per_page`. `per_page` is clamped to 1–100. |
+| GET | `/api/v1/packages` | No | Search/list packages. Query options: `q`, `type`, `tag`, `category`, `sort`, `page`, `per_page`, `mine`. `per_page` is clamped to 1–100. |
 | GET | `/api/v1/facets` | No | Package type and tag counts. |
 | GET | `/api/v1/packages/{name}` | No | Package metadata, manifest, maintainers, and version information. |
-| GET | `/api/v1/packages/{name}/versions` | No | List package versions. |
-| GET | `/api/v1/packages/{name}/readme` | No | Return latest non-yanked README as Markdown and rendered HTML. |
+| GET | `/api/v1/packages/{name}/versions` | No | List package versions with `version`, `sha256`, `size`, `downloads`, `yanked`, `created`, and `source`, a web link to the version's exact commit and subfolder (empty if the repo URL is not http(s)). |
+| GET | `/api/v1/packages/{name}/readme` | No | Return the stored README (from the index). If none is stored, fetch it raw from a non-yanked version's repo (public hosts only; GitHub or GitLab-style). Response has `markdown` and `html`. |
 | GET | `/api/v1/resolve?name={name}&spec={constraint}` | No | Resolve the newest non-yanked version matching a version constraint. |
-| POST | `/api/v1/resolve/tree` | No (public install setting) | Resolve `{"roots": [{"name", "spec"}], "installed": {name: version}}` and all dependencies in one request. Returns `{"packages": [...]}` in install order, each with `name`, `version`, `sha256`, `size`, `url`, `manifest`, `requires`, `root`. Constraints from all dependents are combined; `409` names the package and its dependents when none satisfy them all. |
-| PATCH | `/api/v1/packages/{name}` | User + package manager | Change package `hidden` status and/or `tags`. |
+| POST | `/api/v1/resolve/tree` | No (public install setting) | Resolve `{"roots": [{"name", "spec"}], "installed": {name: version}}` and all dependencies in one request. Returns `{"packages": [...]}` in install order, each with `name`, `version`, `sha256`, `size`, `repo`, `manifest`, `requires`, `root`. Constraints from all dependents are combined; `409` names the package and its dependents when none satisfy them all. |
+| PATCH | `/api/v1/packages/{name}` | User + package manager | Change package `hidden` status, `tags`, and/or `visibility` (`public` or `private`). |
 | GET | `/api/v1/packages/{name}/maintainers` | No | List package maintainers. |
 | POST | `/api/v1/packages/{name}/maintainers` | User + package manager | Add an existing user with `{ "username" }`. |
 | DELETE | `/api/v1/packages/{name}/maintainers/{username}` | User + package manager | Remove a package maintainer. |
@@ -43,7 +43,7 @@ Routes marked **No** are public. **User** means an active account token is requi
 
 ## Publishing and version control
 
-The server stores no package files and has no upload or download routes (`/upload`, `/uploads`, `/files/...` and `/dl/...` return 404). Packages are published with `aihub dev publish`, which pushes to git; see [architecture](architecture.md).
+The server stores no package files and has no upload or download routes (`/upload`, `/uploads`, `/files/...` and `/dl/...` return 404). Packages are published with `aihub dev publish`, which pushes to git; see [architecture](architecture.md). The server is the only writer of the package index (a folder, default `index`). It turns `aihub.publish` events (public data the CLI sends through Langfuse) into index entries, README text included, and pushes them to the index repo. The CLI never writes the index.
 
 | Method | Path | Auth required | Purpose |
 | --- | --- | --- | --- |
@@ -51,7 +51,7 @@ The server stores no package files and has no upload or download routes (`/uploa
 | POST | `/api/v1/packages/{name}/versions/{version}/unyank` | User + package manager | Make a yanked version resolvable again. |
 | GET | `/api/v1/resolve?name=&spec=` | Per `public_install` | Pick a version. The response carries `repo` (`url`, `branch`, `subdir`, `ref`) and the manifest, not a download URL. |
 | POST | `/api/v1/resolve/tree` | Per `public_install` | Resolve several packages and their dependencies, constraints merged. |
-| GET | `/api/v1/client-config` | No (credentials gated) | Index location for the CLI. Langfuse credentials (never git credentials) are included only when an admin enabled sharing and the caller is signed in or sends `?code=<enrollment code>`. Never cached. |
+| GET | `/api/v1/client-config` | No (credentials gated) | Index location for the CLI (`index.url`, `branch`, `path`, default folder `index`) and `refresh_hours`. Git credentials are never stored or sent. Langfuse credentials (`credentials.langfuse`) are included only when an admin enabled sharing and the caller is signed in or sends `?code=<enrollment code>`; otherwise `credentials_hint` says a code is needed. Never cached. |
 
 ## Reviews
 
@@ -68,7 +68,7 @@ The server no longer accepts events (`POST /api/v1/events` is gone). The CLI wri
 | --- | --- | --- | --- |
 | GET | `/api/v1/packages/{name}/stats?days=30` | No | Aggregate package usage statistics. |
 | GET | `/api/v1/packages/{name}/events` | User + package manager | List recent package events. |
-| GET | `/api/v1/rankings/{what}?days=30` | No | Rank `packages`, `developers`, or `users`. |
+| GET | `/api/v1/rankings/{what}?days=30` | No | Rank `packages`, `developers`, or `users` over the window. `reviews` and `reviewed` rank by rating, all-time, not windowed. |
 | GET | `/api/v1/stats/overview` | No | Aggregate package, version, user, event, and download counts. |
 | GET | `/api/v1/dashboard` | `view_dashboard` | Aggregates for the dashboard. |
 | GET | `/api/v1/dashboard/events` | `view_dashboard` | Paginated activity log (no command detail or working directory). |
@@ -80,12 +80,20 @@ Dashboard filters (query parameters): `days` (7, 14, 30, 90, 180, 365) or a cust
 | Method | Path | Auth required | Purpose |
 | --- | --- | --- | --- |
 | GET | `/api/v1/admin/sync` | `admin` | Sync status and settings. Secrets are reported as `"set"`, never returned. |
-| PUT | `/api/v1/admin/sync` | `admin` | Update Langfuse and index settings, the schedule (`sync_interval`: seconds or a 5-field cron expression), credential sharing, the enrollment code and the CLI refresh interval. Sending `""` or `"set"` for a secret keeps the stored value. |
+| PUT | `/api/v1/admin/sync` | `admin` | Update Langfuse and index settings, the CLI git source (`cli_git_url`, `cli_git_branch`, `cli_git_subdir`), the schedule (`sync_interval`: seconds or a 5-field cron expression), credential sharing, the enrollment code and the CLI refresh interval. Sending `""` or `"set"` for a secret keeps the stored value. |
 | POST | `/api/v1/admin/sync/run?full=false` | `admin` | Run a sync now. `full=true` forgets the cursor and looks back over everything (duplicates are skipped). |
+
+### Backup administration
+
+| Method | Path | Auth required | Purpose |
+| --- | --- | --- | --- |
+| GET | `/api/v1/admin/backup` | `admin` | Backup settings (`backup_enabled`, `backup_schedule`, `backup_events_chunk`) and run status. |
+| PUT | `/api/v1/admin/backup` | `admin` | Update those settings. `backup_enabled` is `0` or `1`; `backup_events_chunk` is 1000–1000000. |
+| POST | `/api/v1/admin/backup/run` | `admin` | Back up now to the index git repo, whether or not the schedule is enabled. Returns the same view as GET. |
 
 ## Administration
 
-All administration routes require the `admin` permission.
+Most administration routes require the `admin` permission. The rows name any other permission they accept.
 
 | Method | Path | Auth required | Purpose |
 | --- | --- | --- | --- |
@@ -111,7 +119,6 @@ These routes are outside the `/api/v1` API prefix, except for the repository doc
 | GET | `/install.sh` | No | CLI bootstrap script, with configured public URL. |
 | GET | `/cli/version` | No | CLI version information. |
 | GET | `/cli/aihub.pyz` | No | Download generated CLI zipapp. |
-| GET | `/files/{name}/{filename}` | No | Download a published package archive. |
 | GET | `/static/*` | No | Static web application assets. |
 | GET | `/docs` | No | FastAPI Swagger UI (interactive OpenAPI docs). |
 | GET | `/redoc` | No | FastAPI ReDoc UI. |

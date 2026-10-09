@@ -53,6 +53,7 @@ ALL_PERMS = {
     "create_groups": "Create and manage own groups",
     "reset_password": "Reset other people's passwords",
     "audit": "View the security audit (tool calls and admin actions)",
+    "index": "Force a package into the index (aihub dev index)",
 }
 PERMS = {
     "admin": list(ALL_PERMS),

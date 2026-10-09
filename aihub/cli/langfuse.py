@@ -13,9 +13,13 @@ from . import paths
 
 
 def settings():
+    """Lookup order for each value: environment > ~/.aihub/config.json > aihub/core/defaults.json (langfuse.host)."""
+    from ..core import defaults
     c = paths.config()
+    host = (os.environ.get("LANGFUSE_BASE_URL") or os.environ.get("LANGFUSE_HOST") or c.get("langfuse_host")
+            or defaults.load().get("langfuse", {}).get("host") or "")
     return {
-        "host": (os.environ.get("LANGFUSE_BASE_URL") or os.environ.get("LANGFUSE_HOST") or c.get("langfuse_host") or "").rstrip("/"),
+        "host": host.rstrip("/"),
         "public": os.environ.get("LANGFUSE_PUBLIC_KEY") or c.get("langfuse_public_key") or "",
         "secret": os.environ.get("LANGFUSE_SECRET_KEY") or c.get("langfuse_secret_key") or "",
     }

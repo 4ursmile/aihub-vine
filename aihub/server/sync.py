@@ -2,7 +2,8 @@
 
 - Events: polled by observation id (events.ext_id is unique), so overlap, restarts and several servers never
   duplicate or lose rows. First run (no cursor) looks back over everything.
-- Index: re-read only on first run or when a new `aihub.publish` event arrived.
+- Index: the server is the only writer. A new `aihub.publish` event (public data sent by the CLI) makes the server fetch that
+  package repo at the published commit, read its aihub.toml, update the index repo and push; then the index is re-read.
 """
 import json
 import logging
@@ -13,6 +14,7 @@ from datetime import datetime, timezone
 
 from ..cli import gitx, langfuse
 from ..core import naming, pkgindex, redact
+from . import nethost
 
 log = logging.getLogger("aihub")
 OVERLAP = 300          # seconds re-read behind the cursor; ext_id makes the overlap harmless
@@ -87,6 +89,7 @@ def _iso(t):
     return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+SCHEMES = ("https://", "http://", "ssh://", "git@")      # transports a publish event may name (tests add file://)
 MAX_COUNT = 1000      # calls one span may stand for; bounds rows per observation
 
 
@@ -129,14 +132,17 @@ class Sync:
         self.repos, self.s = repos, settings
         self.stop, self.wake = threading.Event(), threading.Event()
         self.t = None
+        self.first_pass = threading.Event()                 # set once the first pass after start has finished (ok or not)
+        self._lookback_checked = False
+        self.index_lock = threading.Lock()                  # one index writer at a time (event sync and manual forcing share a checkout)
         self.status = {"last_run": None, "last_error": None, "events_total": 0, "index_packages": 0}
 
     # ----- config: env first, then admin settings
     def cfg(self, key, env, default=""):
-        return os.environ.get(env) or self.repos.setting(key, "") or default
+        return self.s.env_get(env) or self.repos.setting(key, "") or default
 
     def lf(self):
-        return {"host": self.cfg("langfuse_host", "LANGFUSE_BASE_URL").rstrip("/") or os.environ.get("LANGFUSE_HOST", "").rstrip("/"),
+        return {"host": self.cfg("langfuse_host", "LANGFUSE_BASE_URL").rstrip("/") or self.s.env_get("LANGFUSE_HOST").rstrip("/"),
                 "public": self.cfg("langfuse_public_key", "LANGFUSE_PUBLIC_KEY"),
                 "secret": self.cfg("langfuse_secret_key", "LANGFUSE_SECRET_KEY")}
 
@@ -163,6 +169,7 @@ class Sync:
                 log.warning("sync failed: %s", e)
             finally:
                 self.repos.db.release()
+                self.first_pass.set()
             self.wake.wait(self.delay())
             self.wake.clear()
 
@@ -179,10 +186,20 @@ class Sync:
 
     def pull_events(self, lf):
         cursor = self.repos.setting("sync_cursor")
+        if not self._lookback_checked:
+            self._lookback_checked = True
+            # Cursor says "pulled up to here" but no pulled event is stored (database replaced, partial restore):
+            # trust nothing, read Langfuse's whole retention again. Inserts are idempotent on ext_id.
+            if cursor and not self.repos.db.conn().execute("SELECT 1 FROM events WHERE ext_id IS NOT NULL LIMIT 1").fetchone():
+                cursor = None
         since = _iso(float(cursor) - OVERLAP) if cursor else None      # None = full lookback
         started = time.time()
-        rows, publish = [], False
+        rows, publish, pubs = [], False, {}
         for o in langfuse.fetch_observations("aihub.", since=since, s=lf):
+            if o.get("name") == "aihub.publish":
+                m = o.get("metadata") or {}
+                if m.get("package") and m.get("version") and m.get("git_url"):
+                    pubs[(naming.normalize(str(m["package"])), str(m["version"]))] = m      # latest event per version wins
             for r in to_rows(o):
                 rows.append(r)
                 publish = publish or (r["kind"] == "publish")
@@ -190,10 +207,81 @@ class Sync:
                 self._store(rows)
                 rows = []
         n = self._store(rows)
+        if pubs:
+            try:
+                if self.update_index(list(pubs.values())):
+                    publish = True
+            except Exception as e:                                      # events stay stored; the next full sync retries
+                self.status["last_error"] = "index update: " + gitx.redact_url(str(e))[:250]
+                log.warning("index update failed: %s", gitx.redact_url(str(e)))
         self.repos.set_setting("sync_cursor", started - 1)             # only advanced after a fully successful pass
         new = self.status["events_total"] + n
         self.status["events_total"] = new
         return publish and (n > 0 or not cursor)
+
+    def update_index(self, pubs, force=False, results=None):
+        """Add published versions to the index repo. Nothing from the event is trusted but where to look: the package repo is
+        fetched at the published commit and its aihub.toml is what goes in. -> True when the index repo changed.
+        force=True re-indexes a version that is already listed. `results` (a list) receives one (name, version, status) per item."""
+        with self.index_lock:
+            return self._update_index(pubs, force, results if results is not None else [])
+
+    def _update_index(self, pubs, force, results):
+        url, branch, path = self.index_source()
+        if not url or os.path.isfile(url):
+            return False
+        work = os.path.join(self.s.data_dir, "index-repos")
+        os.makedirs(work, exist_ok=True)
+        d = gitx.fetch(url, branch, base=work) if gitx.remote_head(url, branch) else None
+        if d is None:
+            results.append(("", "", "index repository not reachable"))
+            return False
+        folder = os.path.join(d, path[:-5] if path.endswith(".json") else path)
+        changed = 0
+        for m in pubs:
+            name, ver, gurl = naming.normalize(str(m["package"])), str(m["version"]), str(m["git_url"])
+            if not gurl.startswith(SCHEMES):
+                results.append((name, ver, "git address not allowed"))
+                continue                                                # no file:// or other odd transports from event data
+            if not gurl.startswith("file://") and not nethost.allowed(gurl, url):
+                log.warning("publish event for %s names a non-public host; ignored", name)
+                results.append((name, ver, "host is not public and not the index host"))
+                continue
+            try:
+                with open(os.path.join(folder, pkgindex.entry_rel(name)), encoding="utf-8") as f:
+                    have = {v["version"]: v.get("ref", "") for v in json.load(f).get("versions", [])}
+            except (OSError, ValueError):
+                have = {}
+            ref = str(m.get("commit") or "")
+            if ver in have and have[ver] == ref and not force:
+                results.append((name, ver, "already indexed"))
+                continue
+            try:
+                src = gitx.fetch(gurl, str(m.get("git_branch") or "main"), ref or None, base=os.path.join(self.s.data_dir, "repos"))
+                proj = os.path.join(src, str(m.get("git_subdir") or "").strip("/"))
+                if not os.path.realpath(proj).startswith(os.path.realpath(src)):
+                    results.append((name, ver, "subdir outside the repository"))
+                    continue
+                from ..core import manifest as M
+                with open(os.path.join(proj, "aihub.toml"), encoding="utf-8") as f:
+                    pk = M.parse(f.read())["package"]
+                if naming.normalize(pk["name"]) != name or str(pk["version"]) != ver:
+                    log.warning("publish event for %s %s does not match its aihub.toml; ignored", name, ver)
+                    results.append((name, ver, "does not match aihub.toml at that commit (found %s %s)" % (pk["name"], pk["version"])))
+                    continue
+                pkgindex.add(folder, proj, gitx.redact_url(gurl), str(m.get("git_branch") or "main"), str(m.get("git_subdir") or ""), ref, readme=True)
+                changed += 1
+                results.append((name, ver, "indexed"))
+            except Exception as e:
+                log.warning("cannot index %s %s: %s", name, ver, gitx.redact_url(str(e)))
+                results.append((name, ver, "cannot read the repository: " + gitx.redact_url(str(e))[:200]))
+        if not changed or not gitx.run(["status", "--porcelain", "--", path], cwd=d):
+            return False
+        gitx.run(["add", "-A", "--", path], cwd=d)
+        gitx.run(["-c", "user.name=aihub-server", "-c", "user.email=aihub-server@localhost", "commit", "-q", "-m",
+                  "index: %d published version(s)" % changed], cwd=d)
+        gitx.run(["push", "-q", "origin", "HEAD:refs/heads/" + branch], cwd=d)
+        return True
 
     def _store(self, rows):
         return self.repos.events_insert_ext(rows) if rows else 0

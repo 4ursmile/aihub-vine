@@ -310,6 +310,9 @@ def cli():
     ap.add_argument("--data", default=None)
     ap.add_argument("--public-url", default=None)
     ap.add_argument("--env-file", default=None, help="path to a .env file (default: ./.env or <data>/.env)")
+    ap.add_argument("--recover", default=None, choices=["ask", "local", "remote", "latest", "skip"],
+                    help="when the local database and the git backup differ: ask (default), keep local, use the backup, take the latest, or skip the check "
+                         "(env AIHUB_RECOVER)")
     ap.add_argument("--check", action="store_true", help="validate configuration, test every backend connection, then exit")
     a = ap.parse_args()
     import logging
@@ -325,6 +328,8 @@ def cli():
     logging.basicConfig(level=s.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
     if a.check:
         raise SystemExit(check(s))
+    from . import recover
+    recover.run(s, a.recover)
     uvicorn.run(create_app(s), host=host, port=port)
 
 

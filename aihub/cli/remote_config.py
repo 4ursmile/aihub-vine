@@ -36,8 +36,9 @@ def apply(cfg, index_host=None):
     """Write server-provided values into config.json. Environment variables still take priority at use time."""
     c = paths.load("config.json", {})
     idx = cfg.get("index") or {}
+    env_for = {"index_url": "AIHUB_INDEX_URL", "index_branch": "AIHUB_INDEX_BRANCH", "index_path": "AIHUB_INDEX_PATH"}
     for k_src, k_dst in (("url", "index_url"), ("branch", "index_branch"), ("path", "index_path")):
-        if idx.get(k_src) and not os.environ.get("AIHUB_INDEX_URL" if k_dst == "index_url" else "_"):
+        if idx.get(k_src) and not os.environ.get(env_for[k_dst]):          # environment wins over what the hub sends
             c[k_dst] = idx[k_src]
     cred = cfg.get("credentials")
     got = []

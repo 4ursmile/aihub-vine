@@ -51,7 +51,7 @@ aihub login
 
 `AIHUB_URL` supplies the default hub URL when no saved `hub` value exists. `AIHUB_HOME` changes the CLI state directory from `~/.aihub` to the specified path.
 
-Packages are found in a git-backed package index, not on the hub. `aihub setup` asks the hub for the index location and, if your admin shares them, the Langfuse keys. Without a hub, run `aihub setup --manual`, set the index with `aihub config set index_url <git url>`, or export `AIHUB_INDEX_URL`, `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY`. Git credentials stay with your own git credential helper.
+Packages are found in a git-backed package index, not on the hub. The index is a folder in that repository (default path `index`, holding `root.json`, `catalog/` and `packages/`); an older single `index.json` is still read. The CLI only reads the index; the server is the only writer. `aihub setup` asks the hub for the index location and, if your admin shares them, the Langfuse keys. Without a hub, run `aihub setup --manual`, set the index with `aihub config set index_url <git url>`, or export `AIHUB_INDEX_URL`, `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY`. Git credentials stay with your own git credential helper.
 
 ## Common commands
 
@@ -77,7 +77,7 @@ aihub upgrade
 ```
 
 - `search [term]` prints up to 30 matching packages.
-- `info <name>` prints package metadata and versions as JSON.
+- `info <name>` prints package metadata and versions (as JSON when output is not a terminal).
 - `install <name>` resolves the package from the git index, clones its repository at the version's ref, installs dependencies, and can register components with detected tools. Version constraints such as `"name>=1.2"` or `"name==1.2.0"` are accepted. Interactive mode asks for confirmation. `--yes` skips prompts; `--tool` can be repeated to select tools explicitly.
 - `download <name>[@version]` copies a package's files out of git into `./<name>-<version>` (or the `-o` folder) without installing it.
 - `list` shows installed package names, versions and enabled status.
@@ -89,11 +89,11 @@ aihub upgrade
 - `welcome` runs first-time setup for detected tools; `setup` pulls index and Langfuse settings (see [Install and configure](#install-and-configure)).
 - `version` shows the CLI version and the one the hub offers; `upgrade` installs it (see [Versions and self-update](#versions-and-self-update)).
 
-During installation, missing required commands are reported with any manifest hint. Package dependencies are recursively installed. Python dependencies in `[python]` are installed into a package-specific virtual environment. Installation asks before running the platform install script and before registering components; `--yes` skips these prompts.
+During installation, missing required commands are reported with any manifest hint. Package dependencies are recursively installed. Python dependencies in `[python]` are installed into a package-specific virtual environment. Installation asks before running the platform install script and before registering components; `--yes` skips these prompts. When stdin is closed (non-interactive), those prompts count as "no".
 
 ## Enable, disable, tree, lock and sync
 
-**Dependency resolution** happens on your machine against the package index. `install` and `sync` walk the dependency graph and produce every package to install, dependencies first. The index is cached in `~/.aihub/index-cache.json` for five minutes; if it cannot be fetched, the cached copy is used. Constraints from every dependent are combined, so a package shared by two others gets one version that satisfies both (for example `left` needs `base>=1,<2` and `right` needs `base>=1.2,<3`: `base` 1.5.0 is chosen). If nothing satisfies all constraints the error names the package and who requires it. Packages already installed at a satisfying version are skipped. Each package is then cloned from its repository at the version's ref.
+**Dependency resolution** happens on your machine against the package index. `install` and `sync` walk the dependency graph and produce every package to install, dependencies first. The index checkout in `~/.aihub/repos/_index/` is fetched at most every five minutes; if the fetch fails, the last checkout is used. Constraints from every dependent are combined, so a package shared by two others gets one version that satisfies both (for example `left` needs `base>=1,<2` and `right` needs `base>=1.2,<3`: `base` 1.5.0 is chosen). If nothing satisfies all constraints the error names the package and who requires it. Packages already installed at a satisfying version are skipped. Each package is then cloned from its repository at the version's ref.
 
 **Enable and disable.** `aihub disable my-skill` keeps the files but removes everything visible to your tools. `aihub disable` refuses while an enabled package depends on it (`--force` overrides; `--all` disables everything). `aihub enable my-skill` enables disabled dependencies first. `aihub install my-skill` on a disabled package enables it, unless the index has a newer version, in which case it updates. `aihub list` shows the status, `aihub update` skips disabled packages, and usage hooks ignore them. Enable and disable are local only and send no telemetry.
 
@@ -125,7 +125,7 @@ Events are written to Langfuse as OpenTelemetry spans, under your account name w
 - OpenCode uses `~/.config/opencode/plugin/aihub-usage.js`, listening for `tool.execute.before` and launching the CLI in the background.
 - Codex does not expose a general tool-call hook, so there is no equivalent hook integration.
 
-The hook writes events to `~/.aihub/queue/events.jsonl` (or `$AIHUB_HOME/queue/events.jsonl`). A background flusher sends them to Langfuse once per telemetry window (60 seconds by default; `aihub config set telemetry_interval <seconds>` or `AIHUB_TELEMETRY_INTERVAL` changes it). Events wait in the queue while Langfuse is unconfigured or unreachable. The queue is capped at 5 MiB; if it exceeds that size, additional events are dropped until it shrinks. Hook failures are suppressed to avoid blocking the coding tool.
+The hook writes events to `~/.aihub/queue/events.jsonl` (or `$AIHUB_HOME/queue/events.jsonl`). A background flusher sends them to Langfuse once per telemetry window (60 seconds by default, between 10 and 3600; `aihub config set telemetry_interval <seconds>` or `AIHUB_TELEMETRY_INTERVAL` changes it). `aihub flush` sends the queue immediately, and returns without waiting if the background flusher already holds the lock. Events wait in the queue while Langfuse is unconfigured or unreachable. The queue is capped at 5 MiB; if it exceeds that size, additional events are dropped until it shrinks. Hook failures are suppressed to avoid blocking the coding tool.
 
 Install or remove hooks explicitly:
 
@@ -145,7 +145,7 @@ The default CLI home is `~/.aihub`; set `AIHUB_HOME` to override it. The CLI use
 ~/.aihub/
   config.json          Hub URL, index and Langfuse settings, client ID
   credentials.json     Hub login token and username
-  index-cache.json     Cached package index (refreshed every 5 minutes)
+  index-cache.json     Cached copy of an http(s) .json index, used when it cannot be fetched
   state.json           Installed package state (version, rev, dependencies, enabled flag)
   packages/<name>/     Installed package files
   repos/               Cached git checkouts of the index and packages
@@ -154,6 +154,8 @@ The default CLI home is `~/.aihub`; set `AIHUB_HOME` to override it. The CLI use
   backups/<name>/      Setup-step backups
   queue/               Usage event spool and flusher state
 ```
+
+Settings resolve in this order: environment variables, then `config.json`, then the built-in `aihub/core/defaults.json` (keys such as `index_url`, `index_branch`, `index_path`, `langfuse_*` and `telemetry_interval`).
 
 The `credentials.json` file is written with restrictive permissions. Keep the directory private.
 
@@ -170,7 +172,7 @@ aihub dev publish ./my-package --bump patch
 aihub dev stats ./my-package
 ```
 
-`aihub dev init [path] --type skill|agent|mcp|tool|setup --name NAME --description DESCRIPTION --force` creates a starter project for the selected type and fills in the `[git]` table from the project's repository when it can. If `aihub.toml` already exists, init keeps it; `--force` overwrites the starter files it generates, and unrelated files are left in place. `aihub dev validate [path]` parses and normalizes the manifest, then lints the files it references, reporting errors and warnings. See [Publishing to AI Hub](publishing.md) for project trees, manifest examples, install scripts, visibility, and release steps. `dev build` writes `dist/<name>-<version>.tar.gz`. `dev publish` commits the project, pushes it to the `[git]` remote and branch in `aihub.toml`, and records an `aihub.publish` event in Langfuse. It stops if the repository's remote or branch does not match `[git]`, and it tracks files over 50 MB with git-lfs. The index entry that lists the package is updated by whoever owns the index repository. Published versions cannot be reused, so bump the version for each release. `--bump` supports `major`, `minor`, and `patch`.
+`aihub dev init [path] --type skill|agent|mcp|tool|setup --name NAME --description DESCRIPTION --force` creates a starter project for the selected type and fills in the `[git]` table from the project's repository when it can. If `aihub.toml` already exists, init keeps it; `--force` overwrites the starter files it generates, and unrelated files are left in place. `aihub dev validate [path]` parses and normalizes the manifest, then lints the files it references, reporting errors and warnings. See [Publishing to AI Hub](publishing.md) for project trees, manifest examples, install scripts, visibility, and release steps. `dev build` writes `dist/<name>-<version>.tar.gz`. `dev publish` commits the project, pushes it to the `[git]` remote and branch in `aihub.toml`, and sends an `aihub.publish` event (queued if Langfuse is unreachable). It stops if the repository's remote or branch does not match `[git]`, and it tracks files over 50 MB with git-lfs. It does not edit any index: the hub lists the package on its next index sync, which can take 1-2 minutes. Published versions cannot be reused, so bump the version for each release. `--bump` supports `major`, `minor`, and `patch`.
 
 See [Publishing to AI Hub](publishing.md) for end-to-end package authoring and the [manifest reference](manifest.md) for package fields and setup step behavior.
 

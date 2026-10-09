@@ -2,7 +2,7 @@
 
 Built-in AI Hub skill, installed automatically by the hub installer and `aihub welcome`.
 
-Teaches Claude Code, Codex and OpenCode to use AI Hub. Before answering or setting up a project, it fetches the current Markdown docs from the hub API (`/api/v1/docs/<slug>/raw`), so its answers follow the running hub rather than a fixed copy.
+Teaches Claude Code, Codex and OpenCode to use AI Hub. Before answering or setting up a project, it fetches the current Markdown docs from the hub API (`/api/v1/docs/<slug>/raw`), so its answers follow the running hub rather than a fixed copy. If the hub cannot be reached, it falls back to the bundled `skills/aihub-guide/offline.md` snapshot and says that it may be older than the hub.
 
 ```sh
 aihub install aihub-guide

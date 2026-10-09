@@ -29,9 +29,12 @@ class Scrub(unittest.TestCase):
 class Run(unittest.TestCase):
     def test_split_incremental_and_clean(self):
         with tempfile.TemporaryDirectory() as t:
+            cwd = os.getcwd()
+            os.chdir(t)                            # so Settings.load() cannot pick up the repo's .env
+            self.addCleanup(os.chdir, cwd)
             bare = os.path.join(t, "idx.git")
             subprocess.run(["git", "init", "-q", "--bare", "-b", "main", bare], check=True)
-            s = Settings.load(data_dir=os.path.join(t, "data"), sync_enabled=False)
+            s = Settings.load(env={}, env_file=os.path.join(t, "none.env"), data_dir=os.path.join(t, "data"), sync_enabled=False)   # isolated; cwd is a temp dir (see setUp)
             r = Repos(init_db(s))
             r.set_setting("index_url", bare)
             r.set_setting("langfuse_secret_key", "sk-lf-supersecret1234567890")

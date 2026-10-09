@@ -3,9 +3,16 @@
   "index": {
     "git_url": "https://github.com/4ursmile/aftest",
     "branch": "main",
-    "path": "index",
-    "langfuse_host": "",
-    "langfuse_project": "aihub"
+    "path": "index"
+  },
+  "langfuse": {
+    "host": "",
+    "project": "aihub"
+  },
+  "cli": {
+    "git_url": "",
+    "branch": "",
+    "subdir": ""
   },
   "event_names": {
     "use": "aihub.use",

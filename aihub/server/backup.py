@@ -38,6 +38,32 @@ def tables():
     return re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)\(", dbmod.TABLES)
 
 
+KEY_TABLES = ("users", "groups", "packages", "versions", "reviews", "events")     # what recovery compares and counts as "data"
+ACTIVITY = (("events", "ts"), ("audit_log", "ts"), ("packages", "updated"), ("versions", "created"),
+            ("users", "created"), ("reviews", "created"))
+
+
+def table_cols(db, c, table):
+    """Column names in table order (db._columns returns a set)."""
+    if db.engine == "postgres":
+        return [r["column_name"] for r in c.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name=? ORDER BY ordinal_position", (table,))]
+    return [r[1] for r in c.execute("PRAGMA table_info(%s)" % table)]
+
+
+def summary(c):
+    """Row counts per table and the time of the newest thing in the database: what a human needs to pick local vs backup."""
+    rows, latest = {}, 0.0
+    for t in tables():
+        if t not in SKIP:
+            rows[t] = c.execute("SELECT COUNT(*) FROM %s" % t).fetchone()[0]
+    for t, col in ACTIVITY:
+        r = c.execute("SELECT MAX(%s) FROM %s" % (col, t)).fetchone()
+        if r and r[0]:
+            latest = max(latest, float(r[0]))
+    return {"rows": rows, "latest": latest}
+
+
 def _h(v):
     return "sha256:" + hashlib.sha256(str(v).encode()).hexdigest()
 
@@ -101,7 +127,7 @@ class Backup:
 
     # ----- config (admin settings; environment wins for the on/off switch)
     def enabled(self):
-        v = os.environ.get("AIHUB_BACKUP_ENABLED") or self.repos.setting("backup_enabled", "") or "0"
+        v = self.s.env_get("AIHUB_BACKUP_ENABLED") or self.repos.setting("backup_enabled", "") or "0"
         return v.lower() in ("1", "true", "yes", "on")
 
     def schedule_text(self):
@@ -128,18 +154,28 @@ class Backup:
         self.stop.set()
         self.wake.set()
 
+    def on_start(self):
+        return self.s.env_get("AIHUB_BACKUP_ON_START", "1").lower() in ("1", "true", "yes", "on")
+
+    def _try(self):
+        try:
+            self.run_once()
+        except Exception as e:
+            log.warning("backup failed: %s", gitx.redact_url(str(e)))
+        finally:
+            self.repos.db.release()
+
     def _loop(self):
+        # One backup right after the first sync pass: events pulled from Langfuse while the server was down reach git
+        # now, not at the next cron slot. Langfuse or this disk can fail later; git then still has them.
+        if self.on_start() and self.sync.first_pass.wait(300) and not self.stop.is_set() and self.enabled():
+            self._try()
         while not self.stop.is_set():
             if self.wake.wait(self.delay()):          # woken early: settings changed or shutdown, not a scheduled run
                 self.wake.clear()
                 continue
             if self.enabled():
-                try:
-                    self.run_once()
-                except Exception as e:
-                    log.warning("backup failed: %s", gitx.redact_url(str(e)))
-                finally:
-                    self.repos.db.release()
+                self._try()
 
     # ----- one backup
     def run_once(self):
@@ -164,6 +200,7 @@ class Backup:
         os.makedirs(work, exist_ok=True)
         for attempt in (1, 2):                        # second try = someone pushed in between: refetch and redo
             d = self._checkout(url, branch, work)
+            self._guard(d)
             files, rows = self.export(d)
             gitx.run(["add", "-A", "backups"], cwd=d)
             if not gitx.run(["status", "--porcelain", "backups"], cwd=d):
@@ -177,6 +214,19 @@ class Backup:
                 if attempt == 2:
                     raise
         raise RuntimeError("unreachable")
+
+    def _guard(self, d):
+        """An empty database (lost data dir, wrong DATABASE_URL) must never overwrite a backup that holds data: that would
+        turn the one good copy into an empty one. Recover first (start the server with --recover)."""
+        try:
+            with open(os.path.join(d, "backups", "index.json")) as f:
+                old = json.load(f)
+        except (OSError, ValueError):
+            return
+        have = sum(e.get("rows", 0) for e in old.get("files", []) if e.get("table") in KEY_TABLES)
+        mine = summary(self.repos.db.conn())["rows"]
+        if have and not sum(mine.get(t, 0) for t in KEY_TABLES):
+            raise RuntimeError("refusing to back up an empty database over a backup with %d rows: restart with --recover remote" % have)
 
     @staticmethod
     def _checkout(url, branch, work):
@@ -256,7 +306,7 @@ class Backup:
         # the timestamp only moves when something changed, so an idle database makes no commit
         created = prev_idx["created"] if same and prev_idx.get("created") else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         index = {"format": FORMAT, "app": "aihub", "engine": self.repos.db.engine, "created": created,
-                 "events_chunk": n, "tables": sorted({e["table"] for e in entries}), "files": entries,
+                 "events_chunk": n, "stats": summary(c), "tables": sorted({e["table"] for e in entries}), "files": entries,
                  "redaction": {"users.password_hash": "kept only if already a pbkdf2/sha256 hash, else sha256",
                                "tokens.hash": "already sha256; plain values are hashed",
                                "app_settings": "values of secret-looking keys or secret-looking values are sha256 (not restorable: re-enter them)",
@@ -269,11 +319,7 @@ class Backup:
         return len(entries), total
 
     def _cols(self, c, table):
-        """Column names in table order (db._columns returns a set)."""
-        if self.repos.db.engine == "postgres":
-            return [r["column_name"] for r in c.execute(
-                "SELECT column_name FROM information_schema.columns WHERE table_name=? ORDER BY ordinal_position", (table,))]
-        return [r[1] for r in c.execute("PRAGMA table_info(%s)" % table)]
+        return table_cols(self.repos.db, c, table)
 
     def _ranges(self, c, table, n):
         r = c.execute("SELECT MAX(id) FROM %s" % table).fetchone()

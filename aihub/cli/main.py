@@ -7,7 +7,7 @@ import tempfile
 import urllib.parse
 
 from ..core import archive, ignore, manifest as M, naming, version as V
-from . import api, installer, paths, publish as pub, registry, remote_config, ui, updater
+from . import api, gitx, installer, paths, publish as pub, registry, remote_config, ui, updater
 from .installer import _spec
 
 def cmd_config(a):
@@ -508,6 +508,32 @@ def dev_publish(a):
         ui.note("publish event queued; it will be sent when Langfuse is reachable (aihub flush)")
 
 
+def dev_index(a):
+    """Ask the hub to index this project now (needs the `index` permission). For a publish event that was lost."""
+    root = _root(a)
+    m = dev_validate(a, quiet=True)
+    git = pub.detect(root, m["git"])
+    pkg = m["package"]
+    top = pub.toplevel(root)
+    commit = a.commit or (gitx.run(["rev-parse", "HEAD"], cwd=top, check=False) if top else "")
+    if not commit:
+        raise api.ApiError("this project is not a git repository with a commit; publish it first (aihub dev publish)")
+    if top and gitx.run(["status", "--porcelain", "--", "."], cwd=root) and not a.commit:
+        ui.note("you have uncommitted changes; the hub reads the pushed commit %s, not your working files" % commit[:8])
+    if top and not a.commit and gitx.run(["branch", "-r", "--contains", commit], cwd=top, check=False) == "":
+        raise api.ApiError("commit %s is not pushed yet; run: git push (or aihub dev publish)" % commit[:8])
+    body = {"package": pkg["name"], "version": pkg["version"], "git_url": gitx.redact_url(git["url"]),
+            "git_branch": git["branch"], "git_subdir": git.get("subdir", ""), "commit": commit}
+    with ui.Spinner("Asking the hub to index %s %s" % (pkg["name"], pkg["version"])):
+        try:
+            r = api.call("POST", "/index/package", body)
+        except api.ApiError as e:
+            if "403" in str(e) or "missing permission" in str(e):
+                raise api.ApiError("your account may not force an index; an admin can grant the 'index' permission to your role (%s)" % e)
+            raise
+    ui.good("%s %s: %s (commit %s)" % (r["package"], r["version"], r["status"], commit[:8]))
+
+
 def dev_stats(a):
     """Usage of this package, read from Langfuse (the same events the hub dashboard shows)."""
     from . import langfuse
@@ -731,6 +757,10 @@ def build_parser():
          "Optionally bump the version in aihub.toml, validate and build the package, then upload it to the configured hub. Large packages use resumable chunked uploads; smaller packages use a single upload request.",
          "Examples:\n  aihub dev publish\n  aihub dev publish --bump patch",
          [arg("--bump", choices=["major", "minor", "patch"], metavar="PART", help="Increment this version part before building (major/minor/patch; lower parts reset).")]),
+        ("index", dev_index, "Force the hub to index this project (maintainers).",
+         "Ask the hub to read this project's pushed commit and add the version to the package index. Use it when the automatic step after `aihub dev publish` did not happen (lost event, Langfuse down). Needs `aihub login` with an account whose role has the 'index' permission. The hub checks aihub.toml at that commit; nothing from your machine is trusted but the repo location.",
+         "Examples:\n  aihub dev index\n  aihub dev index --commit 1a2b3c4",
+         [arg("--commit", metavar="SHA", default="", help="Index this commit instead of HEAD (must be pushed).")]),
         ("stats", dev_stats, "Show usage statistics for this package.",
          "Read usage statistics for the package named in PATH/aihub.toml. Non-interactive output is JSON.",
          "Example:\n  aihub dev stats ./my-skill", []),
