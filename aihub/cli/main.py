@@ -306,6 +306,9 @@ def cmd_welcome(a):
     ask = ui.INTERACTIVE and not a.yes
     ui.banner()
     ui.heading("Let's get you set up")
+    from . import remote_config
+    if ask or a.yes:
+        remote_config.resolve_missing(a.yes)           # env > saved > defaults.json (confirmed) > typed
     _check_backends()
     tools = integrations.detected()
     if tools:
@@ -709,7 +712,8 @@ def build_parser():
         "Examples:\n  aihub setup\n  aihub setup --hub https://hub.example.com --code TEAM-CODE",
         arg("--hub", metavar="URL", help="Hub to ask (default: the configured hub)."),
         arg("--code", metavar="CODE", help="Enrollment code from your admin, needed when credential sharing is code-protected."),
-        arg("--manual", action="store_true", help="Skip the hub and enter the values by hand."))
+        arg("--manual", action="store_true", help="Skip the hub and enter the values by hand."),
+        arg("-y", "--yes", action="store_true", help="Accept defaults.json values without asking."))
     add("welcome", cmd_welcome, "Run first-time setup for detected AI tools.",
         "Check the hub and detected tools, offer or install usage hooks and the built-in packaging skill, and optionally sign in or register. Interactive setup lets you choose; --yes accepts defaults without prompting.",
         "Examples:\n  aihub welcome\n  aihub welcome --yes",

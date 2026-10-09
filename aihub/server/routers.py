@@ -1425,11 +1425,16 @@ def _check_cli_git(k, v):
 def sync_status(request: Request, u=admin):
     sy, repos = request.app.state.sync, R(request)
     cfg = {k: repos.setting(k, "") for k in SYNC_KEYS}
+    envget = request.app.state.settings.env_get
+    for k, e in SYNC_ENV.items():
+        if envget(e):
+            cfg[k] = envget(e)                                                   # what is really used: environment / .env wins
     for k in SECRET_KEYS:
         cfg[k] = "set" if cfg[k] else ""                                         # never echo secrets
     cfg["sync_interval"] = cfg["sync_interval"] or "60"
     return {"config": cfg, "status": dict(sy.status, next_in=round(sy.delay())), "cursor": repos.setting("sync_cursor"),
             "from_env": {"langfuse": bool(request.app.state.settings.env_get("LANGFUSE_SECRET_KEY")),
+                         "langfuse_secret_key": bool(request.app.state.settings.env_get("LANGFUSE_SECRET_KEY")),
                          "index": bool(request.app.state.settings.env_get("AIHUB_INDEX_URL")),
                          **{k: bool(request.app.state.settings.env_get(e)) for k, e in SYNC_ENV.items()}}}
 
@@ -1559,13 +1564,15 @@ def client_config(request: Request, code: str = "", u=Depends(current_user)):
     out = {"index": {"url": env("AIHUB_INDEX_URL") or repos.setting("index_url", "") or dx.get("git_url", ""),
                      "branch": env("AIHUB_INDEX_BRANCH") or repos.setting("index_branch", "") or dx.get("branch", "main"),
                      "path": env("AIHUB_INDEX_PATH") or repos.setting("index_path", "") or dx.get("path", "index")},
+           "langfuse": {"host": (env("LANGFUSE_BASE_URL") or env("LANGFUSE_HOST") or repos.setting("langfuse_host", "")
+                                or defaults.load().get("langfuse", {}).get("host", "")).strip()},      # URL only: not a secret, always shared
            "refresh_hours": int(repos.setting("client_refresh_hours", "") or 24), "credentials": None}
     if repos.setting("share_credentials", "0") == "1":
         want = repos.setting("enroll_code", "")
         import hmac
         if u or (want and hmac.compare_digest(want.encode(), (code or "").encode())):
             out["credentials"] = {            # Langfuse only: git credentials are never stored on or sent by the server
-                "langfuse": {"host": env("LANGFUSE_BASE_URL") or repos.setting("langfuse_host", "") or defaults.load().get("langfuse", {}).get("host", ""),
+                "langfuse": {"host": out["langfuse"]["host"],
                              "public_key": env("LANGFUSE_PUBLIC_KEY") or repos.setting("langfuse_public_key", ""),
                              "secret_key": env("LANGFUSE_SECRET_KEY") or repos.setting("langfuse_secret_key", "")}}
             repos.audit(u["username"] if u else "enroll-code", "client-config.credentials", "", request.client.host if request.client else "")

@@ -44,6 +44,8 @@ curl -fsSL $HUB/api/v1/docs/<slug>/raw       # one document as Markdown
 | server-setup | deploying, upgrading and operating a hub |
 | architecture | how git, the index, Langfuse and the hub fit together |
 
+**HTTPS with a private or self-signed certificate:** if `curl` reports a certificate error, add `--cacert /path/ca.pem` (preferred) or `-k` to the `curl` calls above, and for Python use `ssl._create_unverified_context()` as `context=`. Only do this for a hub the user trusts; `aihub config set ca_bundle <ca.pem>` / `insecure_tls true` makes the aihub CLI itself accept it.
+
 Fetch only what the task needs. If a slug is missing, use the list from the first call. Without `curl`, use `python3 -c "import urllib.request,sys;print(urllib.request.urlopen(sys.argv[1]).read().decode())" URL`. For protected hubs add `-H "Authorization: Bearer $TOKEN"` (create a token with `aihub login`; never print or store it in project files).
 
 The live endpoint list is at `$HUB/openapi.json`.

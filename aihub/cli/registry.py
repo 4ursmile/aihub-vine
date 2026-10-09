@@ -15,7 +15,7 @@ import time
 import urllib.request
 
 from ..core import manifest as M, naming, pkgindex, version as V
-from . import api, gitx, paths
+from . import api, gitx, paths, tls
 
 TTL = 300
 
@@ -47,7 +47,7 @@ def _reader(src, refresh=False):
         return pkgindex.open_source(u, src["path"])
     if u.startswith(("http://", "https://")) and u.rstrip("/").endswith(".json"):
         try:
-            with urllib.request.urlopen(u, timeout=20) as r:
+            with urllib.request.urlopen(u, timeout=20, context=tls.context()) as r:
                 data = json.loads(r.read())
             paths.save("index-cache.json", data)
         except (OSError, ValueError):
@@ -64,6 +64,8 @@ def _reader(src, refresh=False):
             d = gitx.fetch(u, src["branch"], base=base)
             open(stamp, "w").close()
         except gitx.GitError as e:
+            if gitx.remote_empty(u):
+                return pkgindex.Legacy({})              # brand-new empty repo: a valid, empty index (the first publish fills it)
             if not os.path.isdir(os.path.join(d, ".git")):
                 raise api.ApiError("cannot fetch package index: %s" % gitx.redact_url(str(e)))
     try:

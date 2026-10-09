@@ -54,13 +54,20 @@ fi
 ok "Using $PY"
 mkdir -p "$HOME/.aihub/bin"
 step "Downloading the CLI from $HUB"
-curl -fsSL "$HUB/cli/aihub.pyz" -o "$HOME/.aihub/bin/aihub.pyz"
+CURL_OPTS="-fsSL"
+[ -n "$AIHUB_CA_BUNDLE" ] && CURL_OPTS="$CURL_OPTS --cacert $AIHUB_CA_BUNDLE"
+case "$AIHUB_INSECURE" in 1|true|yes) CURL_OPTS="$CURL_OPTS -k" ;; esac   # self-signed hub: AIHUB_INSECURE=1 (or AIHUB_CA_BUNDLE=ca.pem to keep checks)
+curl $CURL_OPTS "$HUB/cli/aihub.pyz" -o "$HOME/.aihub/bin/aihub.pyz"
 printf '#!/bin/sh\\nexec %s "$HOME/.aihub/bin/aihub.pyz" "$@"\\n' "$PY" > "$HOME/.aihub/bin/aihub"
 chmod +x "$HOME/.aihub/bin/aihub"
 "$HOME/.aihub/bin/aihub" config set hub "$HUB" >/dev/null || true
 ok "Installed to $HOME/.aihub/bin"
 step "Connecting your AI tools"
-"$HOME/.aihub/bin/aihub" welcome -y < /dev/null || true   # usage hooks + packaging skill for detected tools
+if [ -r /dev/tty ]; then
+  "$HOME/.aihub/bin/aihub" welcome < /dev/tty || true     # asks to confirm / fill index + Langfuse values when no env var is set
+else
+  "$HOME/.aihub/bin/aihub" welcome -y < /dev/null || true   # no terminal: environment values only, nothing is asked
+fi
 # Put ~/.aihub/bin on PATH for future shells. Guard: ask first when a person is at the terminal (default yes),
 # add directly when non-interactive (CI), and skip entirely with AIHUB_NO_MODIFY_PATH=1.
 BIN="$HOME/.aihub/bin"
@@ -169,7 +176,11 @@ Say-Ok "Using Python: $Py"
 $Bin = Join-Path $env:USERPROFILE ".aihub\bin"
 New-Item -ItemType Directory -Force -Path $Bin | Out-Null
 Say-Step "Downloading the CLI from $Hub"
-Invoke-WebRequest "$Hub/cli/aihub.pyz" -OutFile (Join-Path $Bin "aihub.pyz") -UseBasicParsing
+if ($env:AIHUB_INSECURE -in "1","true","yes") {      # self-signed hub: $env:AIHUB_INSECURE="1" before running the installer
+  try { [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true } } catch {}
+  if ($PSVersionTable.PSVersion.Major -ge 6) { $Skip = @{ SkipCertificateCheck = $true } } else { $Skip = @{} }
+} else { $Skip = @{} }
+Invoke-WebRequest @Skip "$Hub/cli/aihub.pyz" -OutFile (Join-Path $Bin "aihub.pyz") -UseBasicParsing
 Set-Content -Path (Join-Path $Bin "aihub.cmd") -Encoding ASCII -Value ('@echo off' + "`r`n" + '"' + $Py + '" "%~dp0aihub.pyz" %*')
 # Extensionless twin for Git Bash / WSL-style shells (what Claude Code and Codex use on Windows): they ignore .cmd files.
 $PyPosix = $Py -replace '\\', '/'
@@ -177,7 +188,7 @@ $PyPosix = $Py -replace '\\', '/'
 & "$Bin\aihub.cmd" config set hub $Hub | Out-Null
 Say-Ok "Installed to $Bin"
 Say-Step "Connecting your AI tools"
-try { $null | & "$Bin\aihub.cmd" welcome -y } catch {}
+try { if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) { & "$Bin\aihub.cmd" welcome } else { $null | & "$Bin\aihub.cmd" welcome -y } } catch {}
 $User = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($User -notlike "*$Bin*") { [Environment]::SetEnvironmentVariable("Path", "$User;$Bin", "User") }
 $env:Path += ";$Bin"

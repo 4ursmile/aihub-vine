@@ -40,12 +40,8 @@ def span_id(*parts):
 
 
 def _ctx():
-    try:
-        import certifi
-        import ssl
-        return ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        return None
+    from . import tls
+    return tls.context(certifi_default=True)
 
 
 def _req(s, method, path, body=None, timeout=10):

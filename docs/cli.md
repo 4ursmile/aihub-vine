@@ -203,3 +203,16 @@ To ship a new CLI, bump `VERSION` in `aihub/core/release.py` and restart the ser
 ## Site identity (admin)
 
 Admin > Settings > Site sets the site name, logo (PNG/JPEG/WebP, max 256 KB), and contact name/email/support link/phone. They appear in the nav and footer. API: `PUT /api/v1/admin/settings`, `POST|DELETE /api/v1/admin/logo`; public read via `GET /api/v1/meta`.
+
+
+## HTTPS with a private or self-signed certificate
+
+Certificate checks are on by default. If your hub, Langfuse or git host uses an internal CA, tell the CLI once:
+
+| setting | environment | effect |
+| --- | --- | --- |
+| `aihub config set ca_bundle /path/ca.pem` | `AIHUB_CA_BUNDLE` | trust this CA file (preferred; verification stays on) |
+| `aihub config set insecure_tls true` | `AIHUB_INSECURE=1` | skip certificate checks (self-signed / test hubs only) |
+
+They apply to every CLI call: hub, Langfuse, an https index, and git (`GIT_SSL_CAINFO` / `GIT_SSL_NO_VERIFY`). The installers read the same
+variables, e.g. `curl -kfsSL https://hub/install.sh | AIHUB_INSECURE=1 sh` (PowerShell: set `$env:AIHUB_INSECURE="1"` first).

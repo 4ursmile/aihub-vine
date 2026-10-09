@@ -7,7 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import api, gitx, paths, ui
+from . import api, gitx, paths, tls, ui
 
 KEYS = ("langfuse_host", "langfuse_public_key", "langfuse_secret_key")
 
@@ -40,11 +40,15 @@ def apply(cfg, index_host=None):
     for k_src, k_dst in (("url", "index_url"), ("branch", "index_branch"), ("path", "index_path")):
         if idx.get(k_src) and not os.environ.get(env_for[k_dst]):          # environment wins over what the hub sends
             c[k_dst] = idx[k_src]
-    cred = cfg.get("credentials")
     got = []
+    lf_host = (cfg.get("langfuse") or {}).get("host")
+    if lf_host and not (os.environ.get("LANGFUSE_BASE_URL") or os.environ.get("LANGFUSE_HOST")):
+        c["langfuse_host"] = lf_host
+        got.append("langfuse_host")
+    cred = cfg.get("credentials")
     if cred:
         lf = cred.get("langfuse") or {}
-        for src, dst in (("host", "langfuse_host"), ("public_key", "langfuse_public_key"), ("secret_key", "langfuse_secret_key")):
+        for src, dst in (("public_key", "langfuse_public_key"), ("secret_key", "langfuse_secret_key")):
             if lf.get(src):
                 c[dst] = lf[src]
                 got.append(dst)
@@ -80,7 +84,7 @@ def auto(cmd):
 
 def ensure_git_access(url):
     """Make sure `git ls-remote url` works; if it needs credentials we do not have, ask for them once."""
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **tls.git_env())
     r = subprocess.run(["git", "ls-remote", "--exit-code", "-h", url, "HEAD"], env=env, capture_output=True, text=True)
     if r.returncode in (0, 2):
         return True
@@ -122,30 +126,55 @@ def cmd_setup(a):
     ui.good("index: %s" % (cfg.get("index", {}).get("url") or "not set"))
     if got:
         ui.good("received: " + ", ".join(got))
+    if any(k.endswith("_key") for k in got):
+        pass
     elif cfg.get("credentials_hint"):
         ui.note("%s. ask your admin, then: aihub setup --code <code>" % cfg["credentials_hint"])
     else:
-        ui.note("the hub is not sharing Langfuse credentials; set them yourself (see: aihub setup --manual)")
+        ui.note("the hub shares only the Langfuse URL; set your Langfuse keys before using aihub (aihub setup --manual, or LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY)")
+    resolve_missing(getattr(a, "yes", False))
     _verify()
 
 
-def _manual(a):
-    if not ui.INTERACTIVE:
-        return
+SETUP_FIELDS = (("langfuse_host", "LANGFUSE_BASE_URL", "Langfuse URL", False, ("langfuse", "host")),
+                ("langfuse_public_key", "LANGFUSE_PUBLIC_KEY", "Langfuse public key", False, None),
+                ("langfuse_secret_key", "LANGFUSE_SECRET_KEY", "Langfuse secret key", True, None),
+                ("index_url", "AIHUB_INDEX_URL", "Package index (git URL)", False, ("index", "git_url")))
+
+
+def resolve_missing(yes=False):
+    """Fill every setup value that is still missing. Order: environment variable > value already saved in config.json >
+    defaults.json (shown and confirmed first) > typed by the user. Non-interactive runs never invent a value: a
+    defaults.json value is accepted only with yes=True (or a typed 'yes'), anything else stays unset. Returns the keys that are still empty."""
+    from ..core import defaults
     import getpass
     c = paths.load("config.json", {})
-    for key, label, secret in (("langfuse_host", "Langfuse URL", False), ("langfuse_public_key", "Langfuse public key", False),
-                               ("langfuse_secret_key", "Langfuse secret key", True), ("index_url", "Package index (git URL)", False)):
-        cur = os.environ.get({"langfuse_host": "LANGFUSE_BASE_URL", "langfuse_public_key": "LANGFUSE_PUBLIC_KEY",
-                              "langfuse_secret_key": "LANGFUSE_SECRET_KEY", "index_url": "AIHUB_INDEX_URL"}[key]) or c.get(key)
-        if cur:
-            c[key] = cur                                  # taken from the environment / existing config
-            continue
-        v = (getpass.getpass if secret else input)("%s: " % label).strip()
-        if v:
-            c[key] = v
+    d = defaults.load()
+    for key, env, label, secret, dpath in SETUP_FIELDS:
+        if os.environ.get(env) or c.get(key):
+            continue                                       # already provided; the environment is read at use time
+        dv = d.get(dpath[0], {}).get(dpath[1], "") if dpath else ""
+        if dv:
+            if yes or (ui.INTERACTIVE and ui.confirm("%s: use the default %s ?" % (label, dv))):
+                c[key] = dv
+                continue
+        if ui.INTERACTIVE and not yes:
+            v = (getpass.getpass if secret else input)("%s: " % label).strip()
+            if v:
+                c[key] = v
     paths.save("config.json", c)
-    if c.get("index_url", "").startswith("http"):
+    try:
+        os.chmod(paths.p("config.json"), 0o600)
+    except OSError:
+        pass
+    return [k for k, env, *_ in SETUP_FIELDS if not (os.environ.get(env) or c.get(k))]
+
+
+def _manual(a):
+    resolve_missing(getattr(a, "yes", False))
+    c = paths.load("config.json", {})
+    if ui.INTERACTIVE and (os.environ.get("AIHUB_INDEX_URL") or c.get("index_url", "")).startswith("http"):
+        c = dict(c, index_url=os.environ.get("AIHUB_INDEX_URL") or c["index_url"])
         try:
             ensure_git_access(c["index_url"])
         except gitx.GitError as e:

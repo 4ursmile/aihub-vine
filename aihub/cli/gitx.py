@@ -3,7 +3,7 @@ import os
 import re
 import subprocess
 
-from . import paths
+from . import paths, tls
 
 
 class GitError(Exception):
@@ -11,7 +11,7 @@ class GitError(Exception):
 
 
 def run(args, cwd=None, check=True):
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **tls.git_env())
     r = subprocess.run(["git"] + list(args), cwd=cwd, env=env, capture_output=True, text=True)
     if check and r.returncode != 0:
         raise GitError((r.stderr or r.stdout).strip() or "git %s failed" % args[0])
@@ -69,6 +69,14 @@ def is_repo(cwd="."):
 def remote_head(url, branch):
     out = run(["ls-remote", url, "refs/heads/" + branch], check=False)
     return out.split()[0] if out else None
+
+
+def remote_empty(url):
+    """True when the remote is reachable but has no commits at all (a freshly created repo). An unreachable or
+    unauthorised remote is NOT empty: that stays an error."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **tls.git_env())
+    r = subprocess.run(["git", "ls-remote", url], env=env, capture_output=True, text=True)
+    return r.returncode == 0 and not r.stdout.strip()
 
 
 def large_files(cwd, limit_mb=50):

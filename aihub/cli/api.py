@@ -9,7 +9,7 @@ import urllib.request
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import paths
+from . import paths, tls
 
 SINGLE_MAX = 8 * 1024 * 1024      # at or below this, one request is fine under any sane proxy limit
 
@@ -30,7 +30,15 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
         return new
 
 
-_opener = urllib.request.build_opener(_SafeRedirect)
+class _Opener:
+    """Builds the opener per call so ca_bundle / insecure_tls changes apply immediately."""
+    def open(self, rq, timeout=None):
+        ctx = tls.context()
+        handlers = [_SafeRedirect] + ([urllib.request.HTTPSHandler(context=ctx)] if ctx else [])
+        return urllib.request.build_opener(*handlers).open(rq, timeout=timeout)
+
+
+_opener = _Opener()
 
 
 def _req(method, path, body=None, raw=None, headers=None, timeout=30):
@@ -54,7 +62,7 @@ def _req(method, path, body=None, raw=None, headers=None, timeout=30):
             msg = e.reason
         raise ApiError("%s %s: %s" % (e.code, path, msg))
     except urllib.error.URLError as e:
-        raise ApiError("cannot reach hub %s (%s)" % (hub, e.reason))
+        raise ApiError("cannot reach hub %s (%s)%s" % (hub, e.reason, tls.hint(e.reason)))
 
 
 def call(method, path, body=None, **kw):

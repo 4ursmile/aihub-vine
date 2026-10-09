@@ -33,6 +33,8 @@ curl -fsSL $HUB/api/v1/docs/manifest/raw              # aihub.toml fields, setup
 curl -fsSL $HUB/api/v1/docs/publishing-examples/raw   # worked examples to copy from
 ```
 
+**HTTPS with a private or self-signed certificate:** if `curl` reports a certificate error, add `--cacert /path/ca.pem` (preferred) or `-k` to the `curl` calls above, and for Python use `ssl._create_unverified_context()` as `context=`. Only do this for a hub the user trusts; `aihub config set ca_bundle <ca.pem>` / `insecure_tls true` makes the aihub CLI itself accept it.
+
 Without `curl`, use `python3 -c "import urllib.request,sys;print(urllib.request.urlopen(sys.argv[1]).read().decode())" URL`. For protected hubs add `-H "Authorization: Bearer $TOKEN"` (create a token with `aihub login`; never print or store it in project files).
 
 ## 3. Follow it

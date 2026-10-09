@@ -232,7 +232,15 @@ class Sync:
             return False
         work = os.path.join(self.s.data_dir, "index-repos")
         os.makedirs(work, exist_ok=True)
-        d = gitx.fetch(url, branch, base=work) if gitx.remote_head(url, branch) else None
+        if gitx.remote_head(url, branch):
+            d = gitx.fetch(url, branch, base=work)
+        elif gitx.remote_empty(url):                                    # new empty repo: start the index from scratch, push creates the branch
+            d = gitx.cache_dir(url, work)
+            if not os.path.isdir(os.path.join(d, ".git")):
+                gitx.run(["init", "-q"], cwd=d)
+                gitx.run(["remote", "add", "origin", url], cwd=d)
+        else:
+            d = None
         if d is None:
             results.append(("", "", "index repository not reachable"))
             return False
@@ -301,6 +309,8 @@ class Sync:
         if os.path.isdir(url):
             rd = pkgindex.open_source(url, path)
             return rd, getattr(rd, "root", {}).get("digest")
+        if gitx.remote_empty(url):
+            return pkgindex.Legacy({}), "empty"                        # new empty repo: nothing to read yet, not an error
         d = gitx.fetch(url, branch, base=os.path.join(self.s.data_dir, "repos"))
         return pkgindex.open_source(d, path), gitx.run(["rev-parse", "HEAD"], cwd=d)
 
