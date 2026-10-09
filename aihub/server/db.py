@@ -60,6 +60,8 @@ PERMS = {
     "publisher": ["publish", "review"],
     "user": ["publish", "review"],
 }
+# Permissions a visitor who is not signed in can never hold: they would hand out control of accounts and the audit trail
+ANON_LOCKED = ("admin", "manage_all", "reset_password", "audit", "create_groups")   # create_groups: groups need a real owner
 DESCR = {"admin": "Full access", "publisher": "Can publish and review", "user": "Default role for new accounts"}
 
 # Columns added after the first release. Existing databases get them via ALTER TABLE.
@@ -69,7 +71,7 @@ LATE_COLUMNS = [
     ("packages", "readme", "TEXT DEFAULT ''"), ("packages", "visibility", "TEXT NOT NULL DEFAULT 'public'"),
     ("events", "source", "TEXT"),
     ("events", "local_user", "TEXT"), ("events", "host", "TEXT"), ("events", "detail", "TEXT"), ("events", "cwd", "TEXT"), ("events", "ip", "TEXT"),
-    ("events", "ext_id", "TEXT"),
+    ("events", "ext_id", "TEXT"), ("reviews", "reviewer", "TEXT"),
 ]
 
 # a quoted string literal | a positional ? | a named :param (not the :: cast operator)
@@ -342,8 +344,10 @@ class DB:
                     for p in ps:
                         c.execute("INSERT OR IGNORE INTO role_permissions VALUES(?,?)", (r, p))
                 c.execute("INSERT OR IGNORE INTO app_settings VALUES('perms_seeded','1')")
+            c.execute("INSERT OR IGNORE INTO roles VALUES('anonymous','Visitors who are not signed in',1)")
             for p in ALL_PERMS:
                 c.execute("INSERT OR IGNORE INTO role_permissions VALUES('admin',?)", (p,))
+            c.execute("DELETE FROM role_permissions WHERE role='anonymous' AND permission IN (%s)" % ",".join("?" * len(ANON_LOCKED)), ANON_LOCKED)
             c.commit()
         finally:
             if self.engine == "postgres":

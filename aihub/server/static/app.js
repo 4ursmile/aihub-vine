@@ -29,7 +29,14 @@ function saveBlob(blob, name) { const a = document.createElement("a"); a.href = 
 const nav = (p) => (location.hash = "#" + p);
 const fmt = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n || 0));
 const ago = (t) => { const s = Date.now() / 1000 - t; return s < 3600 ? Math.max(1, s / 60 | 0) + "m ago" : s < 86400 ? (s / 3600 | 0) + "h ago" : s < 2592000 ? (s / 86400 | 0) + "d ago" : new Date(t * 1000).toLocaleDateString(); };
-const copy = async (t) => { try { await navigator.clipboard.writeText(t); toast("Copied"); } catch { toast("Copy failed", 1); } };
+// navigator.clipboard only exists on HTTPS / localhost; on plain http (or a denied permission) fall back to a hidden textarea
+const writeClip = async (t) => {
+  try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(t); return true; } } catch {}
+  const a = document.createElement("textarea"); a.value = t; a.setAttribute("readonly", ""); a.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  document.body.appendChild(a); a.select(); a.setSelectionRange(0, t.length);
+  let ok = false; try { ok = document.execCommand("copy"); } catch {} a.remove(); return ok;
+};
+const copy = async (t) => { (await writeClip(t)) ? toast("Copied") : toast("Copy failed", 1); };
 function useLoad(fn, deps) {
   const [s, setS] = useState({ loading: true });
   // keep the previous data visible while a new request is in flight (no flash, controls keep their options)
@@ -258,12 +265,14 @@ function Usage({ name }) {
 }
 function Reviews({ name, me, onDone }) {
   const [tick, setTick] = useState(0); const r = useLoad(() => api(`/packages/${name}/reviews`), [name, tick]);
-  const [rating, setRating] = useState(5); const [body, setBody] = useState("");
-  const post = async () => { try { await api(`/packages/${name}/reviews`, { method: "POST", body: { rating, body } }); toast("Thanks for your review"); setBody(""); setTick(tick + 1); onDone(); } catch (e) { toast(e.message, 1); } };
-  return html`<div class="stack">${me ? html`<div class="card stack"><div class="row"><b>Your rating</b><div class="seg">${[1, 2, 3, 4, 5].map((n) => html`<button key=${n} class=${rating === n ? "on" : ""} onClick=${() => setRating(n)}>${"★".repeat(n)}</button>`)}</div></div>
+  const [rating, setRating] = useState(5); const [body, setBody] = useState(""); const [who, setWho] = useState("");
+  const mt = useLoad(() => api("/meta"), []); const anonOk = !me && !!(mt.d && mt.d.anonymous_review);
+  const post = async () => { if (anonOk && who.trim().length < 2) return toast("Please enter your name", 1);
+    try { await api(`/packages/${name}/reviews`, { method: "POST", body: { rating, body, name: who.trim() } }); toast("Thanks for your review"); setBody(""); setTick(tick + 1); onDone(); } catch (e) { toast(e.message, 1); } };
+  return html`<div class="stack">${me || anonOk ? html`<div class="card stack">${anonOk && html`<input class="field" required maxlength="40" placeholder="Your name (required)" aria-label="Your name" value=${who} onInput=${(e) => setWho(e.target.value)} />`}<div class="row"><b>Your rating</b><div class="seg">${[1, 2, 3, 4, 5].map((n) => html`<button key=${n} class=${rating === n ? "on" : ""} onClick=${() => setRating(n)}>${"★".repeat(n)}</button>`)}</div></div>
       <textarea class="field" rows="3" style="padding:12px;resize:vertical" placeholder="Share your experience (optional)" value=${body} onInput=${(e) => setBody(e.target.value)}></textarea>
-      <button class="btn" onClick=${post}>Submit review</button></div>` : html`<p class="mut"><a href="#/login">Sign in</a> to leave a review.</p>`}
-    ${r.d && (r.d.reviews.length ? html`<div class="list">${r.d.reviews.map((x) => html`<div class="li" key=${x.username}><${Avatar} p=${x} size=${36} /><div class="t"><b>${shown(x)} <span class="mut3">${"★".repeat(x.rating)}</span></b>${x.title && html`<span class="xs mut3" style="display:block">${x.title}</span>`}<span>${x.body}</span></div><span class="xs mut3">${ago(x.created)}</span></div>`)}</div>` : html`<p class="mut">No reviews yet.</p>`)}</div>`;
+      <button class="btn" disabled=${anonOk && who.trim().length < 2} onClick=${post}>Submit review</button></div>` : html`<p class="mut"><a href="#/login">Sign in</a> to leave a review.</p>`}
+    ${r.d && (r.d.reviews.length ? html`<div class="list">${r.d.reviews.map((x) => html`<div class="li" key=${x.username || "anon:" + x.display_name}><${Avatar} p=${x.anonymous ? { username: x.display_name } : x} size=${36} /><div class="t"><b>${shown(x)} <span class="mut3">${"★".repeat(x.rating)}</span></b>${x.title && html`<span class="xs mut3" style="display:block">${x.title}</span>`}<span>${x.body}</span></div><span class="xs mut3">${ago(x.created)}</span></div>`)}</div>` : html`<p class="mut">No reviews yet.</p>`)}</div>`;
 }
 
 function Rankings() {
@@ -394,7 +403,7 @@ function Admin() {
 }
 const SC = { active: "green", pending: "orange", disabled: "red" };
 function People({ me, tick, bump }) {
-  const d = useLoad(async () => ({ users: (await api("/admin/users")).users, roles: Object.keys((await api("/admin/roles")).roles) }), [tick]);
+  const d = useLoad(async () => ({ users: (await api("/admin/users")).users, roles: Object.keys((await api("/admin/roles")).roles).filter((x) => x !== "anonymous") }), [tick]);
   const [q, setQ] = useState(""); const [batch, setBatch] = useState(false); const [ask, setAsk] = useState(null); const [pw, setPw] = useState(null);
   if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
   const st = async (u, status) => { try { await api(`/admin/users/${u}/status`, { method: "POST", body: { status } }); bump(); } catch (e) { toast(e.message, 1); } };
@@ -404,7 +413,7 @@ function People({ me, tick, bump }) {
   const reset = async (u) => { try { const r = await api(`/admin/users/${u}/reset-password`, { method: "POST" }); setPw(r); setAsk(null); bump(); } catch (e) { toast(e.message, 1); setAsk(null); } };
   return html`<div class="stack"><div class="row"><div style="flex:1;min-width:200px"><${Search} value=${q} onInput=${setQ} ph="Filter people" /></div>${adm && html`<button class="btn" onClick=${() => setBatch(!batch)}>${batch ? "Close" : "Create accounts in bulk"}</button>`}</div>
     ${pw && html`<div class="card stack" style="border:1px solid var(--orange)"><b>New password for ${pw.username}</b><div class="row"><code class="mono" style="font-size:18px;user-select:all">${pw.password}</code><span class="sp"></span>
-      <button class="btn sec sm" onClick=${() => { try { navigator.clipboard.writeText(pw.password); toast("Copied"); } catch {} }}>Copy</button><button class="btn sm" onClick=${() => setPw(null)}>Done</button></div>
+      <button class="btn sec sm" onClick=${() => { copy(pw.password) }}>Copy</button><button class="btn sm" onClick=${() => setPw(null)}>Done</button></div>
       <span class="xs mut3">Shown once. ${pw.username} was signed out everywhere and should change it after signing in (Account → Password).</span></div>`}
     ${batch && adm && html`<${BatchImport} roles=${d.d.roles} done=${bump} />`}
     <div class="list">${users.map((u) => html`<div class="li" key=${u.username}><${Avatar} p=${u} size=${36} /><div class="t"><b>${shown(u)}</b><span>${u.display_name ? u.username + " · " : ""}${u.title ? u.title + " · " : ""}${u.created ? "joined " + ago(u.created) : ""}</span></div>
@@ -429,17 +438,20 @@ function BatchImport({ roles, done }) {
     ${res && html`<div class="row"><span class="badge green">${res.created} created</span>${res.skipped ? html`<span class="badge orange">${res.skipped} skipped - see the “status” column in the sheet</span>` : null}<span class="xs mut3">Keep the sheet safe and delete it after sharing passwords.</span></div>`}</div>`;
 }
 function Roles({ tick, bump }) {
-  const d = useLoad(() => api("/admin/roles"), [tick]); const [nn, setNn] = useState(""); const [nd, setNd] = useState("");
+  const d = useLoad(async () => ({ ...(await api("/admin/roles")), anon: (await api("/admin/settings")).values }), [tick]); const [nn, setNn] = useState(""); const [nd, setNd] = useState("");
   if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
-  const roles = d.d.detail, perms = d.d.permissions;
+  const roles = d.d.detail, perms = d.d.permissions, locked = d.d.anon_locked || [];
+  const anon = d.d.anon, ANON = [["public_browse", "Browse public packages", "Signed-out visitors can browse packages, rankings and docs"], ["public_install", "Install public packages", "The CLI can install public packages without signing in"]];
+  const toggleAnon = async (k) => { try { await api("/admin/settings", { method: "PUT", body: { [k]: anon[k] === "1" ? "0" : "1" } }); bump(); } catch (e) { toast(e.message, 1); } };
   const toggle = async (r, p) => { const cur = new Set(r.permissions); cur.has(p) ? cur.delete(p) : cur.add(p);
     try { await api("/admin/roles/" + r.name, { method: "PUT", body: { permissions: [...cur] } }); bump(); } catch (e) { toast(e.message, 1); } };
   const create = async () => { try { await api("/admin/roles", { method: "POST", body: { name: nn, description: nd, permissions: [] } }); setNn(""); setNd(""); toast("Role created - now grant it permissions"); bump(); } catch (e) { toast(e.message, 1); } };
   const del = async (r) => { try { await api("/admin/roles/" + r.name, { method: "DELETE" }); toast("Role deleted"); bump(); } catch (e) { toast(e.message, 1); } };
-  return html`<div class="stack"><p class="mut">Tick what each role may do. Changes apply immediately. The <code>admin</code> role always keeps full access.</p>
+  return html`<div class="stack"><p class="mut">Tick what each role may do. The <code>anonymous</code> role is for visitors who are not signed in; it can never hold admin, manage all, reset password, audit or create groups. Changes apply immediately. The <code>admin</code> role always keeps full access.</p>
     <div class="list tscroll"><table class="matrix"><thead><tr><th>Permission</th>${roles.map((r) => html`<th key=${r.name} style="text-align:center"><div>${r.name}</div><div class="xs mut3" style="font-weight:400">${r.users} ${r.users === 1 ? "person" : "people"}</div></th>`)}</tr></thead><tbody>
       ${perms.map((p) => html`<tr key=${p.key}><td><b style="font-weight:500">${p.label}</b><div class="xs mut3 mono">${p.key}</div></td>${roles.map((r) => html`<td key=${r.name} style="text-align:center">
-        <input type="checkbox" class="chk" aria-label=${`${r.name}: ${p.label}`} checked=${r.permissions.includes(p.key)} disabled=${r.name === "admin"} onChange=${() => toggle(r, p.key)} /></td>`)}</tr>`)}
+        <input type="checkbox" class="chk" aria-label=${`${r.name}: ${p.label}`} checked=${r.permissions.includes(p.key)} disabled=${r.name === "admin" || (r.name === "anonymous" && locked.includes(p.key))} title=${r.name === "anonymous" && locked.includes(p.key) ? "Never available without signing in" : ""} onChange=${() => toggle(r, p.key)} /></td>`)}</tr>`)}
+      ${ANON.map(([k, label, help]) => html`<tr key=${k}><td><b style="font-weight:500">${label}</b><div class="xs mut3">${help}</div></td>${roles.map((r) => html`<td key=${r.name} style="text-align:center">${r.name === "anonymous" ? html`<input type="checkbox" class="chk" aria-label=${`anonymous: ${label}`} checked=${anon[k] === "1"} onChange=${() => toggleAnon(k)} />` : html`<input type="checkbox" class="chk" checked disabled title="Signed-in accounts always can" aria-label=${`${r.name}: ${label}`} />`}</td>`)}</tr>`)}
       <tr><td class="mut sm">Remove role</td>${roles.map((r) => html`<td key=${r.name} style="text-align:center">${r.builtin ? html`<span class="xs mut3">built-in</span>` : html`<button class="btn danger sm" onClick=${() => del(r)}>Delete</button>`}</td>`)}</tr></tbody></table></div>
     <div class="card stack"><h3>New role</h3><div class="row"><input class="field" style="flex:1;min-width:160px" placeholder="Name, e.g. analyst" value=${nn} onInput=${(e) => setNn(e.target.value)} />
       <input class="field" style="flex:2;min-width:200px" placeholder="Description (optional)" value=${nd} onInput=${(e) => setNd(e.target.value)} /><button class="btn" disabled=${!nn} onClick=${create}>Create role</button></div>
@@ -474,7 +486,7 @@ function AdminSettings() {
   const [tick, setTick] = useState(0); const d = useLoad(() => api("/admin/settings"), [tick]); const [busy, setBusy] = useState("");
   if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
   const set1 = async (k, v) => { setBusy(k); if (k === "cli_endpoint" && v) toast("Checking endpoint…"); try { await api("/admin/settings", { method: "PUT", body: { [k]: v } }); toast("Saved"); if (k === "theme_color") loadBrand(); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
-  const sections = [["Site", ["site_name", "theme_color", "cli_endpoint", "contact_name", "contact_email", "contact_url", "contact_phone"]], ["Access", ["signup", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility"]], ["Groups", ["allow_group_creation"]]];
+  const sections = [["Site", ["site_name", "theme_color", "cli_endpoint", "contact_name", "contact_email", "contact_url", "contact_phone", "announcement"]], ["Access", ["signup", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility"]], ["Groups", ["allow_group_creation"]]];
   const by = Object.fromEntries(d.d.schema.map((x) => [x.key, x]));
   const warn = d.d.values.public_install === "1";
   return html`<div class="stack"><div class="card row"><b>Server version</b><span class="mono">v${d.d.server_version}</span><span class="sp"></span><span class="xs mut3">CLIs on this hub self-update to this version (<code>aihub upgrade</code>)</span></div>${sections.map(([title, keys]) => html`<div class="stack" key=${title}><h3>${title}</h3><div class="list">${title === "Site" && html`<${LogoSetting} url=${d.d.logo_url} bump=${() => setTick(tick + 1)} />`}${keys.filter((k) => by[k]).map((k) => { const x = by[k], v = d.d.values[k]; if (x.type === "text") return html`<${TextSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; if (x.type === "number") return html`<${NumSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; const onoff = x.options.length === 2 && x.options[0] === "0";

@@ -4,9 +4,10 @@ import re
 import sqlite3
 import threading
 import time
+import zlib
 
 from ..core import version as V
-from .db import ALL_PERMS
+from .db import ALL_PERMS, ANON_LOCKED
 
 
 # Who an event belongs to: the signed-in account, else the OS user on the machine that ran it, else a short client id.
@@ -46,7 +47,7 @@ class Repos:
         return dict(r) if r else None
 
     def user_count(self):
-        return self.db.conn().execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        return self.db.conn().execute("SELECT COUNT(*) FROM users WHERE role<>'anonymous'").fetchone()[0]
 
     def user_create(self, username, pw_hash, role="user", status="active"):
         with self.lock:
@@ -74,7 +75,7 @@ class Repos:
     def users(self, q=""):
         return _rows(self.db.conn().execute(
             "SELECT id,username,display_name,title,avatar_v,role,status,auth_provider,created FROM users "
-            "WHERE username LIKE ? OR display_name LIKE ? ORDER BY id", ("%" + q + "%", "%" + q + "%")))
+            "WHERE role<>'anonymous' AND (username LIKE ? OR display_name LIKE ?) ORDER BY id", ("%" + q + "%", "%" + q + "%")))
 
     def profile_set(self, username, display_name=None, title=None):
         with self.lock:
@@ -135,7 +136,19 @@ class Repos:
             c.commit()
 
     def perms(self, role):
-        return {r[0] for r in self.db.conn().execute("SELECT permission FROM role_permissions WHERE role=?", (role,))}
+        got = {r[0] for r in self.db.conn().execute("SELECT permission FROM role_permissions WHERE role=?", (role,))}
+        return got - set(ANON_LOCKED) if role == "anonymous" else got
+
+    def anon_user(self):
+        """The shared, un-loginable account that actions by signed-out visitors are attributed to."""
+        u = self.user_by_name("anonymous")
+        if not u:
+            try:
+                self.user_create("anonymous", "!", "anonymous", "disabled")
+            except INTEGRITY:
+                pass
+            u = self.user_by_name("anonymous")
+        return u
 
     def roles(self):
         """{role: [permissions]} including roles that currently grant nothing."""
@@ -148,7 +161,7 @@ class Repos:
     def roles_detail(self):
         c = self.db.conn()
         perms = self.roles()
-        counts = {r[0]: r[1] for r in c.execute("SELECT role,COUNT(*) FROM users GROUP BY role")}
+        counts = {r[0]: r[1] for r in c.execute("SELECT role,COUNT(*) FROM users WHERE role<>'anonymous' GROUP BY role")}
         return [{"name": r["name"], "description": r["description"], "builtin": bool(r["builtin"]),
                  "permissions": perms.get(r["name"], []), "users": counts.get(r["name"], 0)}
                 for r in c.execute("SELECT * FROM roles ORDER BY builtin DESC, name")]
@@ -626,13 +639,21 @@ class Repos:
     # ---- reviews
     def reviews(self, pid):
         return _rows(self.db.conn().execute(
-            "SELECT u.username,u.display_name,u.title,u.avatar_v,r.rating,r.body,r.created FROM reviews r JOIN users u ON u.id=r.user_id "
+            "SELECT COALESCE(u.username,'') AS username,COALESCE(u.display_name,'') AS display_name,COALESCE(u.title,'') AS title,COALESCE(u.avatar_v,0) AS avatar_v,u.role,r.reviewer,r.rating,r.body,r.created FROM reviews r LEFT JOIN users u ON u.id=r.user_id "
             "WHERE package_id=? ORDER BY r.created DESC", (pid,)))
 
-    def review_upsert(self, pid, uid, rating, body):
+    def review_upsert(self, pid, uid, rating, body, reviewer=None):
+        """One review per person per package. Signed-out visitors all share one account, so `reviewer` (the typed name) is stored
+        with the review and a second review under the same name replaces the first, never someone else's."""
         with self.lock:
             c = self.db.conn()
-            c.execute("INSERT OR REPLACE INTO reviews VALUES(?,?,?,?,?)", (pid, uid, rating, body, time.time()))
+            if reviewer:
+                # the (package, user) primary key allows one row per account, so each anonymous name gets a stable negative key of its own
+                key = -(zlib.crc32(reviewer.lower().encode()) + 1)
+                c.execute("INSERT OR REPLACE INTO reviews(package_id,user_id,rating,body,created,reviewer) VALUES(?,?,?,?,?,?)",
+                          (pid, key, rating, body, time.time(), reviewer))
+            else:
+                c.execute("INSERT OR REPLACE INTO reviews(package_id,user_id,rating,body,created) VALUES(?,?,?,?,?)", (pid, uid, rating, body, time.time()))
             c.commit()
 
     def rating(self, pid):
@@ -880,9 +901,10 @@ class Repos:
     def overview(self, viewer=None):
         c = self.db.conn()
         vsql, va = self.visible_sql(viewer)
+        vsql = "packages.hidden=0 AND " + vsql              # same set the browse page and category counts use
         return {"packages": c.execute("SELECT COUNT(*) FROM packages WHERE " + vsql, va).fetchone()[0],
                 "versions": c.execute("SELECT COUNT(*) FROM versions v JOIN packages ON packages.id=v.package_id WHERE " + vsql, va).fetchone()[0],
-                "users": c.execute("SELECT COUNT(*) FROM users").fetchone()[0],
+                "users": c.execute("SELECT COUNT(*) FROM users WHERE status='active'").fetchone()[0],
                 "downloads": c.execute("SELECT COALESCE(SUM(v.downloads),0) FROM versions v JOIN packages ON packages.id=v.package_id WHERE " + vsql, va).fetchone()[0]}
 
 

@@ -22,7 +22,7 @@ from ..core import archive, manifest as M, naming, redact, version as V
 from .sync import parse_schedule
 from . import builtin, image, markdown, nethost, safehtml, sheet
 from .categories import category_of
-from .db import ALL_PERMS
+from .db import ALL_PERMS, ANON_LOCKED
 from .deps import can_develop, can_manage, current_user, require_any, require_perm, require_user, viewer_of
 from .security import hash_password, hash_token, new_token, verify_password
 
@@ -298,6 +298,7 @@ def branding(request):
 def meta(request: Request, u=Depends(current_user)):
     b = branding(request)
     return {"name": b["name"], "theme": b["theme"], "logo_url": b["logo_url"], "contact": b["contact"], "announcement": b.get("announcement", ""), "public_url": public_url(request),
+            "anonymous_review": "review" in R(request).perms("anonymous"),
             "cli_version": VERSION, "server_version": VERSION,
             "index_git_url": _index_public(request),
             "cli_git_url": env_first(request, "cli_git_url", "AIHUB_CLI_GIT_URL", _cli_default("git_url"))[0],
@@ -712,17 +713,23 @@ def my_packages(request: Request, u=Depends(require_user)):
 def reviews(name: str, request: Request, u=Depends(current_user)):
     need_login_unless(request, u, "public_browse")
     p = _pkg_or_404(request, name, u)
-    revs = [dict(_public(x), rating=x["rating"], body=x["body"], created=x["created"]) for x in R(request).reviews(p["id"])]
+    revs = [dict(_public(x), rating=x["rating"], body=x["body"], created=x["created"]) if x["role"] != "anonymous" and not x["reviewer"] else
+            {"username": "", "display_name": x["reviewer"] or "Anonymous", "title": "", "avatar_url": None, "anonymous": True,
+             "rating": x["rating"], "body": x["body"], "created": x["created"]} for x in R(request).reviews(p["id"])]
     return {"rating": R(request).rating(p["id"]), "reviews": revs}
 
 
 @r.post("/packages/{name}/reviews")
 def review_post(name: str, body: dict, request: Request, u=Depends(require_perm("review"))):
-    p = _pkg_or_404(request, name, u)
+    anon = u["role"] == "anonymous"
+    p = _pkg_or_404(request, name, None if anon else u)    # a signed-out visitor sees only what the public sees
     rating = int(body.get("rating", 0))
     if not 1 <= rating <= 5:
         raise HTTPException(400, "rating 1..5")
-    R(request).review_upsert(p["id"], u["id"], rating, str(body.get("body", ""))[:2000])
+    who = _clean(body.get("name", ""), 40) if anon else None
+    if anon and len(who) < 2:
+        raise HTTPException(400, "please enter your name (2-40 characters) to post a review")
+    R(request).review_upsert(p["id"], u["id"], rating, str(body.get("body", ""))[:2000], who)
     C(request).invalidate("pkg")
     return {"ok": True}
 
@@ -784,7 +791,7 @@ def a_status(username: str, body: dict, request: Request, u=admin):
 
 @r.post("/admin/users/{username}/role")
 def a_role(username: str, body: dict, request: Request, u=admin):
-    if body.get("role") not in R(request).roles():
+    if body.get("role") == "anonymous" or body.get("role") not in R(request).roles():
         raise HTTPException(400, "unknown role")
     R(request).user_set(username, role=body["role"])
     R(request).audit(u["username"], "user.role", username, body["role"])
@@ -1099,7 +1106,7 @@ def _perm_list(v):
 @r.get("/admin/roles")
 def a_roles(request: Request, u=admin):
     return {"roles": R(request).roles(), "detail": R(request).roles_detail(),
-            "permissions": [{"key": k, "label": v} for k, v in ALL_PERMS.items()]}
+            "permissions": [{"key": k, "label": v} for k, v in ALL_PERMS.items()], "anon_locked": list(ANON_LOCKED)}
 
 
 @r.post("/admin/roles")
@@ -1107,7 +1114,7 @@ def a_role_create(body: dict, request: Request, u=admin):
     name = str(body.get("name", "")).strip().lower()
     if not ROLE_RE.match(name):
         raise HTTPException(400, "role name: 2-32 chars, lowercase letters, digits, - or _, starting with a letter")
-    if name in R(request).roles():
+    if name == "anonymous" or name in R(request).roles():
         raise HTTPException(409, "role already exists")
     perms = _perm_list(body.get("permissions", []))
     R(request).role_create(name, str(body.get("description", ""))[:200], perms)
@@ -1121,6 +1128,8 @@ def a_role_update(name: str, body: dict, request: Request, u=admin):
     if name not in repos.roles():
         raise HTTPException(404, "role not found")
     perms = _perm_list(body["permissions"]) if "permissions" in body else None
+    if name == "anonymous" and perms and set(perms) & set(ANON_LOCKED):
+        raise HTTPException(400, "anonymous cannot hold: " + ", ".join(sorted(set(perms) & set(ANON_LOCKED))))
     if name == "admin" and perms is not None and "admin" not in perms:
         raise HTTPException(400, "the admin role must keep the admin permission")
     if perms is not None and name == u["role"] and "admin" not in perms:
@@ -1208,6 +1217,7 @@ def _batch_rows(rows, default_role):
 async def a_batch(request: Request, role: str = "user", u=admin):
     repos = R(request)
     roles = repos.roles()
+    roles.pop("anonymous", None)
     if role not in roles:
         raise HTTPException(400, "unknown default role: " + role)
     data = await request.body()

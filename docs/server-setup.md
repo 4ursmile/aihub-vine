@@ -20,6 +20,10 @@ python -m aihub.server --host 127.0.0.1 --port 8000 --data /var/lib/aihub --publ
 
 The options are `--host` (default `127.0.0.1`), `--port` (default `8000`), `--data` (default `./aihub-data`), and `--public-url`. If neither `--public-url` nor `AIHUB_PUBLIC_URL` is set, the public URL is derived from host and port. Set it to the exact externally reachable scheme, host, and optional path that clients use. AI Hub embeds it in package download URLs returned by `/api/v1/resolve` and in the generated `/install.sh`.
 
+### HTTP or HTTPS
+
+The server speaks plain HTTP unless you give it a certificate. `--ssl-cert cert.pem --ssl-key key.pem` (or `AIHUB_SSL_CERT` / `AIHUB_SSL_KEY`) makes it serve HTTPS directly; both are required together and the files must exist. Set `--public-url` to the matching `https://` address. If a reverse proxy terminates TLS, omit them and keep the server on HTTP behind the proxy.
+
 Check the service with `GET https://hub.example.com/api/v1/healthz`. It returns `{"ok":true}`.
 
 ## Environment variables

@@ -309,6 +309,9 @@ def cli():
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--data", default=None)
     ap.add_argument("--public-url", default=None)
+    ap.add_argument("--ssl-cert", default=None, help="TLS certificate (PEM). With --ssl-key the server speaks HTTPS; without them it speaks plain HTTP "
+                                                     "(env AIHUB_SSL_CERT)")
+    ap.add_argument("--ssl-key", default=None, help="TLS private key (PEM) for --ssl-cert (env AIHUB_SSL_KEY)")
     ap.add_argument("--env-file", default=None, help="path to a .env file (default: ./.env or <data>/.env)")
     ap.add_argument("--recover", default=None, choices=["ask", "local", "remote", "latest", "skip"],
                     help="when the local database and the git backup differ: ask (default), keep local, use the backup, take the latest, or skip the check "
@@ -323,14 +326,20 @@ def cli():
         raise SystemExit("aihub: " + str(e))
     host = a.host or os.environ.get("AIHUB_HOST") or "127.0.0.1"
     port = a.port or int(os.environ.get("AIHUB_PORT") or 8000)
+    cert, key = a.ssl_cert or os.environ.get("AIHUB_SSL_CERT"), a.ssl_key or os.environ.get("AIHUB_SSL_KEY")
+    if bool(cert) != bool(key):
+        raise SystemExit("aihub: --ssl-cert and --ssl-key must be given together")
+    for f in (cert, key):
+        if f and not os.path.isfile(f):
+            raise SystemExit("aihub: TLS file not found: " + f)
     if not a.public_url and "AIHUB_PUBLIC_URL" not in os.environ and s.public_url == Settings().public_url:
-        s.public_url = "http://%s:%d" % ("localhost" if host in ("0.0.0.0", "127.0.0.1") else host, port)
+        s.public_url = "%s://%s:%d" % ("https" if cert else "http", "localhost" if host in ("0.0.0.0", "127.0.0.1") else host, port)
     logging.basicConfig(level=s.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
     if a.check:
         raise SystemExit(check(s))
     from . import recover
     recover.run(s, a.recover)
-    uvicorn.run(create_app(s), host=host, port=port)
+    uvicorn.run(create_app(s), host=host, port=port, ssl_certfile=cert, ssl_keyfile=key)
 
 
 def check(s):

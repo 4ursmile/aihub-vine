@@ -21,17 +21,26 @@ def require_user(u=Depends(current_user)):
     return u
 
 
+def user_or_anon(request: Request, u=Depends(current_user)):
+    """The signed-in user, or the shared `anonymous` account when the visitor is not signed in (its role holds what anonymous may do)."""
+    return u or request.app.state.repos.anon_user()
+
+
 def require_perm(perm):
-    def dep(request: Request, u=Depends(require_user)):
+    def dep(request: Request, u=Depends(user_or_anon)):
         if perm not in request.app.state.repos.perms(u["role"]):
+            if u["role"] == "anonymous":
+                raise HTTPException(401, "authentication required")
             raise HTTPException(403, "missing permission: " + perm)
         return u
     return dep
 
 
 def require_any(*perms):
-    def dep(request: Request, u=Depends(require_user)):
+    def dep(request: Request, u=Depends(user_or_anon)):
         if not set(perms) & request.app.state.repos.perms(u["role"]):
+            if u["role"] == "anonymous":
+                raise HTTPException(401, "authentication required")
             raise HTTPException(403, "missing permission: " + " or ".join(perms))
         return u
     return dep

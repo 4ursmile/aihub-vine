@@ -28,6 +28,16 @@ pip install -r requirements-server.txt
 python -m aihub.server --host 127.0.0.1 --port 8000 --data ./aihub-data --public-url http://localhost:8000
 ```
 
+By default the server speaks plain HTTP. To serve HTTPS directly, pass a certificate and key (PEM) and an `https://` public URL:
+
+```sh
+python -m aihub.server --host 0.0.0.0 --port 8443 --data ./aihub-data \
+  --ssl-cert ./cert.pem --ssl-key ./key.pem --public-url https://localhost:8443
+# local test certificate: openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj /CN=localhost -keyout key.pem -out cert.pem
+```
+
+`AIHUB_SSL_CERT` and `AIHUB_SSL_KEY` do the same from `.env`. Both must be set together. Behind a reverse proxy that terminates TLS, leave them out, run plain HTTP and set `--public-url` to the proxy's `https://` address.
+
 The first account registered on a new server becomes its admin. Open Admin > Sync to enter your Langfuse keys and the git URL of the package index, and set how often the server pulls (seconds or a cron expression).
 
 Install the CLI from that server (the installer adds it to your `PATH`), or straight from git if the server is not reachable:
