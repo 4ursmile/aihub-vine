@@ -139,7 +139,9 @@ def cmd_setup(a):
 SETUP_FIELDS = (("langfuse_host", "LANGFUSE_BASE_URL", "Langfuse URL", False, ("langfuse", "host")),
                 ("langfuse_public_key", "LANGFUSE_PUBLIC_KEY", "Langfuse public key", False, None),
                 ("langfuse_secret_key", "LANGFUSE_SECRET_KEY", "Langfuse secret key", True, None),
-                ("index_url", "AIHUB_INDEX_URL", "Package index (git URL)", False, ("index", "git_url")))
+                ("index_url", "AIHUB_INDEX_URL", "Package index (git URL)", False, ("index", "git_url")),
+                ("index_branch", "AIHUB_INDEX_BRANCH", "Package index branch", False, ("index", "branch")),
+                ("index_path", "AIHUB_INDEX_PATH", "Package index folder", False, ("index", "path")))
 
 
 def resolve_missing(yes=False):

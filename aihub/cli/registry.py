@@ -66,12 +66,13 @@ def _reader(src, refresh=False):
         except gitx.GitError as e:
             if gitx.remote_empty(u):
                 return pkgindex.Legacy({})              # brand-new empty repo: a valid, empty index (the first publish fills it)
-            if not os.path.isdir(os.path.join(d, ".git")):
-                raise api.ApiError("cannot fetch package index: %s" % gitx.redact_url(str(e)))
+            if not os.path.isfile(stamp):               # never fetched successfully: the local folder is empty, so say why the fetch failed
+                raise api.ApiError("cannot fetch package index %s (branch '%s'): %s%s" % (
+                    gitx.redact_url(u), src["branch"], gitx.redact_url(str(e)), tls.hint(e)))
     try:
         return pkgindex.open_source(d, src["path"])
     except (OSError, ValueError) as e:
-        raise api.ApiError("cannot read package index: %s" % e)
+        raise api.ApiError("cannot read package index %s (branch '%s', folder '%s'): %s" % (gitx.redact_url(u), src["branch"], src["path"], e))
 
 
 _cache = {}

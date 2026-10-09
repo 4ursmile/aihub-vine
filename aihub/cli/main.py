@@ -278,9 +278,9 @@ def _check_backends(detail=False):
         else:
             try:
                 n = registry.count(refresh=True)
-                sp.text("Package index OK (%d packages)" % n)
+                sp.text("Package index OK (%d packages) - %s, branch %s, folder %s" % (n, gitx.redact_url(idx["url"]), idx["branch"], idx["path"]))
             except Exception as e:
-                sp.problem("package index unreachable: %s" % gitx.redact_url(str(e)))
+                sp.problem("package index unreachable [%s, branch %s]: %s" % (gitx.redact_url(idx["url"]), idx["branch"], gitx.redact_url(str(e))))
     s = langfuse.settings()
     with ui.Spinner("Checking Langfuse") as sp:
         if not langfuse.configured(s):

@@ -311,8 +311,15 @@ class Sync:
             return rd, getattr(rd, "root", {}).get("digest")
         if gitx.remote_empty(url):
             return pkgindex.Legacy({}), "empty"                        # new empty repo: nothing to read yet, not an error
-        d = gitx.fetch(url, branch, base=os.path.join(self.s.data_dir, "repos"))
-        return pkgindex.open_source(d, path), gitx.run(["rev-parse", "HEAD"], cwd=d)
+        try:
+            d = gitx.fetch(url, branch, base=os.path.join(self.s.data_dir, "repos"))
+        except gitx.GitError as e:
+            raise RuntimeError("cannot fetch %s (branch '%s'): %s" % (gitx.redact_url(url), branch, e))
+        try:
+            return pkgindex.open_source(d, path), gitx.run(["rev-parse", "HEAD"], cwd=d)
+        except FileNotFoundError:                                      # name the remote, not the server's local cache folder
+            raise RuntimeError("no package index in %s (branch '%s', folder '%s'): expected %s/root.json or index.json"
+                               % (gitx.redact_url(url), branch, path, path))
 
     def pull_index(self):
         try:
