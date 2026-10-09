@@ -329,17 +329,9 @@ def cmd_welcome(a):
         from ..core.release import BUILTIN_PACKAGES
         ui.out()
         ui.info("recommended: " + ", ".join("aihub install " + n for n in BUILTIN_PACKAGES))
-    if ask and not paths.load("credentials.json", {}).get("token"):
+    if not paths.load("credentials.json", {}).get("token"):
         ui.out()
-        choice = ui.select("Account", [("login", "I have an account - sign in"), ("register", "Create an account"),
-                                       ("skip", "Skip for now")])
-        try:
-            if choice == "login":
-                cmd_login(argparse.Namespace(username=None))
-            elif choice == "register":
-                cmd_register(None)
-        except (api.ApiError, ValueError, EOFError) as e:
-            ui.note("%s (you can retry later with aihub login)" % e)
+        ui.note("an account is optional: `aihub login` shows your name in usage reports")
     _mark_welcomed()
     ui.celebrate("All set")
     ui.out()
@@ -429,7 +421,9 @@ def dev_init(a):
     existing = os.path.exists(f) and not a.force
     made = []
     if not existing:
-        manifest, files, execs = templates.render(a.type, name, a.description or "")
+        from . import identity
+        who = identity.current()                      # signed-in hub username, else the local OS user name
+        manifest, files, execs = templates.render(a.type, name, a.description or "", [who["local_user"] if who["anonymous"] else who["user"]])
         with open(f, "w") as fh:
             fh.write(manifest)
         made.append("aihub.toml")
@@ -715,7 +709,7 @@ def build_parser():
         arg("--manual", action="store_true", help="Skip the hub and enter the values by hand."),
         arg("-y", "--yes", action="store_true", help="Accept defaults.json values without asking."))
     add("welcome", cmd_welcome, "Run first-time setup for detected AI tools.",
-        "Check the hub and detected tools, offer or install usage hooks and the built-in packaging skill, and optionally sign in or register. Interactive setup lets you choose; --yes accepts defaults without prompting.",
+        "Check the hub and detected tools, offer or install usage hooks and the built-in packaging skill, and hint at the optional account. Interactive setup lets you choose; --yes accepts defaults without prompting.",
         "Examples:\n  aihub welcome\n  aihub welcome --yes",
         arg("-y", "--yes", action="store_true", help="Accept setup defaults and do not prompt."))
     add("hook", cmd_hook, "Record one AI-tool usage event from standard input.",

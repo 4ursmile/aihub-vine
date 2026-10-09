@@ -278,6 +278,9 @@ def _ser(request, p, detail=False):
         lm = next((v["manifest"] for v in live), {})
         out["requires"] = lm.get("requires", {})
         out["manifest"] = lm
+        meta = lm.get("package") or {}
+        out["authors"] = meta.get("authors") or []
+        out["license"] = meta.get("license") or ""
         out["maintainers"] = [_public(m) | {"role": m["role"]} for m in repos.maintainers(p["id"])]
         out["versions"] = [{k: v[k] for k in ("version", "sha256", "size", "downloads", "yanked", "created")}
                            | {"source": source_url((v["manifest"] or {}).get("repo"))} for v in vs]

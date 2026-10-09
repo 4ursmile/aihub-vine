@@ -67,6 +67,22 @@ def parse(text: str) -> dict:
     return normalize(_toml.loads(text))
 
 
+def _authors(raw) -> list:
+    """authors = ["Ada <ada@x.org>", {name = "Bob", email = "b@x.org", url = "https://..."}] -> [{name, email?, url?}]."""
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    out = []
+    for a in raw or []:
+        if isinstance(a, dict):
+            a = {k: str(a[k]).strip() for k in ("name", "email", "url") if a.get(k)}
+        else:
+            m = re.match(r"^\s*(.*?)\s*(?:<([^>]*)>)?\s*$", str(a))
+            a = {k: v for k, v in (("name", m.group(1)), ("email", (m.group(2) or "").strip())) if v}
+        if a.get("name") or a.get("email"):
+            out.append(a)
+    return out
+
+
 def normalize(d: dict) -> dict:
     p = d.get("package") or {}
     if not p:
@@ -106,6 +122,7 @@ def normalize(d: dict) -> dict:
             "tags": [str(t).lower() for t in p.get("tags", [])],
             "readme": p.get("readme", "README.md"),
             "license": p.get("license", ""),
+            "authors": _authors(p.get("authors")),
         },
         "requires": {
             "commands": req.get("commands", []),  # [{name, hint}] or [str]

@@ -1,5 +1,7 @@
 """Starter projects for `aihub dev init --type ...`. Each is a complete, publishable project, not a stub:
 files = {relative path: content}. Placeholders: {name}, {title}, {Name}. Executable files are listed in EXEC."""
+import json
+import re
 
 README = """# {title}
 
@@ -187,6 +189,7 @@ description = "{description}"
 tags = []                         # lowercase words people search for
 readme = "README.md"
 license = "MIT"
+authors = []                      # e.g. ["Ada Lovelace <ada@example.com>"]; shown on the package page
 
 [requires]
 commands = []                     # e.g. [{{name = "git", hint = "brew install git"}}]
@@ -233,7 +236,7 @@ content = "hub=${{HUB}}\\n"
 }
 
 
-def render(typ, name, description=""):
+def render(typ, name, description="", authors=()):
     """-> (manifest_text, {path: content}, set_of_executable_paths) for a starter project."""
     if typ not in TEMPLATES:
         raise ValueError("unknown type %r; choose from %s" % (typ, ", ".join(sorted(TEMPLATES))))
@@ -243,4 +246,8 @@ def render(typ, name, description=""):
     t = TEMPLATES[typ]
     files = {p.format(**sub): c.format(**sub) for p, c in t["files"].items()}
     execs = {p.format(**sub) for p in EXEC} & set(files)
-    return t["manifest"].format(**sub), files, execs
+    manifest = t["manifest"].format(**sub)
+    if authors:
+        line = "authors = [%s]" % ", ".join(json.dumps(str(a), ensure_ascii=False) for a in authors)
+        manifest = re.sub(r"^authors = \[\].*$", lambda _: line, manifest, count=1, flags=re.M)
+    return manifest, files, execs

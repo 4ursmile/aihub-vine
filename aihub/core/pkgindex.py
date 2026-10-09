@@ -8,7 +8,7 @@ A lookup by name opens exactly one file (the path is computed, nothing is scanne
 entries. A publish rewrites one entry file and one catalog chunk, so git history and diffs stay small. The old single
 index.json ({"packages": [...]}) is still read (Legacy) and can be converted with `python -m aihub.core.pkgindex migrate`.
 
-Entry = {"name", "type", "description", "tags", "latest_version", "readme"?, "repo": {"url","branch","subdir"?},
+Entry = {"name", "type", "description", "tags", "authors"?, "license"?, "latest_version", "readme"?, "repo": {"url","branch","subdir"?},
          "python"?, "versions": [{"version", "ref"?, "repo"?, "requires"?: {"os","commands","packages"}, "manifest"?}]}
 Empty values are left out. `requires` lives on each version (most have none), never on the entry.
 """
@@ -240,7 +240,7 @@ def add(out, project, url, branch="main", subdir="", ref="", readme=False):
     versions = [v for v in e.get("versions", []) if v["version"] != p["version"]]
     versions.append({"version": p["version"], "ref": ref, "requires": m["requires"]})
     versions.sort(key=lambda v: [int(x) if x.isdigit() else 0 for x in v["version"].replace("-", ".").split(".")])
-    e.update(name=name, type=p["type"], description=p["description"], tags=p["tags"],
+    e.update(name=name, type=p["type"], description=p["description"], tags=p["tags"], authors=p["authors"], license=p["license"],
              latest_version=V.latest([v["version"] for v in versions]), versions=versions,
              repo={"url": url, "branch": branch, "subdir": subdir})
     if readme and e["latest_version"] == p["version"]:

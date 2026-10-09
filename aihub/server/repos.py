@@ -738,14 +738,29 @@ class Repos:
         if what in ("reviews", "reviewed"):
             return self.top_reviewed(what, limit, viewer)
         if what == "developers":
-            return _rows(c.execute(
-                "SELECT u.username AS name, COUNT(e.id) AS count FROM events e JOIN packages p ON p.name=e.package "
-                "JOIN package_maintainers m ON m.package_id=p.id JOIN users u ON u.id=m.user_id "
-                "WHERE e.ts>=? AND " + vsql + " GROUP BY u.username ORDER BY count DESC LIMIT ?", [since] + va + [limit]))
+            return self._top_developers(since, " AND " + vsql, va, limit)
         col = {"packages": "e.package", "users": ACTOR}[what]
         return _rows(c.execute(
             "SELECT %s AS name, COUNT(*) AS count FROM events e JOIN packages p ON p.name=e.package "
             "WHERE e.ts>=? AND %s IS NOT NULL AND %s GROUP BY 1 ORDER BY count DESC LIMIT ?" % (col, col, vsql), [since] + va + [limit]))
+
+    def _top_developers(self, since, flt, args, limit, until=None):
+        """Usage events per package, credited to every author in the latest live manifest (each author gets the full count).
+        A package that lists no authors credits its maintainers instead. `flt` is extra SQL on events e / packages p, starting
+        with AND (the rankings page passes visibility; the dashboard passes its whole filter set), so both pages agree."""
+        c = self.db.conn()
+        used = c.execute("SELECT p.id, COUNT(e.id) FROM events e JOIN packages p ON p.name=e.package "
+                         "WHERE e.ts>=?" + (" AND e.ts<?" if until else "") + flt + " GROUP BY p.id",
+                         [since] + ([until] if until else []) + list(args)).fetchall()
+        score = {}
+        for pid, n in used:
+            live = [v for v in self.versions(pid) if not v["yanked"]]
+            authors = [a.get("name") or a.get("email") for a in (((live[0]["manifest"] if live else {}).get("package") or {}).get("authors") or [])]
+            if not any(authors):
+                authors = [m["username"] for m in self.maintainers(pid)]
+            for a in {x.strip() for x in authors if x and x.strip()}:
+                score[a] = score.get(a, 0) + n
+        return [{"name": k, "count": v} for k, v in sorted(score.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]]
 
     def top_reviewed(self, mode, limit=20, viewer=None):
         """Best-rated packages (Bayesian average, so one 5-star review can't beat 200 reviews at 4.8) or most-reviewed.
@@ -873,6 +888,7 @@ class Repos:
                                  "SUM(e.kind='error') AS errors FROM events e WHERE e.ts>=?" + pf +
                                  " GROUP BY e.package ORDER BY count DESC LIMIT 10", [since] + pa),
             "top_reviewed": [dict(x, avg=round(float(x["avg"]), 2), score=round(float(x["score"]), 2)) for x in self.top_reviewed("reviews", 10, viewer)],
+            "top_developers": self._top_developers(since, pf, pa, 10),
             "top_users": rows("SELECT " + ACTOR + " AS name,COUNT(*) AS count FROM events e "
                               "WHERE e.ts>=? AND (e.username IS NOT NULL OR e.client_id IS NOT NULL)" + pf +
                               " GROUP BY 1 ORDER BY count DESC LIMIT 10", [since] + pa),

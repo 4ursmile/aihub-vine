@@ -354,6 +354,10 @@ class Sync:
                 man = v.get("manifest") or {"package": {"name": name, "version": v["version"], "type": p.get("type")},
                                             "requires": v.get("requires") or p.get("requires") or {}}
                 man["repo"] = dict(p.get("repo") or {}, ref=v.get("ref"))
+                meta = man.setdefault("package", {})
+                for k in ("authors", "license"):                       # entry-level (latest) values fill what the version lacks
+                    if p.get(k) and not meta.get(k):
+                        meta[k] = p[k]
                 self.repos.version_sync(pid, v["version"], man)
         self.repos.package_hide_missing(names)
         self.repos.set_setting("sync_index_hashes", json.dumps(hashes, separators=(",", ":")))

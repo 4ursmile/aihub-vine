@@ -192,6 +192,7 @@ function Package({ name }) {
     <p class="lead">${d.description}</p>
     <div class="row mut sm">${d.visibility === "private" && html`<span class="badge orange">private</span>`}<span>v${d.latest_version}</span><span>·</span><span>↓ ${fmt(d.downloads)}</span><${Stars} r=${d.rating.avg} /><span>· updated ${ago(d.updated)}</span>
       ${d.tags.map((t) => html`<a class="badge tag" key=${t} href=${"#/browse?tag=" + encodeURIComponent(t)}>${t}</a>`)}</div>
+    ${((d.authors || []).length || d.license) && html`<div class="row mut sm">${(d.authors || []).length ? html`<span>By ${d.authors.map((a, i) => html`<span key=${i}>${i ? ", " : ""}${a.url && /^https?:\/\//i.test(a.url) ? html`<a href=${a.url} target="_blank" rel="noopener noreferrer">${a.name || a.email}</a>` : a.email ? html`<a href=${"mailto:" + a.email}>${a.name || a.email}</a>` : a.name}</span>`)}</span>` : null}${d.license ? html`<span>${(d.authors || []).length ? "· " : ""}License: ${d.license}</span>` : null}</div>`}
     <${Cmd} text=${"aihub install " + d.name} />
     <div class="seg">${["Overview", "Install", "Versions", "Usage", "Reviews", ...(d.access === "admin" ? ["Sharing"] : [])].map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} onClick=${() => setTab(t)}>${t}</button>`)}</div>
     ${tab === "Overview" && html`<${Readme} name=${name} />`}
@@ -682,7 +683,8 @@ function Dashboard() {
       <div class="two"><div class="card stack"><h3>Most used packages</h3><${Bars} items=${D.top_packages} link=${true} /></div>
         <div class="card stack"><h3>Most used components</h3><${Bars} items=${(D.top_components || []).map((x) => ({ ...x, name: x.name }))} color="var(--green)" /></div></div>
       <div class="card stack"><div class="row"><h3>When people work</h3><span class="sp"></span><span class="xs mut3">weekday by hour, UTC</span></div><${Heatmap} grid=${D.heatmap} /></div>
-      <div class="two"><div class="card stack"><h3>Top people</h3><${Bars} items=${D.top_users} color="var(--green)" /></div><div class="card stack"><h3>Devices</h3><${Bars} items=${D.by_host || []} color="var(--orange)" /></div></div>
+      <div class="two"><div class="card stack"><h3>Top developers</h3><${Bars} items=${D.top_developers || []} color="var(--blue)" /></div><div class="card stack"><h3>Top people</h3><${Bars} items=${D.top_users} color="var(--green)" /></div></div>
+      <div class="two"><div class="card stack"><h3>Devices</h3><${Bars} items=${D.by_host || []} color="var(--orange)" /></div></div>
       <div class="three"><div class="card stack"><h3>By type</h3><${Donut} items=${D.by_type} /></div><div class="card stack"><h3>By tool</h3><${Donut} items=${D.by_source} /></div><div class="card stack"><h3>Signed in vs anonymous</h3><${Donut} items=${D.by_identity || []} /></div></div>
       <div class="card stack"><div class="row"><h3>Top rated</h3><span class="sp"></span><span class="xs mut3">all time</span></div>${D.top_reviewed.length ? html`<div>${D.top_reviewed.slice(0, 8).map((x) => html`<div class="hb" key=${x.name}><span class="hl"><a href=${"#/package/" + x.name}>${x.name}</a></span><span class="mut sm">${x.reviews} ${x.reviews === 1 ? "review" : "reviews"}</span><b>${x.avg}</b></div>`)}</div>` : html`<p class="mut sm">No reviews yet.</p>`}</div></div>`}
     ${f.tab === "activity" && (log.loading && !log.d ? html`<${Skels} n=2 />` : log.e ? html`<${Err} e=${log.e} /> ` : log.d && html`<div class="card stack"><div class="row"><h3>Activity log</h3><span class="sp"></span><span class="xs mut3">${log.d.total} events</span></div>

@@ -15,6 +15,7 @@ Each package archive contains an `aihub.toml` manifest. The CLI's `aihub dev ini
 | `tags` | `[]` | Tags are converted to lowercase strings. |
 | `readme` | `"README.md"` | Path of the README inside the package; lint warns if the file is missing. The index entry does not use this path: it stores the text of the first README found in the package root (`README.md`, `readme.md`, `Readme.md`, `README.markdown`, or `README`), capped at 20000 characters. |
 | `license` | `""` | License identifier or text. |
+| `authors` | `[]` | Who made the package, shown on its web page. Each entry is `"Name"`, `"Name <email>"`, or a table `{ name = "Name", email = "...", url = "https://..." }`. |
 
 Example:
 
@@ -27,6 +28,7 @@ description = "Small git workflow helpers"
 tags = ["git", "workflow"]
 readme = "README.md"
 license = "MIT"
+authors = ["Ada Lovelace <ada@example.com>"]
 ```
 
 ## Git source

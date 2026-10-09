@@ -185,6 +185,17 @@ class DashboardV2(unittest.TestCase):
         self.assertEqual(self.c.get("/api/v1/dashboard/events", headers=bh).status_code, 403)   # needs view_dashboard
         self.assertEqual(self.c.get("/api/v1/dashboard", headers=bh).status_code, 403)
 
+    def test_top_developers_come_from_manifest_authors(self):
+        pid = {n: self.r.package("alpha" if n == "a" else "beta")["id"] for n in "ab"}
+        pkg = lambda authors: {"package": {"name": "x", "version": "1.0.0", "authors": authors}}
+        self.r.version_sync(pid["a"], "1.0.0", pkg([{"name": "Ann"}, {"name": "Bo", "email": "b@x.org"}]))
+        self.r.version_sync(pid["b"], "1.0.0", pkg([{"name": "Ann"}]))
+        self.c.app.state.cache.invalidate("dash")
+        want = [{"name": "Ann", "count": 3}, {"name": "Bo", "count": 2}]          # alpha: 2 events, beta: 1
+        self.assertEqual(self.get("/dashboard", days=30).json()["top_developers"], want)
+        self.assertEqual(self.c.get("/api/v1/rankings/developers?days=30").json()["items"], want)
+        self.assertEqual(self.get("/dashboard", days=30, package="beta").json()["top_developers"], [{"name": "Ann", "count": 1}])
+
     def test_private_package_events_hidden_from_non_members(self):
         self.r.package_upsert("hush", "skill", "d", [], "", visibility="private")
         self.r.events_insert_ext([{"ts": time.time(), "kind": "use", "package": "hush", "client_id": "z", "username": None, "ext_id": "p1"}])
