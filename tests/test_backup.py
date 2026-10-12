@@ -20,7 +20,7 @@ class Scrub(unittest.TestCase):
         self.assertTrue(u["password_hash"].startswith("sha256:"))
         kept = "pbkdf2$ab$cd"
         self.assertEqual(B.scrub("users", {"password_hash": kept})["password_hash"], kept)
-        s = B.scrub("app_settings", {"key": "langfuse_secret_key", "value": "sk-lf-x"})
+        s = B.scrub("app_settings", {"key": "telemetry_secret_key", "value": "sk-tel-x"})
         self.assertTrue(s["value"].startswith("sha256:"))
         self.assertEqual(B.scrub("app_settings", {"key": "site_name", "value": "Hub"})["value"], "Hub")
         self.assertIn("[redacted]", B.scrub("events", {"detail": "token=abc123"})["detail"])
@@ -37,7 +37,7 @@ class Run(unittest.TestCase):
             s = Settings.load(env={}, env_file=os.path.join(t, "none.env"), data_dir=os.path.join(t, "data"), sync_enabled=False)   # isolated; cwd is a temp dir (see setUp)
             r = Repos(init_db(s))
             r.set_setting("index_url", bare)
-            r.set_setting("langfuse_secret_key", "sk-lf-supersecret1234567890")
+            r.set_setting("telemetry_secret_key", "sk-tel-supersecret1234567890")
             r.set_setting("backup_events_chunk", "1000")
             c = r.db.conn()
             for i in range(2500):
@@ -58,7 +58,7 @@ class Run(unittest.TestCase):
             tmp = os.path.join(t, "x.db")
             open(tmp, "wb").write(gzip.open(os.path.join(chk, "backups/db/app_settings.sqlite.gz")).read())
             rows = dict(sqlite3.connect(tmp).execute("SELECT key,value FROM app_settings").fetchall())
-            self.assertTrue(rows["langfuse_secret_key"].startswith("sha256:"))
+            self.assertTrue(rows["telemetry_secret_key"].startswith("sha256:"))
 
 
 if __name__ == "__main__":

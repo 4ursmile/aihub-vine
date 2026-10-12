@@ -335,7 +335,7 @@ class DB:
             for table, col, ddl in LATE_COLUMNS:
                 if col not in self._columns(c, table):
                     c.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, col, ddl))
-            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ev_ext ON events(ext_id)")   # Langfuse observation id: re-polling never duplicates
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ev_ext ON events(ext_id)")   # CLI event id: re-reading a batch never duplicates
             c.commit()
             self._init_fts(c)
             if not c.execute("SELECT 1 FROM app_settings WHERE key='perms_seeded'").fetchone():

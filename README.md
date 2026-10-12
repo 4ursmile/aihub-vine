@@ -1,6 +1,6 @@
 # AI Hub
 
-AI Hub is a command-line client and web dashboard for distributing AI coding tool packages (skills, agents, MCP server definitions, executables, setup profiles). Packages live in **git**, usage is recorded in **Langfuse**, and the server is a dashboard and catalogue that syncs from both. It stores no package files. See [docs/architecture.md](docs/architecture.md).
+AI Hub is a command-line client and web dashboard for distributing AI coding tool packages (skills, agents, MCP server definitions, executables, setup profiles). Packages live in **git**, usage events travel through **git** too (small batches pushed to an inbox repo), and the server is a dashboard and catalogue that syncs from both. It stores no package files. See [docs/architecture.md](docs/architecture.md).
 
 ## Architecture
 
@@ -8,11 +8,11 @@ AI Hub is a command-line client and web dashboard for distributing AI coding too
 Package author                         aihub CLI (Python 3.9+, stdlib only)
   aihub dev init / publish               install / search / update / hooks
         |                                   |                |
-        | git push                          | git clone      | OpenTelemetry spans
+        | git push                          | git clone      | batched git push
         v                                   v                v
-   Git remote (GitLab, GitHub, ...)  <- package files + index.json      Langfuse
+   Git remote (GitLab, GitHub, ...)  <- package files + index.json    refs/telemetry/*
         ^                                                               |
-        | read index                                                    | read events
+        | read index                                                    | fetch, store, archive
         +------------------ AI Hub server (FastAPI) --------------------+
                             SQLite or PostgreSQL, web UI, dashboard
 ```
@@ -38,17 +38,17 @@ python -m aihub.server --host 0.0.0.0 --port 8443 --data ./aihub-data \
 
 `AIHUB_SSL_CERT` and `AIHUB_SSL_KEY` do the same from `.env`. Both must be set together. Behind a reverse proxy that terminates TLS, leave them out, run plain HTTP and set `--public-url` to the proxy's `https://` address.
 
-The first account registered on a new server becomes its admin. Open Admin > Sync to enter your Langfuse keys and the git URL of the package index, and set how often the server pulls (seconds or a cron expression).
+The first account registered on a new server becomes its admin. Open Admin > Sync to enter the git URL of the package index (and, optionally, of the usage inbox), and set how often the server pulls (seconds or a cron expression).
 
 Install the CLI from that server (the installer adds it to your `PATH`), or straight from git if the server is not reachable:
 
 ```sh
 curl -fsSL http://localhost:8000/install.sh | sh   # asks before adding ~/.aihub/bin to your PATH; open a new terminal after
 pip install "aihub-cli @ git+https://your-git-host/team/aihub.git"      # alternative, needs only git and Python
-aihub setup                     # pulls the index location and, if your admin shares them, the Langfuse keys
+aihub setup                     # pulls the index location and the usage inbox
 ```
 
-Without a server, export `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `AIHUB_INDEX_URL`, or run `aihub setup --manual`.
+Without a server, export `AIHUB_INDEX_URL` (and `AIHUB_TELEMETRY_URL` if usage goes to another repo), or run `aihub setup --manual`.
 
 Create and publish a sample package. `dev init` creates a manifest and README and fills in the git location from your repo; `dev publish` commits and pushes it.
 
@@ -66,12 +66,12 @@ To have Claude Code or Codex package a new or existing project for you, install 
 
 ## Backends
 
-Choose SQLite or PostgreSQL for metadata and memory or Redis for cache in `.env`. See [Server configuration](docs/configuration.md) for deployment settings, [Architecture](docs/architecture.md) for how git, Langfuse and the server fit together, and [Publishing to AI Hub](docs/publishing.md) for package authoring.
+Choose SQLite or PostgreSQL for metadata and memory or Redis for cache in `.env`. See [Server configuration](docs/configuration.md) for deployment settings, [Architecture](docs/architecture.md) for how git and the server fit together, and [Publishing to AI Hub](docs/publishing.md) for package authoring.
 
 ## Features
 
 - Package search and version resolution from a git-hosted index; installs pinned to a commit.
-- Usage events in Langfuse (OpenTelemetry), synced into a dashboard with filters, a heatmap, top packages and developers, and an activity log. Developers are credited from the `authors` in each package's manifest.
+- Usage events batched through git (`refs/telemetry/*`, archived to a branch), synced into a dashboard with filters, a heatmap, top packages and developers, and an activity log. Developers are credited from the `authors` in each package's manifest.
 - Package maintainers, reviews, and ratings.
 - CLI support for Claude Code, Codex, and OpenCode integrations.
 - Manifest-declared commands, dependencies, Python environments, scripts, binaries, and setup steps.

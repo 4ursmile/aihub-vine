@@ -6,7 +6,7 @@ This is a bundled snapshot, condensed from the hub docs (cli, manifest, publishi
 
 - **Git** holds package files and the package index. The index is a folder in a git repo (default branch `main`, path `index`) with `root.json`, `catalog/` and `packages/<xx>/<name>.json`. An older single `index.json` is still read.
 - **Only the hub server writes the index.** The CLI only reads it. Nobody edits the index by hand.
-- **Langfuse** holds usage and lifecycle events (OpenTelemetry spans). The CLI writes them; the server reads them.
+- **The telemetry inbox** (a git repo, often the index repo) holds usage and lifecycle events as small batches on `refs/telemetry/*`. The CLI pushes them; the server ingests them, archives them to a branch and deletes the refs.
 - **The hub server** caches the index and events, and serves accounts, reviews and the web UI. It stores no package files and has no upload routes.
 - Package versions are immutable. A version that was published cannot be re-published.
 
@@ -24,7 +24,7 @@ aihub register          # prompts for username and password; signup policy appli
 aihub login             # prompts for username if omitted; password is not echoed
 ```
 
-- `aihub setup` asks the hub for the index location and, if the admin shares them, the Langfuse keys. `aihub setup --manual` works without a hub (see section 3).
+- `aihub setup` asks the hub for the index location and the telemetry inbox. `aihub setup --manual` works without a hub (see section 3).
 - `aihub welcome` runs first-time setup for detected tools. The hub installer and `welcome` also install the built-in skills.
 
 ## 3. Config precedence and keys
@@ -42,18 +42,18 @@ Keys and environment variables:
 | `hub` | `AIHUB_URL` (default when no saved `hub`) | Hub URL |
 | `index_url` | `AIHUB_INDEX_URL` | Git URL of the index repo, an `https://...json` URL, or a local file |
 | `index_branch` / `index_path` | - | Branch (default `main`) and folder (default `index`) in that repo |
-| `langfuse_*` | `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | Langfuse host and project keys |
+| `telemetry_url`, `telemetry_branch` | `AIHUB_TELEMETRY_URL`, `AIHUB_TELEMETRY_BRANCH` | Git repo CLIs push usage batches to, and the archive branch (default: bundled `defaults.json`, then the index repo) |
 | `telemetry_interval` | `AIHUB_TELEMETRY_INTERVAL` | Seconds per telemetry window (default 60, allowed 10 to 3600) |
 | `auto_update` | `AIHUB_NO_UPDATE=1` | Set `false` to turn off the daily self-update check |
 
 - `AIHUB_HOME` moves the CLI state directory from `~/.aihub` to another path.
 - Git credentials are never stored by AI Hub. They come from your git credential helper.
-- Without a hub: `aihub setup --manual`, or `aihub config set index_url <git url>`, or export `AIHUB_INDEX_URL`, `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`.
+- Without a hub: `aihub setup --manual`, or `aihub config set index_url <git url>`, or export `AIHUB_INDEX_URL` (and `AIHUB_TELEMETRY_URL`).
 
 Local files under `~/.aihub/`:
 
 ```text
-config.json       hub URL, index and Langfuse settings, client ID
+config.json       hub URL, index and telemetry settings, client ID
 credentials.json  hub login token (restrictive permissions)
 index-cache.json  cached copy of an http(s) .json index, used when it cannot be fetched
 state.json        installed packages (version, rev, dependencies, enabled)
@@ -86,7 +86,7 @@ aihub lock                        # write aihub.lock (commit it)
 aihub lock --check                # fail if the lock is out of date
 aihub sync                        # install exactly the locked commits
 aihub sync --check | --prune | --yes
-aihub doctor                      # index and Langfuse reachable? signed in? hooks? python3?
+aihub doctor                      # index and telemetry inbox reachable? signed in? hooks? python3?
 aihub version                     # CLI version and the one the hub offers
 aihub upgrade [--check|--force|--rollback]
 aihub flush                       # send queued usage events now
@@ -142,10 +142,10 @@ Codex has no native agent format, so agents become custom prompts. Skill folders
 - Usage hooks record when an installed component is used (skill, agent, or an MCP tool of an installed package). Calls to other tools are not recorded.
 - Install, update and uninstall events are recorded too; install and update include the version.
 - Claude Code: a `PreToolUse` hook in `~/.claude/settings.json`. OpenCode: `~/.config/opencode/plugin/aihub-usage.js`. Codex: no tool-call hook, so only install and uninstall events are sent.
-- Events are queued in `~/.aihub/queue/events.jsonl` (or `$AIHUB_HOME/queue/`). A background flusher sends them to Langfuse once per telemetry window (default 60 s). `aihub flush` sends immediately. The queue is capped at 5 MiB; extra events are dropped while it is over the cap.
-- Events wait in the queue while Langfuse is unconfigured or unreachable.
+- Events are queued in `~/.aihub/queue/events.jsonl` (or `$AIHUB_HOME/queue/`). A background flusher waits one telemetry window (default 15 s) so a burst becomes one batch, then pushes it to the inbox repo as one commit. Nothing is pushed when the queue is empty. `aihub flush` pushes immediately. The queue is capped at 5 MiB; extra events are dropped while it is over the cap.
+- Events wait in the queue (and are retried) while the inbox is unconfigured, unreachable or not writable.
 - Parameters are scrubbed on your machine before queueing: values under keys like `password`, `token`, `secret`, `api_key`, `authorization`, `Bearer ...` headers, `password=...` text, passwords in URLs, and common key formats are replaced with `[redacted]`. Pattern-based scrubbing cannot catch every secret.
-- Each record carries the working directory, host name and OS user name. Events go to Langfuse under the signed-in account name, or `~<OS user>` when not signed in. That name comes from the client and is not verified.
+- Each record carries the working directory, host name and OS user name. Events are recorded under the signed-in account name, or `~<OS user>` when not signed in. That name comes from the client and is not verified.
 - Event names: `aihub.use`, `aihub.install`, `aihub.update`, `aihub.uninstall`, `aihub.error`, `aihub.publish`.
 - Hook handling is fast, non-blocking and never fatal to the coding tool.
 - Hooks: `aihub hooks install` and `aihub hooks remove` (`--tool` may repeat).
@@ -234,7 +234,7 @@ aihub uninstall <name>
 1. Reads `[git]` (`url`, `branch`, `subdir`) from `aihub.toml`. `dev init` fills it from `origin` and the current branch.
 2. Checks that the repo's remote and branch still match `[git]`, and stops if they do not.
 3. Runs `git init` and adds `origin` if needed, tracks files over 50 MB with git-lfs (stops if git-lfs is missing), commits, and pushes (setting upstream the first time).
-4. Sends a public `aihub.publish` event (package, version, commit, repo, branch) through Langfuse. It is queued if Langfuse is unreachable.
+4. Sends a public `aihub.publish` event (package, version, commit, repo, branch) to the telemetry inbox right away. It is queued if the inbox is unreachable.
 
 It does not edit any index and never needs to. Afterwards the hub reads the event on its next sync (about 60 s, so 1 to 2 minutes), fetches the repo at that commit, checks `aihub.toml`, writes the index entry with its README, and pushes an `index: ...` commit. The package then appears in search, and its version shows a Source link to the commit. Do not edit the index by hand.
 
@@ -376,7 +376,7 @@ All routes use `/api/v1`. Send `Authorization: Bearer <token>` on protected rout
 - Public: `GET /meta`, `GET /healthz`, `GET /packages?q=&type=&tag=&sort=&page=&per_page=` (per_page 1 to 100), `GET /facets`, `GET /packages/{name}`, `GET /packages/{name}/versions`, `GET /packages/{name}/readme`, `GET /resolve?name=&spec=`, `POST /resolve/tree`, `GET /packages/{name}/reviews`, `GET /packages/{name}/stats?days=30`, `GET /rankings/{what}?days=30`, `GET /stats/overview`.
 - Docs: `GET /api/v1/docs` (list), `GET /api/v1/docs/{slug}/raw` (Markdown). Live endpoint list: `/openapi.json`.
 - Auth: `POST /auth/register`, `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST /auth/password`, `GET|POST /auth/tokens`, `DELETE /auth/tokens/{id}`.
-- Client config: `GET /client-config` (index location; Langfuse keys only if an admin shares them and the caller is signed in or sends `?code=<enrollment code>`).
+- Client config: `GET /client-config` (index and telemetry locations, never credentials).
 - Maintainers and access (signed in, maintainer or admin): `GET|POST /packages/{name}/maintainers`, `DELETE /packages/{name}/maintainers/{username}`, `PATCH /packages/{name}`, `GET /me/packages`.
 - Reviews: `POST /packages/{name}/reviews` with `{"rating":1..5,"body":"..."}` (needs `review` permission).
 - Admin (needs `admin`): `GET|PUT /admin/sync`, `POST /admin/sync/run?full=false`, `GET|PUT /admin/backup`, `POST /admin/backup/run`, `GET|PUT /admin/settings/registration` (`open`, `approval`, `closed`), `GET|PUT /admin/settings`, `GET /admin/roles`, `GET /admin/users?q=`, `POST /admin/users/{u}/status|role|reset-password`, `DELETE /admin/users/{u}`, `GET /admin/audit`.
@@ -408,7 +408,7 @@ All routes use `/api/v1`. Send `Authorization: Bearer <token>` on protected rout
 | `AIHUB_ENV_FILE` | unset | Selects a `.env` file |
 | `AIHUB_INDEX_URL` | empty | Index repo URL (environment wins over Admin > Sync) |
 | `AIHUB_INDEX_BRANCH`, `AIHUB_INDEX_PATH` | `main`, `index` | Branch and folder of the index |
-| `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | empty | Langfuse host and keys (the server only reads from it) |
+| `AIHUB_TELEMETRY_URL`, `AIHUB_TELEMETRY_BRANCH` | defaults.json, then the index repo / `telemetry-archive` | Telemetry inbox repo and archive branch (CLIs and the server need push rights) |
 | `AIHUB_CLI_GIT_URL`, `_BRANCH`, `_SUBDIR` | empty | Where `pip install` gets the CLI when the server is unreachable |
 | `AIHUB_BACKUP_ENABLED` | `0` | Backup schedule on or off (real environment only; else admin `backup_enabled`) |
 
@@ -419,7 +419,7 @@ All routes use `/api/v1`. Send `Authorization: Bearer <token>` on protected rout
 
 ## 14. Architecture in one paragraph
 
-The CLI reads the index from git and clones each package repo at the entry's ref, then follows that repo's `aihub.toml` to install and register. It records the commit; `lock` pins it and `sync` reinstalls exactly it. Usage events go to Langfuse as spans. The hub pulls those spans and the index on a schedule and serves the catalogue, accounts and dashboard. Git and Langfuse apply their own access rules; the hub adds none in front of them.
+The CLI reads the index from git and clones each package repo at the entry's ref, then follows that repo's `aihub.toml` to install and register. It records the commit; `lock` pins it and `sync` reinstalls exactly it. Usage events are pushed to a git inbox repo in batches. The hub fetches those batches and the index on a schedule and serves the catalogue, accounts and dashboard. Git applies its own access rules; the hub adds none in front of it.
 
 ## 15. Troubleshooting
 
@@ -446,4 +446,4 @@ The CLI reads the index from git and clones each package repo at the entry's ref
 | Prompt in CI hangs or install skipped | stdin is closed and counts as "no"; use `--yes` |
 | `codex` MCP name already defined | `~/.codex/config.toml` already has `[mcp_servers.<name>]`; the CLI will not overwrite it |
 | Usage events missing for Codex | Codex has no tool-call hook; only install and uninstall events are sent |
-| Events not appearing in Langfuse | Check `aihub doctor` and `aihub flush`; events wait in the queue while Langfuse is unreachable |
+| Events not appearing in the dashboard | Check `aihub doctor` and `aihub flush`; events wait in the queue while the telemetry inbox is unreachable or not writable. The hub ingests on its sync schedule |

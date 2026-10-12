@@ -1,7 +1,8 @@
-"""Pulls the world into SQLite: usage events from Langfuse, package metadata from the git index.
+"""Pulls the world into SQLite: usage events from the git inbox, package metadata from the git index.
 
-- Events: polled by observation id (events.ext_id is unique), so overlap, restarts and several servers never
-  duplicate or lose rows. First run (no cursor) looks back over everything.
+- Events: CLIs push batches to refs/telemetry/<client>/<batch> in the inbox repo. The server fetches them, stores the rows
+  (events.ext_id is the event id and unique, so restarts and several servers never duplicate rows), copies the raw batch to
+  the `telemetry-archive` branch, and only then deletes the refs. A failure at any step leaves the refs for the next pass.
 - Index: the server is the only writer. A new `aihub.publish` event (public data sent by the CLI) makes the server fetch that
   package repo at the published commit, read its aihub.toml, update the index repo and push; then the index is re-read.
 """
@@ -12,14 +13,15 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from ..cli import gitx, langfuse
+from ..cli import gitx
 from ..core import naming, pkgindex, redact
 from . import nethost
 
 log = logging.getLogger("aihub")
-OVERLAP = 300          # seconds re-read behind the cursor; ext_id makes the overlap harmless
-KINDS = {"aihub.use": "use", "aihub.install": "install", "aihub.uninstall": "uninstall",
-         "aihub.update": "update", "aihub.error": "error", "aihub.publish": "publish"}
+KINDS = {"use", "install", "uninstall", "update", "error", "publish"}
+ARCHIVE = "telemetry-archive"
+MAX_BATCH_BYTES = 5 * 1024 * 1024       # a ref bigger than this is dropped unread (a client only ever sends ~BATCH events)
+MAX_REFS = 500                          # refs ingested per pass; the rest wait for the next one
 
 
 def _field(spec, lo, hi):
@@ -78,21 +80,7 @@ def next_delay(schedule, now=None):
     return 3600
 
 
-def _ts(iso):
-    try:
-        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
-    except Exception:
-        return time.time()
-
-
-def _iso(t):
-    return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
 SCHEMES = ("https://", "http://", "ssh://", "git@")      # transports a publish event may name (tests add file://)
-MAX_COUNT = 1000      # calls one span may stand for; bounds rows per observation
-
-
 OS_NAMES = {"darwin": "macOS", "linux": "Linux", "win32": "Windows", "cygwin": "Windows", "freebsd": "FreeBSD"}
 
 
@@ -104,38 +92,27 @@ def _os(v):
     return OS_NAMES.get(v) or redact.text(v, 24)
 
 
-def to_rows(o):
-    """Langfuse observation -> events rows. A span carries `count` calls (the CLI rolls calls up per window), stored as
-    that many rows so every dashboard query stays a plain COUNT. Row ids are <observation id>#<n>: re-reads add nothing."""
-    base = to_row(o)
-    if not base:
-        return []
-    try:
-        n = max(1, min(int(float((o.get("metadata") or {}).get("count") or 1)), MAX_COUNT))
-    except (TypeError, ValueError):
-        n = 1
-    if n == 1:
-        return [base]
-    return [dict(base, ext_id="%s#%d" % (o["id"], i)) for i in range(n)]
-
-
-def to_row(o):
-    """Langfuse observation -> one events row (None if it is not one of ours)."""
-    kind = KINDS.get(o.get("name") or "")
-    m = o.get("metadata") or {}
-    if not kind or not m.get("package"):
+def to_row(e):
+    """One event from a CLI batch -> an events row (None if it is not one of ours). Everything in it is untrusted input."""
+    if not isinstance(e, dict):
         return None
-    uid = o.get("userId") or m.get("user") or ""
+    kind = e.get("kind")
+    if kind not in KINDS or not e.get("package") or not e.get("id"):
+        return None
+    uid = str(e.get("user") or "")
     anon = uid.startswith("~") or not uid
-    return {"ts": _ts(o.get("startTime") or ""), "kind": kind, "package": naming.normalize(str(m["package"])),
-            "version": m.get("version"), "client_id": m.get("client_id"),
-            "username": None if anon else str(uid)[:64], "component": str(m["component"])[:120] if m.get("component") else None,
+    try:
+        ts = min(float(e.get("ts")), time.time() + 86400)       # a client clock in the far future must not pin itself to "now" forever
+    except (TypeError, ValueError):
+        ts = time.time()
+    return {"ts": ts, "kind": kind, "package": naming.normalize(str(e["package"])),
+            "version": redact.text(e.get("version"), 64), "client_id": redact.text(e.get("client_id"), 64),
+            "username": None if anon else uid[:64], "component": str(e["component"])[:120] if e.get("component") else None,
             "duration": None,
-            "source": m.get("source") if m.get("source") in ("claude", "opencode", "codex", "cli") else None,
-            # Langfuse content is untrusted input: scrub it exactly as the old POST /events did
-            "local_user": redact.text(uid[1:] if uid.startswith("~") else m.get("local_user"), 64),
-            "host": redact.text(m.get("host"), 128), "os": _os(m.get("os")), "detail": redact.text(m.get("detail"), 2200),
-            "cwd": redact.text(m.get("cwd"), 200), "ip": None, "ext_id": o["id"]}
+            "source": e.get("source") if e.get("source") in ("claude", "opencode", "codex", "cli") else None,
+            "local_user": redact.text(e.get("local_user"), 64),
+            "host": redact.text(e.get("host"), 128), "os": _os(e.get("os")), "detail": redact.text(e.get("detail"), 2200),
+            "cwd": redact.text(e.get("cwd"), 200), "ip": None, "ext_id": str(e["id"])[:64]}
 
 
 class Sync:
@@ -152,10 +129,15 @@ class Sync:
     def cfg(self, key, env, default=""):
         return self.s.env_get(env) or self.repos.setting(key, "") or default
 
-    def lf(self):
-        return {"host": self.cfg("langfuse_host", "LANGFUSE_BASE_URL").rstrip("/") or self.s.env_get("LANGFUSE_HOST").rstrip("/"),
-                "public": self.cfg("langfuse_public_key", "LANGFUSE_PUBLIC_KEY"),
-                "secret": self.cfg("langfuse_secret_key", "LANGFUSE_SECRET_KEY")}
+    def inbox(self):
+        """Git URL holding refs/telemetry/*: AIHUB_TELEMETRY_URL > admin setting > defaults.json > the package index repo."""
+        from ..core import defaults
+        return (self.cfg("telemetry_url", "AIHUB_TELEMETRY_URL") or defaults.load().get("telemetry", {}).get("git_url", "")
+                or self.index_source()[0])
+
+    def archive_branch(self):
+        from ..core import defaults
+        return self.cfg("telemetry_branch", "AIHUB_TELEMETRY_BRANCH") or defaults.load().get("telemetry", {}).get("branch", "") or ARCHIVE
 
     def delay(self):
         try:
@@ -186,51 +168,164 @@ class Sync:
 
     # ----- one pass
     def run_once(self):
-        lf = self.lf()
         first = not self.repos.setting("sync_cursor")
         new_publish = False
-        if langfuse.configured(lf):
-            new_publish = self.pull_events(lf)
+        if self.inbox() and not os.path.isfile(self.inbox()):
+            if self._needs_replay():
+                self.replay_archive()
+            new_publish = self.pull_events()
         if first or new_publish or self.repos.setting("sync_index_dirty") == "1":
             self.pull_index()
+        self.repos.set_setting("sync_cursor", time.time())             # "an events pass completed"; empty = never (first run, forced re-sync)
         self.status.update(last_run=time.time(), last_error=None)
 
-    def pull_events(self, lf):
-        cursor = self.repos.setting("sync_cursor")
-        if not self._lookback_checked:
-            self._lookback_checked = True
-            # Cursor says "pulled up to here" but no pulled event is stored (database replaced, partial restore):
-            # trust nothing, read Langfuse's whole retention again. Inserts are idempotent on ext_id.
-            if cursor and not self.repos.db.conn().execute("SELECT 1 FROM events WHERE ext_id IS NOT NULL LIMIT 1").fetchone():
-                cursor = None
-        since = _iso(float(cursor) - OVERLAP) if cursor else None      # None = full lookback
-        started = time.time()
-        rows, publish, pubs = [], False, {}
-        for o in langfuse.fetch_observations("aihub.", since=since, s=lf):
-            if o.get("name") == "aihub.publish":
-                m = o.get("metadata") or {}
-                if m.get("package") and m.get("version") and m.get("git_url"):
-                    pubs[(naming.normalize(str(m["package"])), str(m["version"]))] = m      # latest event per version wins
-            for r in to_rows(o):
+    def _needs_replay(self):
+        """True when the cursor says events were pulled before but the table holds none (database replaced / lost), or an admin asked
+        for a full re-sync (cursor cleared). The archive branch then restores everything the refs no longer carry."""
+        if not self.repos.setting("sync_cursor"):
+            return True
+        if self._lookback_checked:
+            return False
+        self._lookback_checked = True
+        return not self.repos.db.conn().execute("SELECT 1 FROM events WHERE ext_id IS NOT NULL LIMIT 1").fetchone()
+
+    def replay_archive(self):
+        """Re-insert every event stored on the archive branch. Idempotent (ext_id is unique), so running it over a healthy database
+        adds nothing. -> number of rows inserted."""
+        url, branch = self.inbox(), self.archive_branch()
+        if not gitx.remote_head(url, branch):
+            return 0                                                    # nothing archived yet (or archiving was off)
+        d = self._inbox_dir(url)
+        gitx.run(["fetch", "-q", "--no-tags", "origin", branch], cwd=d, timeout=300)
+        files = [f for f in gitx.run(["ls-tree", "-r", "--name-only", "FETCH_HEAD", "archive/"], cwd=d, check=False).splitlines()
+                 if f.endswith(".jsonl")]
+        total, rows = 0, []
+        for f in sorted(files):
+            raw = gitx.run(["show", "FETCH_HEAD:" + f], cwd=d, check=False)
+            for line in raw.splitlines():
+                try:
+                    r = to_row(json.loads(line))
+                except ValueError:
+                    continue
+                if r:
+                    rows.append(r)
+            if len(rows) >= 1000:
+                total += self._store(rows)
+                rows = []
+        total += self._store(rows)
+        if total:
+            log.info("restored %d event(s) from the %s branch", total, branch)
+        self.status["events_total"] += total
+        return total
+
+    def _inbox_dir(self, url):
+        work = os.path.join(self.s.data_dir, "telemetry-repo")
+        os.makedirs(work, exist_ok=True)
+        d = gitx.cache_dir(url, work)
+        if not os.path.isdir(os.path.join(d, ".git")):
+            gitx.run(["init", "-q"], cwd=d)
+            gitx.run(["remote", "add", "origin", url], cwd=d)
+        else:
+            gitx.run(["remote", "set-url", "origin", url], cwd=d)
+        return d
+
+    def pull_events(self):
+        """Fetch every pending batch, store its rows, archive it, and only then delete its ref. -> True when a publish event arrived."""
+        url = self.inbox()
+        d = self._inbox_dir(url)
+        gitx.run(["fetch", "-q", "--no-tags", "origin", "+refs/telemetry/*:refs/telemetry/*"], cwd=d, timeout=120)
+        refs = [r for r in gitx.run(["for-each-ref", "--format=%(refname)", "refs/telemetry/"], cwd=d).splitlines() if r]
+        refs = sorted(refs)[:MAX_REFS]
+        rows, pubs, publish, batches, done = [], {}, False, [], []
+        for ref in refs:
+            size = gitx.run(["cat-file", "-s", ref + ":events.jsonl"], cwd=d, check=False)
+            raw = gitx.run(["show", ref + ":events.jsonl"], cwd=d, check=False) if size.isdigit() and int(size) <= MAX_BATCH_BYTES else ""
+            good = []
+            for line in raw.splitlines():
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                r = to_row(e)
+                if not r:
+                    continue
+                good.append(line)
                 rows.append(r)
-                publish = publish or (r["kind"] == "publish")
+                publish = publish or r["kind"] == "publish"
+                if r["kind"] == "publish" and e.get("version") and e.get("git_url"):
+                    pubs[(r["package"], str(e["version"]))] = e                 # latest event per version wins
+            batches.append((ref, good))
+            done.append(ref)
             if len(rows) >= 1000:
                 self._store(rows)
                 rows = []
         n = self._store(rows)
+        self.status["events_total"] += n
         if pubs:
             try:
                 if self.update_index(list(pubs.values())):
                     publish = True
-            except Exception as e:                                      # events stay stored; the cursor stays put so the next pass retries
+            except Exception as e:                                      # events are stored; the refs stay so the next pass retries the index
                 self.status["last_error"] = "index update: " + gitx.redact_url(str(e))[:250]
                 log.warning("index update failed: %s", gitx.redact_url(str(e)))
-                self.status["events_total"] += n
                 return False
-        self.repos.set_setting("sync_cursor", started - 1)             # only advanced after a fully successful pass
-        new = self.status["events_total"] + n
-        self.status["events_total"] = new
-        return publish and (n > 0 or not cursor)
+        if done and self._archive(d, batches):                          # raw copy is safe in git: the refs can go
+            for i in range(0, len(done), 50):
+                gitx.run(["push", "-q", "origin", "--delete"] + done[i:i + 50], cwd=d, check=False, timeout=60)
+            for ref in done:
+                gitx.run(["update-ref", "-d", ref], cwd=d, check=False)
+            gitx.run(["gc", "-q", "--prune=now"], cwd=d, check=False, timeout=120)
+        return publish and n > 0
+
+    def _archive(self, d, batches):
+        """Write each batch as archive/<day>/<client>-<batch>.jsonl on the archive branch and push it. The path is derived from the
+        ref, so doing it twice writes the same file. -> True when the archive holds the batches (or archiving is off)."""
+        if self.repos.setting("telemetry_archive", "1") == "0":
+            return True
+        batches = [(ref, good) for ref, good in batches if good]
+        if not batches:
+            return True
+        work = os.path.join(d, ".archive")
+        branch = self.archive_branch()
+        try:
+            for attempt in range(3):
+                if gitx.remote_head(self.inbox(), branch):
+                    gitx.run(["fetch", "-q", "--no-tags", "origin", branch], cwd=d, timeout=120)
+                    base = gitx.run(["rev-parse", "FETCH_HEAD"], cwd=d)
+                else:
+                    base = ""
+                gitx.run(["worktree", "prune"], cwd=d, check=False)
+                if os.path.isdir(work):
+                    gitx.run(["worktree", "remove", "--force", work], cwd=d, check=False)
+                if base:
+                    gitx.run(["worktree", "add", "-q", "--detach", work, base], cwd=d)
+                else:                                                   # first batch ever: start the archive branch from nothing
+                    os.makedirs(work, exist_ok=True)
+                    gitx.run(["init", "-q"], cwd=work)
+                    gitx.run(["checkout", "-q", "--orphan", branch], cwd=work)
+                for ref, good in batches:
+                    _, _, client, batch = ref.split("/", 3)                # refs/telemetry/<client>/<unix>-<rand>
+                    stamp = batch.split("-", 1)[0]
+                    day = time.strftime("%Y-%m-%d", time.gmtime(int(stamp) if stamp.isdigit() else time.time()))
+                    out = os.path.join(work, "archive", day)
+                    os.makedirs(out, exist_ok=True)
+                    with open(os.path.join(out, "%s-%s.jsonl" % (client, batch)), "w") as f:
+                        f.write("\n".join(good) + "\n")
+                gitx.run(["add", "-A"], cwd=work)
+                if gitx.run(["status", "--porcelain"], cwd=work):
+                    gitx.run(["-c", "user.name=aihub-server", "-c", "user.email=aihub-server@localhost", "commit", "-q", "-m",
+                              "telemetry: %d batch(es)" % len(batches)], cwd=work)
+                    try:
+                        gitx.run(["push", "-q", self.inbox(), "HEAD:refs/heads/" + branch], cwd=work, timeout=120)
+                    except gitx.GitError:
+                        continue                                        # someone else pushed to the archive meanwhile: rebuild on the new tip
+                return True
+            return False
+        except Exception as e:
+            log.warning("telemetry archive failed (refs kept): %s", gitx.redact_url(str(e))[:200])
+            return False
+        finally:
+            gitx.run(["worktree", "remove", "--force", work], cwd=d, check=False)
 
     def update_index(self, pubs, force=False, results=None):
         """Add published versions to the index repo. Nothing from the event is trusted but where to look: the package repo is

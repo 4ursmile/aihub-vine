@@ -38,8 +38,7 @@ def R(request): return request.app.state.repos
 
 # admin setting key -> environment variable that overrides it (environment / .env wins; the UI shows "set by environment")
 CLI_GIT_ENV = {"cli_git_url": "AIHUB_CLI_GIT_URL", "cli_git_branch": "AIHUB_CLI_GIT_BRANCH", "cli_git_subdir": "AIHUB_CLI_GIT_SUBDIR"}
-SYNC_ENV = dict(CLI_GIT_ENV, langfuse_host="LANGFUSE_BASE_URL", langfuse_public_key="LANGFUSE_PUBLIC_KEY",
-                langfuse_secret_key="LANGFUSE_SECRET_KEY", index_url="AIHUB_INDEX_URL", index_branch="AIHUB_INDEX_BRANCH",
+SYNC_ENV = dict(CLI_GIT_ENV, telemetry_url="AIHUB_TELEMETRY_URL", telemetry_branch="AIHUB_TELEMETRY_BRANCH", index_url="AIHUB_INDEX_URL", index_branch="AIHUB_INDEX_BRANCH",
                 index_path="AIHUB_INDEX_PATH")
 SETTING_DEFAULTS = {"public_browse": "1", "public_install": "0", "default_visibility": "public", "allow_private": "1", "allow_source_download": "1",
                     "signup": None}
@@ -1410,10 +1409,10 @@ def dashboard_events(request: Request, days: int = 30, page: int = 1, per_page: 
         raise HTTPException(400, str(e))
 
 
-# ---------------- sync (Langfuse + git index -> SQLite)
-SYNC_KEYS = ("langfuse_host", "langfuse_public_key", "langfuse_secret_key", "index_url", "index_branch", "index_path", "sync_interval",
-             "share_credentials", "enroll_code", "cli_git_url", "cli_git_branch", "cli_git_subdir", "client_refresh_hours")
-SECRET_KEYS = ("langfuse_secret_key", "enroll_code")
+# ---------------- sync (git telemetry inbox + git index -> SQLite)
+SYNC_KEYS = ("telemetry_url", "telemetry_branch", "telemetry_archive", "index_url", "index_branch", "index_path", "sync_interval",
+             "cli_git_url", "cli_git_branch", "cli_git_subdir", "client_refresh_hours")
+SECRET_KEYS = ()
 
 
 def _check_cli_git(k, v):
@@ -1436,9 +1435,7 @@ def sync_status(request: Request, u=admin):
         cfg[k] = "set" if cfg[k] else ""                                         # never echo secrets
     cfg["sync_interval"] = cfg["sync_interval"] or "60"
     return {"config": cfg, "status": dict(sy.status, next_in=round(sy.delay())), "cursor": repos.setting("sync_cursor"),
-            "from_env": {"langfuse": bool(request.app.state.settings.env_get("LANGFUSE_SECRET_KEY")),
-                         "langfuse_secret_key": bool(request.app.state.settings.env_get("LANGFUSE_SECRET_KEY")),
-                         "index": bool(request.app.state.settings.env_get("AIHUB_INDEX_URL")),
+            "from_env": {"index": bool(request.app.state.settings.env_get("AIHUB_INDEX_URL")),
                          **{k: bool(request.app.state.settings.env_get(e)) for k, e in SYNC_ENV.items()}}}
 
 
@@ -1450,8 +1447,8 @@ def sync_update(body: dict, request: Request, u=admin):
             v = str(body[k]).strip()
             if k in SECRET_KEYS and v in ("", "set"):
                 continue                                 # blank/echo = keep the stored secret
-            if k == "share_credentials" and v not in ("0", "1"):
-                raise HTTPException(400, "share_credentials must be 0 or 1")
+            if k == "telemetry_archive" and v not in ("0", "1"):
+                raise HTTPException(400, "telemetry_archive must be 0 or 1")
             if k in ("cli_git_branch", "cli_git_subdir"):
                 _check_cli_git(k, v)
             if k == "sync_interval":
@@ -1556,30 +1553,21 @@ def index_package(body: dict, request: Request, u=Depends(require_perm("index"))
 
 # ---------------- client config (what the CLI pulls to get set up)
 @r.get("/client-config")
-def client_config(request: Request, code: str = "", u=Depends(current_user)):
-    """Settings the CLI needs. The index location is public. Langfuse credentials are shared only when an admin
-    turned sharing on, and only with a signed-in user or a caller that presents the enrollment code. Served over TLS;
-    never cached."""
+def client_config(request: Request):
+    """Settings the CLI needs: where the package index and the telemetry inbox are. Locations only, never credentials
+    (git access stays with the user's own git credential helper). Never cached."""
     repos = R(request)
     env = request.app.state.settings.env_get
     from ..core import defaults
     dx = defaults.load().get("index", {})
-    out = {"index": {"url": env("AIHUB_INDEX_URL") or repos.setting("index_url", "") or dx.get("git_url", ""),
+    idx_url = env("AIHUB_INDEX_URL") or repos.setting("index_url", "") or dx.get("git_url", "")
+    out = {"index": {"url": idx_url,
                      "branch": env("AIHUB_INDEX_BRANCH") or repos.setting("index_branch", "") or dx.get("branch", "main"),
                      "path": env("AIHUB_INDEX_PATH") or repos.setting("index_path", "") or dx.get("path", "index")},
-           "langfuse": {"host": (env("LANGFUSE_BASE_URL") or env("LANGFUSE_HOST") or repos.setting("langfuse_host", "")
-                                or defaults.load().get("langfuse", {}).get("host", "")).strip()},      # URL only: not a secret, always shared
-           "refresh_hours": int(repos.setting("client_refresh_hours", "") or 24), "credentials": None}
-    if repos.setting("share_credentials", "0") == "1":
-        want = repos.setting("enroll_code", "")
-        import hmac
-        if u or (want and hmac.compare_digest(want.encode(), (code or "").encode())):
-            out["credentials"] = {            # Langfuse only: git credentials are never stored on or sent by the server
-                "langfuse": {"host": out["langfuse"]["host"],
-                             "public_key": env("LANGFUSE_PUBLIC_KEY") or repos.setting("langfuse_public_key", ""),
-                             "secret_key": env("LANGFUSE_SECRET_KEY") or repos.setting("langfuse_secret_key", "")}}
-            repos.audit(u["username"] if u else "enroll-code", "client-config.credentials", "", request.client.host if request.client else "")
-        elif want:
-            out["credentials_hint"] = "enrollment code required"
+           "telemetry": {"url": env("AIHUB_TELEMETRY_URL") or repos.setting("telemetry_url", "")
+                         or defaults.load().get("telemetry", {}).get("git_url", "") or idx_url,
+                         "branch": env("AIHUB_TELEMETRY_BRANCH") or repos.setting("telemetry_branch", "")
+                         or defaults.load().get("telemetry", {}).get("branch", "") or "telemetry-archive"},
+           "refresh_hours": int(repos.setting("client_refresh_hours", "") or 24)}
     from fastapi.responses import JSONResponse
     return JSONResponse(out, headers={"Cache-Control": "no-store"})

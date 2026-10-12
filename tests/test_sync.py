@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import unittest.mock
 
 from fastapi.testclient import TestClient
 
@@ -12,9 +13,10 @@ from aihub.server.main import create_app
 from aihub.server import sync as S
 
 
-def obs(i, name="aihub.use", user="~dan", **meta):
-    m = {"package": "demo", "component": "skill:x", "client_id": "c1", "detail": "token=hunter2 run", **meta}
-    return {"id": i, "name": name, "userId": user, "startTime": "2026-10-08T10:00:00.000Z", "metadata": m}
+def obs(i, kind="use", user="", **k):
+    """One event as a CLI batch carries it."""
+    return {"id": i, "kind": kind, "user": user, "package": "demo", "component": "skill:x", "client_id": "c1", "local_user": "dan",
+            "detail": "token=hunter2 run", "ts": 1791000000, **k}
 
 
 class Schedule(unittest.TestCase):
@@ -34,8 +36,12 @@ class Rows(unittest.TestCase):
         self.assertEqual(r["local_user"], "dan")
         self.assertNotIn("hunter2", r["detail"])
         self.assertEqual(S.to_row(obs("o2", user="alice"))["username"], "alice")
-        self.assertIsNone(S.to_row(obs("o3", name="other.thing")))
-        self.assertIsNone(S.to_row({"id": "x", "name": "aihub.use", "metadata": {}}))
+        self.assertIsNone(S.to_row(obs("o3", kind="other")))
+        self.assertIsNone(S.to_row({"id": "x", "kind": "use"}))                        # no package
+        self.assertIsNone(S.to_row({"kind": "use", "package": "p"}))                    # no id: could not be deduplicated
+        self.assertIsNone(S.to_row("junk"))
+        self.assertEqual(S.to_row(obs("o4", user="~dan"))["username"], None)
+        self.assertLessEqual(S.to_row(obs("o5", ts=9e12))["ts"], time.time() + 86401)      # a far-future client clock is clamped
 
 
 class Server(unittest.TestCase):
@@ -75,16 +81,15 @@ class Server(unittest.TestCase):
         finally:
             os.environ.pop("AIHUB_INDEX_URL", None)
 
-    def test_admin_sync_settings_hide_secret_and_validate_schedule(self):
+    def test_admin_sync_settings_validate_schedule_and_archive_flag(self):
         h = self.admin()
-        self.assertEqual(self.c.put("/api/v1/admin/sync", json={"sync_interval": "*/10 * * * *", "langfuse_secret_key": "sk-x"}, headers=h).status_code, 200)
+        self.assertEqual(self.c.put("/api/v1/admin/sync", json={"sync_interval": "*/10 * * * *", "telemetry_url": "https://git.example/t.git"}, headers=h).status_code, 200)
         g = self.c.get("/api/v1/admin/sync", headers=h).json()
         self.assertEqual(g["config"]["sync_interval"], "*/10 * * * *")
-        self.assertEqual(g["config"]["langfuse_secret_key"], "set")                       # never echoed
-        self.assertNotIn("sk-x", json.dumps(g))
+        self.assertEqual(g["config"]["telemetry_url"], "https://git.example/t.git")
         self.assertEqual(self.c.put("/api/v1/admin/sync", json={"sync_interval": "nope"}, headers=h).status_code, 400)
-        self.assertEqual(self.c.put("/api/v1/admin/sync", json={"langfuse_secret_key": "set"}, headers=h).status_code, 200)
-        self.assertEqual(self.r.setting("langfuse_secret_key"), "sk-x")                    # echo does not overwrite
+        self.assertEqual(self.c.put("/api/v1/admin/sync", json={"telemetry_archive": "maybe"}, headers=h).status_code, 400)
+        self.assertEqual(self.c.put("/api/v1/admin/sync", json={"telemetry_archive": "0"}, headers=h).status_code, 200)
         self.assertEqual(self.c.get("/api/v1/admin/sync").status_code, 401)
 
     def test_removed_routes_are_gone(self):
@@ -103,28 +108,20 @@ class ClientConfig(unittest.TestCase):
         self.c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=tempfile.mkdtemp())))
         self.c.post("/api/v1/auth/register", json={"username": "root", "password": "secret1"})
         self.h = {"Authorization": "Bearer " + self.c.post("/api/v1/auth/login", json={"username": "root", "password": "secret1"}).json()["token"]}
-        self.c.put("/api/v1/admin/sync", headers=self.h, json={
-            "index_url": "https://git.example/x.git", "langfuse_host": "https://lf", "langfuse_public_key": "pk-1",
-            "langfuse_secret_key": "sk-SECRET", "git_username": "bot", "git_token": "glpat-TOKEN", "enroll_code": "TEAM1"})   # git keys are no longer accepted
+        self.c.put("/api/v1/admin/sync", headers=self.h, json={"index_url": "https://git.example/x.git"})
 
-    def test_credentials_are_gated(self):
-        g = lambda **k: self.c.get("/api/v1/client-config", **k)
-        r = g()                                                    # sharing off (default): index only
+    def test_locations_only_never_credentials(self):
+        r = self.c.get("/api/v1/client-config")
         self.assertEqual(r.json()["index"]["url"], "https://git.example/x.git")
-        self.assertIsNone(r.json()["credentials"])
+        from aihub.core import defaults
+        self.assertEqual(r.json()["telemetry"]["url"], defaults.load()["telemetry"]["git_url"])      # bundled default
+        self.assertEqual(r.json()["telemetry"]["branch"], defaults.load()["telemetry"]["branch"])
+        self.assertNotIn("credentials", r.json())
         self.assertEqual(r.headers["cache-control"], "no-store")
-        self.c.put("/api/v1/admin/sync", headers=self.h, json={"share_credentials": "1"})
-        self.assertIsNone(g().json()["credentials"])               # anonymous, no code
-        self.assertIsNone(g(params={"code": "WRONG"}).json()["credentials"])
-        ok = g(params={"code": "TEAM1"}).json()["credentials"]
-        self.assertEqual(ok["langfuse"]["secret_key"], "sk-SECRET")
-        self.assertNotIn("git", ok)                                                       # git credentials are never shared
-        self.assertNotIn("glpat-TOKEN", json.dumps(g(params={"code": "TEAM1"}).json()))
-        self.assertIsNone(self.c.app.state.repos.setting("git_token"))                                    # ...and not even stored
-        self.assertIsNotNone(g(headers=self.h).json()["credentials"])   # signed-in user needs no code
-        self.assertNotIn("SECRET", json.dumps(self.c.get("/api/v1/admin/sync", headers=self.h).json()))
-        self.assertNotIn("TOKEN", json.dumps(self.c.get("/api/v1/admin/sync", headers=self.h).json()))
-        self.assertIn("client-config.credentials", [r[0] for r in self.c.app.state.repos.db.conn().execute("select action from audit_log")])   # every hand-out is audited
+        self.c.put("/api/v1/admin/sync", headers=self.h, json={"telemetry_url": "https://git.example/t.git"})
+        self.assertEqual(self.c.get("/api/v1/client-config").json()["telemetry"]["url"], "https://git.example/t.git")
+        self.c.put("/api/v1/admin/sync", headers=self.h, json={"telemetry_branch": "usage"})
+        self.assertEqual(self.c.get("/api/v1/client-config").json()["telemetry"]["branch"], "usage")
 
 
 class DashboardV2(unittest.TestCase):
@@ -224,17 +221,162 @@ class DashboardV2(unittest.TestCase):
         self.assertIn("hush", [x["package"] for x in self.get("/dashboard/events", per_page=100).json()["items"]])   # admin sees it
 
 
+class Inbox(unittest.TestCase):
+    """CLI -> bare git inbox -> server, with real git. No mocks between the two halves."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.inbox = os.path.join(tempfile.mkdtemp(), "inbox.git")
+        subprocess.run(["git", "init", "-q", "--bare", self.inbox], check=True)
+        self.env = unittest.mock.patch.dict(os.environ, {"AIHUB_HOME": self.home, "AIHUB_TELEMETRY_URL": self.inbox})
+        self.env.start()
+        self.c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=tempfile.mkdtemp())))
+        self.r, self.sy = self.c.app.state.repos, self.c.app.state.sync
+
+    def tearDown(self):
+        self.env.stop()
+
+    def refs(self):
+        return subprocess.run(["git", "-C", self.inbox, "for-each-ref", "refs/telemetry/"], capture_output=True, text=True).stdout.split("\n")[:-1]
+
+    def spool(self, n, **k):
+        from aihub.cli import telemetry
+        for i in range(n):
+            telemetry.enqueue(dict({"kind": "use", "package": "demo", "component": "skill:x"}, **k))
+
+    def test_batch_roundtrip_dedup_archive_and_cleanup(self):
+        from aihub.cli import telemetry
+        self.spool(50)
+        self.assertEqual(telemetry.flush(force=True), 50)                         # 50 events -> ONE push
+        self.assertEqual(len(self.refs()), 1)
+        self.assertEqual(telemetry.flush(force=True), 0)                          # nothing spooled -> no push at all
+        self.assertEqual(len(self.refs()), 1)
+        self.sy.pull_events()
+        self.assertEqual(self.r.db.conn().execute("SELECT COUNT(*) FROM events WHERE package='demo'").fetchone()[0], 50)
+        self.assertEqual(self.refs(), [])                                         # ingested and archived: ref deleted
+        arch = subprocess.run(["git", "-C", self.inbox, "ls-tree", "-r", "--name-only", S.ARCHIVE], capture_output=True, text=True).stdout.split()
+        self.assertEqual(len(arch), 1)
+        self.assertTrue(arch[0].startswith("archive/"))
+        self.sy.pull_events()                                                     # idempotent
+        self.assertEqual(self.r.db.conn().execute("SELECT COUNT(*) FROM events WHERE package='demo'").fetchone()[0], 50)
+
+    def test_failed_push_keeps_events_and_resend_does_not_duplicate(self):
+        from aihub.cli import telemetry
+        self.spool(3)
+        with unittest.mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_URL": "/nonexistent/inbox.git"}):
+            self.assertEqual(telemetry.flush(force=True), 0)                      # unreachable: nothing lost
+        self.assertEqual(telemetry.flush(force=True), 3)                          # next pass delivers
+        # crash after push, before the spool file was removed: the same events go out again
+        import glob
+        lines = [l for l in self.sent_lines()]
+        telemetry.push(self.inbox, lines)
+        self.assertEqual(len(self.refs()), 2)
+        self.sy.pull_events()
+        self.assertEqual(self.r.db.conn().execute("SELECT COUNT(*) FROM events WHERE package='demo'").fetchone()[0], 3)
+
+    def sent_lines(self):
+        out = subprocess.run(["git", "-C", self.inbox, "for-each-ref", "--format=%(refname)", "refs/telemetry/"], capture_output=True, text=True).stdout.split()
+        return subprocess.run(["git", "-C", self.inbox, "show", out[0] + ":events.jsonl"], capture_output=True, text=True).stdout.splitlines()
+
+    def test_garbage_and_oversized_batches_are_dropped_without_blocking_good_ones(self):
+        from aihub.cli import telemetry
+        telemetry.push(self.inbox, ["not json", '{"kind":"use"}', json.dumps(obs("good1"))])
+        self.sy.pull_events()
+        self.assertEqual(self.r.db.conn().execute("SELECT COUNT(*) FROM events WHERE ext_id='good1'").fetchone()[0], 1)
+        self.assertEqual(self.refs(), [])
+
+    def test_archive_failure_keeps_refs_for_retry(self):
+        from aihub.cli import telemetry
+        telemetry.push(self.inbox, [json.dumps(obs("keep1"))])
+        with unittest.mock.patch.object(S.Sync, "_archive", return_value=False):
+            self.sy.pull_events()
+        self.assertEqual(len(self.refs()), 1)                                     # not deleted: nothing may be lost
+        self.sy.pull_events()
+        self.assertEqual(self.refs(), [])
+        self.assertEqual(self.r.db.conn().execute("SELECT COUNT(*) FROM events WHERE ext_id='keep1'").fetchone()[0], 1)
+
+    def test_two_clients_push_without_conflict(self):
+        from aihub.cli import telemetry
+        for cid in ("aaa", "bbb"):
+            with unittest.mock.patch("aihub.cli.hooks.client_id", return_value=cid):
+                telemetry.push(self.inbox, [json.dumps(obs("ev-" + cid))])
+        self.assertEqual(len(self.refs()), 2)
+        self.sy.pull_events()
+        self.assertEqual(self.r.db.conn().execute("SELECT COUNT(*) FROM events WHERE ext_id LIKE 'ev-%'").fetchone()[0], 2)
+
+    def count(self, r=None, where="package='demo'"):
+        return (r or self.r).db.conn().execute("SELECT COUNT(*) FROM events WHERE " + where).fetchone()[0]
+
+    def test_repo_without_archive_branch_gets_it_created(self):
+        from aihub.cli import telemetry
+        self.assertEqual(subprocess.run(["git", "-C", self.inbox, "branch", "--list"], capture_output=True, text=True).stdout.strip(), "")
+        self.spool(4)
+        telemetry.flush(force=True)                                                # the CLI needs no branch at all
+        self.sy.pull_events()
+        branches = subprocess.run(["git", "-C", self.inbox, "branch", "--list"], capture_output=True, text=True).stdout
+        self.assertIn(self.sy.archive_branch(), branches)
+
+    def test_server_down_while_clis_keep_pushing_then_catches_up(self):
+        from aihub.cli import telemetry
+        for round_ in range(3):                                                    # server is "down": three batches pile up in git
+            self.spool(5)
+            telemetry.flush(force=True)
+        self.assertEqual(len(self.refs()), 3)
+        self.assertEqual(self.count(), 0)
+        self.sy.run_once()                                                         # server comes back
+        self.assertEqual(self.count(), 15)
+        self.assertEqual(self.refs(), [])
+
+    def test_lost_database_is_rebuilt_from_the_archive_branch(self):
+        from aihub.cli import telemetry
+        self.spool(7)
+        telemetry.flush(force=True)
+        self.sy.run_once()
+        self.assertEqual(self.count(), 7)
+        self.assertEqual(self.refs(), [])                                          # refs are gone: only the archive has the data now
+        c2 = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=tempfile.mkdtemp())))       # brand new, empty database
+        self.assertEqual(self.count(c2.app.state.repos), 0)
+        c2.app.state.sync.run_once()
+        self.assertEqual(self.count(c2.app.state.repos), 7)
+        c2.app.state.sync.run_once()                                               # idempotent
+        self.assertEqual(self.count(c2.app.state.repos), 7)
+
+    def test_database_wiped_but_cursor_survived_still_replays(self):
+        from aihub.cli import telemetry
+        self.spool(3)
+        telemetry.flush(force=True)
+        self.sy.run_once()
+        self.r.db.conn().execute("DELETE FROM events"); self.r.db.conn().commit()
+        self.sy._lookback_checked = False                                          # a restart
+        self.sy.run_once()
+        self.assertEqual(self.count(), 3)
+
+    def test_forced_full_sync_replays_archive(self):
+        from aihub.cli import telemetry
+        self.spool(2)
+        telemetry.flush(force=True)
+        self.sy.run_once()
+        self.r.db.conn().execute("DELETE FROM events"); self.r.db.conn().commit()
+        self.r.set_setting("sync_cursor", "")                                      # admin: "re-read everything"
+        self.sy.run_once()
+        self.assertEqual(self.count(), 2)
+
+    def test_deliver_pushes_now_or_spools(self):
+        from aihub.cli import telemetry
+        with unittest.mock.patch.object(telemetry, "kick", lambda: None):
+            self.assertTrue(telemetry.deliver({"kind": "publish", "package": "demo", "version": "1.0.0"}))
+            with unittest.mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_URL": "/nonexistent/x.git"}):
+                self.assertFalse(telemetry.deliver({"kind": "publish", "package": "demo", "version": "1.0.1"}))
+        self.assertEqual(len(self.refs()), 1)
+        self.assertTrue(os.path.getsize(os.path.join(self.home, "queue", "events.jsonl")) > 0)       # kept for the flusher
+
+
 class CountedSpans(unittest.TestCase):
-    def test_count_expands_to_rows_capped_and_idempotent(self):
-        o = obs("o9", count="25")
-        rows = S.to_rows(o)
-        self.assertEqual(len(rows), 25)
-        self.assertEqual(len({r["ext_id"] for r in rows}), 25)
-        self.assertEqual(len(S.to_rows(obs("o8", count="999999"))), S.MAX_COUNT)           # a bogus count can't flood the table
-        self.assertEqual(len(S.to_rows(obs("o7", count="junk"))), 1)
-        self.assertEqual(len(S.to_rows(obs("o6"))), 1)
+    def test_events_are_idempotent_rows(self):
+        rows = [S.to_row(obs("o9")), S.to_row(obs("o8"))]
+        self.assertEqual(len(rows), 2)
         d = tempfile.mkdtemp()
         c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=d)))
         r = c.app.state.repos
-        self.assertEqual(r.events_insert_ext([dict(x) for x in rows]), 25)
+        self.assertEqual(r.events_insert_ext([dict(x) for x in rows]), 2)
         self.assertEqual(r.events_insert_ext([dict(x) for x in rows]), 0)

@@ -1,4 +1,4 @@
-"""One place for the CLI's HTTPS trust settings, used by every call it makes (hub, Langfuse, index over https, git).
+"""One place for the CLI's HTTPS trust settings, used by every call it makes (hub, index over https, git).
 
 Verification is ON by default. Two opt-in overrides, each from the environment or `aihub config set`:
   ca_bundle    / AIHUB_CA_BUNDLE   path to a PEM file with your internal CA (preferred: keeps verification)
@@ -25,7 +25,7 @@ def ca_bundle():
 
 def context(certifi_default=False):
     """An ssl context for the current settings, or None for Python's default behaviour (system trust store).
-    certifi_default=True keeps the old Langfuse behaviour of using certifi's CA list when nothing is configured."""
+    certifi_default=True uses certifi's CA list when nothing is configured."""
     if insecure():
         ctx = ssl.create_default_context()
         ctx.check_hostname = False

@@ -1,4 +1,4 @@
-"""`aihub dev publish` as a git wrapper: verify remote+branch, commit, push (LFS if needed), report to Langfuse."""
+"""`aihub dev publish` as a git wrapper: verify remote+branch, commit, push (LFS if needed), report to the telemetry inbox."""
 import os
 import re
 import shutil
@@ -136,7 +136,7 @@ def push(root):
 
 def publish(root, m, bump=None, push_now=True):
     """Commit this package folder (and push unless push_now=False, so several packages can share one push).
-    Returns the info dict reported to Langfuse."""
+    Returns the info dict reported to the telemetry inbox."""
     toml = os.path.join(root, "aihub.toml")
     if not shutil.which("git"):
         raise ValueError("git is not installed")
@@ -179,18 +179,10 @@ def publish(root, m, bump=None, push_now=True):
 
 
 def report(info):
-    """Send the publish span now; spool it for the background flusher if Langfuse is unreachable."""
-    from . import langfuse
-    try:
-        if not langfuse.configured():
-            raise RuntimeError("langfuse not configured")
-        info = dict(info, ts=__import__("time").time())
-        langfuse.send([telemetry.to_items(info)])
-        return True
-    except Exception as e:
-        telemetry.record(info)
-        report.error = str(e)[:200]
-        return False
+    """Push the publish event now so the hub indexes it quickly; it is spooled for the background flusher if the inbox is unreachable."""
+    ok = telemetry.deliver(dict(info, ts=__import__("time").time()))
+    report.error = "" if ok else telemetry.deliver.error
+    return ok
 
 
 report.error = ""

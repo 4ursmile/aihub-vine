@@ -71,16 +71,16 @@ aihub dev publish --bump patch builtin          # bump every selected package
 - `tree` reports `own .git`: `aihub dev tree-solve PATH`
 - Overview of the packages and what to fix: `aihub dev tree PATH`
 
-`aihub dev publish` is a wrapper around git. It needs no hub account: access is whatever your git host grants you, and the publish is recorded in Langfuse under your account name, or `~<your-os-username>` when you are not signed in.
+`aihub dev publish` is a wrapper around git. It needs no hub account: access is whatever your git host grants you, and the publish is recorded in the telemetry inbox under your account name, or `~<your-os-username>` when you are not signed in.
 
 What it does, in order:
 
 1. Reads `[git]` (`url`, `branch`, `subdir`) from `aihub.toml`. `aihub dev init` fills this in from the repo's `origin` and current branch; it asks only for what is still missing.
 2. Checks that the repo's remote and branch still match, and stops if they do not.
 3. Runs `git init` and adds `origin` if the project is not a repo yet, tracks files over 50 MB with git-lfs (it stops if git-lfs is missing), commits, and pushes, setting the upstream the first time.
-4. Records an `aihub.publish` event in Langfuse with the package, version and commit.
+4. Pushes an `aihub.publish` event to the telemetry inbox with the package, version and commit.
 
-Git credentials are yours alone: they come from your git credential helper, and the hub never sends or stores them. If none are stored, git (or the CLI, in a terminal) asks you once. `aihub dev publish` pushes your code, then sends a publish event to Langfuse ("publish event sent; the hub will add it to the package index shortly"). The hub batches events, fetches the latest index branch, adds the versions and pushes once (retrying from a fresh fetch if the push is rejected), creating the index if the repo has none. The package appears in the catalogue after that pass.
+Git credentials are yours alone: they come from your git credential helper, and the hub never sends or stores them. If none are stored, git (or the CLI, in a terminal) asks you once. `aihub dev publish` pushes your code, then pushes a publish event to the telemetry inbox ("publish event sent; the hub will add it to the package index shortly"). The hub batches events, fetches the latest index branch, adds the versions and pushes once (retrying from a fresh fetch if the push is rejected), creating the index if the repo has none. The package appears in the catalogue after that pass.
 
 ## Let your assistant package it for you
 

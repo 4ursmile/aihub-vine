@@ -316,8 +316,8 @@ def cmd_doctor(a):
 
 
 def _check_backends(detail=False):
-    """Package index (git) and Langfuse are what the CLI depends on now; the hub is optional."""
-    from . import langfuse, gitx
+    """The package index and the telemetry inbox (both git) are what the CLI depends on; the hub is optional."""
+    from . import telemetry, gitx
     idx = registry.source()
     with ui.Spinner("Checking the package index") as sp:
         if not idx["url"]:
@@ -328,16 +328,14 @@ def _check_backends(detail=False):
                 sp.text("Package index OK (%d packages) - %s, branch %s, folder %s" % (n, gitx.redact_url(idx["url"]), idx["branch"], idx["path"]))
             except Exception as e:
                 sp.problem("package index unreachable [%s, branch %s]: %s" % (gitx.redact_url(idx["url"]), idx["branch"], gitx.redact_url(str(e))))
-    s = langfuse.settings()
-    with ui.Spinner("Checking Langfuse") as sp:
-        if not langfuse.configured(s):
-            sp.problem("Langfuse is not configured, so usage reporting is paused. run: aihub setup")
+    url = telemetry.target()
+    with ui.Spinner("Checking the telemetry inbox") as sp:
+        if not url:
+            sp.problem("no telemetry inbox configured, so usage reporting is paused. run: aihub setup")
+        elif gitx.reachable(url):
+            sp.text("Telemetry inbox reachable (%s)" % gitx.redact_url(url))
         else:
-            try:
-                langfuse._req(s, "GET", "/api/public/projects", timeout=6)
-                sp.text("Langfuse reachable (%s)" % s["host"])
-            except Exception as e:
-                sp.problem("Langfuse unreachable: %s" % e)
+            sp.problem("telemetry inbox unreachable or not writable: %s" % gitx.redact_url(url))
     if detail:
         hub = paths.config()["hub"]
         try:
@@ -354,8 +352,9 @@ def cmd_welcome(a):
     ui.banner()
     ui.heading("Let's get you set up")
     from . import remote_config
-    if ask or a.yes:
-        remote_config.resolve_missing(a.yes)           # env > saved > defaults.json (confirmed) > typed
+    remote_config.resolve_missing(a.yes)               # env > saved > defaults.json, silently
+    if ask:
+        remote_config.ensure_access()                  # asks only when git credentials are missing
     _check_backends()
     tools = integrations.detected()
     if tools:
@@ -775,9 +774,9 @@ def dev_publish(a):
     if pushed and not queued:
         ui.note("publish event sent; the hub will add it to the package index shortly")
     if queued:
-        ui.note("WARNING: Langfuse is not reachable, so the hub has NOT been told about this publish and the package is not in the index yet (%s)"
+        ui.note("WARNING: the telemetry inbox is not reachable, so the hub has NOT been told about this publish and the package is not in the index yet (%s)"
                 % (pub.report.error or "unknown error"))
-        ui.info("the event is queued and goes out when Langfuse is back (aihub flush), then the hub indexes it. To skip the wait: aihub dev index")
+        ui.info("the event is queued and goes out when the inbox is back (aihub flush), then the hub indexes it. To skip the wait: aihub dev index")
     if failed:
         raise ValueError("%d of %d package(s) not published: %s%s" % (len(failed), len(roots), ", ".join(failed),
                                                                  "; the other %d went out" % len(pushed) if pushed else ""))
@@ -810,29 +809,17 @@ def dev_index(a):
 
 
 def dev_stats(a):
-    """Usage of this package, read from Langfuse (the same events the hub dashboard shows)."""
-    from . import langfuse
+    """Usage of this package, read from the hub (the same events its dashboard shows)."""
     name = _load(a)["package"]["name"]
-    s = langfuse.settings()
-    if not langfuse.configured(s):
-        raise ValueError("Langfuse is not configured. run: aihub setup")
-    by, users = {}, set()
-    since = langfuse.now_minus(30 * 86400)
-    with ui.Spinner("Reading events from Langfuse"):
-        for o in langfuse.fetch_observations("aihub.", since=since, s=s):
-            m = o.get("metadata") or {}
-            if m.get("package") != name:
-                continue
-            k = (o.get("name") or "").split(".", 1)[-1]
-            by[k] = by.get(k, 0) + 1
-            users.add(o.get("userId") or m.get("client_id") or "")
-    d = {"days": 30, "by_kind": by, "active_users": len(users)}
+    with ui.Spinner("Reading usage from the hub"):
+        d = api.call("GET", "/packages/%s/stats?days=30" % name)
+    by, users = d.get("by_kind") or {}, d.get("active_users", 0)
     if not ui.TTY:
         print(json.dumps(d, indent=2))
         return
     ui.card("%s - last 30 days" % name,
             ["%-10s %s" % (k, v) for k, v in sorted(by.items())] or ["no events yet"],
-            ui.dim("active users: ") + str(len(users)))
+            ui.dim("active users: ") + str(users))
 
 
 class _CommandGroupAction(argparse.Action):
@@ -979,11 +966,10 @@ def build_parser():
         arg("--check", action="store_true", help="Only report whether a newer version exists."),
         arg("--force", action="store_true", help="Reinstall even when already current."),
         arg("--rollback", action="store_true", help="Restore the version that was installed before the last upgrade."))
-    add("setup", remote_config.cmd_setup, "Pull the package index and Langfuse settings from the hub.",
-        "Ask the hub for the package index location and, when the admin shares them, the Langfuse keys and git credentials. Values come over HTTPS, are stored in your aihub config (git tokens go to your git credential helper), and are refreshed automatically on the interval the admin sets. If the hub cannot be reached, you are asked for the values instead; environment variables LANGFUSE_BASE_URL, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY and AIHUB_INDEX_URL are picked up automatically.",
-        "Examples:\n  aihub setup\n  aihub setup --hub https://hub.example.com --code TEAM-CODE",
+    add("setup", remote_config.cmd_setup, "Pull the package index and telemetry settings from the hub.",
+        "Ask the hub for the package index location and where usage events are sent. Values come over HTTPS, are stored in your aihub config (git tokens go to your git credential helper), and are refreshed automatically on the interval the admin sets. If the hub cannot be reached, you are asked for the values instead; environment variables AIHUB_INDEX_URL and AIHUB_TELEMETRY_URL are picked up automatically.",
+        "Examples:\n  aihub setup\n  aihub setup --hub https://hub.example.com",
         arg("--hub", metavar="URL", help="Hub to ask (default: the configured hub)."),
-        arg("--code", metavar="CODE", help="Enrollment code from your admin, needed when credential sharing is code-protected."),
         arg("--manual", action="store_true", help="Skip the hub and enter the values by hand."),
         arg("-y", "--yes", action="store_true", help="Accept defaults.json values without asking."))
     add("welcome", cmd_welcome, "Run first-time setup for detected AI tools.",
@@ -995,7 +981,7 @@ def build_parser():
         "Example:\n  printf '{}' | aihub hook --source claude",
         arg("--source", default="claude", metavar="TOOL", help="Source label recorded with the event (default: claude)."))
     add("flush", cmd_flush, "Send queued usage events to the hub.",
-        "Send queued usage events to Langfuse now, including the window still open. Events are normally sent in the background once per telemetry interval (aihub config set telemetry_interval 60).",
+        "Push queued usage events to the telemetry inbox (a git repo) now. Events are normally pushed in the background as one batch, a few seconds after the last event (aihub config set telemetry_interval 15).",
         "Examples:\n  aihub flush\n  aihub flush --verbose",
         arg("-v", "--verbose", action="store_true", help="Print the number of events sent."),
         arg("--background", action="store_true", help=argparse.SUPPRESS))
@@ -1043,7 +1029,7 @@ def build_parser():
          "Examples:\n  aihub dev publish\n  aihub dev publish --bump patch",
          [arg("--bump", choices=["major", "minor", "patch"], metavar="PART", help="Increment this version part before building (major/minor/patch; lower parts reset).")]),
         ("index", dev_index, "Force the hub to index this project (maintainers).",
-         "Ask the hub to read this project's pushed commit and add the version to the package index. Use it when the automatic step after `aihub dev publish` did not happen (lost event, Langfuse down). Needs `aihub login` with an account whose role has the 'index' permission. The hub checks aihub.toml at that commit; nothing from your machine is trusted but the repo location.",
+         "Ask the hub to read this project's pushed commit and add the version to the package index. Use it when the automatic step after `aihub dev publish` did not happen (lost event, telemetry inbox down). Needs `aihub login` with an account whose role has the 'index' permission. The hub checks aihub.toml at that commit; nothing from your machine is trusted but the repo location.",
          "Examples:\n  aihub dev index\n  aihub dev index --commit 1a2b3c4",
          [arg("--commit", metavar="SHA", default="", help="Index this commit instead of HEAD (must be pushed).")]),
         ("tree", dev_tree, "Show the packages here as a tree, with repository status.",

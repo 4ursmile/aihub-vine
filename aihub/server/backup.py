@@ -166,8 +166,8 @@ class Backup:
             self.repos.db.release()
 
     def _loop(self):
-        # One backup right after the first sync pass: events pulled from Langfuse while the server was down reach git
-        # now, not at the next cron slot. Langfuse or this disk can fail later; git then still has them.
+        # One backup right after the first sync pass: events pulled from the inbox while the server was down reach git
+        # now, not at the next cron slot. This disk can fail later; git then still has them.
         if self.on_start() and self.sync.first_pass.wait(300) and not self.stop.is_set() and self.enabled():
             self._try()
         while not self.stop.is_set():

@@ -1,4 +1,4 @@
-"""Pull setup values (index location, Langfuse keys) from the hub, and keep them fresh. Git credentials stay with the user."""
+"""Pull setup values (index location, telemetry inbox) from the hub, and keep them fresh. Git credentials stay with the user."""
 import json
 import os
 import subprocess
@@ -9,14 +9,10 @@ import urllib.request
 
 from . import api, gitx, paths, tls, ui
 
-KEYS = ("langfuse_host", "langfuse_public_key", "langfuse_secret_key")
-
-
-def fetch(hub=None, code="", timeout=8):
+def fetch(hub=None, timeout=8):
     hub = (hub or paths.config()["hub"]).rstrip("/")
-    q = "?code=" + urllib.parse.quote(code) if code else ""
     tok = paths.load("credentials.json", {}).get("token")
-    rq = urllib.request.Request(hub + "/api/v1/client-config" + q, headers={"Authorization": "Bearer " + tok} if tok else {})
+    rq = urllib.request.Request(hub + "/api/v1/client-config", headers={"Authorization": "Bearer " + tok} if tok else {})
     if not hub.startswith("https://") and not hub.startswith("http://localhost") and not hub.startswith("http://127."):
         raise ValueError("refusing to fetch credentials over plain http (%s); use https" % hub)
     with api._opener.open(rq, timeout=timeout) as r:
@@ -41,25 +37,14 @@ def apply(cfg, index_host=None):
         if idx.get(k_src) and not os.environ.get(env_for[k_dst]):          # environment wins over what the hub sends
             c[k_dst] = idx[k_src]
     got = []
-    lf_host = (cfg.get("langfuse") or {}).get("host")
-    if lf_host and not (os.environ.get("LANGFUSE_BASE_URL") or os.environ.get("LANGFUSE_HOST")):
-        c["langfuse_host"] = lf_host
-        got.append("langfuse_host")
-    cred = cfg.get("credentials")
-    if cred:
-        lf = cred.get("langfuse") or {}
-        for src, dst in (("public_key", "langfuse_public_key"), ("secret_key", "langfuse_secret_key")):
-            if lf.get(src):
-                c[dst] = lf[src]
-                got.append(dst)
+    tel = cfg.get("telemetry") or {}
+    for k_src, k_dst, env in (("url", "telemetry_url", "AIHUB_TELEMETRY_URL"), ("branch", "telemetry_branch", "AIHUB_TELEMETRY_BRANCH")):
+        if tel.get(k_src) and not os.environ.get(env):                    # environment wins over what the hub sends
+            c[k_dst] = tel[k_src]
+            got.append(k_dst)
     c["remote_config_at"] = time.time()
     c["remote_config_hours"] = cfg.get("refresh_hours", 24)
     paths.save("config.json", c)
-    if "langfuse_secret_key" in got:
-        try:
-            os.chmod(paths.p("config.json"), 0o600)
-        except OSError:
-            pass
     return got
 
 
@@ -76,7 +61,7 @@ def auto(cmd):
         return
     c = paths.load("config.json", {})
     try:
-        apply(fetch(timeout=3, code=c.get("enroll_code", "")))
+        apply(fetch(timeout=3))
     except Exception:
         c["remote_config_at"] = time.time() - (float(c.get("remote_config_hours", 24)) * 3600) + 3600   # retry in an hour
         paths.save("config.json", c)
@@ -105,51 +90,38 @@ def cmd_setup(a):
     if a.manual:
         return _manual(a)
     hub = a.hub or paths.config()["hub"]
-    code = a.code or paths.load("config.json", {}).get("enroll_code", "")
     if a.hub:
         c = paths.load("config.json", {})
         c["hub"] = a.hub.rstrip("/")
         paths.save("config.json", c)
     try:
         with ui.Spinner("Asking %s for setup values" % hub):
-            cfg = fetch(hub, code)
+            cfg = fetch(hub)
     except (urllib.error.URLError, OSError, ValueError) as e:
         ui.bad("cannot reach the hub: %s" % e)
-        ui.info("manual setup:  aihub config set langfuse_host <url>  |  set langfuse_public_key  |  set langfuse_secret_key")
-        ui.info("or export LANGFUSE_BASE_URL, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, and: aihub config set index_url <git url>")
+        ui.info("manual setup:  aihub config set index_url <git url>  |  aihub config set telemetry_url <git url> (defaults to the index repo)")
         return _manual(a)
-    if a.code:
-        c = paths.load("config.json", {})
-        c["enroll_code"] = a.code
-        paths.save("config.json", c)
     got = apply(cfg)
     ui.good("index: %s" % (cfg.get("index", {}).get("url") or "not set"))
     if got:
         ui.good("received: " + ", ".join(got))
-    if any(k.endswith("_key") for k in got):
-        pass
-    elif cfg.get("credentials_hint"):
-        ui.note("%s. ask your admin, then: aihub setup --code <code>" % cfg["credentials_hint"])
-    else:
-        ui.note("the hub shares only the Langfuse URL; set your Langfuse keys before using aihub (aihub setup --manual, or LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY)")
     resolve_missing(getattr(a, "yes", False))
+    ensure_access()
     _verify()
 
 
-SETUP_FIELDS = (("langfuse_host", "LANGFUSE_BASE_URL", "Langfuse URL", False, ("langfuse", "host")),
-                ("langfuse_public_key", "LANGFUSE_PUBLIC_KEY", "Langfuse public key", False, None),
-                ("langfuse_secret_key", "LANGFUSE_SECRET_KEY", "Langfuse secret key", True, None),
-                ("index_url", "AIHUB_INDEX_URL", "Package index (git URL)", False, ("index", "git_url")),
+SETUP_FIELDS = (("index_url", "AIHUB_INDEX_URL", "Package index (git URL)", False, ("index", "git_url")),
                 ("index_branch", "AIHUB_INDEX_BRANCH", "Package index branch", False, ("index", "branch")),
-                ("index_path", "AIHUB_INDEX_PATH", "Package index folder", False, ("index", "path")))
+                ("index_path", "AIHUB_INDEX_PATH", "Package index folder", False, ("index", "path")),
+                ("telemetry_url", "AIHUB_TELEMETRY_URL", "Telemetry inbox (git URL)", False, ("telemetry", "git_url")),
+                ("telemetry_branch", "AIHUB_TELEMETRY_BRANCH", "Telemetry archive branch", False, ("telemetry", "branch")))
 
 
 def resolve_missing(yes=False):
-    """Fill every setup value that is still missing. Order: environment variable > value already saved in config.json >
-    defaults.json (shown and confirmed first) > typed by the user. Non-interactive runs never invent a value: a
-    defaults.json value is accepted only with yes=True (or a typed 'yes'), anything else stays unset. Returns the keys that are still empty."""
+    """Fill every setup value that is still missing, silently. Order: environment variable > value already saved in config.json >
+    defaults.json. Nothing is typed or confirmed: locations are not secrets and the bundled defaults are the intended ones.
+    The only thing a person may be asked for is git access (see ensure_access). Returns the keys that are still empty."""
     from ..core import defaults
-    import getpass
     c = paths.load("config.json", {})
     d = defaults.load()
     for key, env, label, secret, dpath in SETUP_FIELDS:
@@ -157,41 +129,39 @@ def resolve_missing(yes=False):
             continue                                       # already provided; the environment is read at use time
         dv = d.get(dpath[0], {}).get(dpath[1], "") if dpath else ""
         if dv:
-            if yes or (ui.INTERACTIVE and ui.confirm("%s: use the default %s ?" % (label, dv))):
-                c[key] = dv
-                continue
-        if ui.INTERACTIVE and not yes:
-            v = (getpass.getpass if secret else input)("%s: " % label).strip()
-            if v:
-                c[key] = v
+            c[key] = dv
     paths.save("config.json", c)
-    try:
-        os.chmod(paths.p("config.json"), 0o600)
-    except OSError:
-        pass
     return [k for k, env, *_ in SETUP_FIELDS if not (os.environ.get(env) or c.get(k))]
+
+
+def ensure_access(interactive=None):
+    """Check git access to the index and the telemetry inbox. Credentials already in the user's git credential helper are enough
+    and nothing is asked. Only when access fails for lack of credentials, and a person is at a terminal, ask for them once."""
+    from . import registry, telemetry
+    interactive = ui.INTERACTIVE if interactive is None else interactive
+    urls = []
+    for u in (registry.source()["url"], telemetry.target()):
+        if u and u.startswith("http") and u not in urls:
+            urls.append(u)
+    for u in urls:
+        try:
+            ensure_git_access(u)
+        except gitx.GitError as e:
+            ui.note(str(e))
 
 
 def _manual(a):
     resolve_missing(getattr(a, "yes", False))
-    c = paths.load("config.json", {})
-    if ui.INTERACTIVE and (os.environ.get("AIHUB_INDEX_URL") or c.get("index_url", "")).startswith("http"):
-        c = dict(c, index_url=os.environ.get("AIHUB_INDEX_URL") or c["index_url"])
-        try:
-            ensure_git_access(c["index_url"])
-        except gitx.GitError as e:
-            ui.note(str(e))
+    ensure_access()
     _verify()
 
 
 def _verify():
-    from . import langfuse
-    s = langfuse.settings()
-    if not langfuse.configured(s):
-        ui.note("Langfuse is not configured yet; usage reporting is paused")
-        return
-    try:
-        langfuse._req(s, "GET", "/api/public/projects", timeout=6)
-        ui.good("Langfuse reachable (%s)" % s["host"])
-    except Exception as e:
-        ui.note("Langfuse check failed: %s" % e)
+    from . import telemetry
+    url = telemetry.target()
+    if not url:
+        ui.note("no telemetry inbox yet; usage reporting is paused")
+    elif gitx.reachable(url):
+        ui.good("telemetry inbox reachable (%s)" % gitx.redact_url(url))
+    else:
+        ui.note("telemetry inbox not reachable or no access: %s" % gitx.redact_url(url))

@@ -64,7 +64,7 @@ chmod +x "$HOME/.aihub/bin/aihub"
 ok "Installed to $HOME/.aihub/bin"
 step "Connecting your AI tools"
 if [ -r /dev/tty ]; then
-  "$HOME/.aihub/bin/aihub" welcome < /dev/tty || true     # asks to confirm / fill index + Langfuse values when no env var is set
+  "$HOME/.aihub/bin/aihub" welcome < /dev/tty || true     # asks to confirm / fill the index and telemetry values when no env var is set
 else
   "$HOME/.aihub/bin/aihub" welcome -y < /dev/null || true   # no terminal: environment values only, nothing is asked
 fi

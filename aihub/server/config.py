@@ -39,7 +39,7 @@ class Settings:
     data_dir: str = "./aihub-data"
     public_url: str = "http://localhost:8000"
     open_registration: bool = True
-    sync_enabled: bool = True             # poll Langfuse + the git index (disable in tests)
+    sync_enabled: bool = True             # poll the git telemetry inbox + the git index (disable in tests)
     seed_builtin: bool = False             # publish the built-in packages (aihub-guide, aihub-package) into the registry at startup
     log_level: str = "INFO"
     # --- database:  sqlite (default, a file in data_dir)  |  postgres
@@ -91,7 +91,7 @@ class Settings:
         merged.update({k: v for k, v in env.items() if k.startswith("AIHUB_")})   # real environment beats .env
         s = cls()
         s.env_file = used
-        s._env_map = {**file_vals, **env}                                          # env beats .env for every key (also LANGFUSE_*)
+        s._env_map = {**file_vals, **env}                                          # env beats .env for every key (also AIHUB_TELEMETRY_URL)
         for f in fields(cls):
             if f.name in ("env_file", "_env_map"):
                 continue
@@ -126,7 +126,7 @@ class Settings:
             raise ValueError("AIHUB_%s must be a %s, got %r" % (name.upper(), type(current).__name__, val))
 
     def env_get(self, name, default=""):
-        """A deployment value (LANGFUSE_*, AIHUB_INDEX_URL, AIHUB_CLI_GIT_*, ...) from the real environment or the .env file.
+        """A deployment value (AIHUB_TELEMETRY_URL, AIHUB_INDEX_URL, AIHUB_CLI_GIT_*, ...) from the real environment or the .env file.
         Environment wins over .env. Settings built without load() read os.environ only."""
         src = self._env_map if self._env_map is not None else os.environ
         v = src.get(name)

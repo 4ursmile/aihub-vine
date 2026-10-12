@@ -681,7 +681,7 @@ class Repos:
             c.commit()
 
     def events_insert_ext(self, rows):
-        """Insert events keyed by ext_id (a Langfuse observation id). Already-seen ids are skipped. -> number inserted."""
+        """Insert events keyed by ext_id (the event id the CLI generated). Already-seen ids are skipped. -> number inserted."""
         if not rows:
             return 0
         with self.lock:

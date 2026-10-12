@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from aihub.cli import gitx, identity, langfuse, paths
+from aihub.cli import gitx, identity, paths
 from aihub.core import __file__ as core_init
 
 
@@ -28,10 +28,6 @@ class Foundation(unittest.TestCase):
         self.assertTrue(i["user"].startswith("~"))
         paths.save("credentials.json", {"username": "bob"})
         self.assertEqual(identity.current()["user"], "bob")
-
-    def test_span_id_deterministic(self):
-        self.assertEqual(langfuse.span_id("a", 1), langfuse.span_id("a", 1))
-        self.assertNotEqual(langfuse.span_id("a", 1), langfuse.span_id("a", 2))
 
     def test_git_remote_info_and_cache(self):
         d = tempfile.mkdtemp()
@@ -59,36 +55,35 @@ class Telemetry(unittest.TestCase):
     def ev(self, t, comp="skill:a", **k):
         return dict({"kind": "use", "package": "p", "component": comp, "client_id": "c1", "local_user": "dan", "ts": t}, **k)
 
-    def test_every_call_is_counted_but_one_span_per_window(self):
+    def test_interval_is_clamped_and_defaults_to_15s(self):
         from aihub.cli import telemetry
-        events = [self.ev(120 + i) for i in range(50)] + [self.ev(130, comp="skill:b")]      # 50 calls + 1 other, same window
-        spans, left = telemetry.aggregate(events, 60, now=1000)
-        self.assertEqual((len(spans), left), (2, []))
-        counts = sorted(int([a for a in s["attributes"] if a["key"] == "langfuse.observation.metadata.count"][0]["value"]["stringValue"]) for s in spans)
-        self.assertEqual(counts, [1, 50])
-
-    def test_next_window_is_a_different_span_and_resend_is_the_same(self):
-        from aihub.cli import telemetry
-        a, _ = telemetry.aggregate([self.ev(10), self.ev(70)], 60, now=1000)
-        self.assertEqual(len({s["spanId"] for s in a}), 2)
-        b, _ = telemetry.aggregate([self.ev(10), self.ev(70)], 60, now=2000)
-        self.assertEqual({s["spanId"] for s in a}, {s["spanId"] for s in b})                # retries never duplicate
-
-    def test_open_window_is_held_back_until_it_closes(self):
-        from aihub.cli import telemetry
-        spans, left = telemetry.aggregate([self.ev(10), self.ev(990)], 60, now=1000)      # 990 is in the still-open 960-1020 window
-        self.assertEqual((len(spans), len(left)), (1, 1))
-        spans, left = telemetry.aggregate(left, 60, now=1000, force=True)                    # aihub flush sends it anyway
-        self.assertEqual((len(spans), left), (1, []))
-
-    def test_other_events_are_not_merged_and_interval_is_clamped(self):
-        from aihub.cli import telemetry
-        spans, _ = telemetry.aggregate([{"kind": "install", "package": "p", "version": "1", "ts": 5, "client_id": "c"}] * 2, 60, now=1000)
-        self.assertEqual(len(spans), 2)
+        with mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_INTERVAL": ""}):
+            self.assertEqual(telemetry.interval(), 15.0)
+            with mock.patch("aihub.core.defaults.load", return_value={"telemetry": {"interval": 40}}):
+                self.assertEqual(telemetry.interval(), 40.0)                         # defaults.json is honoured
+                paths.save("config.json", {"telemetry_interval": "25"})
+                self.assertEqual(telemetry.interval(), 25.0)                         # config.json beats it
+                with mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_INTERVAL": "7"}):
+                    self.assertEqual(telemetry.interval(), 7.0)                      # environment beats both
         with mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_INTERVAL": "1"}):
-            self.assertEqual(telemetry.interval(), 10.0)
+            self.assertEqual(telemetry.interval(), 5.0)
         with mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_INTERVAL": "999999"}):
             self.assertEqual(telemetry.interval(), 3600.0)
+
+    def test_every_event_gets_a_unique_id_and_identity(self):
+        import json
+        from aihub.cli import telemetry
+        telemetry.enqueue({"kind": "use", "package": "p"})
+        telemetry.enqueue({"kind": "use", "package": "p"})
+        a, b = [json.loads(l) for l in open(paths.p("queue", "events.jsonl"))]
+        self.assertNotEqual(a["id"], b["id"])                                     # the hub dedups on this
+        self.assertTrue(a["client_id"] and a["ts"] and a["os"])
+
+    def test_nothing_is_pushed_when_nothing_is_spooled(self):
+        from aihub.cli import telemetry
+        with mock.patch.object(telemetry, "push") as push, mock.patch.object(telemetry, "target", return_value="file:///x"):
+            self.assertEqual(telemetry._send_once(), 0)
+            push.assert_not_called()
 
 
 class FlusherLock(unittest.TestCase):

@@ -149,7 +149,7 @@ class PostgresTests(unittest.TestCase):
         self.assertEqual(c.get("/api/v1/packages?sort=rating", headers=H).json()["items"][0]["rating"], {"avg": 5.0, "count": 1})
         ev = {"ts": __import__("time").time(), "kind": "use", "package": "pgpkg", "client_id": "c", "username": None, "ext_id": "obs-1"}
         self.assertEqual(r.events_insert_ext([dict(ev)]), 1)
-        self.assertEqual(r.events_insert_ext([dict(ev)]), 0)                      # same Langfuse observation twice: skipped
+        self.assertEqual(r.events_insert_ext([dict(ev)]), 0)                      # same event id twice: skipped
         self.assertEqual(c.get("/api/v1/dashboard?days=7", headers=H).json()["totals"], {"use": 1})
         self.assertEqual(c.get("/api/v1/readyz").json()["database"], "postgres")
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aihub-cli"
 dynamic = ["version"]
-description = "AI Hub command line: install, publish and track skills, agents and MCP servers backed by git and Langfuse."
+description = "AI Hub command line: install, publish and track skills, agents and MCP servers backed by git."
 requires-python = ">=3.9"
 dependencies = []            # the CLI is standard-library only; `pip install aihub-cli[certs]` adds CA certificates
 

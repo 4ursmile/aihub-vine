@@ -1,13 +1,14 @@
 {
-  "_comment": "Defaults for the Git/Langfuse-backed AI Hub. Override any key with: aihub config set <key> <value>",
+  "_comment": "Defaults for the Git-backed AI Hub. Override any key with: aihub config set <key> <value>",
   "index": {
     "git_url": "https://github.com/4ursmile/aftest",
     "branch": "main",
     "path": "index"
   },
-  "langfuse": {
-    "host": "",
-    "project": "aihub"
+  "telemetry": {
+    "git_url": "https://github.com/4ursmile/aftest",
+    "branch": "telemetry-archive",
+    "interval": 15
   },
   "cli": {
     "git_url": "",

@@ -10,9 +10,14 @@ class GitError(Exception):
     pass
 
 
-def run(args, cwd=None, check=True):
+def run(args, cwd=None, check=True, timeout=None, input=None):
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **tls.git_env())
-    r = subprocess.run(["git"] + list(args), cwd=cwd, env=env, capture_output=True, text=True)
+    try:
+        r = subprocess.run(["git"] + list(args), cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout, input=input)
+    except subprocess.TimeoutExpired:
+        if check:
+            raise GitError("git %s timed out after %ss" % (args[0], timeout))
+        return ""
     if check and r.returncode != 0:
         raise GitError((r.stderr or r.stdout).strip() or "git %s failed" % args[0])
     return r.stdout.strip()

@@ -301,7 +301,7 @@ function Start() {
     : os === "mac" ? "Run in Terminal. Needs Python 3.9+ (preinstalled with Xcode tools, or `brew install python`). Then add it to PATH:"
     : "Run in your shell. Needs Python 3.9+ and curl (e.g. `sudo apt install python3 curl`). Then add it to PATH:";
   const path = os === "mac" ? `echo 'export PATH="$HOME/.aihub/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc` : os === "linux" ? `echo 'export PATH="$HOME/.aihub/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc` : null;
-  const envs = os === "windows" ? `$env:LANGFUSE_BASE_URL="https://…"; $env:LANGFUSE_PUBLIC_KEY="pk-lf-…"; $env:LANGFUSE_SECRET_KEY="sk-lf-…"` : `export LANGFUSE_BASE_URL="https://…" LANGFUSE_PUBLIC_KEY="pk-lf-…" LANGFUSE_SECRET_KEY="sk-lf-…"`;
+  const envs = os === "windows" ? `$env:AIHUB_INDEX_URL="https://…"` : `export AIHUB_INDEX_URL="https://…"`;
   const step = (n, t, d, c) => html`<div class="card stack"><div class="row"><span class="rank top">${n}</span><h3>${t}</h3></div><p class="mut">${d}</p>${c && html`<${Cmd} text=${c} />`}</div>`;
   if (m.loading) return html`<div class="skel"></div>`;
   const idx = cfg.d && cfg.d.index && cfg.d.index.url;
@@ -312,9 +312,9 @@ function Start() {
       <${Cmd} text=${cmd} />${path && html`<${Cmd} text=${path} />`}
       <button class="btn sec sm" style="align-self:flex-start" onClick=${() => setAlt(!alt)} aria-expanded=${alt}>${alt ? "Hide" : "Can’t reach this server from your machine?"}</button>
       ${alt && html`<div class="stack"><p class="mut">Install straight from git instead. It needs only git and Python, not this website.</p><${Cmd} text=${pip} />
-        <p class="mut">Then give the CLI your Langfuse settings. Export them (the CLI picks these up automatically), or run <code>aihub setup --manual</code> and it asks for each one:</p><${Cmd} text=${envs} /><${Cmd} text="aihub setup --manual" />
+        <p class="mut">Then tell the CLI where the package index is. Export it (the CLI picks it up automatically), or run <code>aihub setup --manual</code> and it asks:</p><${Cmd} text=${envs} /><${Cmd} text="aihub setup --manual" />
         <p class="mut">${idx ? html`The package index is <code>${idx}</code>; ` : ""}if git asks for a login, enter your username and an access token once. Your git credential helper remembers it.</p></div>`}</div>
-    ${step(2, "Connect to Langfuse and the package index", "Pulls the index location and, if your admin shares them, the Langfuse keys. Asks you for anything missing. Refreshes itself later.", "aihub setup")}
+    ${step(2, "Connect to the package index", "Pulls the index location and the usage inbox from this server. Asks you for anything missing. Refreshes itself later.", "aihub setup")}
     ${step(3, "Install something", "You'll be asked which tools to connect it to. Everything is reversible.", "aihub install <package>")}
     ${step(4, "Publish your own", "Scaffold a manifest, then publish. aihub commits and pushes to your git repo for you.", "aihub dev init && aihub dev publish")}</div>`;
 }
@@ -470,8 +470,8 @@ function TextSetting({ x, v, busy, save, fromEnv, envName }) {
     <div class="row">${x.kind === "html" ? html`<textarea class="field" rows="3" maxlength=${x.max} value=${t} aria-label=${x.label} style="width:min(32rem,100%)" onInput=${(e) => setT(e.target.value)} />` : html`<input class="field" type=${x.kind === "email" ? "email" : x.kind === "url" ? "url" : "text"} maxlength=${x.max} value=${t} aria-label=${x.label} style="width:min(16rem,100%)" onInput=${(e) => setT(e.target.value)} />`}
     <button class="btn sm" disabled=${busy || t.trim() === (v || "")} onClick=${() => save(t.trim())}>Save</button></div></div>`;
 }
-const ENV_NAME = { cli_git_url: "AIHUB_CLI_GIT_URL", cli_git_branch: "AIHUB_CLI_GIT_BRANCH", cli_git_subdir: "AIHUB_CLI_GIT_SUBDIR", langfuse_host: "LANGFUSE_BASE_URL",
-  langfuse_public_key: "LANGFUSE_PUBLIC_KEY", index_url: "AIHUB_INDEX_URL", index_branch: "AIHUB_INDEX_BRANCH", index_path: "AIHUB_INDEX_PATH" };
+const ENV_NAME = { cli_git_url: "AIHUB_CLI_GIT_URL", cli_git_branch: "AIHUB_CLI_GIT_BRANCH", cli_git_subdir: "AIHUB_CLI_GIT_SUBDIR", telemetry_url: "AIHUB_TELEMETRY_URL", telemetry_branch: "AIHUB_TELEMETRY_BRANCH",
+  index_url: "AIHUB_INDEX_URL", index_branch: "AIHUB_INDEX_BRANCH", index_path: "AIHUB_INDEX_PATH" };
 function LogoSetting({ url, bump }) {
   const f = useRef(null); const [busy, setBusy] = useState(false);
   const pick = async (e) => { const file = e.target.files[0]; e.target.value = ""; if (!file) return; setBusy(true);
@@ -517,13 +517,10 @@ function AdminSync() {
     <div class="stack"><h3>Schedule</h3><div class="list"><div class="li"><div class="t"><b>Pull interval</b><span>Seconds (10-86400) or a cron expression: <code>*/5 * * * *</code> every 5 min, <code>0 3 * * *</code> daily at 03:00. Applies immediately.</span></div>
       <div class="row"><input class="field" id="sched" defaultValue=${c.sync_interval} style="width:11rem" aria-label="Pull interval" /><button class="btn sm" disabled=${busy === "sync_interval"} onClick=${() => save("sync_interval", document.getElementById("sched").value)}>Save</button></div></div>
       <div class="li"><div class="t"><b>Presets</b></div><div class="seg">${SCHEDULES.map(([n, v]) => html`<button key=${v} class=${c.sync_interval === v ? "on" : ""} onClick=${() => save("sync_interval", v)}>${n}</button>`)}</div></div></div></div>
-    <div class="stack"><h3>Langfuse</h3><div class="list">${env.langfuse && html`<div class="li mut">Keys are set in the server environment, and those win over the values below.</div>`}
-      ${T("langfuse_host", "Host", "e.g. https://us.cloud.langfuse.com")}${T("langfuse_public_key", "Public key", "pk-lf-…")}
-      <${SecretField} label="Secret key" help="sk-lf-… Write-only: never shown again." v=${c.langfuse_secret_key} onSave=${(v) => save("langfuse_secret_key", v)} /></div></div>
+    <div class="stack"><h3>Usage inbox</h3><div class="list">${T("telemetry_url", "Git URL", "Repo CLIs push usage batches to (refs/telemetry/*). Empty = the default, then the package index repo")}${T("telemetry_branch", "Archive branch", "default: telemetry-archive")}
+      <div class="li"><div class="t"><b>Archive batches to git</b><span>Before deleting an ingested batch, copy it to the archive branch so git keeps a durable copy of every event.</span></div><label class="switch"><input type="checkbox" role="switch" checked=${c.telemetry_archive !== "0"} disabled=${busy === "telemetry_archive"} onChange=${(e) => save("telemetry_archive", e.target.checked ? "1" : "0")} aria-label="Archive batches" /><i></i></label></div></div></div>
     <div class="stack"><h3>Package index</h3><div class="list">${T("index_url", "Git URL", "Repository holding the package index")}${T("index_branch", "Branch", "default: main")}${T("index_path", "Folder", "default: index (a folder index; an old index.json file also works)")}</div></div>
     <div class="stack"><h3>CLI setup</h3><div class="list">
-      <div class="li"><div class="t"><b>Share Langfuse credentials with CLIs</b><span>When on, <code>aihub setup</code> hands the Langfuse keys (never git credentials) to signed-in users and to anyone with the enrollment code. Sent over HTTPS only; every hand-out is audited.</span></div><label class="switch"><input type="checkbox" role="switch" checked=${c.share_credentials === "1"} disabled=${busy === "share_credentials"} onChange=${(e) => save("share_credentials", e.target.checked ? "1" : "0")} aria-label="Share credentials" /><i></i></label></div>
-      <${SecretField} label="Enrollment code" help="Give this to teammates: aihub setup --code <code>. Leave unset to share only with signed-in users." v=${c.enroll_code} onSave=${(v) => save("enroll_code", v)} />
       ${T("cli_git_url", "CLI git URL", "Where to pip install the CLI from when this server is unreachable")}${T("cli_git_branch", "Branch (optional)", "Leave empty to hide. Install from this branch instead of the default")}${T("cli_git_subdir", "Sub folder (optional)", "Leave empty to hide. Install from this folder of the repo")}${T("client_refresh_hours", "CLI refresh (hours)", "How often installed CLIs re-pull these settings (default 24)")}</div></div></div>`;
 }
 function Groups() {

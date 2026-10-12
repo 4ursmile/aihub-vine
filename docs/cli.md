@@ -51,7 +51,7 @@ aihub login
 
 `AIHUB_URL` supplies the default hub URL when no saved `hub` value exists. `AIHUB_HOME` changes the CLI state directory from `~/.aihub` to the specified path.
 
-Packages are found in a git-backed package index, not on the hub. The index is a folder in that repository (default path `index`, holding `root.json`, `catalog/` and `packages/`); an older single `index.json` is still read. The CLI only reads the index; the server is the only writer. `aihub setup` asks the hub for the index location and, if your admin shares them, the Langfuse keys. Without a hub, run `aihub setup --manual`, set the index with `aihub config set index_url <git url>`, or export `AIHUB_INDEX_URL`, `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY`. Git credentials stay with your own git credential helper.
+Packages are found in a git-backed package index, not on the hub. The index is a folder in that repository (default path `index`, holding `root.json`, `catalog/` and `packages/`); an older single `index.json` is still read. The CLI only reads the index; the server is the only writer. `aihub setup` asks the hub for the index location and the telemetry inbox. Without a hub, run `aihub setup --manual`, set the index with `aihub config set index_url <git url>`, or export `AIHUB_INDEX_URL` (and `AIHUB_TELEMETRY_URL`/`AIHUB_TELEMETRY_BRANCH` to send usage somewhere other than the bundled default). Git credentials stay with your own git credential helper.
 
 To remove aihub from a machine, run `aihub self-uninstall` (add `--yes` to skip the question). It removes installed packages, usage hooks, the PATH block and the aihub home folder, and leaves published packages and git repositories alone. For a pip install, also run `pip uninstall aihub-cli`.
 
@@ -88,8 +88,8 @@ aihub upgrade
 - `self-uninstall [--yes]` removes aihub from this machine: every installed package, the usage hooks in your AI tools, the `# >>> aihub` ... `# <<< aihub` PATH block that the installer added to your shell config, and the aihub home folder (`~/.aihub`, or `$AIHUB_HOME`). It asks for confirmation unless `--yes` is given. It does not touch packages you published or your git repositories. A pip install is removed with `pip uninstall aihub-cli`.
 - `disable <name>...` switches a package off without deleting it: its skills, agents and MCP servers are removed from your AI tools, setup steps are reverted, and its commands leave PATH. `enable <name>...` (or `aihub install <name>` on a disabled package) puts it back from the files already on disk, so it works offline. See [Enable, disable, tree, lock and sync](#enable-disable-tree-lock-and-sync).
 - `tree [name]` prints the dependency tree. `lock` and `sync` write and apply a lock file.
-- `doctor` checks that the package index and Langfuse are reachable, whether you are signed in, which detected tools have usage hooks, and whether `python3` is available. The hub is optional and only reported.
-- `welcome` runs first-time setup for detected tools and prints a one-line note that an account is optional (`aihub login`); `setup` pulls index and Langfuse settings (see [Install and configure](#install-and-configure)).
+- `doctor` checks that the package index and the telemetry inbox are reachable (`git ls-remote`), whether you are signed in, which detected tools have usage hooks, and whether `python3` is available. The hub is optional and only reported.
+- `welcome` runs first-time setup for detected tools and prints a one-line note that an account is optional (`aihub login`); `setup` pulls index and telemetry settings (see [Install and configure](#install-and-configure)).
 - `version` shows the CLI version and the one the hub offers; `upgrade` installs it (see [Versions and self-update](#versions-and-self-update)).
 
 During installation, missing required commands are reported with any manifest hint. Package dependencies are recursively installed. Python dependencies in `[python]` are installed into a package-specific virtual environment. Installation asks before running the platform install script and before registering components; `--yes` skips these prompts. When stdin is closed (non-interactive), those prompts count as "no".
@@ -122,13 +122,13 @@ Usage hooks record when an installed package's component is used (a skill, an ag
 
 Parameters are scrubbed on your machine before anything is queued: values under keys such as `password`, `token`, `secret`, `api_key` or `authorization`, `Bearer ...` headers, `password=...` style text, passwords inside `scheme://user:pass@host` URLs, and common key formats (`sk-...`, `ghp_...`, AWS, Slack, JWT, private keys) are replaced with `[redacted]`. Scrubbing is pattern based, so it cannot catch every secret.
 
-Events are written to Langfuse as OpenTelemetry spans, under your account name when you are signed in, or `~<OS user>` when you are not. That name comes from the client and is not verified. Hook handling is intended to be fast, non-blocking, and non-fatal to the coding tool.
+Events are pushed to the telemetry inbox (a git repo) in batches, under your account name when you are signed in, or `~<OS user>` when you are not. That name comes from the client and is not verified. Hook handling is intended to be fast, non-blocking, and non-fatal to the coding tool.
 
 - Claude Code uses a `PreToolUse` hook in `~/.claude/settings.json`. It matches tool calls, identifies installed skills, agent tasks, and MCP tools, then invokes the CLI hook handler.
 - OpenCode uses `~/.config/opencode/plugin/aihub-usage.js`, listening for `tool.execute.before` and launching the CLI in the background.
 - Codex does not expose a general tool-call hook, so there is no equivalent hook integration.
 
-The hook writes events to `~/.aihub/queue/events.jsonl` (or `$AIHUB_HOME/queue/events.jsonl`). A background flusher sends them to Langfuse once per telemetry window (60 seconds by default, between 10 and 3600; `aihub config set telemetry_interval <seconds>` or `AIHUB_TELEMETRY_INTERVAL` changes it). `aihub flush` sends the queue immediately, and returns without waiting if the background flusher already holds the lock. Events wait in the queue while Langfuse is unconfigured or unreachable. The queue is capped at 5 MiB; if it exceeds that size, additional events are dropped until it shrinks. Hook failures are suppressed to avoid blocking the coding tool.
+The hook writes events to `~/.aihub/queue/events.jsonl` (or `$AIHUB_HOME/queue/events.jsonl`). Each event gets a unique `id`. A background flusher waits one telemetry window (15 seconds by default, between 5 and 3600; `AIHUB_TELEMETRY_INTERVAL`, `aihub config set telemetry_interval <seconds>`, or `telemetry.interval` in the bundled `defaults.json` changes it, in that order of priority), so a burst of events becomes one batch, then pushes it as one commit to `refs/telemetry/<client_id>/<batch>` of the inbox repo. Nothing is pushed when the queue is empty. `aihub flush` pushes the queue immediately, and returns without waiting if the background flusher already holds the lock. Events wait in the queue (and are retried on the next event or `aihub flush`) while the inbox is unreachable or not writable. The inbox is `AIHUB_TELEMETRY_URL` > `telemetry_url` in `config.json` > the bundled default (`aihub/core/defaults.json`) > the package index repo; the archive branch is `AIHUB_TELEMETRY_BRANCH` / `telemetry_branch` the same way. The queue is capped at 5 MiB; if it exceeds that size, additional events are dropped until it shrinks. Hook failures are suppressed to avoid blocking the coding tool.
 
 Install or remove hooks explicitly:
 
@@ -146,7 +146,7 @@ The default CLI home is `~/.aihub`; set `AIHUB_HOME` to override it. The CLI use
 
 ```text
 ~/.aihub/
-  config.json          Hub URL, index and Langfuse settings, client ID
+  config.json          Hub URL, index and telemetry settings, client ID
   credentials.json     Hub login token and username
   index-cache.json     Cached copy of an http(s) .json index, used when it cannot be fetched
   state.json           Installed package state (version, rev, dependencies, enabled flag)
@@ -158,7 +158,7 @@ The default CLI home is `~/.aihub`; set `AIHUB_HOME` to override it. The CLI use
   queue/               Usage event spool and flusher state
 ```
 
-Settings resolve in this order: environment variables, then `config.json`, then the built-in `aihub/core/defaults.json` (keys such as `index_url`, `index_branch`, `index_path`, `langfuse_*` and `telemetry_interval`).
+Settings resolve in this order: environment variables, then `config.json`, then the built-in `aihub/core/defaults.json` (keys such as `index_url`, `index_branch`, `index_path`, `telemetry_url`, `telemetry_branch` and `telemetry_interval`).
 
 The `credentials.json` file is written with restrictive permissions. Keep the directory private.
 
@@ -175,7 +175,7 @@ aihub dev publish ./my-package --bump patch
 aihub dev stats ./my-package
 ```
 
-`aihub dev init [path] --type skill|agent|mcp|tool|setup --name NAME --description DESCRIPTION --force` creates a starter project for the selected type and fills in the `[git]` table from the project's repository when it can. If `aihub.toml` already exists, init keeps it; `--force` overwrites the starter files it generates, and unrelated files are left in place. `aihub dev validate [path]` parses and normalizes the manifest, then lints the files it references, reporting errors and warnings. See [Publishing to AI Hub](publishing.md) for project trees, manifest examples, install scripts, visibility, and release steps. `dev build` writes `dist/<name>-<version>.tar.gz`. `dev publish` commits the project, pushes it to the `[git]` remote and branch in `aihub.toml`, and sends an `aihub.publish` event (queued if Langfuse is unreachable). It stops if the repository's remote or branch does not match `[git]`, and it tracks files over 50 MB with git-lfs. It does not edit any index: the hub lists the package on its next index sync, which can take 1-2 minutes. Published versions cannot be reused, so bump the version for each release. `--bump` supports `major`, `minor`, and `patch`.
+`aihub dev init [path] --type skill|agent|mcp|tool|setup --name NAME --description DESCRIPTION --force` creates a starter project for the selected type and fills in the `[git]` table from the project's repository when it can. If `aihub.toml` already exists, init keeps it; `--force` overwrites the starter files it generates, and unrelated files are left in place. `aihub dev validate [path]` parses and normalizes the manifest, then lints the files it references, reporting errors and warnings. See [Publishing to AI Hub](publishing.md) for project trees, manifest examples, install scripts, visibility, and release steps. `dev build` writes `dist/<name>-<version>.tar.gz`. `dev publish` commits the project, pushes it to the `[git]` remote and branch in `aihub.toml`, and pushes an `aihub.publish` event to the telemetry inbox right away (queued if the inbox is unreachable). It stops if the repository's remote or branch does not match `[git]`, and it tracks files over 50 MB with git-lfs. It does not edit any index: the hub lists the package on its next index sync, which can take 1-2 minutes. Published versions cannot be reused, so bump the version for each release. `--bump` supports `major`, `minor`, and `patch`.
 
 `aihub dev` commands also accept a folder holding several packages and `--only NAME` to pick some; `aihub dev list` shows them. `--only` matches the folder name, the relative path, or the package name, and can be repeated or comma-separated. It works with `validate`, `build`, `publish`, `index` and `stats`. `aihub dev init PATH --sub --name NAME` creates the package in `PATH/NAME`, which is how to add a package to a workspace folder. For a monorepo, `aihub dev init PATH --mono [--packages "a,b:mcp"] [--remote URL] [--branch B]` makes PATH one git repository with one package per sub folder. `aihub dev tree [PATH]` shows the packages with their repository and `[git]` status. `aihub dev doctor [PATH] [--check] [--remote URL]` sets `[git]` (url, branch, subdir) from the working repository, and `aihub dev tree-solve [PATH] [--nested merge|keep] [--remote URL]` resolves a package folder that has its own `.git` inside another repository. `aihub dev publish` treats packages independently: a failing package is reported and the rest still publish, with one push per repository, and the exit code is non-zero if any failed. See [several packages in one repository](publishing.md#several-packages-in-one-repository).
 
@@ -212,12 +212,12 @@ Admin > Settings > Site sets the site name, logo (PNG/JPEG/WebP, max 256 KB), an
 
 ## HTTPS with a private or self-signed certificate
 
-Certificate checks are on by default. If your hub, Langfuse or git host uses an internal CA, tell the CLI once:
+Certificate checks are on by default. If your hub or git host uses an internal CA, tell the CLI once:
 
 | setting | environment | effect |
 | --- | --- | --- |
 | `aihub config set ca_bundle /path/ca.pem` | `AIHUB_CA_BUNDLE` | trust this CA file (preferred; verification stays on) |
 | `aihub config set insecure_tls true` | `AIHUB_INSECURE=1` | skip certificate checks (self-signed / test hubs only) |
 
-They apply to every CLI call: hub, Langfuse, an https index, and git (`GIT_SSL_CAINFO` / `GIT_SSL_NO_VERIFY`). The installers read the same
+They apply to every CLI call: hub, an https index, and git (`GIT_SSL_CAINFO` / `GIT_SSL_NO_VERIFY`). The installers read the same
 variables, e.g. `curl -kfsSL https://hub/install.sh | AIHUB_INSECURE=1 sh` (PowerShell: set `$env:AIHUB_INSECURE="1"` first).

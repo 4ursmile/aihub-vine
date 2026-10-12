@@ -1,18 +1,23 @@
-"""Non-blocking usage telemetry.
+"""Non-blocking usage telemetry, batched through git.
 
-`enqueue()` is a single O_APPEND write (microseconds). `kick()` starts a detached flusher process at most
-once per interval. The flusher batches the spool into one POST. Nothing here may raise or block the agent.
+`enqueue()` is a single O_APPEND write (microseconds). `kick()` starts a detached flusher process unless one is alive.
+The flusher waits one short window so a burst of events becomes ONE batch, then pushes it to the inbox repo as an orphan
+commit on its own ref (`refs/telemetry/<client_id>/<batch>`). Nobody else writes that ref, so pushes never conflict. The
+hub fetches the refs, stores the events, archives them and deletes the refs. Nothing here may raise or block the agent.
 """
+import glob
 import json
 import os
 import subprocess
 import sys
 import time
+import uuid
 
-from . import paths
+from . import gitx, paths
 
 STALE = 30      # heartbeat age after which a flusher is considered dead (it beats every 5s)
 MAX_SPOOL = 5 * 1024 * 1024
+BATCH = 5000    # events per pushed commit
 
 
 def _spool():
@@ -42,13 +47,25 @@ def who():
     return _WHO
 
 
+def _prep(ev):
+    """Stamp an event with what the hub needs. `id` is the dedup key: a resent batch never makes a second row."""
+    ev.setdefault("id", uuid.uuid4().hex)
+    ev.setdefault("ts", time.time())
+    ev.setdefault("local_user", who()[0])
+    ev.setdefault("host", who()[1])
+    ev.setdefault("os", sys.platform)
+    if "user" not in ev:
+        ev["user"] = paths.load("credentials.json", {}).get("username") or ""
+    if "client_id" not in ev:
+        from . import hooks
+        ev["client_id"] = hooks.client_id()
+    return json.dumps(ev, separators=(",", ":"))
+
+
 def enqueue(ev):
     try:
         paths.ensure("queue")
-        ev.setdefault("ts", time.time())
-        ev.setdefault("local_user", who()[0])
-        ev.setdefault("host", who()[1])
-        line = (json.dumps(ev, separators=(",", ":")) + "\n").encode()
+        line = (_prep(ev) + "\n").encode()
         if os.path.exists(_spool()) and os.path.getsize(_spool()) > MAX_SPOOL:
             return
         fd = os.open(_spool(), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
@@ -122,98 +139,101 @@ def kick():
 
 
 def interval():
-    """Seconds per flush window. `aihub config set telemetry_interval 120` or AIHUB_TELEMETRY_INTERVAL. 10..3600, default 60."""
-    try:
-        v = float(os.environ.get("AIHUB_TELEMETRY_INTERVAL") or paths.config().get("telemetry_interval") or 60)
-    except (TypeError, ValueError):
-        v = 60
-    return max(10.0, min(v, 3600.0))
-
-
-def _user(ev, cred):
-    return cred.get("username") or "~" + (ev.get("local_user") or "unknown")
-
-
-def to_items(ev, count=1, window=None):
-    """One Langfuse span. Identity is the hub user, else ~<os user>. `count` calls rolled into it; `window` is the
-    bucket start, part of the dedup key so a resend of the same bucket reuses the same ids."""
-    from . import langfuse
-    cred = paths.load("credentials.json", {})
-    user = _user(ev, cred)
-    kind = ev.get("kind", "use")
-    meta = {k: v for k, v in ev.items() if k not in ("ts", "session") and v not in (None, "")}
-    meta.update(user=user, anonymous=not cred.get("username"), os=sys.platform, count=count)
-    cid = ev.get("client_id", "")
-    if kind == "use":
-        key = (cid, ev.get("package", ""), ev.get("component", ""), str(window))
-    elif kind == "publish":
-        key = (ev.get("package", ""), ev.get("version", ""), kind, ev.get("commit", ""))
-    else:
-        key = (cid, ev.get("package", ""), ev.get("version", ""), kind, str(ev.get("ts")))
-    return langfuse.make_span(langfuse_name(kind), key, meta, user, ts=window if window is not None else ev.get("ts"))
-
-
-def aggregate(events, secs, now=None, force=False):
-    """Roll raw events into spans. Every `use` call is counted; calls to the same package component by the same
-    client inside one window become one span with a count. Windows still open stay behind (-> leftover) so a
-    window is only ever sent once with its final count. force=True sends open windows too.
-    -> (spans, leftover_events)"""
-    now = now or time.time()
-    spans, left, groups = [], [], {}
-    for e in events:
-        if e.get("kind", "use") != "use":
-            spans.append(to_items(e))
-            continue
-        w = int(float(e.get("ts") or now) // secs * secs)
-        if not force and w + secs > now:
-            left.append(e)
-            continue
-        g = groups.setdefault((e.get("client_id", ""), e.get("package", ""), e.get("component", ""), w), [])
-        g.append(e)
-    for (_, _, _, w), g in groups.items():
-        spans.append(to_items(g[-1], count=len(g), window=w))          # last call's detail/cwd stand for the window
-    return spans, left
-
-
-def langfuse_name(kind):
+    """Seconds the flusher waits to gather a batch, clamped to 5..3600. Lookup order: AIHUB_TELEMETRY_INTERVAL > `aihub config set
+    telemetry_interval 30` > aihub/core/defaults.json `telemetry.interval` > 15."""
     from ..core import defaults
-    return defaults.load().get("event_names", {}).get(kind, "aihub." + kind)
+    try:
+        v = float(os.environ.get("AIHUB_TELEMETRY_INTERVAL") or paths.config().get("telemetry_interval")
+                  or defaults.load().get("telemetry", {}).get("interval") or 15)
+    except (TypeError, ValueError):
+        v = 15
+    return max(5.0, min(v, 3600.0))
 
 
-def _send_once(timeout, force=False):
-    """Send what is due. Returns the number of events (calls) sent. Open windows go back to the spool."""
-    import glob
-    from . import langfuse
-    if not langfuse.configured():
-        return 0                                         # keep the spool until keys are set
+def source():
+    """Where telemetry goes. Lookup order for each value: environment > ~/.aihub/config.json (`aihub config set telemetry_url|telemetry_branch`)
+    > aihub/core/defaults.json (bundled in both the pip package and aihub.pyz) > the package index repo (url only).
+    The CLI pushes to refs/telemetry/* of `url`; `branch` is the branch the hub archives ingested batches to."""
+    from ..core import defaults
+    d, c = defaults.load().get("telemetry", {}), paths.config()
+    url = os.environ.get("AIHUB_TELEMETRY_URL") or c.get("telemetry_url") or d.get("git_url") or ""
+    if not url:
+        from . import registry
+        url = registry.source()["url"]
+    return {"url": url, "branch": os.environ.get("AIHUB_TELEMETRY_BRANCH") or c.get("telemetry_branch") or d.get("branch") or "telemetry-archive"}
+
+
+def target():
+    return source()["url"]
+
+
+def _scratch():
+    """A private bare repo used only to build commits; nothing is ever checked out."""
+    d = paths.p("queue", "git")
+    if not os.path.isdir(os.path.join(d, "objects")):
+        os.makedirs(d, exist_ok=True)
+        gitx.run(["init", "-q", "--bare"], cwd=d)
+    return d
+
+
+def push(url, lines, timeout=20):
+    """Push `lines` (JSON strings) as one orphan commit on a fresh ref. Raises on any failure; the caller keeps the events."""
+    from . import hooks
+    d = _scratch()
+    blob = gitx.run(["hash-object", "-w", "--stdin"], cwd=d, input="".join(l + "\n" for l in lines), timeout=timeout)
+    tree = gitx.run(["mktree"], cwd=d, input="100644 blob %s\tevents.jsonl\n" % blob, timeout=timeout)
+    commit = gitx.run(["-c", "user.name=aihub", "-c", "user.email=aihub@localhost", "commit-tree", tree, "-m", "telemetry"],
+                      cwd=d, timeout=timeout)
+    ref = "refs/telemetry/%s/%d-%s" % (hooks.client_id(), int(time.time()), uuid.uuid4().hex[:8])
+    gitx.run(["push", "-q", url, "%s:%s" % (commit, ref)], cwd=d, timeout=timeout)
+
+
+def _send_once(timeout=20):
+    """Push everything spooled. Returns the number of events sent. The spool files are deleted only after the push succeeded;
+    a failure leaves them for the next pass, and a crash between push and delete only causes a resend the hub dedups by id."""
+    url = target()
+    if not url:
+        return 0                                         # keep the spool until an inbox is configured
     if os.path.exists(_spool()):
         os.replace(_spool(), paths.p("queue", "sending.%d.%d.jsonl" % (os.getpid(), time.time() * 1000)))
     files = glob.glob(paths.p("queue", "sending.*.jsonl"))
-    events = []
+    lines = []
     for f in files:
-        for line in open(f):
-            try:
-                events.append(json.loads(line))
-            except ValueError:
-                pass
-    spans, left = aggregate(events, interval(), force=force)
+        try:
+            with open(f) as fh:
+                for line in fh:
+                    try:
+                        json.loads(line)
+                        lines.append(line.strip())
+                    except ValueError:
+                        pass
+        except OSError:
+            pass
     try:
-        for i in range(0, len(spans), 100):
-            langfuse.send(spans[i:i + 100], timeout=timeout)
-    except Exception:
-        return 0  # keep files; retried on the next pass
-    for e in left:                                       # still-open windows wait in the spool for the next pass
-        enqueue(e)
+        for i in range(0, len(lines), BATCH):
+            push(url, lines[i:i + BATCH], timeout)
+    except Exception as e:
+        _send_once.error = gitx.redact_url(str(e))[:200]
+        return 0
     for f in files:
-        os.remove(f)
-    return len(events) - len(left)
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+    return len(lines)
 
 
-def flush(timeout=5, linger=None, force=False):
-    """The one flusher. Wakes once per window, sends the closed windows, and exits after a pass with nothing left.
-    A burst of hook calls therefore costs one request per window. The lock's mtime is a heartbeat.
-    force=True (aihub flush) sends open windows too and returns; it waits for no one, so if a background flusher is
-    alive it leaves the spool to it."""
+_send_once.error = ""
+
+
+def _pending():
+    return (os.path.exists(_spool()) and os.path.getsize(_spool()) > 0) or bool(glob.glob(paths.p("queue", "sending.*.jsonl")))
+
+
+def flush(timeout=20, linger=None, force=False):
+    """The one flusher. Waits one window (a burst of events becomes one batch), pushes, and exits once nothing is left or a push
+    failed (the events stay spooled; the next event or `aihub flush` retries). The lock's mtime is a heartbeat.
+    force=True (aihub flush) pushes right now and returns; if a background flusher is alive it leaves the spool to it."""
     total = 0
     owned = os.environ.pop("AIHUB_FLUSH_LOCKED", "") == "1"     # kick() already took the lock for this process
     try:
@@ -221,16 +241,15 @@ def flush(timeout=5, linger=None, force=False):
         if not owned and not _acquire():
             return 0
         if force:
-            return _send_once(timeout, force=True)
-        secs = interval()
+            return _send_once(timeout)
         while True:
-            end = time.time() + secs + 1                 # let the window close, keeping the heartbeat alive
+            end = time.time() + interval()
             while time.time() < end:
                 os.utime(_lock(), None)
                 time.sleep(min(5, max(0.1, end - time.time())))
             n = _send_once(timeout)
             total += n
-            if not n and not (os.path.exists(_spool()) and os.path.getsize(_spool())):
+            if not n or not _pending():
                 break
     except Exception:
         pass
@@ -242,3 +261,21 @@ def flush(timeout=5, linger=None, force=False):
 def record(ev):
     enqueue(ev)
     kick()
+
+
+def deliver(ev, timeout=20):
+    """Push one event now (publish needs the hub to hear about it quickly). Falls back to the spool. -> True when it was pushed."""
+    try:
+        line = _prep(ev)
+        url = target()
+        if url:
+            push(url, [line], timeout)
+            return True
+        deliver.error = "no telemetry inbox configured"
+    except Exception as e:
+        deliver.error = gitx.redact_url(str(e))[:200]
+    record(ev)
+    return False
+
+
+deliver.error = ""

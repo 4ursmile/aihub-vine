@@ -79,15 +79,15 @@ class Recover(unittest.TestCase):
 
     def test_secret_setting_survives_restore(self):
         s, r = make(self.t, "a", self.bare)
-        r.set_setting("langfuse_secret_key", "sk-lf-supersecret1234567890")
+        r.set_setting("telemetry_secret_key", "sk-tel-supersecret1234567890")
         add_events(r, 3, time.time())
         self.backup(s, r)
         s2, r2 = make(self.t, "b", self.bare)
-        r2.set_setting("langfuse_secret_key", "sk-lf-localvalue123456789")
+        r2.set_setting("telemetry_secret_key", "sk-tel-localvalue123456789")
         r2.db.close()
         R.run(s2, "remote", interactive=False)
         r3 = Repos(init_db(s2))
-        self.assertEqual(r3.setting("langfuse_secret_key"), "sk-lf-localvalue123456789")
+        self.assertEqual(r3.setting("telemetry_secret_key"), "sk-tel-localvalue123456789")
 
 
 if __name__ == "__main__":

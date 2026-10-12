@@ -30,7 +30,7 @@ _SEQ = [0]
 
 
 def push_events(client, events, headers=None):
-    """Feed events through the same path the Langfuse poller uses (the server no longer has POST /events)."""
+    """Feed events through the same path the telemetry inbox ingest uses (the server has no POST /events)."""
     from aihub.server.sync import to_row
     repos = client.app.state.repos
     who = None
@@ -39,10 +39,9 @@ def push_events(client, events, headers=None):
     rows = []
     for e in events:
         _SEQ[0] += 1
-        meta = {k: v for k, v in e.items() if v not in (None, "")}
-        o = {"id": "t%d" % _SEQ[0], "name": "aihub." + e["kind"], "startTime": "2026-10-08T10:00:00.000Z",
-             "userId": who or ("~" + e["local_user"] if e.get("local_user") else ""), "metadata": meta}
-        r = to_row(o)
+        ev = dict(e, id="t%d" % _SEQ[0], user=who or ("~" + e["local_user"] if e.get("local_user") else ""))
+        ev.setdefault("ts", __import__("time").time())
+        r = to_row(ev)
         if r:
             if e.get("ts"):
                 r["ts"] = float(e["ts"])
