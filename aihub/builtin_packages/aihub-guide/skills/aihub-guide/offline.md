@@ -6,7 +6,7 @@ This is a bundled snapshot, condensed from the hub docs (cli, manifest, publishi
 
 - **Git** holds package files and the package index. The index is a folder in a git repo (default branch `main`, path `index`) with `root.json`, `catalog/` and `packages/<xx>/<name>.json`. An older single `index.json` is still read.
 - **Only the hub server writes the index.** The CLI only reads it. Nobody edits the index by hand.
-- **The telemetry inbox** (a git repo, often the index repo) holds usage and lifecycle events as small batches on branches `telemetry/<client>/<batch>`. The CLI pushes them; the server ingests them, archives them to a branch and deletes those branches.
+- **The telemetry inbox** (a git repo, often the index repo) holds usage and lifecycle events as files on one branch, `telemetry-inbox`. Each CLI push adds one file; the server ingests the files, archives them to the `telemetry-archive` branch and removes them from the inbox.
 - **The hub server** caches the index and events, and serves accounts, reviews and the web UI. It stores no package files and has no upload routes.
 - Package versions are immutable. A version that was published cannot be re-published.
 
@@ -42,8 +42,8 @@ Keys and environment variables:
 | `hub` | `AIHUB_URL` (default when no saved `hub`) | Hub URL |
 | `index_url` | `AIHUB_INDEX_URL` | Git URL of the index repo, an `https://...json` URL, or a local file |
 | `index_branch` / `index_path` | - | Branch (default `main`) and folder (default `index`) in that repo |
-| `telemetry_url`, `telemetry_branch` | `AIHUB_TELEMETRY_URL`, `AIHUB_TELEMETRY_BRANCH` | Git repo CLIs push usage batches to, and the archive branch (default: bundled `defaults.json`, then the index repo) |
-| `telemetry_interval` | `AIHUB_TELEMETRY_INTERVAL` | Seconds per telemetry window (default 60, allowed 10 to 3600) |
+| `telemetry_url`, `telemetry_inbox_branch` | `AIHUB_TELEMETRY_URL`, `AIHUB_TELEMETRY_INBOX_BRANCH` | Git repo and branch CLIs push usage files to (default: bundled `defaults.json`, then the index repo; branch `telemetry-inbox`) |
+| `telemetry_interval` | `AIHUB_TELEMETRY_INTERVAL` | Seconds per telemetry window (default 15, allowed 5 to 3600) |
 | `auto_update` | `AIHUB_NO_UPDATE=1` | Set `false` to turn off the daily self-update check |
 
 - `AIHUB_HOME` moves the CLI state directory from `~/.aihub` to another path.
@@ -408,7 +408,7 @@ All routes use `/api/v1`. Send `Authorization: Bearer <token>` on protected rout
 | `AIHUB_ENV_FILE` | unset | Selects a `.env` file |
 | `AIHUB_INDEX_URL` | empty | Index repo URL (environment wins over Admin > Sync) |
 | `AIHUB_INDEX_BRANCH`, `AIHUB_INDEX_PATH` | `main`, `index` | Branch and folder of the index |
-| `AIHUB_TELEMETRY_URL`, `AIHUB_TELEMETRY_BRANCH` | defaults.json, then the index repo / `telemetry-archive` | Telemetry inbox repo and archive branch (CLIs need write access to `telemetry/*` branches only, not `main`; the server also deletes those branches and pushes the archive branch) |
+| `AIHUB_TELEMETRY_URL`, `AIHUB_TELEMETRY_INBOX_BRANCH`, `AIHUB_TELEMETRY_BRANCH` | defaults.json, then the index repo / `telemetry-inbox`, `telemetry-archive` | Telemetry inbox repo, its inbox branch (CLIs add files there) and the archive branch (CLIs need write access to `telemetry-inbox` only, not `main`; the server also removes the ingested files and pushes the archive branch) |
 | `AIHUB_CLI_GIT_URL`, `_BRANCH`, `_SUBDIR` | empty | Where `pip install` gets the CLI when the server is unreachable |
 | `AIHUB_BACKUP_ENABLED` | `0` | Backup schedule on or off (real environment only; else admin `backup_enabled`) |
 

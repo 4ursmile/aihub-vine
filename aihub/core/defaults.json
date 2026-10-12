@@ -8,6 +8,7 @@
   "telemetry": {
     "git_url": "https://github.com/4ursmile/aftest",
     "branch": "telemetry-archive",
+    "inbox_branch": "telemetry-inbox",
     "interval": 15
   },
   "cli": {

@@ -38,7 +38,7 @@ def R(request): return request.app.state.repos
 
 # admin setting key -> environment variable that overrides it (environment / .env wins; the UI shows "set by environment")
 CLI_GIT_ENV = {"cli_git_url": "AIHUB_CLI_GIT_URL", "cli_git_branch": "AIHUB_CLI_GIT_BRANCH", "cli_git_subdir": "AIHUB_CLI_GIT_SUBDIR"}
-SYNC_ENV = dict(CLI_GIT_ENV, telemetry_url="AIHUB_TELEMETRY_URL", telemetry_branch="AIHUB_TELEMETRY_BRANCH", index_url="AIHUB_INDEX_URL", index_branch="AIHUB_INDEX_BRANCH",
+SYNC_ENV = dict(CLI_GIT_ENV, telemetry_url="AIHUB_TELEMETRY_URL", telemetry_branch="AIHUB_TELEMETRY_BRANCH", telemetry_inbox_branch="AIHUB_TELEMETRY_INBOX_BRANCH", index_url="AIHUB_INDEX_URL", index_branch="AIHUB_INDEX_BRANCH",
                 index_path="AIHUB_INDEX_PATH")
 SETTING_DEFAULTS = {"public_browse": "1", "public_install": "0", "default_visibility": "public", "allow_private": "1", "allow_source_download": "1",
                     "signup": None}
@@ -1410,7 +1410,7 @@ def dashboard_events(request: Request, days: int = 30, page: int = 1, per_page: 
 
 
 # ---------------- sync (git telemetry inbox + git index -> SQLite)
-SYNC_KEYS = ("telemetry_url", "telemetry_branch", "telemetry_archive", "index_url", "index_branch", "index_path", "sync_interval",
+SYNC_KEYS = ("telemetry_url", "telemetry_inbox_branch", "telemetry_branch", "telemetry_archive", "index_url", "index_branch", "index_path", "sync_interval",
              "cli_git_url", "cli_git_branch", "cli_git_subdir", "client_refresh_hours")
 SECRET_KEYS = ()
 
@@ -1568,6 +1568,8 @@ def client_config(request: Request):
                      "path": env("AIHUB_INDEX_PATH") or repos.setting("index_path", "") or dx.get("path", "index")},
            "telemetry": {"url": env("AIHUB_TELEMETRY_URL") or repos.setting("telemetry_url", "")
                          or defaults.load().get("telemetry", {}).get("git_url", "") or idx_url,
+                         "inbox": env("AIHUB_TELEMETRY_INBOX_BRANCH") or repos.setting("telemetry_inbox_branch", "")
+                         or defaults.load().get("telemetry", {}).get("inbox_branch", "") or "telemetry-inbox",
                          "branch": env("AIHUB_TELEMETRY_BRANCH") or repos.setting("telemetry_branch", "")
                          or defaults.load().get("telemetry", {}).get("branch", "") or "telemetry-archive"},
            "refresh_hours": int(repos.setting("client_refresh_hours", "") or 24)}

@@ -38,7 +38,8 @@ def apply(cfg, index_host=None):
             c[k_dst] = idx[k_src]
     got = []
     tel = cfg.get("telemetry") or {}
-    for k_src, k_dst, env in (("url", "telemetry_url", "AIHUB_TELEMETRY_URL"), ("branch", "telemetry_branch", "AIHUB_TELEMETRY_BRANCH")):
+    for k_src, k_dst, env in (("url", "telemetry_url", "AIHUB_TELEMETRY_URL"), ("branch", "telemetry_branch", "AIHUB_TELEMETRY_BRANCH"),
+                                  ("inbox", "telemetry_inbox_branch", "AIHUB_TELEMETRY_INBOX_BRANCH")):
         if tel.get(k_src) and not os.environ.get(env):                    # environment wins over what the hub sends
             c[k_dst] = tel[k_src]
             got.append(k_dst)

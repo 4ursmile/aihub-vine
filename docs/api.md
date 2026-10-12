@@ -51,7 +51,7 @@ The server stores no package files and has no upload or download routes (`/uploa
 | POST | `/api/v1/packages/{name}/versions/{version}/unyank` | User + package manager | Make a yanked version resolvable again. |
 | GET | `/api/v1/resolve?name=&spec=` | Per `public_install` | Pick a version. The response carries `repo` (`url`, `branch`, `subdir`, `ref`) and the manifest, not a download URL. |
 | POST | `/api/v1/resolve/tree` | Per `public_install` | Resolve several packages and their dependencies, constraints merged. |
-| GET | `/api/v1/client-config` | No | Locations for the CLI: `index` (`url`, `branch`, `path`, default folder `index`), `telemetry` (`url`, `branch`: the inbox repo and its archive branch) and `refresh_hours`. No credentials are stored or sent. Never cached. |
+| GET | `/api/v1/client-config` | No | Locations for the CLI: `index` (`url`, `branch`, `path`, default folder `index`), `telemetry` (`url`, `inbox`, `branch`: the inbox repo, the one branch CLIs push to, and the archive branch) and `refresh_hours`. No credentials are stored or sent. Never cached. |
 
 ## Reviews
 
@@ -62,7 +62,7 @@ The server stores no package files and has no upload or download routes (`/uploa
 
 ## Usage events, statistics, and rankings
 
-The server no longer accepts events (`POST /api/v1/events` is gone). The CLI pushes them in batches to `telemetry/*` branches of a git inbox repo, and the server fetches them on a schedule into the same `events` table, keyed by the event id so re-reads never duplicate. Ingested batches are archived to a branch and their branches deleted. Event kinds: `use`, `install`, `update`, `uninstall`, `error`, `publish`.
+The server no longer accepts events (`POST /api/v1/events` is gone). The CLI adds them as files to the `telemetry-inbox` branch of a git inbox repo, and the server reads them on a schedule into the same `events` table, keyed by the event id so re-reads never duplicate. Ingested files are archived to the `telemetry-archive` branch and then removed from the inbox. Event kinds: `use`, `install`, `update`, `uninstall`, `error`, `publish`.
 
 | Method | Path | Auth required | Purpose |
 | --- | --- | --- | --- |
@@ -80,7 +80,7 @@ Dashboard filters (query parameters): `days` (7, 14, 30, 90, 180, 365) or a cust
 | Method | Path | Auth required | Purpose |
 | --- | --- | --- | --- |
 | GET | `/api/v1/admin/sync` | `admin` | Sync status and settings. Secrets are reported as `"set"`, never returned. |
-| PUT | `/api/v1/admin/sync` | `admin` | Update the telemetry inbox (`telemetry_url`, `telemetry_branch`, `telemetry_archive`: `0` or `1`) and index settings, the CLI git source (`cli_git_url`, `cli_git_branch`, `cli_git_subdir`), the schedule (`sync_interval`: seconds or a 5-field cron expression) and the CLI refresh interval. |
+| PUT | `/api/v1/admin/sync` | `admin` | Update the telemetry inbox (`telemetry_url`, `telemetry_inbox_branch`, `telemetry_branch` for the archive, `telemetry_archive`: `0` or `1`) and index settings, the CLI git source (`cli_git_url`, `cli_git_branch`, `cli_git_subdir`), the schedule (`sync_interval`: seconds or a 5-field cron expression) and the CLI refresh interval. |
 | POST | `/api/v1/admin/sync/run?full=false` | `admin` | Run a sync now. `full=true` forgets the cursor and looks back over everything (duplicates are skipped). |
 
 ### Backup administration

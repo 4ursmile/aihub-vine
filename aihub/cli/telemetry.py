@@ -20,7 +20,7 @@ MAX_SPOOL = 5 * 1024 * 1024
 BATCH = 5000    # events per pushed commit
 BACKOFF_BASE = 30       # seconds to leave the network alone after the first failed push; doubles per failure
 BACKOFF_MAX = 900
-BRANCH_PREFIX = "telemetry"      # batches land on branch telemetry/<client>/<unix>-<rand>: visible in the git host's branch list
+PUSH_TRIES = 6          # a push can lose a race with another client (non-fast-forward): refetch the tip and add the file again
 MAX_PASSES = 20         # push passes one flusher process may run; a safety net so no failure mode can make it loop forever
 
 
@@ -230,7 +230,8 @@ def source():
     if not url:
         from . import registry
         url = registry.source()["url"]
-    return {"url": url, "branch": os.environ.get("AIHUB_TELEMETRY_BRANCH") or c.get("telemetry_branch") or d.get("branch") or "telemetry-archive"}
+    return {"url": url, "branch": os.environ.get("AIHUB_TELEMETRY_BRANCH") or c.get("telemetry_branch") or d.get("branch") or "telemetry-archive",
+            "inbox": os.environ.get("AIHUB_TELEMETRY_INBOX_BRANCH") or c.get("telemetry_inbox_branch") or d.get("inbox_branch") or "telemetry-inbox"}
 
 
 def target():
@@ -246,16 +247,36 @@ def _scratch():
     return d
 
 
+_RACE = ("non-fast-forward", "fetch first", "stale info", "failed to update ref", "cannot lock ref", "couldn't find remote ref")
+
+
 def push(url, lines, timeout=20):
-    """Push `lines` (JSON strings) as one orphan commit on a fresh branch telemetry/<client>/<batch>. Raises on any failure; the caller keeps the events."""
+    """Add one file, inbox/<client>-<unix>-<rand>.jsonl, on top of the tip of the single inbox branch (default `telemetry-inbox`).
+    Only the tip is fetched (depth 1), so the cost does not grow with history. Every client writes a different file name, so two
+    clients racing never conflict in content: the loser is rejected as non-fast-forward, refetches the new tip and adds its file again.
+    However long the server is down, the repo still has this ONE branch; the files just pile up inside it.
+    Raises on any failure; the caller keeps the events."""
+    import random
     from . import hooks
     d = _scratch()
+    branch = source()["inbox"]
+    name = "inbox/%s-%d-%s.jsonl" % (hooks.client_id(), int(time.time()), uuid.uuid4().hex[:8])
     blob = gitx.run(["hash-object", "-w", "--stdin"], cwd=d, input="".join(l + "\n" for l in lines), timeout=timeout)
-    tree = gitx.run(["mktree"], cwd=d, input="100644 blob %s\tevents.jsonl\n" % blob, timeout=timeout)
-    commit = gitx.run(["-c", "user.name=aihub", "-c", "user.email=aihub@localhost", "commit-tree", tree, "-m", "telemetry"],
-                      cwd=d, timeout=timeout)
-    ref = "refs/heads/%s/%s/%d-%s" % (BRANCH_PREFIX, hooks.client_id(), int(time.time()), uuid.uuid4().hex[:8])
-    gitx.run(["push", "-q", url, "%s:%s" % (commit, ref)], cwd=d, timeout=timeout)
+    env = {"GIT_INDEX_FILE": os.path.join(d, "index.push")}
+    for attempt in range(PUSH_TRIES):
+        parent = gitx.fetch_tip(d, url, branch, "refs/inbox/tip", depth=1, timeout=timeout)     # "" = no branch yet: this push creates it
+        gitx.run(["read-tree", parent or "--empty"], cwd=d, extra_env=env)
+        gitx.run(["update-index", "--add", "--cacheinfo", "100644,%s,%s" % (blob, name)], cwd=d, extra_env=env)
+        tree = gitx.run(["write-tree"], cwd=d, extra_env=env)
+        commit = gitx.run(["-c", "user.name=aihub", "-c", "user.email=aihub@localhost", "commit-tree", tree, "-m", "telemetry"]
+                          + (["-p", parent] if parent else []), cwd=d, timeout=timeout)
+        try:
+            gitx.run(["push", "-q", url, "%s:refs/heads/%s" % (commit, branch)], cwd=d, timeout=timeout)
+            return
+        except gitx.GitError as e:
+            if attempt == PUSH_TRIES - 1 or not any(w in str(e).lower() for w in _RACE):
+                raise                                                      # not a lost race (no access, offline, protected branch): do not hammer
+            time.sleep(random.uniform(0.2, 1.0) * (attempt + 1))
 
 
 def _send_once(timeout=20):

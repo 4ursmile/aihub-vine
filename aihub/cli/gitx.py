@@ -10,8 +10,15 @@ class GitError(Exception):
     pass
 
 
-def run(args, cwd=None, check=True, timeout=None, input=None):
+def _env(extra_env=None):
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **tls.git_env())
+    if extra_env:
+        env.update(extra_env)
+    return env
+
+
+def run(args, cwd=None, check=True, timeout=None, input=None, extra_env=None):
+    env = _env(extra_env)
     try:
         r = subprocess.run(["git"] + list(args), cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout, input=input)
     except subprocess.TimeoutExpired:
@@ -21,6 +28,62 @@ def run(args, cwd=None, check=True, timeout=None, input=None):
     if check and r.returncode != 0:
         raise GitError((r.stderr or r.stdout).strip() or "git %s failed" % args[0])
     return r.stdout.strip()
+
+
+MISSING = ("couldn't find remote ref", "could not find remote ref")
+
+
+def fetch_tip(cwd, remote, branch, ref, depth=None, timeout=120):
+    """Fetch the tip of `branch` into the local `ref` -> its commit, or "" when the remote has no such branch (or no commits at all).
+    One network round trip: no `ls-remote` first. Any other failure (offline, no access) raises."""
+    args = ["fetch", "-q", "--no-tags"] + (["--depth", str(depth)] if depth else []) + [remote, "+refs/heads/%s:%s" % (branch, ref)]
+    try:
+        run(args, cwd=cwd, timeout=timeout)
+    except GitError as e:
+        if any(w in str(e).lower() for w in MISSING):
+            run(["update-ref", "-d", ref], cwd=cwd, check=False)
+            return ""
+        raise
+    return run(["rev-parse", ref], cwd=cwd)
+
+
+def _batch(cwd, mode, names, timeout):
+    r = subprocess.run(["git", "cat-file", mode], cwd=cwd, env=_env(), capture_output=True, timeout=timeout,
+                       input="".join(n + "\n" for n in names).encode())
+    if r.returncode != 0:
+        raise GitError(r.stderr.decode("utf-8", "replace").strip() or "git cat-file failed")
+    return r.stdout
+
+
+def objects(cwd, names, timeout=120):
+    """{name: (sha, type, size)} for many objects (`<sha>`, `<rev>:<path>`) in ONE git process. Missing ones are left out."""
+    names = list(dict.fromkeys(n for n in names if n))
+    if not names:
+        return {}
+    out = {}
+    for name, line in zip(names, _batch(cwd, "--batch-check", names, timeout).decode("utf-8", "replace").splitlines()):
+        parts = line.split()
+        if len(parts) == 3 and parts[2].isdigit():
+            out[name] = (parts[0], parts[1], int(parts[2]))
+    return out
+
+
+def blobs(cwd, shas, timeout=300):
+    """{sha: text} for many blobs in ONE git process (`cat-file --batch`) instead of one process per blob."""
+    shas = list(dict.fromkeys(s for s in shas if s))
+    if not shas:
+        return {}
+    raw, out, pos = _batch(cwd, "--batch", shas, timeout), {}, 0
+    while pos < len(raw):
+        end = raw.index(b"\n", pos)
+        parts = raw[pos:end].split()
+        pos = end + 1
+        if len(parts) != 3:                                               # "<name> missing"
+            continue
+        size = int(parts[2])
+        out[parts[0].decode()] = raw[pos:pos + size].decode("utf-8", "replace")
+        pos += size + 1
+    return out
 
 
 def redact_url(url):

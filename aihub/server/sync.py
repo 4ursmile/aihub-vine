@@ -1,8 +1,9 @@
 """Pulls the world into SQLite: usage events from the git inbox, package metadata from the git index.
 
-- Events: CLIs push batches to refs/telemetry/<client>/<batch> in the inbox repo. The server fetches them, stores the rows
-  (events.ext_id is the event id and unique, so restarts and several servers never duplicate rows), copies the raw batch to
-  the `telemetry-archive` branch, and only then deletes the refs. A failure at any step leaves the refs for the next pass.
+- Events: CLIs add files inbox/<client>-<unix>-<rand>.jsonl to the one `telemetry-inbox` branch. The server fetches them (only when
+  `ls-remote` shows something new), stores the rows (events.ext_id is the event id and unique, so restarts and several servers never
+  duplicate rows), copies the raw batch to the `telemetry-archive` branch, and only then removes the files. A failure at any step
+  leaves them for the next pass.
 - Index: the server is the only writer. A new `aihub.publish` event (public data sent by the CLI) makes the server fetch that
   package repo at the published commit, read its aihub.toml, update the index repo and push; then the index is re-read.
 """
@@ -20,6 +21,7 @@ from . import nethost
 log = logging.getLogger("aihub")
 KINDS = {"use", "install", "uninstall", "update", "error", "publish"}
 ARCHIVE = "telemetry-archive"
+INBOX = "telemetry-inbox"
 MAX_BATCH_BYTES = 5 * 1024 * 1024       # a ref bigger than this is dropped unread (a client only ever sends ~BATCH events)
 MAX_REFS = 500                          # refs ingested per pass; the rest wait for the next one
 
@@ -123,7 +125,7 @@ class Sync:
         self.first_pass = threading.Event()                 # set once the first pass after start has finished (ok or not)
         self._lookback_checked = False
         self.index_lock = threading.Lock()                  # one index writer at a time (event sync and manual forcing share a checkout)
-        self.status = {"last_run": None, "last_error": None, "events_total": 0, "index_packages": 0}
+        self.status = {"last_run": None, "last_error": None, "events_error": None, "index_error": None, "archive_error": None, "events_total": 0, "index_packages": 0}
 
     # ----- config: env first, then admin settings
     def cfg(self, key, env, default=""):
@@ -168,16 +170,37 @@ class Sync:
 
     # ----- one pass
     def run_once(self):
+        """One pass. The two halves are independent: if the usage inbox cannot be read (repo down, no access, bad credentials), the package
+        index is still synced, and the other way round. Every failure is kept in `status.last_error` (shown in Admin > Sync) until a pass
+        succeeds completely; a step that fails never reports success and never lets the cursor claim the pass completed."""
         first = not self.repos.setting("sync_cursor")
-        new_publish = False
+        errors, new_publish = [], False
+        self.status["events_error"] = self.status["index_error"] = None
         if self.inbox() and not os.path.isfile(self.inbox()):
-            if self._needs_replay():
-                self.replay_archive()
-            new_publish = self.pull_events()
-        if first or new_publish or self.repos.setting("sync_index_dirty") == "1":
-            self.pull_index()
+            try:
+                if self._needs_replay():
+                    self.replay_archive()
+                new_publish = self.pull_events()
+            except Exception as e:
+                msg = "usage sync: " + gitx.redact_url(str(e))[:240]
+                self.status["events_error"] = msg
+                errors.append(msg)
+                log.warning("sync: %s", msg)
+            if self.status.get("archive_error"):                        # pull_events handled it and carried on; it must still be visible
+                errors.append(self.status["archive_error"])
+        try:
+            if first or new_publish or self.repos.setting("sync_index_dirty") == "1":
+                self.pull_index()
+        except Exception as e:
+            msg = gitx.redact_url(str(e))[:250]
+            self.status["index_error"] = msg
+            errors.append(msg)
+            log.warning("sync: %s", msg)
+        self.status["last_run"] = time.time()
+        self.status["last_error"] = " | ".join(errors) if errors else None
+        if errors:
+            raise RuntimeError(self.status["last_error"])               # the loop and "Sync now" report it; the cursor is NOT advanced
         self.repos.set_setting("sync_cursor", time.time())             # "an events pass completed"; empty = never (first run, forced re-sync)
-        self.status.update(last_run=time.time(), last_error=None)
 
     def _needs_replay(self):
         """True when the cursor says events were pulled before but the table holds none (database replaced / lost), or an admin asked
@@ -193,16 +216,21 @@ class Sync:
         """Re-insert every event stored on the archive branch. Idempotent (ext_id is unique), so running it over a healthy database
         adds nothing. -> number of rows inserted."""
         url, branch = self.inbox(), self.archive_branch()
-        if not gitx.remote_head(url, branch):
-            return 0                                                    # nothing archived yet (or archiving was off)
         d = self._inbox_dir(url)
-        gitx.run(["fetch", "-q", "--no-tags", "origin", branch], cwd=d, timeout=300)
-        files = [f for f in gitx.run(["ls-tree", "-r", "--name-only", "FETCH_HEAD", "archive/"], cwd=d, check=False).splitlines()
-                 if f.endswith(".jsonl")]
+        tip = gitx.fetch_tip(d, "origin", branch, "refs/inbox/archive", depth=1, timeout=300)
+        if not tip:
+            return 0                                                    # nothing archived yet (or archiving was off)
+        files = []
+        for line in gitx.run(["ls-tree", "-r", tip, "--", "archive/"], cwd=d, check=False).splitlines():
+            meta, _, path = line.partition("\t")
+            if path.endswith(".jsonl"):
+                files.append((path, meta.split()[2]))
+        files.sort()
         total, rows = 0, []
-        for f in sorted(files):
-            raw = gitx.run(["show", "FETCH_HEAD:" + f], cwd=d, check=False)
-            for line in raw.splitlines():
+        for i, (f, blob) in enumerate(files):
+            if i % 200 == 0:
+                texts = gitx.blobs(d, [b for _, b in files[i:i + 200]])
+            for line in texts.get(blob, "").splitlines():
                 try:
                     r = to_row(json.loads(line))
                 except ValueError:
@@ -229,21 +257,78 @@ class Sync:
             gitx.run(["remote", "set-url", "origin", url], cwd=d)
         return d
 
+    def inbox_branch(self):
+        from ..core import defaults
+        return (self.cfg("telemetry_inbox_branch", "AIHUB_TELEMETRY_INBOX_BRANCH") or defaults.load().get("telemetry", {}).get("inbox_branch", "")
+                or INBOX)
+
+    def _remote_refs(self, d):
+        """{ref: sha} of everything telemetry related on the inbox remote, in ONE `ls-remote`. Raises when it cannot be read."""
+        out = {}
+        for line in gitx.run(["ls-remote", "origin"], cwd=d, timeout=60).splitlines():
+            sha, _, ref = line.partition("\t")
+            if ref.startswith(("refs/heads/", "refs/telemetry/")):
+                out[ref] = sha
+        return out
+
+    def _collect(self, d):
+        """Everything waiting to be ingested, as [(key, blob, kind, where)]. `key` names the batch (<client>-<unix>-<rand>), `blob` is the git
+        object holding its JSON lines. Three sources, so nothing a CLI of any age has sent is lost:
+          inbox   files inbox/<batch>.jsonl on the ONE inbox branch (current CLIs; the branch count never grows however long the server was down)
+          heads   one branch telemetry/<client>/<batch> per batch (the previous CLI layout)
+          legacy  one hidden ref refs/telemetry/<client>/<batch> (the first CLI layout)
+        One `ls-remote` decides what to fetch: an idle inbox (tip unchanged since the last pass, no old-layout refs) costs no fetch at all."""
+        remote = self._remote_refs(d)
+        self._archive_tip = remote.get("refs/heads/" + self.archive_branch(), "")
+        local = {}
+        for line in gitx.run(["for-each-ref", "--format=%(objectname) %(refname)", "refs/inbox/"], cwd=d, check=False).splitlines():
+            sha, _, ref = line.partition(" ")
+            local[ref] = sha
+        stale = [r for r in local if r.startswith(("refs/inbox/heads/", "refs/inbox/legacy/"))]
+        if stale:
+            gitx.run(["update-ref", "--stdin"], cwd=d, input="".join("delete %s\n" % r for r in stale), check=False)
+        specs, tip = [], remote.get("refs/heads/" + self.inbox_branch(), "")
+        if tip and local.get("refs/inbox/tip") != tip:
+            specs.append("+refs/heads/%s:refs/inbox/tip" % self.inbox_branch())
+        if not tip and "refs/inbox/tip" in local:
+            gitx.run(["update-ref", "-d", "refs/inbox/tip"], cwd=d, check=False)
+        old = [r for r in remote if r.startswith(("refs/heads/telemetry/", "refs/telemetry/"))]
+        if any(r.startswith("refs/heads/telemetry/") for r in old):
+            specs.append("+refs/heads/telemetry/*:refs/inbox/heads/*")
+        if any(r.startswith("refs/telemetry/") for r in old):
+            specs.append("+refs/telemetry/*:refs/inbox/legacy/*")
+        if specs:
+            gitx.run(["fetch", "-q", "--no-tags", "--depth", "1", "origin"] + specs, cwd=d, timeout=300)
+        out = []
+        if tip:
+            for line in gitx.run(["ls-tree", "-r", "refs/inbox/tip", "--", "inbox/"], cwd=d).splitlines():
+                meta, _, path = line.partition("\t")
+                if path.endswith(".jsonl"):
+                    out.append((os.path.basename(path)[:-len(".jsonl")], meta.split()[2], "inbox", path))
+        if old:
+            refs = gitx.run(["for-each-ref", "--format=%(refname)", "refs/inbox/heads/", "refs/inbox/legacy/"], cwd=d, check=False).splitlines()
+            found = gitx.objects(d, [r + ":events.jsonl" for r in refs])
+            for ref in refs:
+                if ref + ":events.jsonl" in found:
+                    kind = "heads" if ref.startswith("refs/inbox/heads/") else "legacy"
+                    out.append(("-".join(ref.split("/")[-2:]), found[ref + ":events.jsonl"][0], kind, ref))
+        return sorted(out)[:MAX_REFS]
+
     def pull_events(self):
-        """Fetch every pending batch, store its rows, archive it, and only then delete its ref. -> True when a publish event arrived."""
+        """Fetch every pending batch, store its rows, archive it, and only then remove it from the inbox. -> True when a publish event arrived."""
         url = self.inbox()
+        self.status["archive_error"] = None
         d = self._inbox_dir(url)
-        # Batches arrive on branches telemetry/<client>/<batch> (visible in the git host) or, from older CLIs, on refs/telemetry/<client>/<batch>.
-        # Both are fetched into private local refs under refs/inbox/{heads,legacy}/ so the server's own branch names can never collide.
-        for stale in gitx.run(["for-each-ref", "--format=%(refname)", "refs/inbox/"], cwd=d, check=False).splitlines():
-            gitx.run(["update-ref", "-d", stale], cwd=d, check=False)
-        gitx.run(["fetch", "-q", "--no-tags", "origin", "+refs/heads/telemetry/*:refs/inbox/heads/*", "+refs/telemetry/*:refs/inbox/legacy/*"],
-                 cwd=d, timeout=120)
-        refs = sorted(r for r in gitx.run(["for-each-ref", "--format=%(refname)", "refs/inbox/"], cwd=d).splitlines() if r)[:MAX_REFS]
-        rows, pubs, publish, batches, done = [], {}, False, [], []
-        for ref in refs:
-            size = gitx.run(["cat-file", "-s", ref + ":events.jsonl"], cwd=d, check=False)
-            raw = gitx.run(["show", ref + ":events.jsonl"], cwd=d, check=False) if size.isdigit() and int(size) <= MAX_BATCH_BYTES else ""
+        found = self._collect(d)
+        if not found:
+            return False                                                # idle inbox: nothing to read, archive, trim or gc
+        sizes = gitx.objects(d, [blob for _, blob, _, _ in found])
+        rows, pubs, publish, batches, done, texts = [], {}, False, [], [], {}
+        for i, (key, blob, kind, where) in enumerate(found):
+            if i % 50 == 0:                                             # read blobs 50 at a time: one git process each, bounded memory
+                chunk = [b for _, b, _, _ in found[i:i + 50] if b in sizes and sizes[b][2] <= MAX_BATCH_BYTES]
+                texts = gitx.blobs(d, chunk)
+            raw = texts.get(blob, "")
             good = []
             for line in raw.splitlines():
                 try:
@@ -258,85 +343,144 @@ class Sync:
                 publish = publish or r["kind"] == "publish"
                 if r["kind"] == "publish" and e.get("version") and e.get("git_url"):
                     pubs[(r["package"], str(e["version"]))] = e                 # latest event per version wins
-            batches.append((ref, good))
-            done.append(ref)
+            batches.append((key, good))
+            done.append((kind, where))
             if len(rows) >= 1000:
                 self._store(rows)
                 rows = []
         n = self._store(rows)
         self.status["events_total"] += n
+        changed = False
         if pubs:
             try:
-                if self.update_index(list(pubs.values())):
-                    publish = True
-            except Exception as e:                                      # events are stored; the refs stay so the next pass retries the index
-                self.status["last_error"] = "index update: " + gitx.redact_url(str(e))[:250]
+                changed = bool(self.update_index(list(pubs.values())))
+            except Exception as e:                                      # events are stored; the batches stay so the next pass retries the index
                 log.warning("index update failed: %s", gitx.redact_url(str(e)))
-                return False
-        if done and self._archive(d, batches):                          # raw copy is safe in git: the refs can go
-            remote = [self._remote_name(r) for r in done]
-            for i in range(0, len(remote), 50):
-                gitx.run(["push", "-q", "origin", "--delete"] + remote[i:i + 50], cwd=d, check=False, timeout=60)
-            for ref in done:
-                gitx.run(["update-ref", "-d", ref], cwd=d, check=False)
-            gitx.run(["gc", "-q", "--prune=now"], cwd=d, check=False, timeout=120)
-        return publish and n > 0
+                raise RuntimeError("index update: " + gitx.redact_url(str(e))[:240])      # run_once records it: a quiet 'return' showed OK while broken
+        if done and self._archive(d, batches):                          # raw copy is safe in git: the inbox entries can go
+            self._remove(d, done)
+            gitx.run(["gc", "-q", "--auto", "--prune=now"], cwd=d, check=False, timeout=120)     # repacks only once objects pile up
+        # a retried batch (its rows were stored by a pass whose index update failed) inserts nothing, but if the index changed now it
+        # must still be re-read
+        return (publish and n > 0) or changed
 
-    @staticmethod
-    def _remote_name(local):
-        """refs/inbox/heads/<client>/<batch> -> refs/heads/telemetry/<client>/<batch>;  refs/inbox/legacy/... -> refs/telemetry/..."""
-        kind, _, rest = local[len("refs/inbox/"):].partition("/")
-        return ("refs/heads/telemetry/" if kind == "heads" else "refs/telemetry/") + rest
+    def _remove(self, d, done):
+        """Delete exactly the batches that were archived. Per-batch branches and hidden refs are deleted on the remote; for the single inbox
+        branch ONE commit removes just those files, so a batch a CLI pushed after our fetch is never touched."""
+        old = []
+        for kind, where in done:
+            if kind == "heads":
+                old.append("refs/heads/telemetry/" + where[len("refs/inbox/heads/"):])
+            elif kind == "legacy":
+                old.append("refs/telemetry/" + where[len("refs/inbox/legacy/"):])
+        for i in range(0, len(old), 50):
+            gitx.run(["push", "-q", "origin", "--delete"] + old[i:i + 50], cwd=d, check=False, timeout=60)
+        files = [where for kind, where in done if kind == "inbox"]
+        if files:
+            self._trim_inbox(d, files)
+        local = [where for _, where in done if where.startswith("refs/")]
+        if local:
+            gitx.run(["update-ref", "--stdin"], cwd=d, input="".join("delete %s\n" % r for r in local), check=False)
+
+    def _trim_inbox(self, d, files):
+        """Commit 'remove these files' on top of the CURRENT inbox tip and push. CLIs push to the same branch, so a rejected push means a
+        newer tip exists: refetch it and redo the removal (the files still exist there, and new files are left alone)."""
+        branch, gone, idx = self.inbox_branch(), set(files), os.path.join(d, "index.trim")
+        env = {"GIT_INDEX_FILE": idx}
+        for attempt in range(6):
+            if attempt:
+                time.sleep(0.2 * attempt)
+                tip = gitx.fetch_tip(d, "origin", branch, "refs/inbox/tip", depth=1)
+            else:
+                tip = gitx.run(["rev-parse", "-q", "--verify", "refs/inbox/tip"], cwd=d, check=False)
+            if not tip:
+                return
+            present = sorted(gone & set(gitx.run(["ls-tree", "-r", "--name-only", tip, "--", "inbox/"], cwd=d).splitlines()))
+            if not present:
+                return
+            gitx.run(["read-tree", tip], cwd=d, extra_env=env)
+            for i in range(0, len(present), 200):
+                gitx.run(["update-index", "--force-remove", "--"] + present[i:i + 200], cwd=d, extra_env=env)
+            tree = gitx.run(["write-tree"], cwd=d, extra_env=env)
+            commit = gitx.run(["-c", "user.name=aihub-server", "-c", "user.email=aihub-server@localhost", "commit-tree", tree, "-p", tip,
+                               "-m", "telemetry: archived %d batch(es)" % len(present)], cwd=d)
+            try:
+                gitx.run(["push", "-q", "origin", "%s:refs/heads/%s" % (commit, branch)], cwd=d, timeout=60)
+                gitx.run(["update-ref", "refs/inbox/tip", commit], cwd=d, check=False)     # next pass sees the remote unchanged: no fetch
+                return
+            except gitx.GitError:
+                continue
+        self.status["archive_error"] = "could not clear ingested batches from the inbox (kept, re-read next pass and deduped by id)"
+        log.warning("could not trim the telemetry inbox (they stay and are re-ingested, deduped by id)")
 
     def _archive(self, d, batches):
         """Write each batch as archive/<day>/<client>-<batch>.jsonl on the archive branch and push it. The path is derived from the
-        ref, so doing it twice writes the same file. -> True when the archive holds the batches (or archiving is off)."""
+        batch name, so doing it twice writes the same file. Built with plumbing on a depth-1 fetch of the archive tip: no checkout, so
+        the cost does not grow with the size or history of the archive. -> True when the archive holds the batches (or archiving is off)."""
         if self.repos.setting("telemetry_archive", "1") == "0":
             return True
-        batches = [(ref, good) for ref, good in batches if good]
+        batches = [(key, good) for key, good in batches if good]
         if not batches:
             return True
         work = os.path.join(d, ".archive")
-        branch = self.archive_branch()
+        branch, ref, env = self.archive_branch(), "refs/inbox/archive", {"GIT_INDEX_FILE": os.path.join(d, "index.archive")}
         try:
+            self._clear_worktree(d, work)                               # leftovers of an older server (it used a worktree here)
+            os.makedirs(work)
+            names = []
+            for i, (key, good) in enumerate(batches):
+                f = os.path.join(work, "%d.jsonl" % i)
+                with open(f, "w") as fh:
+                    fh.write("\n".join(good) + "\n")
+                names.append(f)
+            shas = gitx.run(["hash-object", "-w", "--stdin-paths"], cwd=d, input="".join(n + "\n" for n in names)).split()
+            entries = []
+            for (key, _), sha in zip(batches, shas):
+                parts = key.split("-")                                  # <client>-<unix>-<rand>
+                stamp = parts[-2] if len(parts) >= 3 else ""
+                day = time.strftime("%Y-%m-%d", time.gmtime(int(stamp) if stamp.isdigit() else time.time()))
+                entries.append("100644 %s\tarchive/%s/%s.jsonl\n" % (sha, day, key))
+            known = getattr(self, "_archive_tip", None)
             for attempt in range(3):
-                if gitx.remote_head(self.inbox(), branch):
-                    gitx.run(["fetch", "-q", "--no-tags", "origin", branch], cwd=d, timeout=120)
-                    base = gitx.run(["rev-parse", "FETCH_HEAD"], cwd=d)
+                have = gitx.run(["rev-parse", "-q", "--verify", ref], cwd=d, check=False)
+                if attempt or known is None or (known and known != have):
+                    base = gitx.fetch_tip(d, "origin", branch, ref, depth=1)
                 else:
-                    base = ""
-                gitx.run(["worktree", "prune"], cwd=d, check=False)
-                if os.path.isdir(work):
-                    gitx.run(["worktree", "remove", "--force", work], cwd=d, check=False)
-                if base:
-                    gitx.run(["worktree", "add", "-q", "--detach", work, base], cwd=d)
-                else:                                                   # first batch ever: start the archive branch from nothing
-                    os.makedirs(work, exist_ok=True)
-                    gitx.run(["init", "-q"], cwd=work)
-                    gitx.run(["checkout", "-q", "--orphan", branch], cwd=work)
-                for ref, good in batches:
-                    client, batch = ref.split("/")[-2:]                      # refs/inbox/<kind>/<client>/<unix>-<rand>
-                    stamp = batch.split("-", 1)[0]
-                    day = time.strftime("%Y-%m-%d", time.gmtime(int(stamp) if stamp.isdigit() else time.time()))
-                    out = os.path.join(work, "archive", day)
-                    os.makedirs(out, exist_ok=True)
-                    with open(os.path.join(out, "%s-%s.jsonl" % (client, batch)), "w") as f:
-                        f.write("\n".join(good) + "\n")
-                gitx.run(["add", "-A"], cwd=work)
-                if gitx.run(["status", "--porcelain"], cwd=work):
-                    gitx.run(["-c", "user.name=aihub-server", "-c", "user.email=aihub-server@localhost", "commit", "-q", "-m",
-                              "telemetry: %d batch(es)" % len(batches)], cwd=work)
-                    try:
-                        gitx.run(["push", "-q", self.inbox(), "HEAD:refs/heads/" + branch], cwd=work, timeout=120)
-                    except gitx.GitError:
-                        continue                                        # someone else pushed to the archive meanwhile: rebuild on the new tip
+                    base = known                                        # the ls-remote of this pass says our copy is current
+                gitx.run(["read-tree", base or "--empty"], cwd=d, extra_env=env)
+                gitx.run(["update-index", "--index-info"], cwd=d, input="".join(entries), extra_env=env)
+                tree = gitx.run(["write-tree"], cwd=d, extra_env=env)
+                if base and tree == gitx.run(["rev-parse", base + "^{tree}"], cwd=d):
+                    return True                                         # already archived (a retried pass)
+                commit = gitx.run(["-c", "user.name=aihub-server", "-c", "user.email=aihub-server@localhost", "commit-tree", tree,
+                                   "-m", "telemetry: %d batch(es)" % len(batches)] + (["-p", base] if base else []), cwd=d)
+                try:
+                    gitx.run(["push", "-q", "origin", "%s:refs/heads/%s" % (commit, branch)], cwd=d, timeout=120)
+                except gitx.GitError:
+                    continue                                            # someone else pushed to the archive meanwhile: rebuild on the new tip
+                gitx.run(["update-ref", ref, commit], cwd=d, check=False)
+                self._archive_tip = commit
                 return True
             return False
         except Exception as e:
+            self.status["archive_error"] = "archiving usage: " + gitx.redact_url(str(e))[:220]
             log.warning("telemetry archive failed (refs kept): %s", gitx.redact_url(str(e))[:200])
             return False
         finally:
-            gitx.run(["worktree", "remove", "--force", work], cwd=d, check=False)
+            self._archive_tip = None
+            self._clear_worktree(d, work)
+
+    @staticmethod
+    def _clear_worktree(d, work):
+        """Leave no trace of the scratch checkout. A server stopped or killed mid-archive leaves the folder behind, sometimes registered as a
+        worktree and sometimes not, and git then refuses to create it again ("already exists") on EVERY later pass: nothing would ever be
+        stored, archived or deleted. So unregister it and delete the folder whatever its state."""
+        import shutil
+        if not os.path.exists(work) and not os.path.isdir(os.path.join(d, ".git", "worktrees")):
+            return                                                      # the usual case: nothing to clean, no git process
+        gitx.run(["worktree", "remove", "--force", work], cwd=d, check=False)
+        shutil.rmtree(work, ignore_errors=True)
+        gitx.run(["worktree", "prune"], cwd=d, check=False)
 
     def update_index(self, pubs, force=False, results=None):
         """Add published versions to the index repo. Nothing from the event is trusted but where to look: the package repo is

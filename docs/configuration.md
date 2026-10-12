@@ -225,8 +225,9 @@ These can be set here or in Admin > Sync. **Environment wins over Admin settings
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AIHUB_TELEMETRY_URL` | `aihub/core/defaults.json`, then the index repo | Git repo CLIs push usage batches to (one `telemetry/<client>/<batch>` branch per batch). Users need write access to `telemetry/*` branches only, not `main`; the server also deletes those branches and pushes the archive branch. |
-| `AIHUB_TELEMETRY_BRANCH` | `telemetry-archive` | Branch the server archives ingested batches to (`archive/<day>/<client>-<batch>.jsonl`). |
+| `AIHUB_TELEMETRY_URL` | `aihub/core/defaults.json`, then the index repo | Git repo CLIs push usage files to. Users need write access to the `telemetry-inbox` branch only, not `main`. The server also removes the ingested files from that branch and pushes the archive branch. |
+| `AIHUB_TELEMETRY_INBOX_BRANCH` | `telemetry-inbox` (`telemetry.inbox_branch` in `defaults.json`) | The one branch CLIs add an `inbox/<client>-<unix>-<rand>.jsonl` file to on each push, and the server reads and empties. Set it the same on the hub and in the CLI defaults, because the hub does not send it to CLIs. Not editable in Admin > Sync. |
+| `AIHUB_TELEMETRY_BRANCH` | `telemetry-archive` | Permanent branch the server archives ingested files to (`archive/<day>/<client>-<unix>-<rand>.jsonl`). |
 | `AIHUB_INDEX_URL` | empty | Git URL of the repo holding the index, an `https://...json` URL, or a local file. |
 | `AIHUB_INDEX_BRANCH` / `AIHUB_INDEX_PATH` | `main` / `index` | Branch and folder inside that repo (a folder index; an old `index.json` file is still read). |
 | `AIHUB_CLI_GIT_URL` | empty | Repo to `pip install` the CLI from when this server is unreachable (shown on Get started). |
