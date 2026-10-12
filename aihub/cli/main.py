@@ -3,11 +3,12 @@ import functools
 import getpass
 import json
 import os
+import re
 import sys
 import tempfile
 import urllib.parse
 
-from ..core import archive, ignore, manifest as M, naming, version as V
+from ..core import archive, ignore, manifest as M, naming, pysync, version as V
 from . import api, gitx, installer, paths, publish as pub, registry, remote_config, ui, updater, workspace as ws
 from .installer import _spec
 
@@ -88,10 +89,51 @@ def cmd_info(a):
     ui.card(d["name"], lines, ui.dim("install  ") + ui.code("aihub install " + d["name"]))
 
 
+def read_requirements(path, _seen=()):
+    """Lines of a pip-style requirements file: one `name[<spec>]` per line, `#` comments, blank lines and `-r other.txt` honored."""
+    path = os.path.abspath(path)
+    if path in _seen:
+        raise ValueError("%s includes itself through -r" % path)
+    try:
+        lines = open(path, encoding="utf-8-sig").read().splitlines()
+    except OSError as e:
+        raise ValueError("cannot read %s: %s" % (path, e.strerror or e))
+    out = []
+    for ln in lines:
+        ln = re.split(r"(?:^|\s)#", ln, 1)[0].strip()
+        if not ln:
+            continue
+        if ln.startswith(("-r ", "-r=", "--requirement")):
+            ref = ln.split(None, 1)[1] if " " in ln else ln.split("=", 1)[1]
+            out += read_requirements(os.path.join(os.path.dirname(path), ref.strip()), _seen + (path,))
+        elif ln.startswith("-"):
+            raise ValueError("%s: unsupported option %r (only package names and -r are read)" % (path, ln))
+        else:
+            out.append(ln)
+    return out
+
+
 def cmd_install(a):
-    n, s = _spec(a.name)
+    """Install several packages (names given and/or -r files); one failing package never stops the rest."""
+    specs = list(a.name or [])
+    for f in a.requirement or []:
+        specs += read_requirements(f)
+    if not specs:
+        raise ValueError("nothing to install: give package names or -r requirements.txt")
+    specs = list(dict.fromkeys(specs))               # same line twice installs once
     ui.out()
-    installer.install(n, s, a.yes, a.tool)
+    failed = []
+    for s in specs:
+        n, sp = _spec(s)
+        try:
+            installer.install(n, sp, a.yes, a.tool)
+        except (api.ApiError, ValueError, OSError, gitx.GitError) as e:
+            if len(specs) == 1:
+                raise
+            ui.bad("%s: %s" % (s, e))
+            failed.append(s)
+    if failed:
+        raise ValueError("%d of %d package(s) not installed: %s" % (len(failed), len(specs), ", ".join(failed)))
 
 
 def cmd_download(a):
@@ -644,6 +686,8 @@ def dev_validate(a, quiet=False):
     if nested:
         warns.append("this package folder also contains other packages (%s); their files ship inside this one. Move them beside it"
                      % ", ".join(os.path.relpath(p, _root(a)) for p in nested[:3]))
+    for f, got, v in pysync.check(_root(a), pysync.want(m)):
+        errs.append("pyproject.toml %s %r does not match aihub.toml %r (fix with: aihub dev doctor)" % (f, got, v))
     for w in warns:
         ui.note(w)
     for e in errs:
@@ -742,7 +786,7 @@ def dev_doctor(a):
     root = _root(a)
     dirs = _projects(a)
     ui.out()
-    stuck = 0
+    stuck = pydrift = 0
     for d in dirs:
         try:
             rec, changes = ws.fix_git(d, root, remote=a.remote, write=not a.check)
@@ -758,12 +802,22 @@ def dev_doctor(a):
         for code, text in ws.blocking(rec):
             ui.bad("%s  %s" % (rec["name"], text))
             stuck += 1
+        try:
+            want = pysync.want(_load(argparse.Namespace(**dict(vars(a), path=d))))
+            for f, got, v in (pysync.check if a.check else pysync.sync)(d, want):
+                (ui.note if a.check else ui.good)("%s  pyproject.toml %s %r -> %r%s" % (rec["name"], f, got, v, "  (would change)" if a.check else ""))
+                pydrift += 1
+        except (OSError, ValueError, KeyError) as e:
+            ui.bad("%s: pyproject.toml: %s" % (os.path.basename(d), e))
+            stuck += 1
     ui.out()
     if stuck:
         ui.info("nested repositories:  aihub dev tree-solve      overview:  aihub dev tree")
         raise ValueError("%d problem(s) need your decision" % stuck)
     if a.check and any(ws.fix_git(d, root, write=False)[1] for d in dirs):
         raise ValueError("[git] is out of date; run `aihub dev doctor` to fix it")
+    if pydrift:
+        raise ValueError("pyproject.toml differs from aihub.toml; run `aihub dev doctor` to fix it")
 
 
 def dev_tree_solve(a):
@@ -800,6 +854,8 @@ def dev_publish(a):
                 t = open(p).read()
                 old = m["package"]["version"]
                 open(p, "w").write(t.replace('version = "%s"' % old, 'version = "%s"' % V.bump(old, a.bump), 1))
+            for f, got, v in pysync.sync(d, pysync.want(_load(with_path(d)))):    # pyproject.toml follows aihub.toml (also after --bump)
+                ui.good("%s: pyproject.toml %s %r -> %r" % (label, f, got, v))
             m = dev_validate(with_path(d), quiet=True)
             ready.append((d, pub.publish(d, m, push_now=False)))      # one commit per package: history says which was released
         except (api.ApiError, ValueError, KeyError, OSError, gitx.GitError) as e:
@@ -956,8 +1012,9 @@ def build_parser():
     add("install", cmd_install, "Install a package and register its components.",
         "Resolve and install a skill, agent, MCP server, tool, or setup package. Install version constraints use comparison operators, for example 'name>=1.0' or 'name>=1.0,<2'; quote comma-separated constraints for the shell. Use 'name==1.2.0' for an exact install version. The 'name@1.2.0' shorthand is supported by download. The CLI verifies the archive, installs declared dependencies, and can register components with detected tools. Interactive installs ask before scripts and tool registration; --yes accepts those prompts' defaults.",
 
-        "Examples:\n  aihub install my-skill\n  aihub install \"my-skill>=1.2\"\n  aihub install my-skill --yes --tool claude",
-        arg("name", metavar="PACKAGE[<SPEC>]", help="Package name, optionally followed by a version constraint such as name>=1.0,<2."),
+        "Examples:\n  aihub install my-skill\n  aihub install \"my-skill>=1.2\"\n  aihub install a b \"c>=1.0\" --yes\n  aihub install -r requirements.txt\n  aihub install my-skill --yes --tool claude",
+        arg("name", nargs="*", metavar="PACKAGE[<SPEC>]", help="One or more package names, each optionally followed by a version constraint such as name>=1.0,<2."),
+        arg("-r", "--requirement", action="append", metavar="FILE", help="Install every package listed in FILE (pip style: one per line, # comments, nested -r); repeatable."),
         arg("-y", "--yes", action="store_true", help="Skip install-script and tool-registration prompts; use detected tools unless --tool is given."),
         arg("--tool", action="append", metavar="TOOL", help="Register components with this tool; repeat to select multiple (claude, codex, or opencode)."))
     add("enable", cmd_enable, "Switch a disabled package back on.",

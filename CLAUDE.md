@@ -9,7 +9,7 @@ commands, behavior rules or gotchas below.
 
 | Path | What lives there |
 | --- | --- |
-| `aihub/core/` | Shared by CLI and server, **stdlib only**: `manifest.py` (parse/normalize/lint `aihub.toml`), `pkgindex.py` (folder package index), `templates.py` (`dev init` starters), `toml_lite.py` (py3.9/3.10 TOML fallback), `version.py`, `naming.py` |
+| `aihub/core/` | Shared by CLI and server, **stdlib only**: `pysync.py` (pyproject.toml name/version/description <- aihub.toml; used by dev doctor/validate/publish), `manifest.py` (parse/normalize/lint `aihub.toml`), `pkgindex.py` (folder package index), `templates.py` (`dev init` starters), `toml_lite.py` (py3.9/3.10 TOML fallback), `version.py`, `naming.py` |
 | `aihub/cli/` | `main.py` (argparse, every command: `cmd_*`, `dev_*`), `publish.py` (git publish, `discover`, `enclosing`, `push`), `workspace.py` (monorepo: inspect/fix_git/tree/solve), `installer.py`, `registry.py`, `gitx.py`, `identity.py`, `hooks.py`, `telemetry.py`, `ui.py` |
 | `aihub/server/` | `main.py` (app + install.sh/ps1 text), `routers.py` (all `/api/v1`), `repos.py` (all SQL, `Repos`), `db.py` (SQLite/Postgres layer, `LATE_COLUMNS`), `sync.py` (index -> DB), `static/app.js` (Preact+htm SPA, no build step; Admin tabs People / Roles / Sync / Backup / Settings), `static/style.css` |
 | `aihub/builtin_packages/` | `aihub-guide`, `aihub-package`: ship with the server. `aihub-guide/skills/aihub-guide/offline.md` is the **offline fallback**: keep it self-contained and in sync with the CLI |

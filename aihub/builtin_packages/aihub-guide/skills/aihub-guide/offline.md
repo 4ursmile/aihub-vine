@@ -72,6 +72,8 @@ aihub search "code review"        # up to 30 matches
 aihub info <name>                 # metadata and versions (JSON when output is not a terminal)
 aihub install <name>              # resolve from the index, clone at the version ref, install
 aihub install <name> --yes        # skip confirmations
+aihub install a b "c>=1.0"        # several packages at once; one failing never stops the rest
+aihub install -r requirements.txt # pip-style file: one name[<spec>] per line, # comments, nested -r
 aihub install <name> --tool claude --tool opencode   # only these tools
 aihub list                        # installed names, versions, enabled status
 aihub update                      # all installed packages
@@ -241,7 +243,7 @@ It does not edit any index and never needs to. Afterwards the hub reads the even
 
 Published versions cannot be reused, so bump the version for every release.
 
-Several packages in one folder (monorepo): `aihub dev init . --mono --packages "a,b:mcp"` makes the folder one git repository and creates one package per sub folder (packages already there are kept, and their `[git]` is refreshed). `aihub dev tree` shows each package's repository and `[git]` status. `aihub dev doctor` sets `[git]` url, branch and subdir from the real repository, changing nothing else (`--check` only reports). A package folder with its own `.git` inside another repository is resolved with `aihub dev tree-solve --nested merge` (its `.git` moves to `~/.aihub/backups`) or `--nested keep` (the outer repository ignores it). Never put a package inside another package. Publishing several packages: each is prepared and validated on its own, a failing one is reported and skipped, the others are committed and pushed (one push per repository); `--only NAME` selects one. Exit status is non-zero if any failed.
+Several packages in one folder (monorepo): `aihub dev init . --mono --packages "a,b:mcp"` makes the folder one git repository and creates one package per sub folder (packages already there are kept, and their `[git]` is refreshed). `aihub dev tree` shows each package's repository and `[git]` status. `aihub dev doctor` sets `[git]` url, branch and subdir from the real repository and syncs `name`, `version` and `description` in `pyproject.toml` (if any) to `aihub.toml`, changing nothing else (`--check` only reports; `validate` errors on a mismatch, `publish` syncs it). A package folder with its own `.git` inside another repository is resolved with `aihub dev tree-solve --nested merge` (its `.git` moves to `~/.aihub/backups`) or `--nested keep` (the outer repository ignores it). Never put a package inside another package. Publishing several packages: each is prepared and validated on its own, a failing one is reported and skipped, the others are committed and pushed (one push per repository); `--only NAME` selects one. Exit status is non-zero if any failed.
 
 Final report to give the user: package name, version, type, files moved, warnings left, and `aihub install <name>`.
 
