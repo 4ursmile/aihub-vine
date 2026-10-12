@@ -233,9 +233,13 @@ class Sync:
         """Fetch every pending batch, store its rows, archive it, and only then delete its ref. -> True when a publish event arrived."""
         url = self.inbox()
         d = self._inbox_dir(url)
-        gitx.run(["fetch", "-q", "--no-tags", "origin", "+refs/telemetry/*:refs/telemetry/*"], cwd=d, timeout=120)
-        refs = [r for r in gitx.run(["for-each-ref", "--format=%(refname)", "refs/telemetry/"], cwd=d).splitlines() if r]
-        refs = sorted(refs)[:MAX_REFS]
+        # Batches arrive on branches telemetry/<client>/<batch> (visible in the git host) or, from older CLIs, on refs/telemetry/<client>/<batch>.
+        # Both are fetched into private local refs under refs/inbox/{heads,legacy}/ so the server's own branch names can never collide.
+        for stale in gitx.run(["for-each-ref", "--format=%(refname)", "refs/inbox/"], cwd=d, check=False).splitlines():
+            gitx.run(["update-ref", "-d", stale], cwd=d, check=False)
+        gitx.run(["fetch", "-q", "--no-tags", "origin", "+refs/heads/telemetry/*:refs/inbox/heads/*", "+refs/telemetry/*:refs/inbox/legacy/*"],
+                 cwd=d, timeout=120)
+        refs = sorted(r for r in gitx.run(["for-each-ref", "--format=%(refname)", "refs/inbox/"], cwd=d).splitlines() if r)[:MAX_REFS]
         rows, pubs, publish, batches, done = [], {}, False, [], []
         for ref in refs:
             size = gitx.run(["cat-file", "-s", ref + ":events.jsonl"], cwd=d, check=False)
@@ -270,12 +274,19 @@ class Sync:
                 log.warning("index update failed: %s", gitx.redact_url(str(e)))
                 return False
         if done and self._archive(d, batches):                          # raw copy is safe in git: the refs can go
-            for i in range(0, len(done), 50):
-                gitx.run(["push", "-q", "origin", "--delete"] + done[i:i + 50], cwd=d, check=False, timeout=60)
+            remote = [self._remote_name(r) for r in done]
+            for i in range(0, len(remote), 50):
+                gitx.run(["push", "-q", "origin", "--delete"] + remote[i:i + 50], cwd=d, check=False, timeout=60)
             for ref in done:
                 gitx.run(["update-ref", "-d", ref], cwd=d, check=False)
             gitx.run(["gc", "-q", "--prune=now"], cwd=d, check=False, timeout=120)
         return publish and n > 0
+
+    @staticmethod
+    def _remote_name(local):
+        """refs/inbox/heads/<client>/<batch> -> refs/heads/telemetry/<client>/<batch>;  refs/inbox/legacy/... -> refs/telemetry/..."""
+        kind, _, rest = local[len("refs/inbox/"):].partition("/")
+        return ("refs/heads/telemetry/" if kind == "heads" else "refs/telemetry/") + rest
 
     def _archive(self, d, batches):
         """Write each batch as archive/<day>/<client>-<batch>.jsonl on the archive branch and push it. The path is derived from the
@@ -304,7 +315,7 @@ class Sync:
                     gitx.run(["init", "-q"], cwd=work)
                     gitx.run(["checkout", "-q", "--orphan", branch], cwd=work)
                 for ref, good in batches:
-                    _, _, client, batch = ref.split("/", 3)                # refs/telemetry/<client>/<unix>-<rand>
+                    client, batch = ref.split("/")[-2:]                      # refs/inbox/<kind>/<client>/<unix>-<rand>
                     stamp = batch.split("-", 1)[0]
                     day = time.strftime("%Y-%m-%d", time.gmtime(int(stamp) if stamp.isdigit() else time.time()))
                     out = os.path.join(work, "archive", day)

@@ -5,7 +5,7 @@ AI Hub no longer hosts package files. Three systems share the work:
 | System | Holds | Written by | Read by |
 |---|---|---|---|
 | **Git** (GitLab, GitHub, any remote) | The package files and the index (`index.json`) | `aihub dev publish` | `aihub install`, the server's index sync |
-| **Git telemetry inbox** (any git remote, often the index repo) | Usage and lifecycle events as small batches on `refs/telemetry/<client>/<batch>`, then an archive branch | The CLI and its hooks | The server's event sync |
+| **Git telemetry inbox** (any git remote, often the index repo) | Usage and lifecycle events as small batches on branches `telemetry/<client>/<batch>`, then an archive branch | The CLI and its hooks | The server's event sync |
 | **AI Hub server** | A SQLite or Postgres cache of both, accounts, roles, reviews, groups, the dashboard | The syncs | The web UI |
 
 Git applies its own access policy to the packages, the index and the telemetry inbox. The server adds nothing in front of it. CLIs and the server need push rights on the inbox repo.
@@ -43,10 +43,10 @@ Publishing the index itself (the `index.json` entry) is done by whoever owns the
 
 On a schedule you set in Admin > Sync (seconds or cron) the server:
 
-- fetches `refs/telemetry/*` from the inbox repo and inserts the events keyed by their unique event id (`events.ext_id`), so restarts, resent batches and several servers never duplicate rows. Oversized (over 5 MB) batches and malformed lines are dropped;
-- copies each raw batch to `archive/<YYYY-MM-DD>/<client>-<batch>.jsonl` on the archive branch (default `telemetry-archive`; switch off with the `telemetry_archive` admin setting), and only then deletes the refs and runs `git gc`. If any step fails the refs stay and the next pass retries, so nothing is lost. Git keeps a durable copy of every event;
-- creates the archive branch on the first batch when the repo exists but the branch does not (the CLI needs no branch: it only pushes `refs/telemetry/*`);
-- while the server is down, CLIs keep pushing and the refs simply pile up in git; the next pass ingests them in order;
+- fetches the `telemetry/*` branches (and, from older CLIs, `refs/telemetry/*`) from the inbox repo and inserts the events keyed by their unique event id (`events.ext_id`), so restarts, resent batches and several servers never duplicate rows. Oversized (over 5 MB) batches and malformed lines are dropped;
+- copies each raw batch to `archive/<YYYY-MM-DD>/<client>-<batch>.jsonl` on the archive branch (default `telemetry-archive`; switch off with the `telemetry_archive` admin setting), and only then deletes those branches (and legacy refs) and runs `git gc`. If any step fails they stay and the next pass retries, so nothing is lost. A failed remote delete is ignored; the batch is read again next pass and deduplicated by event id. Git keeps a durable copy of every event;
+- creates the archive branch on the first batch when the repo exists but the branch does not (the CLI never touches the archive branch: it only pushes `telemetry/*` branches);
+- while the server is down, CLIs keep pushing and the batch branches simply pile up in git; the next pass ingests them in order;
 - when the database holds no events (lost, replaced) or an admin forces a full sync, it first replays every `archive/**/*.jsonl` from the archive branch. Inserts are idempotent, so replaying over a healthy database adds nothing. The database's own git backup covers everything else.
 - re-reads the git index on the first run and whenever a publish event arrives;
 
@@ -54,9 +54,9 @@ A failed pass reports the error on the Sync tab.
 
 ## Telemetry from the CLI
 
-Hooks append each event (with a unique `id`) to a local spool. A detached flusher waits `telemetry_interval` seconds (default 15, between 5 and 3600) so a burst becomes one batch, then pushes one orphan commit to `refs/telemetry/<client_id>/<unix>-<rand>`. Each client writes only its own refs, so pushes never conflict. Nothing is pushed when nothing is spooled. A failed push keeps the spool; the CLI then starts no flusher for a back-off delay (30 s, doubling to 15 min, stored in `queue/backoff.json`), and `aihub flush` retries at once. `aihub dev publish` pushes its publish event immediately so the package is indexed quickly, and spools it if the push fails.
+Hooks append each event (with a unique `id`) to a local spool. A detached flusher waits `telemetry_interval` seconds (default 15, between 5 and 3600) so a burst becomes one batch, then pushes one orphan commit to the branch `telemetry/<client_id>/<unix>-<rand>`. Each client writes only its own branch names, so pushes never conflict. Every push outcome is written to `queue/status.json`. Nothing is pushed when nothing is spooled. A failed push keeps the spool; the CLI then starts no flusher for a back-off delay (30 s, doubling to 15 min, stored in `queue/backoff.json`), and `aihub flush` retries at once. `aihub dev publish` pushes its publish event immediately so the package is indexed quickly, and spools it if the push fails.
 
-The inbox is resolved as: environment (`AIHUB_TELEMETRY_URL`, `AIHUB_TELEMETRY_BRANCH`) > `config.json` (`telemetry_url`, `telemetry_branch`) > the bundled `aihub/core/defaults.json` (`telemetry.git_url`, `telemetry.branch`, shipped in both the pip package and `aihub.pyz`) > the package index repo (URL only). The server uses the same order with its admin settings in place of `config.json`.
+The inbox is resolved as: environment (`AIHUB_TELEMETRY_URL`, `AIHUB_TELEMETRY_BRANCH`) > `config.json` (`telemetry_url`, `telemetry_branch`) > the bundled `aihub/core/defaults.json` (`telemetry.git_url`, `telemetry.branch`, shipped in both the pip package and `aihub.pyz`) > the package index repo (URL only). The server uses the same order with its admin settings in place of `config.json`. Setup does not copy the bundled values into `config.json`, so a changed default reaches existing installs.
 
 ## Credentials for clients
 

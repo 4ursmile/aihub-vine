@@ -1468,7 +1468,9 @@ BACKUP_KEYS = ("backup_enabled", "backup_schedule", "backup_events_chunk")
 def _backup_view(request, u):
     bk, repos = request.app.state.backup, R(request)
     return {"config": {"backup_enabled": "1" if bk.enabled() else "0", "backup_schedule": bk.schedule_text(), "backup_events_chunk": str(bk.chunk())},
-            "status": dict(bk.status, next_in=round(bk.delay()))}
+            "status": dict(bk.status, next_in=round(bk.delay())),
+            "from_env": {"backup_enabled": bool(request.app.state.settings.env_get("AIHUB_BACKUP_ENABLED"))},     # the environment wins over the saved switch
+            "target": {"url": gitx.redact_url(request.app.state.sync.index_source()[0]), "branch": request.app.state.sync.index_source()[1]}}
 
 
 @r.get("/admin/backup")

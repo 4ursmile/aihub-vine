@@ -20,6 +20,7 @@ MAX_SPOOL = 5 * 1024 * 1024
 BATCH = 5000    # events per pushed commit
 BACKOFF_BASE = 30       # seconds to leave the network alone after the first failed push; doubles per failure
 BACKOFF_MAX = 900
+BRANCH_PREFIX = "telemetry"      # batches land on branch telemetry/<client>/<unix>-<rand>: visible in the git host's branch list
 MAX_PASSES = 20         # push passes one flusher process may run; a safety net so no failure mode can make it loop forever
 
 
@@ -120,6 +121,34 @@ def _release():
         pass
 
 
+def _status_file():
+    return paths.p("queue", "status.json")
+
+
+def _status(ok, error="", sent=0):
+    """Remember the outcome of the last push, because the flusher is a detached process nobody watches. `aihub flush -v` and `aihub doctor` show it."""
+    try:
+        cur = last_status()
+        cur.update(at=time.time(), ok=bool(ok), error=error)
+        if ok:
+            cur.update(last_ok=cur["at"], last_sent=sent)
+        tmp = _status_file() + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cur, f)
+        os.replace(tmp, _status_file())
+    except Exception:
+        pass
+
+
+def last_status():
+    try:
+        with open(_status_file()) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def _backoff_file():
     return paths.p("queue", "backoff.json")
 
@@ -218,14 +247,14 @@ def _scratch():
 
 
 def push(url, lines, timeout=20):
-    """Push `lines` (JSON strings) as one orphan commit on a fresh ref. Raises on any failure; the caller keeps the events."""
+    """Push `lines` (JSON strings) as one orphan commit on a fresh branch telemetry/<client>/<batch>. Raises on any failure; the caller keeps the events."""
     from . import hooks
     d = _scratch()
     blob = gitx.run(["hash-object", "-w", "--stdin"], cwd=d, input="".join(l + "\n" for l in lines), timeout=timeout)
     tree = gitx.run(["mktree"], cwd=d, input="100644 blob %s\tevents.jsonl\n" % blob, timeout=timeout)
     commit = gitx.run(["-c", "user.name=aihub", "-c", "user.email=aihub@localhost", "commit-tree", tree, "-m", "telemetry"],
                       cwd=d, timeout=timeout)
-    ref = "refs/telemetry/%s/%d-%s" % (hooks.client_id(), int(time.time()), uuid.uuid4().hex[:8])
+    ref = "refs/heads/%s/%s/%d-%s" % (BRANCH_PREFIX, hooks.client_id(), int(time.time()), uuid.uuid4().hex[:8])
     gitx.run(["push", "-q", url, "%s:%s" % (commit, ref)], cwd=d, timeout=timeout)
 
 
@@ -257,9 +286,11 @@ def _send_once(timeout=20):
                 push(url, lines[i:i + BATCH], timeout)
         except Exception as e:
             _send_once.error = gitx.redact_url(str(e))[:200]
+            _status(False, _send_once.error)
             _fail()
             return 0
         _ok()
+        _status(True, "", len(lines))
     for f, size in sizes.items():                        # nothing valid in a file is also "done": it must not keep the flusher looping
         try:
             if os.path.getsize(f) == size:               # a hook that opened the spool just before the rename may still have appended: keep that file
@@ -329,10 +360,12 @@ def deliver(ev, timeout=20):
         if url:
             push(url, [line], timeout)
             _ok()
+            _status(True, "", 1)
             return True
         deliver.error = "no telemetry inbox configured"
     except Exception as e:
         deliver.error = gitx.redact_url(str(e))[:200]
+        _status(False, deliver.error)
         _fail()
     record(ev)
     return False

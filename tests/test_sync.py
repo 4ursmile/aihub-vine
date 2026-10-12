@@ -92,6 +92,19 @@ class Server(unittest.TestCase):
         self.assertEqual(self.c.put("/api/v1/admin/sync", json={"telemetry_archive": "0"}, headers=h).status_code, 200)
         self.assertEqual(self.c.get("/api/v1/admin/sync").status_code, 401)
 
+    def test_backup_settings_api_for_the_admin_tab(self):
+        h = self.admin()
+        g = lambda: self.c.get("/api/v1/admin/backup", headers=h).json()
+        self.assertEqual(sorted(g()), ["config", "from_env", "status", "target"])
+        self.assertEqual(g()["config"]["backup_enabled"], "0")                            # off until an admin turns it on
+        self.assertEqual(self.c.put("/api/v1/admin/backup", headers=h, json={"backup_enabled": "1", "backup_schedule": "0 */6 * * *", "backup_events_chunk": "5000"}).status_code, 200)
+        self.assertEqual(g()["config"], {"backup_enabled": "1", "backup_schedule": "0 */6 * * *", "backup_events_chunk": "5000"})
+        for bad in ({"backup_enabled": "2"}, {"backup_schedule": "nope"}, {"backup_events_chunk": "5"}):
+            self.assertEqual(self.c.put("/api/v1/admin/backup", headers=h, json=bad).status_code, 400, bad)
+        self.assertEqual(self.c.get("/api/v1/admin/backup").status_code, 401)             # admins only
+        with unittest.mock.patch.dict(os.environ, {"AIHUB_BACKUP_ENABLED": "0"}):
+            self.assertTrue(self.c.get("/api/v1/admin/backup", headers=h).json()["from_env"]["backup_enabled"])      # the UI can say "set by environment"
+
     def test_removed_routes_are_gone(self):
         h = self.admin()
         for method, path in (("post", "/api/v1/upload"), ("post", "/api/v1/uploads"), ("post", "/api/v1/events")):
@@ -237,7 +250,7 @@ class Inbox(unittest.TestCase):
         self.env.stop()
 
     def refs(self):
-        return subprocess.run(["git", "-C", self.inbox, "for-each-ref", "refs/telemetry/"], capture_output=True, text=True).stdout.split("\n")[:-1]
+        return subprocess.run(["git", "-C", self.inbox, "for-each-ref", "refs/heads/telemetry/", "refs/telemetry/"], capture_output=True, text=True).stdout.split("\n")[:-1]
 
     def spool(self, n, **k):
         from aihub.cli import telemetry
@@ -275,7 +288,7 @@ class Inbox(unittest.TestCase):
         self.assertEqual(self.r.db.conn().execute("SELECT COUNT(*) FROM events WHERE package='demo'").fetchone()[0], 3)
 
     def sent_lines(self):
-        out = subprocess.run(["git", "-C", self.inbox, "for-each-ref", "--format=%(refname)", "refs/telemetry/"], capture_output=True, text=True).stdout.split()
+        out = subprocess.run(["git", "-C", self.inbox, "for-each-ref", "--format=%(refname)", "refs/heads/telemetry/", "refs/telemetry/"], capture_output=True, text=True).stdout.split()
         return subprocess.run(["git", "-C", self.inbox, "show", out[0] + ":events.jsonl"], capture_output=True, text=True).stdout.splitlines()
 
     def test_garbage_and_oversized_batches_are_dropped_without_blocking_good_ones(self):
@@ -360,6 +373,45 @@ class Inbox(unittest.TestCase):
         self.r.set_setting("sync_cursor", "")                                      # admin: "re-read everything"
         self.sy.run_once()
         self.assertEqual(self.count(), 2)
+
+    def test_batches_land_on_visible_branches_not_hidden_refs(self):
+        from aihub.cli import telemetry
+        self.spool(2)
+        telemetry.flush(force=True)
+        heads = subprocess.run(["git", "-C", self.inbox, "branch", "--list", "telemetry/*"], capture_output=True, text=True).stdout.split()
+        self.assertEqual(len(heads), 1)                                            # shows up in the git host's branch list
+        self.assertEqual(subprocess.run(["git", "-C", self.inbox, "for-each-ref", "refs/telemetry/"], capture_output=True, text=True).stdout, "")
+        self.sy.pull_events()
+        self.assertEqual(self.count(), 2)
+        self.assertEqual(subprocess.run(["git", "-C", self.inbox, "branch", "--list", "telemetry/*"], capture_output=True, text=True).stdout.strip(), "")   # ingested: branch deleted
+        self.assertIn(self.sy.archive_branch(), subprocess.run(["git", "-C", self.inbox, "branch", "--list"], capture_output=True, text=True).stdout)
+
+    def test_old_cli_refs_are_still_ingested_and_removed(self):
+        """A CLI that has not updated yet pushes to refs/telemetry/*: nothing it sent may be lost."""
+        from aihub.cli import telemetry
+        d = telemetry._scratch()
+        blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=d, input=json.dumps(obs("legacy1")) + "\n", capture_output=True, text=True).stdout.strip()
+        tree = subprocess.run(["git", "mktree"], cwd=d, input="100644 blob %s\tevents.jsonl\n" % blob, capture_output=True, text=True).stdout.strip()
+        commit = subprocess.run(["git", "-c", "user.name=a", "-c", "user.email=a@b", "commit-tree", tree, "-m", "t"], cwd=d, capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "push", "-q", self.inbox, commit + ":refs/telemetry/oldclient/1791000000-abcd1234"], cwd=d, check=True)
+        self.spool(1)
+        telemetry.flush(force=True)                                                # plus one new-style batch
+        self.sy.pull_events()
+        self.assertEqual(self.count(where="ext_id='legacy1'"), 1)
+        self.assertEqual(self.count(), 2)                                          # the legacy event + the new-style one
+        self.assertEqual(self.refs(), [])
+
+    def test_failed_push_is_recorded_where_the_user_can_see_it(self):
+        from aihub.cli import telemetry
+        self.spool(1)
+        with unittest.mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_URL": "/nonexistent/inbox.git"}):
+            telemetry.flush(force=True)
+        st = telemetry.last_status()
+        self.assertFalse(st["ok"])
+        self.assertTrue(st["error"])
+        telemetry.flush(force=True)                                                # back online
+        self.assertTrue(telemetry.last_status()["ok"])
+        self.assertEqual(telemetry.last_status()["last_sent"], 1)
 
     def test_deliver_pushes_now_or_spools(self):
         from aihub.cli import telemetry

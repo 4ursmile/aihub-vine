@@ -334,6 +334,9 @@ def _check_backends(detail=False):
             sp.problem("no telemetry inbox configured, so usage reporting is paused. run: aihub setup")
         elif gitx.reachable(url):
             sp.text("Telemetry inbox reachable (%s)" % gitx.redact_url(url))
+            st = telemetry.last_status()
+            if st and not st.get("ok"):
+                ui.note("the last usage push FAILED: %s (events are kept and retried; try: aihub flush -v)" % (st.get("error") or "unknown error"))
         else:
             sp.problem("telemetry inbox unreachable or not writable: %s" % gitx.redact_url(url))
     if detail:
@@ -407,6 +410,10 @@ def cmd_flush(a):
     n = telemetry.flush(force=not getattr(a, "background", False))     # --background: the detached sender, one pass per window
     if a.verbose:
         print("sent %d events" % n)
+        st = telemetry.last_status()
+        if st and not st.get("ok"):
+            print("last push failed: %s" % (st.get("error") or "unknown error"))
+            print("inbox: %s" % gitx.redact_url(telemetry.target()))
 
 
 def cmd_skill(a):

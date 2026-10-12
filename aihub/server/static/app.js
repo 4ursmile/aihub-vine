@@ -397,10 +397,10 @@ function Account() {
 function Admin() {
   const { me } = useStore(); const [tab, setTab] = useState("People"); const [tick, setTick] = useState(0); const bump = () => setTick((x) => x + 1);
   if (!can("admin") && !can("reset_password")) return html`<${Empty} t="Admins only" d="You don’t have access to this page." />`;
-  const tabs = can("admin") ? ["People", "Roles", "Sync", "Settings"] : ["People"];
+  const tabs = can("admin") ? ["People", "Roles", "Sync", "Backup", "Settings"] : ["People"];
   return html`<div class="stack"><h1>Admin</h1>${tabs.length > 1 && html`<div class="seg">${tabs.map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} onClick=${() => setTab(t)}>${t}</button>`)}</div>`}
     ${tab === "People" && html`<${People} me=${me} tick=${tick} bump=${bump} />`}${tab === "Roles" && can("admin") && html`<${Roles} tick=${tick} bump=${bump} />`}
-    ${tab === "Sync" && can("admin") && html`<${AdminSync} />`}${tab === "Settings" && can("admin") && html`<${AdminSettings} />`}</div>`;
+    ${tab === "Sync" && can("admin") && html`<${AdminSync} />`}${tab === "Backup" && can("admin") && html`<${AdminBackup} />`}${tab === "Settings" && can("admin") && html`<${AdminSettings} />`}</div>`;
 }
 const SC = { active: "green", pending: "orange", disabled: "red" };
 function People({ me, tick, bump }) {
@@ -522,6 +522,30 @@ function AdminSync() {
     <div class="stack"><h3>Package index</h3><div class="list">${T("index_url", "Git URL", "Repository holding the package index")}${T("index_branch", "Branch", "default: main")}${T("index_path", "Folder", "default: index (a folder index; an old index.json file also works)")}</div></div>
     <div class="stack"><h3>CLI setup</h3><div class="list">
       ${T("cli_git_url", "CLI git URL", "Where to pip install the CLI from when this server is unreachable")}${T("cli_git_branch", "Branch (optional)", "Leave empty to hide. Install from this branch instead of the default")}${T("cli_git_subdir", "Sub folder (optional)", "Leave empty to hide. Install from this folder of the repo")}${T("client_refresh_hours", "CLI refresh (hours)", "How often installed CLIs re-pull these settings (default 24)")}</div></div></div>`;
+}
+
+const BACKUP_SCHEDULES = [["Hourly", "0 * * * *"], ["Every 6 hours", "0 */6 * * *"], ["Daily 03:00", "0 3 * * *"], ["Weekly (Sun 03:00)", "0 3 * * 0"]];
+function AdminBackup() {
+  const [tick, setTick] = useState(0); const d = useLoad(() => api("/admin/backup"), [tick]); const [busy, setBusy] = useState("");
+  if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
+  const { config: c, status: st, from_env: env, target: tg } = d.d;
+  const on = c.backup_enabled === "1";
+  const save = async (k, v) => { setBusy(k); try { await api("/admin/backup", { method: "PUT", body: { [k]: v } }); toast("Saved"); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
+  const run = async () => { setBusy("run"); try { toast("Backing up…"); await api("/admin/backup/run", { method: "POST" }); toast("Backup finished"); setTick(tick + 1); } catch (e) { toast(e.message, 1); setTick(tick + 1); } finally { setBusy(""); } };
+  const when = (t) => t ? new Date(t * 1000).toLocaleString() : "never";
+  const next = st.next_in != null ? (st.next_in >= 3600 ? Math.round(st.next_in / 3600) + " h" : st.next_in >= 60 ? Math.round(st.next_in / 60) + " min" : st.next_in + " s") : "-";
+  return html`<div class="stack">
+    <div class="card stack"><div class="row"><h3>Backup status</h3><span class="sp"></span><button class="btn sec sm" disabled=${busy === "run"} onClick=${run} title="Back up now, whether or not the schedule is on">Back up now</button></div>
+      <div class="kpis"><div class="stat"><b>${on ? "On" : "Off"}</b><span>schedule</span></div><div class="stat"><b>${on ? next : "-"}</b><span>next backup in</span></div><div class="stat"><b>${st.rows || 0}</b><span>rows in last backup</span></div><div class="stat"><b>${st.files || 0}</b><span>files</span></div></div>
+      <p class="mut sm">Last run: ${when(st.last_run)}${st.last_error ? html` · <b style="color:var(--red)">${st.last_error}</b>` : st.last_run ? html` · <span style="color:var(--green)">OK</span>` : ""}${st.last_commit ? html` · commit <code>${st.last_commit}</code>` : ""}</p>
+      <p class="mut sm">Tables are exported as small gzipped files under <code>backups/</code> in the package index repo${tg && tg.url ? html` (<code>${tg.url}</code>, branch <code>${tg.branch}</code>)` : ""}. Passwords, tokens and secret settings are hashed first. If the database is ever lost, the server restores from this.</p></div>
+    <div class="stack"><h3>Schedule</h3><div class="list">
+      <div class="li"><div class="t"><b>Scheduled backups</b><span>${on ? "Runs on the schedule below." : "Off: nothing runs on a schedule. “Back up now” still works."}</span>${env && env.backup_enabled && html`<span class="mut sm" role="note">Set by environment (AIHUB_BACKUP_ENABLED): that value is used, this switch is ignored.</span>`}</div>
+        <label class="switch"><input type="checkbox" role="switch" checked=${on} disabled=${busy === "backup_enabled" || (env && env.backup_enabled)} onChange=${(e) => save("backup_enabled", e.target.checked ? "1" : "0")} aria-label="Scheduled backups" /><i></i></label></div>
+      <div class="li"><div class="t"><b>Backup schedule</b><span>Seconds (10-86400) or a cron expression: <code>0 3 * * *</code> daily at 03:00. Applies immediately.</span></div>
+        <div class="row"><input class="field" id="bk-sched" defaultValue=${c.backup_schedule} style="width:11rem" aria-label="Backup schedule" /><button class="btn sm" disabled=${busy === "backup_schedule"} onClick=${() => save("backup_schedule", document.getElementById("bk-sched").value)}>Save</button></div></div>
+      <div class="li"><div class="t"><b>Presets</b></div><div class="seg">${BACKUP_SCHEDULES.map(([n, v]) => html`<button key=${v} class=${c.backup_schedule === v ? "on" : ""} onClick=${() => save("backup_schedule", v)}>${n}</button>`)}</div></div>
+      <${TextSetting} x=${{ label: "Rows per file", help: "Events and audit log are split into files of this many rows (1000-1000000, default 20000). Smaller files make smaller git diffs.", kind: "text", max: 7 }} v=${c.backup_events_chunk} busy=${busy === "backup_events_chunk"} save=${(n) => save("backup_events_chunk", n)} /></div></div></div>`;
 }
 function Groups() {
   const { me } = useStore(); const [tick, setTick] = useState(0); const bump = () => setTick((x) => x + 1);

@@ -112,9 +112,9 @@ def cmd_setup(a):
 
 SETUP_FIELDS = (("index_url", "AIHUB_INDEX_URL", "Package index (git URL)", False, ("index", "git_url")),
                 ("index_branch", "AIHUB_INDEX_BRANCH", "Package index branch", False, ("index", "branch")),
-                ("index_path", "AIHUB_INDEX_PATH", "Package index folder", False, ("index", "path")),
-                ("telemetry_url", "AIHUB_TELEMETRY_URL", "Telemetry inbox (git URL)", False, ("telemetry", "git_url")),
-                ("telemetry_branch", "AIHUB_TELEMETRY_BRANCH", "Telemetry archive branch", False, ("telemetry", "branch")))
+                ("index_path", "AIHUB_INDEX_PATH", "Package index folder", False, ("index", "path")))
+# Telemetry url/branch/interval are NOT copied into config.json: telemetry.source() reads defaults.json live, so a new default reaches
+# every install, while an explicit `aihub config set` or what the hub sends (apply) still wins.
 
 
 def resolve_missing(yes=False):

@@ -62,7 +62,7 @@ The server stores no package files and has no upload or download routes (`/uploa
 
 ## Usage events, statistics, and rankings
 
-The server no longer accepts events (`POST /api/v1/events` is gone). The CLI pushes them in batches to `refs/telemetry/*` of a git inbox repo, and the server fetches them on a schedule into the same `events` table, keyed by the event id so re-reads never duplicate. Ingested batches are archived to a branch and their refs deleted. Event kinds: `use`, `install`, `update`, `uninstall`, `error`, `publish`.
+The server no longer accepts events (`POST /api/v1/events` is gone). The CLI pushes them in batches to `telemetry/*` branches of a git inbox repo, and the server fetches them on a schedule into the same `events` table, keyed by the event id so re-reads never duplicate. Ingested batches are archived to a branch and their branches deleted. Event kinds: `use`, `install`, `update`, `uninstall`, `error`, `publish`.
 
 | Method | Path | Auth required | Purpose |
 | --- | --- | --- | --- |
@@ -87,7 +87,7 @@ Dashboard filters (query parameters): `days` (7, 14, 30, 90, 180, 365) or a cust
 
 | Method | Path | Auth required | Purpose |
 | --- | --- | --- | --- |
-| GET | `/api/v1/admin/backup` | `admin` | Backup settings (`backup_enabled`, `backup_schedule`, `backup_events_chunk`) and run status. |
+| GET | `/api/v1/admin/backup` | `admin` | Backup settings (`backup_enabled`, `backup_schedule`, `backup_events_chunk`), run status, `from_env.backup_enabled` (true when `AIHUB_BACKUP_ENABLED` overrides the saved switch) and `target` (index repo URL and branch the backup goes to). |
 | PUT | `/api/v1/admin/backup` | `admin` | Update those settings. `backup_enabled` is `0` or `1`; `backup_events_chunk` is 1000–1000000. |
 | POST | `/api/v1/admin/backup/run` | `admin` | Back up now to the index git repo, whether or not the schedule is enabled. Returns the same view as GET. |
 

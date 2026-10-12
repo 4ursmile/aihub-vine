@@ -204,9 +204,12 @@ class SetupAsksOnlyForGit(unittest.TestCase):
             missing = remote_config.resolve_missing()
             cfg = json.load(open(os.path.join(home, "config.json")))
         self.assertEqual(missing, [])
-        self.assertEqual(cfg["telemetry_url"], DEF["telemetry"]["git_url"])
-        self.assertEqual(cfg["telemetry_branch"], DEF["telemetry"]["branch"])
         self.assertEqual(cfg["index_url"], DEF["index"]["git_url"])
+        self.assertNotIn("telemetry_url", cfg)                       # not frozen: a new defaults.json value must reach existing installs
+        self.assertNotIn("telemetry_branch", cfg)
+        with mock.patch.dict(os.environ, {"AIHUB_HOME": home, "AIHUB_TELEMETRY_URL": "", "AIHUB_TELEMETRY_BRANCH": ""}):
+            from aihub.cli import telemetry
+            self.assertEqual(telemetry.source()["url"], DEF["telemetry"]["git_url"])
 
     def test_no_credentials_prompt_when_git_access_already_works(self):
         from aihub.cli import remote_config

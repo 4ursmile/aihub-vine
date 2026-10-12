@@ -10,7 +10,7 @@ Package author                         aihub CLI (Python 3.9+, stdlib only)
         |                                   |                |
         | git push                          | git clone      | batched git push
         v                                   v                v
-   Git remote (GitLab, GitHub, ...)  <- package files + index.json    refs/telemetry/*
+   Git remote (GitLab, GitHub, ...)  <- package files + index.json    telemetry/* branches
         ^                                                               |
         | read index                                                    | fetch, store, archive
         +------------------ AI Hub server (FastAPI) --------------------+
@@ -71,7 +71,7 @@ Choose SQLite or PostgreSQL for metadata and memory or Redis for cache in `.env`
 ## Features
 
 - Package search and version resolution from a git-hosted index; installs pinned to a commit.
-- Usage events batched through git (`refs/telemetry/*`, archived to a branch), synced into a dashboard with filters, a heatmap, top packages and developers, and an activity log. Developers are credited from the `authors` in each package's manifest.
+- Usage events batched through git (`telemetry/*` branches, archived to a branch), synced into a dashboard with filters, a heatmap, top packages and developers, and an activity log. Developers are credited from the `authors` in each package's manifest.
 - Package maintainers, reviews, and ratings.
 - CLI support for Claude Code, Codex, and OpenCode integrations.
 - Manifest-declared commands, dependencies, Python environments, scripts, binaries, and setup steps.

@@ -225,7 +225,7 @@ These can be set here or in Admin > Sync. **Environment wins over Admin settings
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AIHUB_TELEMETRY_URL` | `aihub/core/defaults.json`, then the index repo | Git repo CLIs push usage batches to (`refs/telemetry/*`). CLIs and the server need push rights. |
+| `AIHUB_TELEMETRY_URL` | `aihub/core/defaults.json`, then the index repo | Git repo CLIs push usage batches to (one `telemetry/<client>/<batch>` branch per batch). Users need write access to `telemetry/*` branches only, not `main`; the server also deletes those branches and pushes the archive branch. |
 | `AIHUB_TELEMETRY_BRANCH` | `telemetry-archive` | Branch the server archives ingested batches to (`archive/<day>/<client>-<batch>.jsonl`). |
 | `AIHUB_INDEX_URL` | empty | Git URL of the repo holding the index, an `https://...json` URL, or a local file. |
 | `AIHUB_INDEX_BRANCH` / `AIHUB_INDEX_PATH` | `main` / `index` | Branch and folder inside that repo (a folder index; an old `index.json` file is still read). |
@@ -250,6 +250,7 @@ The server can back up its database into the index git repo, under `backups/`. I
 - A backup needs the index git URL and push access for the server's git credentials. A local-file index is not backed up.
 - Layout: `backups/index.json` lists each file with row count, sha256 and size. `backups/db/<table>.sqlite.gz` holds one table per file. `events` and `audit_log` are split into `<table>-000001.sqlite.gz`, `<table>-000002.sqlite.gz`, and so on. Full chunks are not rewritten.
 - Passwords and tokens are written as one-way hashes. Secret-like settings are hashed, and event details are redacted.
+- Admin UI: Admin > Backup shows the last run and next run, the on/off switch, the schedule (with presets), rows per file, and a Back up now button. If `AIHUB_BACKUP_ENABLED` is set in the environment, the switch is shown as set by the environment and ignored.
 - Admin API: `GET`/`PUT /api/v1/admin/backup`, and `POST /api/v1/admin/backup/run` to back up now.
 
 ### Recovery at startup
