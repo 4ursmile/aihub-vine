@@ -17,7 +17,9 @@ import urllib.request
 from ..core import manifest as M, naming, pkgindex, version as V
 from . import api, gitx, paths, tls
 
-TTL = 300
+TTL = 300       # in-process cache of the reader; the on-disk checkout is checked against the remote far more often (CHECK)
+CHECK = 20      # seconds a checkout counts as current without asking the remote. After that ONE `ls-remote` (cheap, no download)
+                # says whether the branch moved; only then is it fetched. So a new publish shows up within seconds, not 5 minutes.
 
 
 def _defaults():
@@ -58,7 +60,12 @@ def _reader(src, refresh=False):
     base = paths.ensure("repos", "_index")        # own folder: a package checkout of the same repo (pinned commit) must not replace the index
     d = gitx.cache_dir(u, base)
     stamp = os.path.join(d, ".aihub-index-fetched")
-    fresh = not refresh and os.path.isfile(stamp) and time.time() - os.path.getmtime(stamp) < TTL
+    fresh = not refresh and os.path.isfile(stamp) and time.time() - os.path.getmtime(stamp) < CHECK
+    if not fresh and not refresh and os.path.isfile(stamp):
+        head = gitx.remote_head(u, src["branch"], timeout=15)
+        if head and head == gitx.run(["rev-parse", "-q", "--verify", "HEAD"], cwd=d, check=False):
+            open(stamp, "w").close()                    # remote unchanged: no fetch needed
+            fresh = True
     if not fresh:
         try:
             d = gitx.fetch(u, src["branch"], base=base)
@@ -81,7 +88,7 @@ _cache = {}
 def reader(refresh=False):
     src = source()
     key = (src["url"], src["branch"], src["path"])
-    if refresh or key not in _cache or time.time() - _cache[key][0] > TTL:
+    if refresh or key not in _cache or time.time() - _cache[key][0] > CHECK:
         _cache[key] = (time.time(), _reader(src, refresh))
     return _cache[key][1]
 

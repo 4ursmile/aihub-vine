@@ -133,37 +133,46 @@ class ClaudeCode(Tool):
     @staticmethod
     def _ours(h): return " hook --source " in h.get("command", "")
 
+    EVENTS = ("PreToolUse", "UserPromptSubmit")     # tool calls, and "/skill" typed by the user (no tool call)
+
     def has_hook(self):
         try:
             d = _read_json(self._settings())
         except ValueError:
             return False
-        return any(self._ours(h) for g in d.get("hooks", {}).get("PreToolUse", []) for h in g.get("hooks", []))
+        return all(any(self._ours(h) for g in d.get("hooks", {}).get(ev, []) for h in g.get("hooks", [])) for ev in self.EVENTS)
 
     def install_hook(self, cmd):
         d = _read_json(self._settings())
-        groups = d.setdefault("hooks", {}).setdefault("PreToolUse", [])
-        for g in groups:  # drop stale copies of ours, then add fresh
-            g["hooks"] = [h for h in g.get("hooks", []) if not self._ours(h)]
-        groups[:] = [g for g in groups if g.get("hooks")]
-        groups.append({"matcher": "*", "hooks": [{"type": "command", "command": cmd + " --source claude", "timeout": 5}]})
+        for ev in self.EVENTS:
+            groups = d.setdefault("hooks", {}).setdefault(ev, [])
+            for g in groups:  # drop stale copies of ours, then add fresh
+                g["hooks"] = [h for h in g.get("hooks", []) if not self._ours(h)]
+            groups[:] = [g for g in groups if g.get("hooks")]
+            g = {"hooks": [{"type": "command", "command": cmd + " --source claude", "timeout": 5}]}
+            if ev == "PreToolUse":
+                g["matcher"] = "*"
+            groups.append(g)
         _write_json(self._settings(), d)
         return True
 
     def remove_hook(self):
         d = _read_json(self._settings())
-        groups = d.get("hooks", {}).get("PreToolUse", [])
-        n = sum(len(g.get("hooks", [])) for g in groups)
-        for g in groups:
-            g["hooks"] = [h for h in g.get("hooks", []) if not self._ours(h)]
-        if "hooks" in d:
-            d["hooks"]["PreToolUse"] = [g for g in groups if g.get("hooks")]
-            if not d["hooks"]["PreToolUse"]:
-                del d["hooks"]["PreToolUse"]
-            if not d["hooks"]:
-                del d["hooks"]
+        n0 = n1 = 0
+        for ev in self.EVENTS:
+            groups = d.get("hooks", {}).get(ev, [])
+            n0 += sum(len(g.get("hooks", [])) for g in groups)
+            for g in groups:
+                g["hooks"] = [h for h in g.get("hooks", []) if not self._ours(h)]
+            n1 += sum(len(g.get("hooks", [])) for g in groups)
+            if "hooks" in d:
+                d["hooks"][ev] = [g for g in groups if g.get("hooks")]
+                if not d["hooks"][ev]:
+                    del d["hooks"][ev]
+        if "hooks" in d and not d["hooks"]:
+            del d["hooks"]
         _write_json(self._settings(), d)
-        return n != sum(len(g.get("hooks", [])) for g in groups)
+        return n0 != n1
 
 
 class Codex(Tool):

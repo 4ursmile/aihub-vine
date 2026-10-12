@@ -118,14 +118,15 @@ def to_row(e):
 
 
 class Sync:
-    def __init__(self, repos, settings):
-        self.repos, self.s = repos, settings
+    def __init__(self, repos, settings, cache=None):
+        self.repos, self.s, self.cache = repos, settings, cache          # cache: dropped after new events so counts and the feed update now
         self.stop, self.wake = threading.Event(), threading.Event()
         self.t = None
         self.first_pass = threading.Event()                 # set once the first pass after start has finished (ok or not)
         self._lookback_checked = False
         self.index_lock = threading.Lock()                  # one index writer at a time (event sync and manual forcing share a checkout)
-        self.status = {"last_run": None, "last_error": None, "events_error": None, "index_error": None, "archive_error": None, "events_total": 0, "index_packages": 0}
+        self.status = {"last_run": None, "last_error": None, "events_error": None, "index_error": None, "archive_error": None, "events_total": 0, "index_packages": 0,
+                       "archive_last": None, "archive_batches": 0, "archive_files": 0, "archive_commit": None, "inbox_pending": 0, "last_events": 0}
 
     # ----- config: env first, then admin settings
     def cfg(self, key, env, default=""):
@@ -293,6 +294,10 @@ class Sync:
         One `ls-remote` decides what to fetch: an idle inbox (tip unchanged since the last pass, no old-layout refs) costs no fetch at all."""
         remote = self._remote_refs(d)
         self._archive_tip = remote.get("refs/heads/" + self.archive_branch(), "")
+        if self._archive_tip and not self.status.get("archive_commit"):             # after a restart: show what the archive already holds
+            self.status["archive_commit"] = self._archive_tip[:10]
+            if gitx.run(["rev-parse", "-q", "--verify", self._archive_tip + "^{commit}"], cwd=d, check=False):
+                self._count_archive(d, self._archive_tip)                   # only when we already have it locally: no fetch for a label
         local = {}
         for line in gitx.run(["for-each-ref", "--format=%(objectname) %(refname)", "refs/inbox/"], cwd=d, check=False).splitlines():
             sha, _, ref = line.partition(" ")
@@ -365,6 +370,12 @@ class Sync:
                 rows = []
         n = self._store(rows)
         self.status["events_total"] += n
+        self.status["last_events"] = n
+        if n and self.cache is not None:
+            try:
+                self.cache.invalidate("pkg")                            # package lists, download counts, "Happening now"
+            except Exception:
+                pass
         log.info("sync: %d batch(es) read from %s, %d new event(s) stored", len(found), self.inbox_branch(), n)
         changed = False
         if pubs:
@@ -478,6 +489,10 @@ class Sync:
                     continue                                            # someone else pushed to the archive meanwhile: rebuild on the new tip
                 gitx.run(["update-ref", ref, commit], cwd=d, check=False)
                 self._archive_tip = commit
+                self.status.update(archive_last=time.time(), archive_batches=self.status.get("archive_batches", 0) + len(batches),
+                                   archive_commit=commit[:10])
+                self._count_archive(d, commit)
+                log.info("sync: archived %d batch(es) to %s (%s)", len(batches), branch, commit[:10])
                 return True
             return False
         except Exception as e:
@@ -487,6 +502,11 @@ class Sync:
         finally:
             self._archive_tip = None
             self._clear_worktree(d, work)
+
+    def _count_archive(self, d, rev):
+        """Files on the archive branch, for the admin page (one cheap local ls-tree of an object we already have)."""
+        out = gitx.run(["ls-tree", "-r", "--name-only", rev, "--", "archive/"], cwd=d, check=False)
+        self.status["archive_files"] = len(out.splitlines()) if out else 0
 
     @staticmethod
     def _clear_worktree(d, work):

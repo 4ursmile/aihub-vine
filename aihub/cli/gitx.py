@@ -15,6 +15,14 @@ NETWORK = ("fetch", "push", "ls-remote", "clone", "pull")
 NETWORK_TIMEOUT = 300   # seconds; in BATCH mode a network command never runs without a limit
 
 
+NO_WINDOW = 0x08000000 if os.name == "nt" else 0   # CREATE_NO_WINDOW: on Windows every git call otherwise flashes a console window
+
+
+def popen_kw():
+    """Extra subprocess arguments so a child never opens a console window on Windows (empty elsewhere)."""
+    return {"creationflags": NO_WINDOW} if NO_WINDOW else {}
+
+
 def _env(extra_env=None):
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **tls.git_env())
     env.setdefault("GIT_HTTP_LOW_SPEED_LIMIT", "1000")             # a stalled https transfer (proxy, dead link) aborts instead of hanging
@@ -34,7 +42,7 @@ def run(args, cwd=None, check=True, timeout=None, input=None, extra_env=None):
     if timeout is None and BATCH and args and args[0] in NETWORK:
         timeout = NETWORK_TIMEOUT
     try:
-        r = subprocess.run(["git"] + list(args), cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout, input=input)
+        r = subprocess.run(["git"] + list(args), cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout, input=input, **popen_kw())
     except subprocess.TimeoutExpired:
         if check:
             raise GitError("git %s timed out after %ss" % (args[0], timeout))
@@ -62,7 +70,7 @@ def fetch_tip(cwd, remote, branch, ref, depth=None, timeout=120):
 
 
 def _batch(cwd, mode, names, timeout):
-    r = subprocess.run(["git", "cat-file", mode], cwd=cwd, env=_env(), capture_output=True, timeout=timeout,
+    r = subprocess.run(["git", "cat-file", mode], cwd=cwd, env=_env(), capture_output=True, timeout=timeout, **popen_kw(),
                        input="".join(n + "\n" for n in names).encode())
     if r.returncode != 0:
         raise GitError(r.stderr.decode("utf-8", "replace").strip() or "git cat-file failed")
@@ -157,7 +165,7 @@ def remote_empty(url):
     """True when the remote is reachable but has no commits at all (a freshly created repo). An unreachable or
     unauthorised remote is NOT empty: that stays an error."""
     try:
-        r = subprocess.run(["git", "ls-remote", url], env=_env(), capture_output=True, text=True, timeout=60)
+        r = subprocess.run(["git", "ls-remote", url], env=_env(), capture_output=True, text=True, timeout=60, **popen_kw())
     except subprocess.TimeoutExpired:
         return False
     return r.returncode == 0 and not r.stdout.strip()
@@ -166,7 +174,7 @@ def remote_empty(url):
 def reachable(url):
     """True when `git ls-remote` succeeds (the repo exists and we may read it), whether or not it has any branch."""
     try:
-        return subprocess.run(["git", "ls-remote", url], env=_env(), capture_output=True, text=True, timeout=60).returncode == 0
+        return subprocess.run(["git", "ls-remote", url], env=_env(), capture_output=True, text=True, timeout=60, **popen_kw()).returncode == 0
     except subprocess.TimeoutExpired:
         return False
 

@@ -20,6 +20,7 @@ MAX_SPOOL = 5 * 1024 * 1024
 BATCH = 5000    # events per pushed commit
 BACKOFF_BASE = 30       # seconds to leave the network alone after the first failed push; doubles per failure
 BACKOFF_MAX = 900
+WINDOWS = os.name == "nt"
 PUSH_TRIES = 6          # a push can lose a race with another client (non-fast-forward): refetch the tip and add the file again
 MAX_PASSES = 20         # push passes one flusher process may run; a safety net so no failure mode can make it loop forever
 
@@ -196,8 +197,11 @@ def kick():
             return
         kw = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
                   env=dict(os.environ, AIHUB_FLUSH_LOCKED="1"))
-        if os.name == "nt":
-            kw["creationflags"] = 0x00000008 | 0x00000200  # DETACHED | NEW_GROUP
+        if WINDOWS:
+            # CREATE_NO_WINDOW | NEW_PROCESS_GROUP. Not DETACHED_PROCESS: a detached process has no console, so Windows opened a NEW
+            # console window for every git it ran (a window flashing on and off for each command). This one has a hidden console its
+            # children share. pythonw would avoid it too but is not always next to python.
+            kw["creationflags"] = 0x08000000 | 0x00000200
         else:
             kw["start_new_session"] = True
         try:

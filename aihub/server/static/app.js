@@ -96,7 +96,7 @@ function Typer({ words }) {
 }
 
 const since = (t) => { const s = Date.now() / 1000 - t; return s < 45 ? "just now" : ago(t); };
-const VERB = { install: "installed", use: "used", update: "updated" };
+const VERB = { install: "installed", use: "used", update: "updated", publish: "published" };
 function Activity() {
   const [items, setItems] = useState(null), [err, setErr] = useState(null), [, tick] = useState(0); const seen = useRef(new Set());
   useEffect(() => {
@@ -114,9 +114,9 @@ function Activity() {
   }, []);
   return html`<aside class="feed" aria-label="Live activity"><div class="feed-h"><h3>Happening now</h3><span class="live" title="Refreshes while this tab is open">live</span></div>
     ${err ? html`<p class="mut sm feed-e">Activity is unavailable right now.</p>` : !items ? html`<div class="feed-l">${[0, 1, 2, 3, 4].map((i) => html`<div class="skel line" key=${i}></div>`)}</div>` :
-      !items.length ? html`<p class="mut sm feed-e">Nothing yet. Installs and usage show up here as they happen.</p>` :
+      !items.length ? html`<p class="mut sm feed-e">Nothing yet. Publishes, installs and usage show up here as they happen.</p>` :
       html`<ul class="feed-l">${items.slice(0, 7).map((x, n) => html`<li key=${x.k} class=${x.fresh ? "fresh" : ""} style=${"--i:" + n}>
-        <span class=${"badge " + (TYPE[x.type] || "")}>${x.type}</span><a href=${"#/package/" + x.package}>${x.package}</a><span class="v">${VERB[x.kind] || x.kind}</span><time class="mut3">${since(x.ts)}</time></li>`)}</ul>`}</aside>`;
+        <span class=${"badge " + (TYPE[x.type] || "")}>${x.type}</span><a href=${"#/package/" + x.package}>${x.package}</a><span class="v">${VERB[x.kind] || x.kind}${x.kind === "publish" && x.version ? " " + x.version : ""}</span><time class="mut3">${since(x.ts)}</time></li>`)}</ul>`}</aside>`;
 }
 
 const catClass = (n) => ["a", "b", "c", "d", "e", "f"][n] || "x";
@@ -513,7 +513,8 @@ function AdminSync() {
   return html`<div class="stack">
     <div class="card stack"><div class="row"><h3>Sync status</h3><span class="sp"></span><button class="btn sec sm" disabled=${busy === "run"} onClick=${() => run(false)}>Sync now</button><button class="btn sec sm" disabled=${busy === "run"} onClick=${() => run(true)} title="Forget the cursor and look back over everything; duplicates are skipped">Full re-sync</button></div>
       <div class="kpis"><div class="stat"><b>${st.events_total || 0}</b><span>events this run</span></div><div class="stat"><b>${st.index_packages || 0}</b><span>packages in index</span></div><div class="stat"><b>${st.next_in != null ? st.next_in + "s" : "-"}</b><span>next sync in</span></div></div>
-      <p class="mut sm">Last run: ${when(st.last_run)}${st.last_error ? html` · <b style="color:var(--red)">${st.last_error}</b>` : html` · <span style="color:var(--green)">OK</span>`}</p></div>
+      <p class="mut sm">Last run: ${when(st.last_run)}${st.last_error ? html` · <b style="color:var(--red)">${st.last_error}</b>` : html` · <span style="color:var(--green)">OK</span>`}</p>
+      <p class="mut sm">Archive: ${c.telemetry_archive === "0" ? "off" : html`${st.archive_last ? "last written " + when(st.archive_last) : "nothing written since the server started"}${st.archive_batches ? html` · ${st.archive_batches} batch(es) this run` : ""}${st.archive_files ? html` · ${st.archive_files} file(s) on <code>${c.telemetry_branch || "telemetry-archive"}</code>` : ""}${st.archive_commit ? html` · commit <code>${st.archive_commit}</code>` : ""}`}${st.inbox_pending ? html` · ${st.inbox_pending} batch(es) were waiting in the inbox` : ""}</p></div>
     <div class="stack"><h3>Schedule</h3><div class="list"><div class="li"><div class="t"><b>Pull interval</b><span>Seconds (10-86400) or a cron expression: <code>*/5 * * * *</code> every 5 min, <code>0 3 * * *</code> daily at 03:00. Applies immediately.</span></div>
       <div class="row"><input class="field" id="sched" defaultValue=${c.sync_interval} style="width:11rem" aria-label="Pull interval" /><button class="btn sm" disabled=${busy === "sync_interval"} onClick=${() => save("sync_interval", document.getElementById("sched").value)}>Save</button></div></div>
       <div class="li"><div class="t"><b>Presets</b></div><div class="seg">${SCHEDULES.map(([n, v]) => html`<button key=${v} class=${c.sync_interval === v ? "on" : ""} onClick=${() => save("sync_interval", v)}>${n}</button>`)}</div></div></div></div>

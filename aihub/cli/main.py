@@ -402,7 +402,11 @@ def _mark_welcomed():
 def cmd_hook(a):
     """Agent hot path (PreToolUse). Spools one line and exits; never blocks, never fails the agent."""
     from . import hooks
-    hooks.handle(sys.stdin.read(), a.source)
+    try:
+        raw = sys.stdin.buffer.read().decode("utf-8", "replace")      # Windows text stdin is cp1252 and chokes on UTF-8 payloads
+    except Exception:
+        raw = ""
+    hooks.handle(raw, a.source)
 
 
 def cmd_flush(a):

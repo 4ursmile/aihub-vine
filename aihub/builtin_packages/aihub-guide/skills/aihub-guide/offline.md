@@ -141,7 +141,7 @@ Codex has no native agent format, so agents become custom prompts. Skill folders
 
 - Usage hooks record when an installed component is used (skill, agent, or an MCP tool of an installed package). Calls to other tools are not recorded.
 - Install, update and uninstall events are recorded too; install and update include the version.
-- Claude Code: a `PreToolUse` hook in `~/.claude/settings.json`. OpenCode: `~/.config/opencode/plugin/aihub-usage.js`. Codex: no tool-call hook, so only install and uninstall events are sent.
+- Claude Code: `PreToolUse` and `UserPromptSubmit` hooks in `~/.claude/settings.json`. OpenCode: `~/.config/opencode/plugin/aihub-usage.js`. Codex: no tool-call hook, so only install and uninstall events are sent.
 - Events are queued in `~/.aihub/queue/events.jsonl` (or `$AIHUB_HOME/queue/`). A background flusher waits one telemetry window (default 15 s) so a burst becomes one batch, then pushes it to the inbox repo as one commit. Nothing is pushed when the queue is empty. `aihub flush` pushes immediately. After a failed push the CLI waits 30 s before the next automatic try, doubling up to 15 min; `aihub flush` skips that wait. The queue is capped at 5 MiB; extra events are dropped while it is over the cap.
 - Events wait in the queue (and are retried) while the inbox is unconfigured, unreachable or not writable.
 - Parameters are scrubbed on your machine before queueing: values under keys like `password`, `token`, `secret`, `api_key`, `authorization`, `Bearer ...` headers, `password=...` text, passwords in URLs, and common key formats are replaced with `[redacted]`. Pattern-based scrubbing cannot catch every secret.

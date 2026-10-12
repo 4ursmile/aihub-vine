@@ -221,7 +221,7 @@ def create_app(settings: Settings = None) -> FastAPI:
     app.state.repos = Repos(db)
     app.state.cache = init_cache(s)
     app.state.events = EventBuffer(app.state.repos, s.event_flush_rows, s.event_flush_secs)
-    app.state.sync = Sync(app.state.repos, s)
+    app.state.sync = Sync(app.state.repos, s, app.state.cache)
     app.state.backup = Backup(app.state.repos, s, app.state.sync)
     app.add_middleware(GZipMiddleware, minimum_size=800)
     app.include_router(api)

@@ -674,6 +674,33 @@ class Inbox(unittest.TestCase):
         self.assertEqual(self.refs(), [])
         self.assertEqual(len(self.git("ls-tree", "-r", "--name-only", "telemetry-archive").split()), 1)
 
+    def test_archive_result_is_reported_for_the_admin_page(self):
+        from aihub.cli import telemetry
+        self.spool(2)
+        telemetry.flush(force=True)
+        self.sy.pull_events()
+        st = self.sy.status
+        self.assertTrue(st["archive_last"])
+        self.assertEqual(st["archive_batches"], 1)
+        self.assertEqual(st["archive_files"], 1)
+        self.assertEqual(st["archive_commit"], self.git("rev-parse", "telemetry-archive").strip()[:10])
+
+    def test_windows_children_never_open_a_console_window(self):
+        from aihub.cli import gitx, telemetry
+        with unittest.mock.patch.object(gitx, "NO_WINDOW", 0x08000000):
+            self.assertEqual(gitx.popen_kw(), {"creationflags": 0x08000000})
+            with unittest.mock.patch.object(gitx.subprocess, "run") as fake:
+                fake.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+                gitx.run(["--version"], check=False)
+                self.assertEqual(fake.call_args.kwargs.get("creationflags"), 0x08000000)
+        with unittest.mock.patch.object(telemetry, "WINDOWS", True), unittest.mock.patch.object(telemetry, "_acquire", return_value=True), \
+                unittest.mock.patch.object(telemetry, "_backoff", return_value=False), \
+                unittest.mock.patch.object(telemetry.subprocess, "Popen") as popen:
+            telemetry.kick()
+        flags = popen.call_args.kwargs["creationflags"]
+        self.assertTrue(flags & 0x08000000)                                         # hidden console, shared by every git it runs
+        self.assertFalse(flags & 0x00000008)                                        # NOT detached: that made each git open its own window
+
     def test_deliver_pushes_now_or_spools(self):
         from aihub.cli import telemetry
         with unittest.mock.patch.object(telemetry, "kick", lambda: None):
@@ -685,6 +712,23 @@ class Inbox(unittest.TestCase):
 
 
 class CountedSpans(unittest.TestCase):
+    def test_package_page_and_home_count_installs_like_the_dashboard(self):
+        """The package page / home read versions.downloads, which ingested installs never touched: they showed 0 while the dashboard
+        and rankings (which count events) were right. Now all of them count install/update events, old ones included."""
+        c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=tempfile.mkdtemp())))
+        r = c.app.state.repos
+        pid = r.package_upsert("demo", "skill", "d", [], visibility="public")
+        r.version_sync(pid, "1.0.0", {"package": {"name": "demo", "version": "1.0.0"}})
+        rows = [S.to_row(obs("i1", kind="install", version="1.0.0")), S.to_row(obs("i2", kind="install")), S.to_row(obs("u1"))]
+        r.events_insert_ext([dict(x) for x in rows])
+        r.events_insert_ext([dict(x) for x in rows])                   # a resent batch: deduped, no double count
+        self.assertEqual(r.versions(pid)[0]["downloads"], 2)           # two installs (one without a version -> latest); a use does not count
+        self.assertEqual(r.overview()["downloads"], 2)
+        page = c.get("/api/v1/packages/demo").json()                   # what the package page and home cards show
+        self.assertEqual(page["downloads"], 2)
+        self.assertEqual(page["versions"][0]["downloads"], 2)
+        self.assertEqual(c.get("/api/v1/packages?sort=downloads").json()["items"][0]["downloads"], 2)
+
     def test_events_are_idempotent_rows(self):
         rows = [S.to_row(obs("o9")), S.to_row(obs("o8"))]
         self.assertEqual(len(rows), 2)

@@ -25,7 +25,7 @@ def store_git(host_url, username, token):
         return False
     u = urllib.parse.urlsplit(host_url)
     payload = "protocol=%s\nhost=%s\nusername=%s\npassword=%s\n\n" % (u.scheme or "https", u.netloc, username, token)
-    return subprocess.run(["git", "credential", "approve"], input=payload, text=True, capture_output=True).returncode == 0
+    return subprocess.run(["git", "credential", "approve"], input=payload, text=True, capture_output=True, **gitx.popen_kw()).returncode == 0
 
 
 def apply(cfg, index_host=None):
@@ -71,7 +71,7 @@ def auto(cmd):
 def ensure_git_access(url):
     """Make sure `git ls-remote url` works; if it needs credentials we do not have, ask for them once."""
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **tls.git_env())
-    r = subprocess.run(["git", "ls-remote", "--exit-code", "-h", url, "HEAD"], env=env, capture_output=True, text=True)
+    r = subprocess.run(["git", "ls-remote", "--exit-code", "-h", url, "HEAD"], env=env, capture_output=True, text=True, **gitx.popen_kw())
     if r.returncode in (0, 2):
         return True
     err = (r.stderr or "").lower()
@@ -84,7 +84,7 @@ def ensure_git_access(url):
     user = input("username: ").strip()
     tok = getpass.getpass("token/password: ")
     store_git(url, user, tok)
-    return subprocess.run(["git", "ls-remote", "--exit-code", "-h", url, "HEAD"], env=env, capture_output=True).returncode in (0, 2)
+    return subprocess.run(["git", "ls-remote", "--exit-code", "-h", url, "HEAD"], env=env, capture_output=True, **gitx.popen_kw()).returncode in (0, 2)
 
 
 def cmd_setup(a):

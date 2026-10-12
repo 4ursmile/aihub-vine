@@ -124,7 +124,7 @@ Parameters are scrubbed on your machine before anything is queued: values under 
 
 Events are pushed to the telemetry inbox (a git repo) in batches, under your account name when you are signed in, or `~<OS user>` when you are not. That name comes from the client and is not verified. Hook handling is intended to be fast, non-blocking, and non-fatal to the coding tool.
 
-- Claude Code uses a `PreToolUse` hook in `~/.claude/settings.json`. It matches tool calls, identifies installed skills, agent tasks, and MCP tools, then invokes the CLI hook handler.
+- Claude Code uses `PreToolUse` and `UserPromptSubmit` hooks in `~/.claude/settings.json` (the latter catches a typed `/skill-name`). It matches tool calls, identifies installed skills, agent tasks, and MCP tools, then invokes the CLI hook handler.
 - OpenCode uses `~/.config/opencode/plugin/aihub-usage.js`, listening for `tool.execute.before` and launching the CLI in the background.
 - Codex does not expose a general tool-call hook, so there is no equivalent hook integration.
 

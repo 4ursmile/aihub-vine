@@ -34,6 +34,9 @@ INTEGRITY = _integrity_errors()
 # Bayesian average: (C*m + sum(ratings)) / (C + n). A package with few reviews is pulled toward the site-wide mean m,
 # so one 5-star review can't outrank 200 reviews averaging 4.8. C = how many reviews it takes to "count" fully.
 BAYES_C = 5
+# downloads of `packages` (the row in scope): legacy HTTP downloads + install/update events, as the dashboard counts them
+DOWNLOADS_SQL = ("(SELECT COALESCE(SUM(v.downloads),0) FROM versions v WHERE v.package_id=packages.id)"
+                 " + (SELECT COUNT(*) FROM events e WHERE e.package=packages.name AND e.kind IN ('install','update'))")
 
 
 class Repos:
@@ -475,7 +478,7 @@ class Repos:
         site_mean = c.execute("SELECT COALESCE(AVG(rating),0) FROM reviews").fetchone()[0] or 0
         order_args = []
         order = {"name": "name", "updated": "updated DESC", "created": "created DESC",
-                 "downloads": "(SELECT COALESCE(SUM(downloads),0) FROM versions v WHERE v.package_id=packages.id) DESC",
+                 "downloads": "(" + DOWNLOADS_SQL + ") DESC",
                  # best reviewed: Bayesian average; ties (and unreviewed packages) fall back to most reviews, then name
                  # Unreviewed packages sort strictly last: with a plain Bayesian prior they would get exactly the site mean and
                  # outrank packages people actually rated poorly. Reviewed ones order by the Bayesian score, then review count.
@@ -524,11 +527,11 @@ class Repos:
         return [n for _, n in scored[:limit]]
 
     def recent_activity(self, viewer=None, limit=15):
-        """Latest install/use/update events on packages the viewer may see. Deliberately carries no user or client identifiers."""
+        """Latest publish/install/use/update events on packages the viewer may see. Deliberately carries no user or client identifiers."""
         vsql, va = self.visible_sql(viewer, "p")
         return _rows(self.db.conn().execute(
-            "SELECT e.package AS package, e.kind AS kind, e.ts AS ts, p.type AS type FROM events e JOIN packages p ON p.name=e.package "
-            "WHERE e.kind IN ('install','use','update') AND p.hidden=0 AND " + vsql + " ORDER BY e.id DESC LIMIT ?", va + [limit]))
+            "SELECT e.package AS package, e.kind AS kind, e.ts AS ts, p.type AS type, e.version AS version FROM events e JOIN packages p ON p.name=e.package "
+            "WHERE e.kind IN ('install','use','update','publish') AND p.hidden=0 AND " + vsql + " ORDER BY e.id DESC LIMIT ?", va + [limit]))
 
     def facets(self, viewer=None):
         from .categories import BY_ID
@@ -612,9 +615,20 @@ class Repos:
 
     # ---- versions
     def versions(self, pid):
-        rows = _rows(self.db.conn().execute("SELECT * FROM versions WHERE package_id=?", (pid,)))
+        """Versions of a package, newest first. `downloads` = legacy HTTP downloads (versions.downloads) + install/update events, the same
+        events the dashboard and rankings count. An event without a known version counts on the latest version, so the total matches."""
+        c = self.db.conn()
+        rows = _rows(c.execute("SELECT * FROM versions WHERE package_id=?", (pid,)))
+        ev = {}
+        for r in c.execute("SELECT COALESCE(e.version,''),COUNT(*) FROM events e JOIN packages p ON p.name=e.package "
+                           "WHERE p.id=? AND e.kind IN ('install','update') GROUP BY 1", (pid,)).fetchall():
+            ev[r[0]] = r[1]
+        latest = (c.execute("SELECT latest_version FROM packages WHERE id=?", (pid,)).fetchone() or [None])[0]
+        known = {r["version"] for r in rows}
+        orphan = sum(n for v, n in ev.items() if v not in known)
         for r in rows:
             r["manifest"] = json.loads(r["manifest"] or "{}")
+            r["downloads"] = (r["downloads"] or 0) + ev.get(r["version"], 0) + (orphan if r["version"] == latest else 0)
         rows.sort(key=lambda r: V.parse(r["version"]), reverse=True)
         return rows
 
@@ -941,7 +955,7 @@ class Repos:
         return {"packages": c.execute("SELECT COUNT(*) FROM packages WHERE " + vsql, va).fetchone()[0],
                 "versions": c.execute("SELECT COUNT(*) FROM versions v JOIN packages ON packages.id=v.package_id WHERE " + vsql, va).fetchone()[0],
                 "users": c.execute("SELECT COUNT(*) FROM users WHERE status='active'").fetchone()[0],
-                "downloads": c.execute("SELECT COALESCE(SUM(v.downloads),0) FROM versions v JOIN packages ON packages.id=v.package_id WHERE " + vsql, va).fetchone()[0]}
+                "downloads": c.execute("SELECT COALESCE(SUM(" + DOWNLOADS_SQL + "),0) FROM packages WHERE " + vsql, va).fetchone()[0]}
 
 
 class EventBuffer:

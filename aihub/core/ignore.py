@@ -102,8 +102,8 @@ def list_files(root: str):
     """
     always = [r for r in map(_rule, ALWAYS) if r]
     try:
-        out = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=root,
-                             capture_output=True, text=True, check=True).stdout.split("\n")
+        out = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=root, capture_output=True, text=True, check=True,
+                             creationflags=0x08000000 if os.name == "nt" else 0).stdout.split("\n")
         files = [f for f in out if f and os.path.isfile(os.path.join(root, f))]
         if files:
             rules = always + _load(root, [".aihubignore"])

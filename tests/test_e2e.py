@@ -287,6 +287,30 @@ class Integrations(unittest.TestCase):
         lines = open(paths.p("queue", "events.jsonl")).read().strip().split("\n")
         self.assertEqual([json.loads(l)["package"] for l in lines], ["pk", "pk", "pk"])
 
+    def test_hook_handle_skill_name_variants_and_slash_prompt(self):
+        import json
+        from aihub.cli import hooks, paths, telemetry
+        paths.save("state.json", {"packages": {"pk": {"components": ["skill:my-skill"]}}})
+        telemetry.kick = lambda: None
+        f = paths.p("queue", "events.jsonl")
+        if os.path.exists(f):
+            os.remove(f)
+        hooks.handle(json.dumps({"tool_name": "Skill", "tool_input": {"skill": "pk:my-skill"}}))      # plugin-style prefix
+        hooks.handle(json.dumps({"tool_name": "Skill", "tool_input": {"command": "My_Skill"}}))       # other key, case, underscore
+        hooks.handle(json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "/my-skill do it"}))  # typed slash command
+        hooks.handle(json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "/other"}))
+        lines = [json.loads(l) for l in open(f).read().strip().split("\n")]
+        self.assertEqual([l["component"] for l in lines], ["skill:my-skill"] * 3)
+
+    def test_claude_hook_installs_prompt_event_too(self):
+        import json
+        from aihub.cli import integrations as I
+        c = I.ClaudeCode()
+        c.install_hook("/x/aihub hook")
+        d = json.load(open(os.path.join(self.h, ".claude", "settings.json")))["hooks"]
+        self.assertEqual(sorted(d), ["PreToolUse", "UserPromptSubmit"])
+        self.assertTrue(c.has_hook()); c.remove_hook(); self.assertFalse(c.has_hook())
+
 
 class MarkdownRich(unittest.TestCase):
     def test_tables_and_safety(self):
@@ -848,5 +872,14 @@ class Discovery(Access):
             res = self.c.get("/api/v1/activity", headers=h)
             self.assertEqual([i["package"] for i in res.json()["items"]], ["open-one"])
             self.assertNotIn("alice", res.text); self.assertNotIn("cid-xyz", res.text)
-            self.assertEqual(set(res.json()["items"][0]), {"package", "kind", "ts", "type"})
+            self.assertEqual(set(res.json()["items"][0]), {"package", "kind", "ts", "type", "version"})
         self.assertIn("secret-one", [i["package"] for i in self.c.get("/api/v1/activity", headers=self.alice).json()["items"]])
+
+    def test_activity_shows_publishes(self):
+        import time
+        self.publish(self.alice, "pub-one")
+        push_events(self.c, [{"kind": "publish", "package": "pub-one", "version": "1.0.0", "client_id": "cid-q"}], headers=self.alice)
+        time.sleep(0.8)
+        items = self.c.get("/api/v1/activity").json()["items"]
+        self.assertIn(("pub-one", "publish", "1.0.0"), [(i["package"], i["kind"], i["version"]) for i in items])
+        self.assertNotIn("cid-q", str(items))

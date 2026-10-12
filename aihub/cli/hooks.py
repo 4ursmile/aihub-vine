@@ -1,6 +1,7 @@
 """Usage hooks: install into tools, and the hot-path `hook` handler."""
 import json
 import os
+import re
 import shlex
 import sys
 
@@ -11,7 +12,16 @@ from . import integrations, paths, telemetry
 def hook_cmd():
     shim = paths.p("bin", "aihub")
     base = [shim] if os.name != "nt" and os.path.exists(shim) else telemetry.self_cmd()
-    return " ".join(shlex.quote(x) for x in base) + " hook"
+    return " ".join(_quote(x) for x in base) + " hook"
+
+
+def _quote(x):
+    """Quote one argument for the shell that runs the hook. Claude Code on Windows runs hooks in Git Bash, where an unquoted
+    backslash path (C:\\Users\\me\\python.exe) loses its backslashes, so Windows paths get forward slashes and double quotes."""
+    if os.name == "nt":
+        x = x.replace("\\", "/")
+        return '"%s"' % x if any(c in x for c in " ()&^%!$`'") else x
+    return shlex.quote(x)
 
 
 def ensure(only=None, remove=False):
@@ -44,6 +54,21 @@ def _components():
     return m
 
 
+def _skill_comp(name, comps):
+    """Map what the tool reported ("name", "/name", "pkg:name", "Name") to an installed skill component, or None."""
+    n = str(name or "").strip().lstrip("/")
+    cands = [n, n.rsplit(":", 1)[-1]]
+    for c in cands:
+        if "skill:" + c in comps:
+            return "skill:" + c
+    low = {k.lower().replace("_", "-"): k for k in comps if k.startswith("skill:")}
+    for c in cands:
+        k = low.get("skill:" + c.lower().replace("_", "-"))
+        if k:
+            return k
+    return None
+
+
 def handle(stdin_text, source="claude"):
     """Hot path: must be fast and must never raise. Maps a tool call to a hub package and spools it."""
     try:
@@ -51,12 +76,22 @@ def handle(stdin_text, source="claude"):
         tool = str(data.get("tool_name") or data.get("tool") or "")
         inp = data.get("tool_input") or {}
         comps = _components()
-        if not comps or not tool:
+        if not comps:
             return
         hit = None
-        if tool == "Skill" or tool.lower() == "skill":
-            s = inp.get("skill") or inp.get("name") or ""
-            hit = ("skill:" + s, "skill:" + s)
+        prompt = data.get("prompt")
+        if not tool and isinstance(prompt, str):      # UserPromptSubmit: "/skill-name args" runs a skill without a tool call
+            m = re.match(r"\s*/([\w.:-]+)", prompt)
+            k = _skill_comp(m.group(1), comps) if m else None
+            if k:
+                hit = (k, k)
+                inp = {"prompt": prompt[:200]}
+        elif not tool:
+            return
+        elif tool.lower() == "skill":
+            k = _skill_comp(inp.get("skill") or inp.get("name") or inp.get("command"), comps)
+            if k:
+                hit = (k, k)
         elif tool == "Task":
             s = inp.get("subagent_type") or ""
             hit = ("agent:" + s, "agent:" + s)
