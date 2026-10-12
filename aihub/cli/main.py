@@ -772,8 +772,12 @@ def dev_publish(a):
         ui.celebrate("Published %s %s" % (info["package"], info["version"]))
         ui.info("repo:    %s @ %s (%s)" % (info["git_url"], info["git_branch"], info["commit"][:8]))
         ui.info("install: aihub install %s" % info["package"])
+    if pushed and not queued:
+        ui.note("publish event sent; the hub will add it to the package index shortly")
     if queued:
-        ui.note("publish event queued; it will be sent when Langfuse is reachable (aihub flush)")
+        ui.note("WARNING: Langfuse is not reachable, so the hub has NOT been told about this publish and the package is not in the index yet (%s)"
+                % (pub.report.error or "unknown error"))
+        ui.info("the event is queued and goes out when Langfuse is back (aihub flush), then the hub indexes it. To skip the wait: aihub dev index")
     if failed:
         raise ValueError("%d of %d package(s) not published: %s%s" % (len(failed), len(roots), ", ".join(failed),
                                                                  "; the other %d went out" % len(pushed) if pushed else ""))

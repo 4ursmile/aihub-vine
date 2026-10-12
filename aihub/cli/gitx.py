@@ -79,6 +79,12 @@ def remote_empty(url):
     return r.returncode == 0 and not r.stdout.strip()
 
 
+def reachable(url):
+    """True when `git ls-remote` succeeds (the repo exists and we may read it), whether or not it has any branch."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **tls.git_env())
+    return subprocess.run(["git", "ls-remote", url], env=env, capture_output=True, text=True).returncode == 0
+
+
 def large_files(cwd, limit_mb=50):
     out, big = run(["ls-files", "-co", "--exclude-standard"], cwd=cwd), []
     for rel in out.splitlines():

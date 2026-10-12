@@ -187,6 +187,10 @@ def report(info):
         info = dict(info, ts=__import__("time").time())
         langfuse.send([telemetry.to_items(info)])
         return True
-    except Exception:
+    except Exception as e:
         telemetry.record(info)
+        report.error = str(e)[:200]
         return False
+
+
+report.error = ""

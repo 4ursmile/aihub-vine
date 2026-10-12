@@ -222,9 +222,11 @@ class Sync:
             try:
                 if self.update_index(list(pubs.values())):
                     publish = True
-            except Exception as e:                                      # events stay stored; the next full sync retries
+            except Exception as e:                                      # events stay stored; the cursor stays put so the next pass retries
                 self.status["last_error"] = "index update: " + gitx.redact_url(str(e))[:250]
                 log.warning("index update failed: %s", gitx.redact_url(str(e)))
+                self.status["events_total"] += n
+                return False
         self.repos.set_setting("sync_cursor", started - 1)             # only advanced after a fully successful pass
         new = self.status["events_total"] + n
         self.status["events_total"] = new
@@ -234,8 +236,17 @@ class Sync:
         """Add published versions to the index repo. Nothing from the event is trusted but where to look: the package repo is
         fetched at the published commit and its aihub.toml is what goes in. -> True when the index repo changed.
         force=True re-indexes a version that is already listed. `results` (a list) receives one (name, version, status) per item."""
+        results = results if results is not None else []
         with self.index_lock:
-            return self._update_index(pubs, force, results if results is not None else [])
+            for attempt in range(3):
+                mark = len(results)
+                try:
+                    return self._update_index(pubs, force, results)
+                except gitx.GitError as e:                              # push rejected (someone else pushed meanwhile): fetch the new tip and redo the batch
+                    if attempt == 2:
+                        raise
+                    log.info("index push failed (%s); fetching the latest index and retrying", gitx.redact_url(str(e))[:150])
+                    del results[mark:]
 
     def _update_index(self, pubs, force, results):
         url, branch, path = self.index_source()
@@ -245,18 +256,25 @@ class Sync:
         os.makedirs(work, exist_ok=True)
         if gitx.remote_head(url, branch):
             d = gitx.fetch(url, branch, base=work)
-        elif gitx.remote_empty(url):                                    # new empty repo: start the index from scratch, push creates the branch
+        elif gitx.reachable(url):                                       # empty repo, or the index branch does not exist yet: start from scratch, push creates it
             d = gitx.cache_dir(url, work)
             if not os.path.isdir(os.path.join(d, ".git")):
                 gitx.run(["init", "-q"], cwd=d)
                 gitx.run(["remote", "add", "origin", url], cwd=d)
+            else:
+                gitx.run(["remote", "set-url", "origin", url], cwd=d)
+            gitx.run(["checkout", "-q", "--orphan", "aihub-index-new"], cwd=d, check=False)
+            gitx.run(["rm", "-rq", "--cached", "--ignore-unmatch", "."], cwd=d, check=False)
         else:
             d = None
         if d is None:
             results.append(("", "", "index repository not reachable"))
-            return False
+            raise RuntimeError("index repository not reachable: " + gitx.redact_url(url))
         folder = os.path.join(d, path[:-5] if path.endswith(".json") else path)
         changed = 0
+        if not os.path.isfile(os.path.join(folder, "root.json")):      # no index yet: the server creates it
+            pkgindex.rebuild(folder)
+            changed += 1
         for m in pubs:
             name, ver, gurl = naming.normalize(str(m["package"])), str(m["version"]), str(m["git_url"])
             if not gurl.startswith(SCHEMES):
@@ -320,17 +338,26 @@ class Sync:
         if os.path.isdir(url):
             rd = pkgindex.open_source(url, path)
             return rd, getattr(rd, "root", {}).get("digest")
-        if gitx.remote_empty(url):
-            return pkgindex.Legacy({}), "empty"                        # new empty repo: nothing to read yet, not an error
+        if not gitx.remote_head(url, branch):
+            if not gitx.reachable(url):
+                raise RuntimeError("cannot reach %s" % gitx.redact_url(url))
+            return self._bootstrap_index()                              # empty repo or no index branch yet: create it
         try:
             d = gitx.fetch(url, branch, base=os.path.join(self.s.data_dir, "repos"))
         except gitx.GitError as e:
             raise RuntimeError("cannot fetch %s (branch '%s'): %s" % (gitx.redact_url(url), branch, e))
         try:
             return pkgindex.open_source(d, path), gitx.run(["rev-parse", "HEAD"], cwd=d)
-        except FileNotFoundError:                                      # name the remote, not the server's local cache folder
-            raise RuntimeError("no package index in %s (branch '%s', folder '%s'): expected %s/root.json or index.json"
-                               % (gitx.redact_url(url), branch, path, path))
+        except FileNotFoundError:                                      # branch exists but has no index folder: create it
+            return self._bootstrap_index()
+
+    def _bootstrap_index(self):
+        """Create an empty index in the index repo and push it, then replay publish events so existing packages get listed."""
+        log.info("no package index in the index repository; creating one")
+        self.update_index([])
+        self.repos.set_setting("sync_cursor", "")                       # next pass re-reads the publish events (inserts are idempotent)
+        self.wake.set()
+        return pkgindex.Legacy({}), None
 
     def pull_index(self):
         try:

@@ -63,8 +63,14 @@ class Force(unittest.TestCase):
     def test_mismatch_is_reported_not_indexed(self):
         with mock.patch.object(syncmod, "SCHEMES", ("file://",)):
             res = []
-            self.assertFalse(self.sy.update_index([dict(self.ev, version="9.9.9")], force=True, results=res))
+            self.sy.update_index([dict(self.ev, version="9.9.9")], force=True, results=res)      # (creates the empty index on first use)
             self.assertIn("does not match", res[-1][2])
+
+    def test_missing_index_is_created_by_the_server(self):
+        with mock.patch.object(syncmod, "SCHEMES", ("file://",)):
+            self.assertTrue(self.sy.update_index([]))
+            rd, _ = self.sy.read_index()
+            self.assertEqual(rd.count, 0)
 
 
 class Cli(unittest.TestCase):

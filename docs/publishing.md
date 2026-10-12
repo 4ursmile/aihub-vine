@@ -80,7 +80,7 @@ What it does, in order:
 3. Runs `git init` and adds `origin` if the project is not a repo yet, tracks files over 50 MB with git-lfs (it stops if git-lfs is missing), commits, and pushes, setting the upstream the first time.
 4. Records an `aihub.publish` event in Langfuse with the package, version and commit.
 
-Git credentials are yours alone: they come from your git credential helper, and the hub never sends or stores them. If none are stored, git (or the CLI, in a terminal) asks you once. The package appears in the catalogue when the index lists it (the index repo owner adds it, for example from CI on the publish event).
+Git credentials are yours alone: they come from your git credential helper, and the hub never sends or stores them. If none are stored, git (or the CLI, in a terminal) asks you once. `aihub dev publish` pushes your code, then sends a publish event to Langfuse ("publish event sent; the hub will add it to the package index shortly"). The hub batches events, fetches the latest index branch, adds the versions and pushes once (retrying from a fresh fetch if the push is rejected), creating the index if the repo has none. The package appears in the catalogue after that pass.
 
 ## Let your assistant package it for you
 
