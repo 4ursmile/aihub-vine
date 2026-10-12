@@ -93,6 +93,17 @@ SCHEMES = ("https://", "http://", "ssh://", "git@")      # transports a publish 
 MAX_COUNT = 1000      # calls one span may stand for; bounds rows per observation
 
 
+OS_NAMES = {"darwin": "macOS", "linux": "Linux", "win32": "Windows", "cygwin": "Windows", "freebsd": "FreeBSD"}
+
+
+def _os(v):
+    """sys.platform from the CLI -> a display name. Untrusted input: unknown values are kept short and scrubbed."""
+    v = str(v or "").strip().lower()
+    if not v:
+        return None
+    return OS_NAMES.get(v) or redact.text(v, 24)
+
+
 def to_rows(o):
     """Langfuse observation -> events rows. A span carries `count` calls (the CLI rolls calls up per window), stored as
     that many rows so every dashboard query stays a plain COUNT. Row ids are <observation id>#<n>: re-reads add nothing."""
@@ -123,7 +134,7 @@ def to_row(o):
             "source": m.get("source") if m.get("source") in ("claude", "opencode", "codex", "cli") else None,
             # Langfuse content is untrusted input: scrub it exactly as the old POST /events did
             "local_user": redact.text(uid[1:] if uid.startswith("~") else m.get("local_user"), 64),
-            "host": redact.text(m.get("host"), 128), "detail": redact.text(m.get("detail"), 2200),
+            "host": redact.text(m.get("host"), 128), "os": _os(m.get("os")), "detail": redact.text(m.get("detail"), 2200),
             "cwd": redact.text(m.get("cwd"), 200), "ip": None, "ext_id": o["id"]}
 
 

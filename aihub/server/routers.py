@@ -1287,7 +1287,7 @@ def a_audit(request: Request, u=audit_dep): return {"audit": R(request).audit_li
 
 @r.get("/audit")
 def audit_search(request: Request, source: str = "tools", q: str = "", actor: str = "", action: str = "", package: str = "", kind: str = "",
-                 days: float = 7, start: float = 0, end: float = 0, page: int = 1, per_page: int = 50, u=audit_dep):
+                 days: float = 7, start: float = 0, end: float = 0, page: int = 1, per_page: int = 50, host: str = "", os: str = "", u=audit_dep):
     """Security audit with filters. `source=tools` = agent tool calls / installs; `source=admin` = account, role and setting changes."""
     if source not in ("tools", "admin"):
         raise HTTPException(400, "source must be tools or admin")
@@ -1297,21 +1297,21 @@ def audit_search(request: Request, source: str = "tools", q: str = "", actor: st
     now = time.time()
     since = start or (now - days * 86400 if days > 0 else 0)
     per_page = max(1, min(per_page, 200))
-    res = R(request).audit_search(source, q.strip()[:200], actor, action.strip()[:200], package, kind, since, end, per_page, (max(page, 1) - 1) * per_page)
-    return dict(res, page=max(page, 1), per_page=per_page, actors=R(request).audit_actors()[source])
+    res = R(request).audit_search(source, q.strip()[:200], actor, action.strip()[:200], package, kind, since, end, per_page, (max(page, 1) - 1) * per_page, host[:128], os[:24])
+    return dict(res, page=max(page, 1), per_page=per_page, actors=R(request).audit_actors()[source], **R(request).audit_devices())
 
 
 @r.get("/audit/export")
 def audit_export(request: Request, source: str = "tools", q: str = "", actor: str = "", action: str = "", package: str = "", kind: str = "",
-                 days: float = 7, start: float = 0, end: float = 0, u=audit_dep):
+                 days: float = 7, start: float = 0, end: float = 0, host: str = "", os: str = "", u=audit_dep):
     if source not in ("tools", "admin"):
         raise HTTPException(400, "source must be tools or admin")
     request.app.state.events.flush()
     now = time.time()
     since = start or (now - days * 86400 if days > 0 else 0)
-    res = R(request).audit_search(source, q.strip()[:200], actor, action.strip()[:200], package, kind, since, end, 5000, 0)
+    res = R(request).audit_search(source, q.strip()[:200], actor, action.strip()[:200], package, kind, since, end, 5000, 0, host[:128], os[:24])
     cols = (["ts", "actor", "action", "target", "detail"] if source == "admin" else
-            ["ts", "actor", "kind", "package", "version", "component", "source", "host", "local_user", "ip", "cwd", "detail"])
+            ["ts", "actor", "kind", "package", "version", "component", "source", "host", "os", "local_user", "ip", "cwd", "detail"])
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(cols)
@@ -1373,20 +1373,20 @@ def _dash_args(days, kind, identity, date_from, date_to):
 
 @r.get("/dashboard")
 def dashboard(request: Request, days: int = 30, package: str = None, type: str = None, user: str = None, source: str = None,
-              kind: str = None, identity: str = None, host: str = None, q: str = None, date_from: str = Query(None, alias="from"),
+              kind: str = None, identity: str = None, host: str = None, os: str = None, q: str = None, date_from: str = Query(None, alias="from"),
               date_to: str = Query(None, alias="to"), u=Depends(require_perm("view_dashboard"))):
     _dash_args(days, kind, identity, date_from, date_to)
     v = viewer(request, u)
     if package:
         package = _pkg_or_404(request, package, u)["name"]      # also enforces that the viewer may see it
     request.app.state.events.flush()
-    key = "dash:%s:%s" % (_cache_scope(v), "|".join(str(x) for x in (days, package, type, user, source, kind, identity, host, q, date_from, date_to)))
+    key = "dash:%s:%s" % (_cache_scope(v), "|".join(str(x) for x in (days, package, type, user, source, kind, identity, host, os, q, date_from, date_to)))
     hit = C(request).get(key)
     if hit:
         return hit
     try:
         res = R(request).dashboard(days, package, viewer=v, type=type, user=user, source=source, kind=kind,
-                                   identity=identity, host=host, q=(q or "").strip()[:80] or None, date_from=date_from, date_to=date_to)
+                                   identity=identity, host=host, os=os, q=(q or "").strip()[:80] or None, date_from=date_from, date_to=date_to)
     except ValueError as e:
         raise HTTPException(400, str(e))
     C(request).set(key, res, 15)
@@ -1395,7 +1395,7 @@ def dashboard(request: Request, days: int = 30, package: str = None, type: str =
 
 @r.get("/dashboard/events")
 def dashboard_events(request: Request, days: int = 30, page: int = 1, per_page: int = 25, package: str = None, type: str = None,
-                     user: str = None, source: str = None, kind: str = None, identity: str = None, host: str = None, q: str = None,
+                     user: str = None, source: str = None, kind: str = None, identity: str = None, host: str = None, os: str = None, q: str = None,
                      date_from: str = Query(None, alias="from"), date_to: str = Query(None, alias="to"),
                      u=Depends(require_perm("view_dashboard"))):
     _dash_args(days, kind, identity, date_from, date_to)
@@ -1405,7 +1405,7 @@ def dashboard_events(request: Request, days: int = 30, page: int = 1, per_page: 
     request.app.state.events.flush()
     try:
         return R(request).dashboard_events(v, days, date_from, date_to, page, per_page, type=type, package=package, user=user,
-                                           source=source, kind=kind, identity=identity, host=host, q=(q or "").strip()[:80] or None)
+                                           source=source, kind=kind, identity=identity, host=host, os=os, q=(q or "").strip()[:80] or None)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

@@ -30,7 +30,7 @@ Routes marked **No** are public. **User** means an active account token is requi
 | GET | `/api/v1/healthz` | No | Health check; returns `{ "ok": true }`. |
 | GET | `/api/v1/packages` | No | Search/list packages. Query options: `q`, `type`, `tag`, `category`, `sort`, `page`, `per_page`, `mine`. `per_page` is clamped to 1–100. |
 | GET | `/api/v1/facets` | No | Package type and tag counts. |
-| GET | `/api/v1/packages/{name}` | No | Package metadata, manifest, maintainers, and version information. |
+| GET | `/api/v1/packages/{name}` | No | Package metadata, manifest, maintainers, and version information. The response includes `authors` (list of `{name, email?, url?}` from the latest manifest) and `license` (string, empty if unset). |
 | GET | `/api/v1/packages/{name}/versions` | No | List package versions with `version`, `sha256`, `size`, `downloads`, `yanked`, `created`, and `source`, a web link to the version's exact commit and subfolder (empty if the repo URL is not http(s)). |
 | GET | `/api/v1/packages/{name}/readme` | No | Return the stored README (from the index). If none is stored, fetch it raw from a non-yanked version's repo (public hosts only; GitHub or GitLab-style). Response has `markdown` and `html`. |
 | GET | `/api/v1/resolve?name={name}&spec={constraint}` | No | Resolve the newest non-yanked version matching a version constraint. |
@@ -68,12 +68,12 @@ The server no longer accepts events (`POST /api/v1/events` is gone). The CLI wri
 | --- | --- | --- | --- |
 | GET | `/api/v1/packages/{name}/stats?days=30` | No | Aggregate package usage statistics. |
 | GET | `/api/v1/packages/{name}/events` | User + package manager | List recent package events. |
-| GET | `/api/v1/rankings/{what}?days=30` | No | Rank `packages`, `developers`, or `users` over the window. `reviews` and `reviewed` rank by rating, all-time, not windowed. |
+| GET | `/api/v1/rankings/{what}?days=30` | No | Rank `packages`, `developers`, or `users` over the window. `developers` credits each name in a package's manifest `authors` (latest non-yanked version) with the package's full usage count; a package with no authors credits its maintainers. `reviews` and `reviewed` rank by rating, all-time, not windowed. |
 | GET | `/api/v1/stats/overview` | No | Aggregate package, version, user, event, and download counts. |
-| GET | `/api/v1/dashboard` | `view_dashboard` | Aggregates for the dashboard. |
+| GET | `/api/v1/dashboard` | `view_dashboard` | Aggregates for the dashboard, including `top_developers` (same author-based credit as the `developers` ranking). |
 | GET | `/api/v1/dashboard/events` | `view_dashboard` | Paginated activity log (no command detail or working directory). |
 
-Dashboard filters (query parameters): `days` (7, 14, 30, 90, 180, 365) or a custom `from` / `to` (`YYYY-MM-DD`, UTC, at most 366 days); `package`, `type`, `user`, `source`, `kind`, `identity` (`anonymous` or `signed-in`), `host`, and `q` (substring of package or component). The log also takes `page` and `per_page` (max 100). Results only include packages the caller may see.
+Dashboard filters (query parameters): `days` (7, 14, 30, 90, 180, 365) or a custom `from` / `to` (`YYYY-MM-DD`, UTC, at most 366 days); `package`, `type`, `user`, `source`, `kind`, `identity` (`anonymous` or `signed-in`), `host` (device), `os` (`macOS`, `Linux`, `Windows`, …), and `q` (substring of package or component). The log also takes `page` and `per_page` (max 100). Results only include packages the caller may see.
 
 ### Sync administration
 
@@ -106,7 +106,7 @@ Most administration routes require the `admin` permission. The rows name any oth
 | PUT | `/api/v1/admin/settings/registration` | `admin` | Set mode to `open`, `approval`, or `closed`. |
 | GET | `/api/v1/admin/roles` | `admin` | List roles and permissions. |
 | GET | `/api/v1/admin/audit` | `audit` | Read recent admin-action records. |
-| GET | `/api/v1/audit` | `audit` | Security audit search. `source=tools` (agent tool calls and installs) or `admin` (account, role and setting changes). Filters: `q` (free text over parameters, tool, package, path, host, person), `actor`, `action` (tool/component or action name), `package`, `kind`, `days` (0 = all time) or `start`/`end` (unix seconds), `page`, `per_page` (max 200). `%` and `_` in text are literal. |
+| GET | `/api/v1/audit` | `audit` | Security audit search. `source=tools` (agent tool calls and installs) or `admin` (account, role and setting changes). Filters: `q` (free text over parameters, tool, package, path, host, person), `actor`, `action` (tool/component or action name), `package`, `kind`, `host` (device), `os`, `days` (0 = all time) or `start`/`end` (unix seconds), `page`, `per_page` (max 200). `%` and `_` in text are literal. |
 | GET | `/api/v1/audit/export` | `audit` | Same filters, up to 5,000 rows as CSV. The export itself is audited. |
 
 ## Other server routes

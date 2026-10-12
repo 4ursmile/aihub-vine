@@ -53,6 +53,8 @@ aihub login
 
 Packages are found in a git-backed package index, not on the hub. The index is a folder in that repository (default path `index`, holding `root.json`, `catalog/` and `packages/`); an older single `index.json` is still read. The CLI only reads the index; the server is the only writer. `aihub setup` asks the hub for the index location and, if your admin shares them, the Langfuse keys. Without a hub, run `aihub setup --manual`, set the index with `aihub config set index_url <git url>`, or export `AIHUB_INDEX_URL`, `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY`. Git credentials stay with your own git credential helper.
 
+To remove aihub from a machine, run `aihub self-uninstall` (add `--yes` to skip the question). It removes installed packages, usage hooks, the PATH block and the aihub home folder, and leaves published packages and git repositories alone. For a pip install, also run `pip uninstall aihub-cli`.
+
 ## Common commands
 
 ```sh
@@ -83,10 +85,11 @@ aihub upgrade
 - `list` shows installed package names, versions and enabled status.
 - `update [name]` updates all installed packages or the named one.
 - `uninstall <name>` removes package files and reverts registered integration and setup changes where recorded.
+- `self-uninstall [--yes]` removes aihub from this machine: every installed package, the usage hooks in your AI tools, the `# >>> aihub` ... `# <<< aihub` PATH block that the installer added to your shell config, and the aihub home folder (`~/.aihub`, or `$AIHUB_HOME`). It asks for confirmation unless `--yes` is given. It does not touch packages you published or your git repositories. A pip install is removed with `pip uninstall aihub-cli`.
 - `disable <name>...` switches a package off without deleting it: its skills, agents and MCP servers are removed from your AI tools, setup steps are reverted, and its commands leave PATH. `enable <name>...` (or `aihub install <name>` on a disabled package) puts it back from the files already on disk, so it works offline. See [Enable, disable, tree, lock and sync](#enable-disable-tree-lock-and-sync).
 - `tree [name]` prints the dependency tree. `lock` and `sync` write and apply a lock file.
 - `doctor` checks that the package index and Langfuse are reachable, whether you are signed in, which detected tools have usage hooks, and whether `python3` is available. The hub is optional and only reported.
-- `welcome` runs first-time setup for detected tools; `setup` pulls index and Langfuse settings (see [Install and configure](#install-and-configure)).
+- `welcome` runs first-time setup for detected tools and prints a one-line note that an account is optional (`aihub login`); `setup` pulls index and Langfuse settings (see [Install and configure](#install-and-configure)).
 - `version` shows the CLI version and the one the hub offers; `upgrade` installs it (see [Versions and self-update](#versions-and-self-update)).
 
 During installation, missing required commands are reported with any manifest hint. Package dependencies are recursively installed. Python dependencies in `[python]` are installed into a package-specific virtual environment. Installation asks before running the platform install script and before registering components; `--yes` skips these prompts. When stdin is closed (non-interactive), those prompts count as "no".
@@ -173,6 +176,8 @@ aihub dev stats ./my-package
 ```
 
 `aihub dev init [path] --type skill|agent|mcp|tool|setup --name NAME --description DESCRIPTION --force` creates a starter project for the selected type and fills in the `[git]` table from the project's repository when it can. If `aihub.toml` already exists, init keeps it; `--force` overwrites the starter files it generates, and unrelated files are left in place. `aihub dev validate [path]` parses and normalizes the manifest, then lints the files it references, reporting errors and warnings. See [Publishing to AI Hub](publishing.md) for project trees, manifest examples, install scripts, visibility, and release steps. `dev build` writes `dist/<name>-<version>.tar.gz`. `dev publish` commits the project, pushes it to the `[git]` remote and branch in `aihub.toml`, and sends an `aihub.publish` event (queued if Langfuse is unreachable). It stops if the repository's remote or branch does not match `[git]`, and it tracks files over 50 MB with git-lfs. It does not edit any index: the hub lists the package on its next index sync, which can take 1-2 minutes. Published versions cannot be reused, so bump the version for each release. `--bump` supports `major`, `minor`, and `patch`.
+
+`aihub dev` commands also accept a folder holding several packages and `--only NAME` to pick some; `aihub dev list` shows them. `--only` matches the folder name, the relative path, or the package name, and can be repeated or comma-separated. It works with `validate`, `build`, `publish`, `index` and `stats`. `aihub dev init PATH --sub --name NAME` creates the package in `PATH/NAME`, which is how to add a package to a workspace folder. For a monorepo, `aihub dev init PATH --mono [--packages "a,b:mcp"] [--remote URL] [--branch B]` makes PATH one git repository with one package per sub folder. `aihub dev tree [PATH]` shows the packages with their repository and `[git]` status. `aihub dev doctor [PATH] [--check] [--remote URL]` sets `[git]` (url, branch, subdir) from the working repository, and `aihub dev tree-solve [PATH] [--nested merge|keep] [--remote URL]` resolves a package folder that has its own `.git` inside another repository. `aihub dev publish` treats packages independently: a failing package is reported and the rest still publish, with one push per repository, and the exit code is non-zero if any failed. See [several packages in one repository](publishing.md#several-packages-in-one-repository).
 
 See [Publishing to AI Hub](publishing.md) for end-to-end package authoring and the [manifest reference](manifest.md) for package fields and setup step behavior.
 

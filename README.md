@@ -60,6 +60,8 @@ aihub dev publish
 aihub install hello-world       # once the index lists it
 ```
 
+To remove aihub from a machine, run `aihub self-uninstall`. It removes installed packages, usage hooks, the PATH line the installer added and the `~/.aihub` folder, but not your published packages or git repositories. Installed with pip? Run `pip uninstall aihub-cli` afterwards.
+
 To have Claude Code or Codex package a new or existing project for you, install the `aihub-package` skill with `aihub install aihub-package` and ask "package this project for AI Hub".
 
 ## Backends
@@ -69,7 +71,7 @@ Choose SQLite or PostgreSQL for metadata and memory or Redis for cache in `.env`
 ## Features
 
 - Package search and version resolution from a git-hosted index; installs pinned to a commit.
-- Usage events in Langfuse (OpenTelemetry), synced into a dashboard with filters, a heatmap and an activity log.
+- Usage events in Langfuse (OpenTelemetry), synced into a dashboard with filters, a heatmap, top packages and developers, and an activity log. Developers are credited from the `authors` in each package's manifest.
 - Package maintainers, reviews, and ratings.
 - CLI support for Claude Code, Codex, and OpenCode integrations.
 - Manifest-declared commands, dependencies, Python environments, scripts, binaries, and setup steps.

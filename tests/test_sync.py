@@ -137,8 +137,8 @@ class DashboardV2(unittest.TestCase):
         self.r.package_upsert("beta", "mcp", "d", [], "")
         now = time.time()
         ev = lambda i, **k: dict({"ts": now - 3600, "kind": "use", "package": "alpha", "client_id": "c%d" % i, "username": None, "ext_id": "e%d" % i,
-                                  "component": "skill:a", "host": "mbp", "source": "claude", "detail": "SECRET-DETAIL", "cwd": "/priv/path"}, **k)
-        self.r.events_insert_ext([ev(1), ev(2, host="pc", package="beta", component="mcp:db"), ev(3, username="alice", host="mbp"),
+                                  "component": "skill:a", "host": "mbp", "os": "macOS", "source": "claude", "detail": "SECRET-DETAIL", "cwd": "/priv/path"}, **k)
+        self.r.events_insert_ext([ev(1), ev(2, host="pc", os="Windows", package="beta", component="mcp:db"), ev(3, username="alice", host="mbp"),
                                   ev(4, kind="publish", ts=now - 40 * 86400)])
 
     def get(self, path, **p):
@@ -159,6 +159,22 @@ class DashboardV2(unittest.TestCase):
         self.assertEqual(sum(sum(row) for row in d["heatmap"]), 3)
         self.assertIn("mbp", d["options"]["hosts"])
         self.assertEqual(d["top_components"][0]["name"], "skill:a")
+
+    def test_os_filter_chart_and_audit(self):
+        d = self.get("/dashboard", days=30).json()
+        self.assertEqual({x["name"]: x["count"] for x in d["by_os"]}, {"macOS": 2, "Windows": 1})
+        self.assertEqual(sorted(d["by_os_daily"]["series"]), ["Windows", "macOS"])
+        self.assertEqual(sum(sum(v for k, v in x.items() if k != "date") for x in d["by_os_daily"]["daily"]), 3)
+        self.assertEqual(sorted(d["options"]["oses"]), ["Windows", "macOS"])
+        self.assertEqual(self.get("/dashboard", os="Windows").json()["totals"]["use"], 1)
+        self.assertEqual(self.get("/dashboard/events", os="macOS").json()["total"], 2)
+        a = self.get("/audit", days=0, os="Windows").json()
+        self.assertEqual(a["total"], 1)
+        self.assertEqual(a["items"][0]["os"], "Windows")
+        self.assertEqual(self.get("/audit", days=0, host="mbp").json()["total"], 3)
+        self.assertEqual(self.get("/audit", days=0, host="mbp", os="Windows").json()["total"], 0)
+        self.assertIn("pc", a["hosts"])
+        self.assertIn("macOS", a["oses"])
 
     def test_custom_range_and_validation(self):
         import datetime

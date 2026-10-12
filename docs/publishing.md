@@ -25,6 +25,52 @@ For a new release, edit the files, bump the immutable version, and publish again
 aihub dev publish --bump patch
 ```
 
+### Several packages in one repository
+
+Keep related packages side by side, each in its own folder with its own `aihub.toml`. The folder can be one git repository (a monorepo); each package's `[git] subdir` is filled in for you:
+
+```
+builtin/
+  aihub-guide/aihub.toml
+  aihub-package/aihub.toml
+```
+
+Create the whole workspace in one step: one git repository in `builtin`, one package per sub folder. Each entry in `--packages` is `NAME` or `NAME:TYPE`; a bare `NAME` uses `--type` (default `skill`):
+
+```
+aihub dev init builtin --mono --packages "aihub-guide,aihub-package:skill" --remote https://git.example.com/team/builtin.git
+```
+
+Packages that already exist below `builtin` are kept; only their `[git]` table is refreshed to the repository's real remote, branch and folder. Without `--remote` the command asks once on a terminal. `--branch` sets the branch (default `main`).
+
+Point any `aihub dev` command at the parent folder (or run it there):
+
+```
+aihub dev list builtin                          # packages, versions, uncommitted changes
+aihub dev validate builtin                      # checks every package
+aihub dev tree builtin                          # packages, repository and [git] status
+aihub dev publish builtin                       # all of them: one commit each, one push per repository
+aihub dev publish builtin --only aihub-guide    # just one (folder or package name; repeat or comma-separate)
+aihub dev publish --bump patch builtin          # bump every selected package
+```
+
+`publish` treats each package independently. Each one is prepared first (its `[git]` is refreshed, it is validated, then committed as one commit). A package that fails is reported and skipped, and the others still go out. The command exits with an error if any package failed. Add new packages with `aihub dev init builtin --sub --name <name>`, which creates `builtin/<name>`. `--sub` needs `--name`.
+
+`aihub dev init` refuses to create a package inside another package, because that package's archive would include it, and refuses to create one above existing packages, because it would swallow them. Interactively it offers a valid location; otherwise it prints the command to run instead, such as `aihub dev init <parent folder> --sub --name <name>`. Re-running init on a folder that already has an `aihub.toml` keeps the manifest. `aihub dev validate` warns when a package folder contains other packages.
+
+**Status.** `aihub dev tree [PATH]` shows each package with its version, type and repository, and a status: `in sync`, `[git] out of date`, `own .git` (a nested repository) or `new` (no repository yet). It lists each problem with the command that fixes it.
+
+**Fix [git].** `aihub dev doctor [PATH]` sets `[git]` (`url`, `branch`, `subdir`) of the package in PATH, or of every package below it, from the working repository. Nothing else in the manifest changes. Use it after the remote or branch has moved. `--remote URL` points the repository's origin at a new URL first. `--check` only reports, and exits with an error if anything is out of date. Problems it cannot decide (no repository, a nested `.git`, duplicate package names) are listed, not guessed.
+
+**Nested repositories.** A package folder with its own `.git` inside another repository cannot be published by the outer one. `aihub dev tree-solve [PATH]` resolves it: `--nested merge` folds the folder into the outer repository (its old `.git` moves to `~/.aihub/backups`, so the history is kept there); `--nested keep` leaves it a separate repository and makes the outer one ignore it (through `.git/info/exclude`), so you manage it directly. Without `--nested` it asks for each folder on a terminal. Afterwards every `[git]` is refreshed.
+
+**Which command when:**
+
+- New workspace of several packages: `aihub dev init PATH --mono --packages "a,b:mcp"`
+- The remote or branch of the repository changed: `aihub dev doctor PATH`
+- `tree` reports `own .git`: `aihub dev tree-solve PATH`
+- Overview of the packages and what to fix: `aihub dev tree PATH`
+
 `aihub dev publish` is a wrapper around git. It needs no hub account: access is whatever your git host grants you, and the publish is recorded in Langfuse under your account name, or `~<your-os-username>` when you are not signed in.
 
 What it does, in order:
@@ -61,6 +107,8 @@ The `aihub-package` skill fetches this section and follows it, so it is the sing
 - `aihub.toml` exists -> existing package: run `aihub dev validate`, fix every error and warning, go to step 5.
 - No `aihub.toml`, folder has code/skills/agents -> **existing project**: follow step 3 (restructure).
 - Empty or new folder -> **new project**: pick a type (step 2) and run `aihub dev init . --type <type> --name <name>`.
+- The folder should hold several packages (one repository, one package per sub folder) -> **monorepo**: run `aihub dev init . --mono --packages "a,b:mcp"` (names and types), then `aihub dev tree`. Never create a package inside another package.
+- `aihub dev tree` shows any `[git]` out of date (fix with `aihub dev doctor`) or a nested `.git` (fix with `aihub dev tree-solve`).
 
 ### Step 2: Choose the package type
 
@@ -109,10 +157,12 @@ Quality rules:
 ### Step 5: Validate, build, publish
 
 ```
-aihub dev validate     # fix all errors; treat warnings as TODOs
+aihub dev validate     # fix all errors; treat warnings as TODOs (in a workspace folder, validates every package)
 aihub dev build        # dist/<name>-<version>.tar.gz
 aihub dev publish --bump patch    # ask the user first; needs push access to the [git] repository
 ```
+
+In a folder of several packages, run `aihub dev validate .` and `aihub dev tree` first, then use `--only NAME` to publish or build one package. A package whose validation fails is reported and skipped by `publish`; the others still go out.
 
 Finish by reporting: package name/version/type, files moved, warnings left, and the install command `aihub install <name>`.
 
@@ -224,6 +274,7 @@ description = "A short description"
 tags = []                         # lowercase words people search for
 readme = "README.md"
 license = "MIT"
+authors = []                      # "Ada Lovelace <ada@example.com>" or {name, email, url}; shown on the web page, credited in developer rankings
 
 [requires]
 commands = []                     # e.g. [{name = "git", hint = "brew install git"}]
@@ -414,7 +465,7 @@ Use `GET /api/v1/packages/{name}/access` to inspect visibility and current share
 
 ## Reviews and ranking
 
-A user with the `review` permission can submit or replace one 1–5-star review per package, with an optional text body. The catalogue's displayed rating is the arithmetic mean and count. The `rating` search sort uses a Bayesian average with a five-review prior toward the mean across all package reviews; unreviewed packages sort last. The `reviews` search sort uses review count, then package name. The `/rankings/reviews` endpoint ranks reviewed packages by Bayesian score, then review count; `/rankings/reviewed` ranks by review count, then average rating. Both review rankings are all-time, not limited by the activity window, and exclude packages without reviews. `GET /api/v1/rankings/{what}` also accepts `packages`, `developers`, and `users`, which rank usage events within the requested day window.
+A user with the `review` permission can submit or replace one 1–5-star review per package, with an optional text body. The catalogue's displayed rating is the arithmetic mean and count. The `rating` search sort uses a Bayesian average with a five-review prior toward the mean across all package reviews; unreviewed packages sort last. The `reviews` search sort uses review count, then package name. The `/rankings/reviews` endpoint ranks reviewed packages by Bayesian score, then review count; `/rankings/reviewed` ranks by review count, then average rating. Both review rankings are all-time, not limited by the activity window, and exclude packages without reviews. `GET /api/v1/rankings/{what}` also accepts `packages`, `developers`, and `users`, which rank usage events within the requested day window. `developers` credits usage to people, not repositories: each name in the `authors` list of a package's latest non-yanked version gets the full usage count of that package, so a package with three authors counts three times. A package that lists no authors credits its repository maintainers instead.
 
 Package search accepts these sort values:
 
@@ -434,7 +485,7 @@ The CLI records `install`, `update`, and `uninstall` events. For components regi
 
 The CLI sends timestamps, package names, and a generated client ID. Install/update events also include version; use events include the matched component and source (`claude` or `opencode`). The server derives a username from an authenticated token, not from the client payload. The current CLI does not record client-side `error` events, populate duration, or send arbitrary tool input. Although an adapter comment mentions Codex MCP launch counting through `aihub exec-mcp`, this CLI has no `exec-mcp` command, so do not expect Codex usage events. The server accepts `error` and `duration` fields from clients, but that does not mean this CLI collects them. Events are queued locally and sent asynchronously; the spool is capped at 5 MiB.
 
-The dashboard aggregates usage events by package, event kind, actor/client, component, source, and package type over selectable periods. Package owners can inspect package stats and recent events; the broader usage dashboard requires the `view_dashboard` permission. Do not treat client IDs as verified people: anonymous event identity is based on the generated client ID.
+The dashboard aggregates usage events by package, event kind, actor/client, component, source, and package type over selectable periods. Its `top_developers` list uses the same author-based credit as the `developers` ranking. Package owners can inspect package stats and recent events; the broader usage dashboard requires the `view_dashboard` permission. Do not treat client IDs as verified people: anonymous event identity is based on the generated client ID.
 
 ## Pre-publish checklist
 

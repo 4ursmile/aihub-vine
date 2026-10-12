@@ -86,8 +86,57 @@ def _lfs(top):
     return big
 
 
-def publish(root, m, bump=None):
-    """Returns the info dict reported to Langfuse."""
+SKIP_DIRS = {"node_modules", "dist", "build", "__pycache__", "venv"}
+
+
+def discover(root, depth=4):
+    """Package folders (those holding an aihub.toml) in `root` or below it. A folder with a manifest is a leaf: nothing under it is searched."""
+    root = os.path.abspath(root)
+    if not os.path.isdir(root):
+        return []
+    if os.path.isfile(os.path.join(root, "aihub.toml")):
+        return [root]
+    found = []
+    if depth > 0:
+        for n in sorted(os.listdir(root)):
+            d = os.path.join(root, n)
+            if os.path.isdir(d) and not n.startswith(".") and n not in SKIP_DIRS and not os.path.islink(d):
+                found += discover(d, depth - 1)
+    return found
+
+
+def enclosing(d):
+    """Nearest folder above `d` (inside the same git repo, or up to 6 levels when there is none) that holds an aihub.toml, else None."""
+    d = os.path.abspath(d)
+    live = d
+    while not os.path.isdir(live) and os.path.dirname(live) != live:     # the folder may not exist yet (init)
+        live = os.path.dirname(live)
+    stop = toplevel(live) if gitx.is_repo(live) else None
+    cur = d
+    for _ in range(6):
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+        if os.path.isfile(os.path.join(cur, "aihub.toml")):
+            return cur
+        if stop and os.path.realpath(cur) == os.path.realpath(stop):
+            return None
+    return None
+
+
+def push(root):
+    """Push the current branch of the repo holding `root` (sets the upstream the first time)."""
+    top = toplevel(root)
+    branch = gitx.run(["symbolic-ref", "--short", "HEAD"], cwd=top)
+    has_up = gitx.run(["rev-parse", "--abbrev-ref", "@{u}"], cwd=top, check=False)
+    with ui.Spinner("Pushing to %s" % branch):
+        gitx.run(["push", "-q"] + ([] if has_up else ["-u", "origin", branch]), cwd=top)
+
+
+def publish(root, m, bump=None, push_now=True):
+    """Commit this package folder (and push unless push_now=False, so several packages can share one push).
+    Returns the info dict reported to Langfuse."""
     toml = os.path.join(root, "aihub.toml")
     if not shutil.which("git"):
         raise ValueError("git is not installed")
@@ -115,9 +164,8 @@ def publish(root, m, bump=None):
     pkg = m["package"]
     if gitx.run(["status", "--porcelain", "--", "."], cwd=root):
         gitx.run(["commit", "-q", "-m", "publish %s %s" % (pkg["name"], pkg["version"])], cwd=root)
-    has_up = gitx.run(["rev-parse", "--abbrev-ref", "@{u}"], cwd=top, check=False)
-    with ui.Spinner("Pushing to %s" % git["branch"]):
-        gitx.run(["push", "-q"] + ([] if has_up else ["-u", "origin", git["branch"]]), cwd=top)
+    if push_now:
+        push(root)
     commit = gitx.run(["rev-parse", "HEAD"], cwd=top)
     who = identity.current()
     info = {"kind": "publish", "package": pkg["name"], "version": pkg["version"], "commit": commit,

@@ -78,7 +78,7 @@ function Count({ to }) {
       const step = (t) => { const k = Math.min(1, (t - t0) / 900); el.textContent = fmt(Math.round(n * (1 - Math.pow(1 - k, 3)))); if (k < 1) raf = requestAnimationFrame(step); }; raf = requestAnimationFrame(step); });
     el.textContent = fmt(0); ob.observe(el); return () => { ob.disconnect(); cancelAnimationFrame(raf); };
   }, [to]);
-  return html`<span ref=${ref}>${fmt(to)}</span>`;
+  return html`<span ref=${ref}></span>`;           // no vdom children: the effect owns the text, so a re-render (e.g. the Copy toast) cannot touch it
 }
 
 // types real package names after "aihub install"; the full name is kept in data-full so Copy always gets the whole command
@@ -562,7 +562,7 @@ function GroupDetail({ name, bump, onGone }) {
 const KINDS = ["install", "update", "uninstall", "use", "error"];
 const DAYS = [["1", "Last 24 hours"], ["7", "Last 7 days"], ["30", "Last 30 days"], ["90", "Last 90 days"], ["0", "All time"]];
 function Audit() {
-  const [f, setF] = useState({ source: "tools", q: "", actor: "", action: "", package: "", kind: "", days: "7", page: 1 }); const [q, setQ] = useState(""); const [open, setOpen] = useState(null);
+  const [f, setF] = useState({ source: "tools", q: "", actor: "", action: "", package: "", kind: "", host: "", os: "", days: "7", page: 1 }); const [q, setQ] = useState(""); const [open, setOpen] = useState(null);
   useEffect(() => { const t = setTimeout(() => setF((x) => (x.q === q ? x : { ...x, q, page: 1 })), 300); return () => clearTimeout(t); }, [q]);
   const qs = (o) => Object.entries(o).filter(([, v]) => v !== "" && v != null).map(([k, v]) => k + "=" + encodeURIComponent(v)).join("&");
   const d = useLoad(() => api("/audit?" + qs({ ...f, per_page: 50 })), [JSON.stringify(f)]);
@@ -572,17 +572,19 @@ function Audit() {
   const rows = d.d ? d.d.items : [], total = d.d ? d.d.total : 0, pages = Math.max(1, Math.ceil(total / 50));
   const stamp = (t) => new Date(t * 1000).toLocaleString();
   return html`<div class="stack"><div class="row"><h1>Security audit</h1><span class="sp"></span><button class="btn sec sm" onClick=${exportCsv}>Export CSV</button></div>
-    <div class="seg">${[["tools", "Tool calls & installs"], ["admin", "Admin actions"]].map(([k, l]) => html`<button key=${k} class=${f.source === k ? "on" : ""} onClick=${() => { setQ(""); setF({ source: k, q: "", actor: "", action: "", package: "", kind: "", days: f.days, page: 1 }); }}>${l}</button>`)}</div>
+    <div class="seg">${[["tools", "Tool calls & installs"], ["admin", "Admin actions"]].map(([k, l]) => html`<button key=${k} class=${f.source === k ? "on" : ""} onClick=${() => { setQ(""); setF({ source: k, q: "", actor: "", action: "", package: "", kind: "", host: "", os: "", days: f.days, page: 1 }); }}>${l}</button>`)}</div>
     <div class="card stack"><div class="row" style="flex-wrap:wrap;gap:10px"><div style="flex:2;min-width:220px"><${Search} value=${q} onInput=${setQ} ph=${tools ? "Search parameters, commands, paths, hosts, people" : "Search actor, action, target, detail"} /></div>
       <select class="field" aria-label="Time range" value=${f.days} onChange=${(e) => up("days", e.target.value)}>${DAYS.map(([v, l]) => html`<option value=${v} key=${v}>${l}</option>`)}</select>
       <select class="field" aria-label="Person" value=${f.actor} onChange=${(e) => up("actor", e.target.value)}><option value="">${tools ? "Anyone" : "Any actor"}</option>${(d.d ? d.d.actors : []).map((a) => html`<option value=${a} key=${a}>${a}</option>`)}</select>
       ${tools && html`<select class="field" aria-label="Event" value=${f.kind} onChange=${(e) => up("kind", e.target.value)}><option value="">Any event</option>${KINDS.map((k) => html`<option value=${k} key=${k}>${k}</option>`)}</select>
+        <select class="field" aria-label="Device" value=${f.host} onChange=${(e) => up("host", e.target.value)}><option value="">Any device</option>${(d.d ? d.d.hosts || [] : []).map((a) => html`<option value=${a} key=${a}>${a}</option>`)}</select>
+        <select class="field" aria-label="OS" value=${f.os} onChange=${(e) => up("os", e.target.value)}><option value="">Any OS</option>${(d.d ? d.d.oses || [] : []).map((a) => html`<option value=${a} key=${a}>${a}</option>`)}</select>
         <input class="field" style="max-width:170px" placeholder="Package" value=${f.package} onInput=${(e) => up("package", e.target.value.trim())} />`}
       <input class="field" style="max-width:190px" placeholder=${tools ? "Tool / component" : "Action, e.g. user.role"} value=${f.action} onInput=${(e) => up("action", e.target.value)} /></div>
       <span class="xs mut3">${d.loading && !d.d ? "Loading…" : `${fmt(total)} ${total === 1 ? "record" : "records"}`}${tools ? ". Parameters are scrubbed of passwords, tokens and keys before they leave the machine. “(local)” = not signed in; the name is the OS user on that device and is self-reported." : ""}</span></div>
     ${d.e ? html`<${Err} e=${d.e} />` : html`<div class="list tscroll"><table><thead><tr><th>When</th><th>${tools ? "Who" : "Actor"}</th><th>${tools ? "Event" : "Action"}</th><th>${tools ? "Tool call" : "Target"}</th><th></th></tr></thead><tbody>
       ${rows.map((x) => { const k = x.id + f.source; return html`<tr key=${k} style="cursor:pointer" onClick=${() => setOpen(open === k ? null : k)}>
-        <td class="mut sm" title=${stamp(x.ts)}>${ago(x.ts)}</td><td>${x.actor}${tools && x.host ? html`<div class="xs mut3">${x.host}</div>` : ""}</td>
+        <td class="mut sm" title=${stamp(x.ts)}>${ago(x.ts)}</td><td>${x.actor}${tools && (x.host || x.os) ? html`<div class="xs mut3">${[x.host, x.os].filter(Boolean).join(" · ")}</div>` : ""}</td>
         <td>${tools ? html`<span class=${"badge " + (x.kind === "error" ? "red" : x.kind === "use" ? "" : "green")}>${x.kind}</span>` : html`<code>${x.action}</code>`}</td>
         <td class="mut">${tools ? html`<b style="font-weight:500">${x.package}</b>${x.component ? html` · <code>${x.component}</code>` : ""}${x.detail ? html`<div class="xs mono" style="max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.detail}</div>` : ""}` : `${x.target} ${x.detail}`}</td>
         <td class="mut3 xs">${open === k ? "▾" : "▸"}</td></tr>${open === k && html`<tr key=${k + "d"}><td colspan="5"><div class="stack" style="padding:6px 0"><div class="xs mut">${stamp(x.ts)}${tools ? ` · source ${x.source || "cli"} · ip ${x.ip || "?"} · client ${String(x.client_id || "").slice(0, 8)}${x.cwd ? " · cwd " + x.cwd : ""}${x.username ? "" : x.local_user ? ` · OS user ${x.local_user} (unverified)` : ""}` : ""}</div>
@@ -606,7 +608,7 @@ const delta = (a, b) => { if (!b) return a ? { t: "new", c: "green" } : null; co
 const Kpi = ({ label, value, prev, invert }) => { const d = delta(value, prev);
   return html`<div class="card stat"><span>${label}</span><b>${fmt(value)}</b>${d ? html`<span class=${"badge " + (invert ? (d.c === "green" ? "red" : "green") : d.c)}>${d.t} vs prior</span>` : html`<span class="xs mut3">no prior data</span>`}</div>`; };
 
-function LineChart({ daily, series }) {
+function LineChart({ daily, series, colors = KC }) {
   const W = 760, H = 220, P = { l: 34, r: 10, t: 10, b: 24 }, n = daily.length;
   const mx = Math.max(1, ...daily.map((d) => Math.max(...series.map((k) => d[k] || 0))));
   const nice = Math.ceil(mx / 4) * 4 || 4, x = (i) => P.l + (n < 2 ? 0 : i * (W - P.l - P.r) / (n - 1)), y = (v) => P.t + (H - P.t - P.b) * (1 - v / nice);
@@ -616,11 +618,11 @@ function LineChart({ daily, series }) {
   return html`<div style="position:relative"><svg viewBox=${`0 0 ${W} ${H}`} style="width:100%;height:auto;display:block" role="img" aria-label="Daily activity chart" onMouseMove=${move} onMouseLeave=${() => setHv(null)}>
     ${[0, 1, 2, 3, 4].map((i) => html`<g key=${i}><line x1=${P.l} x2=${W - P.r} y1=${y(nice * i / 4)} y2=${y(nice * i / 4)} stroke="var(--sep)" stroke-width="1"/><text x=${P.l - 6} y=${y(nice * i / 4) + 4} text-anchor="end" font-size="11" fill="var(--fg-3)">${fmt(Math.round(nice * i / 4))}</text></g>`)}
     ${daily.map((d, i) => i % step === 0 ? html`<text key=${i} x=${x(i)} y=${H - 6} text-anchor="middle" font-size="11" fill="var(--fg-3)">${d.date.slice(5)}</text>` : null)}
-    ${series.map((k) => html`<g key=${k}><path d=${daily.map((d, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(d[k] || 0).toFixed(1)}`).join("")} fill="none" stroke=${KC[k]} stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
-      ${hv !== null && html`<circle cx=${x(hv)} cy=${y(daily[hv][k] || 0)} r="4" fill=${KC[k]} stroke="var(--surface)" stroke-width="2"/>`}</g>`)}
+    ${series.map((k) => html`<g key=${k}><path d=${daily.map((d, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(d[k] || 0).toFixed(1)}`).join("")} fill="none" stroke=${colors[k]} stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
+      ${hv !== null && html`<circle cx=${x(hv)} cy=${y(daily[hv][k] || 0)} r="4" fill=${colors[k]} stroke="var(--surface)" stroke-width="2"/>`}</g>`)}
     ${hv !== null && html`<line x1=${x(hv)} x2=${x(hv)} y1=${P.t} y2=${H - P.b} stroke="var(--fg-3)" stroke-dasharray="3 3"/>`}</svg>
-    ${hv !== null && html`<div class="tip" style=${`left:${Math.min(78, Math.max(2, x(hv) / W * 100))}%`}><b>${daily[hv].date}</b>${series.map((k) => html`<div key=${k}><i style=${"background:" + KC[k]}></i>${k} <b>${daily[hv][k] || 0}</b></div>`)}</div>`}
-    <div class="row xs mut" style="gap:16px;margin-top:6px">${series.map((k) => html`<span key=${k}><i class="dot" style=${"background:" + KC[k]}></i>${k}</span>`)}</div></div>`;
+    ${hv !== null && html`<div class="tip" style=${`left:${Math.min(78, Math.max(2, x(hv) / W * 100))}%`}><b>${daily[hv].date}</b>${series.map((k) => html`<div key=${k}><i style=${"background:" + colors[k]}></i>${k} <b>${daily[hv][k] || 0}</b></div>`)}</div>`}
+    <div class="row xs mut" style="gap:16px;margin-top:6px">${series.map((k) => html`<span key=${k}><i class="dot" style=${"background:" + colors[k]}></i>${k}</span>`)}</div></div>`;
 }
 const Bars = ({ items, color = "var(--blue)", link }) => { const mx = Math.max(1, ...items.map((i) => i.count));
   return items.length ? html`<div>${items.map((i) => html`<div class="hb" key=${i.name}><span class="hl">${link ? html`<a href=${"#/package/" + i.name}>${i.name}</a>` : i.name}</span><span class="ht"><i style=${`width:${i.count / mx * 100}%;background:${color}`}></i></span><span class="hn">${fmt(i.count)}</span></div>`)}</div>` : html`<p class="mut sm">No data in this period.</p>`; };
@@ -630,8 +632,10 @@ const Donut = ({ items }) => { const tot = items.reduce((a, b) => a + b.count, 0
     ${items.map((it, i) => { const len = it.count / tot * C, el = html`<circle key=${it.name} cx="50" cy="50" r=${R} fill="none" stroke=${pal[i % 5]} stroke-width="14" stroke-dasharray=${`${len} ${C - len}`} stroke-dashoffset=${-acc}/>`; acc += len; return el; })}</svg>
     <div class="sm" style="min-width:0">${items.map((it, i) => html`<div key=${it.name}><i class="dot" style=${"background:" + pal[i % 5]}></i>${it.name} <b>${Math.round(it.count / tot * 100)}%</b> <span class="mut3">${fmt(it.count)}</span></div>`)}</div></div>`; };
 
-const DASH_KEYS = ["package", "type", "user", "source", "kind", "identity", "host", "q"];
-const DASH_LABEL = { package: "Package", type: "Type", user: "Person", source: "Tool", kind: "Event", identity: "Identity", host: "Device", q: "Search" };
+const OS_PAL = ["var(--blue)", "var(--green)", "var(--orange)", "var(--red)", "var(--fg-3)"];
+const osColors = (names) => Object.fromEntries(names.map((n, i) => [n, OS_PAL[i % 5]]));
+const DASH_KEYS = ["package", "type", "user", "source", "kind", "identity", "host", "os", "q"];
+const DASH_LABEL = { package: "Package", type: "Type", user: "Person", source: "Tool", kind: "Event", identity: "Identity", host: "Device", os: "OS", q: "Search" };
 const DASH_KINDS = ["use", "install", "update", "uninstall", "error", "publish"];
 const dashParams = () => { const q = new URLSearchParams((store.route.split("?")[1]) || ""); const o = { days: +q.get("days") || 30, from: q.get("from") || "", to: q.get("to") || "", tab: q.get("tab") || "overview", page: +q.get("page") || 1 }; DASH_KEYS.forEach((k) => (o[k] = q.get(k) || "")); return o; };
 const dashHash = (o) => { const q = new URLSearchParams(); if (o.from || o.to) { if (o.from) q.set("from", o.from); if (o.to) q.set("to", o.to); } else if (o.days !== 30) q.set("days", o.days); DASH_KEYS.forEach((k) => o[k] && q.set(k, o[k])); if (o.tab !== "overview") q.set("tab", o.tab); if (o.page > 1) q.set("page", o.page); const t = q.toString(); return "/dashboard" + (t ? "?" + t : ""); };
@@ -670,7 +674,7 @@ function Dashboard() {
       <select class="field" aria-label="Package" value=${f.package} onChange=${(e) => go({ package: e.target.value })}><option value="">All packages</option>${(pk.d ? pk.d.items : []).map((p) => html`<option value=${p.name} key=${p.name} selected=${p.name === f.package}>${p.name}</option>`)}</select>
       ${sel("type", "Type", o.types || [], "Any type")}${sel("kind", "Event", DASH_KINDS, "Any event")}${sel("source", "Tool", o.sources || [], "Any tool")}
       <select class="field" aria-label="Identity" value=${f.identity} onChange=${(e) => go({ identity: e.target.value })}><option value="">Anyone</option><option value="signed-in" selected=${f.identity === "signed-in"}>Signed-in only</option><option value="anonymous" selected=${f.identity === "anonymous"}>Anonymous only</option></select>
-      ${sel("user", "Person", o.users || [], "Any person")}${sel("host", "Device", o.hosts || [], "Any device")}</div>
+      ${sel("user", "Person", o.users || [], "Any person")}${sel("host", "Device", o.hosts || [], "Any device")}${sel("os", "OS", o.oses || [], "Any OS")}</div>
     ${active.length > 0 && html`<div class="row" style="gap:8px" aria-label="Active filters">${active.map((k) => html`<button key=${k} class="chip" onClick=${() => go({ [k]: "" })} aria-label=${`Remove ${DASH_LABEL[k]} filter`}>${DASH_LABEL[k]}: <b>${f[k]}</b> ✕</button>`)}<button class="btn sec sm" onClick=${() => go(Object.fromEntries(DASH_KEYS.map((k) => [k, ""])))}>Clear all</button></div>`}
     <div class="seg" role="tablist" style="align-self:flex-start">${[["overview", "Overview"], ["activity", "Activity"]].map(([k, l]) => html`<button key=${k} role="tab" aria-selected=${f.tab === k} class=${f.tab === k ? "on" : ""} onClick=${() => go({ tab: k })}>${l}</button>`)}</div>
     ${d.loading && !D ? html`<${Skels} n=4 />` : d.e ? html`<${Err} e=${d.e} />` : D && f.tab === "overview" && html`<div class="stack">
@@ -684,12 +688,13 @@ function Dashboard() {
         <div class="card stack"><h3>Most used components</h3><${Bars} items=${(D.top_components || []).map((x) => ({ ...x, name: x.name }))} color="var(--green)" /></div></div>
       <div class="card stack"><div class="row"><h3>When people work</h3><span class="sp"></span><span class="xs mut3">weekday by hour, UTC</span></div><${Heatmap} grid=${D.heatmap} /></div>
       <div class="two"><div class="card stack"><h3>Top developers</h3><${Bars} items=${D.top_developers || []} color="var(--blue)" /></div><div class="card stack"><h3>Top people</h3><${Bars} items=${D.top_users} color="var(--green)" /></div></div>
-      <div class="two"><div class="card stack"><h3>Devices</h3><${Bars} items=${D.by_host || []} color="var(--orange)" /></div></div>
+      <div class="two"><div class="card stack"><h3>Devices</h3><${Bars} items=${D.by_host || []} color="var(--orange)" /></div><div class="card stack"><h3>By OS</h3><${Donut} items=${D.by_os || []} /></div></div>
+      ${(D.by_os_daily && D.by_os_daily.series.length > 0) && html`<div class="card stack"><div class="row"><h3>Activity by OS</h3><span class="sp"></span><span class="xs mut3">all events per day, UTC</span></div><${LineChart} daily=${D.by_os_daily.daily} series=${D.by_os_daily.series} colors=${osColors(D.by_os_daily.series)} /></div>`}
       <div class="three"><div class="card stack"><h3>By type</h3><${Donut} items=${D.by_type} /></div><div class="card stack"><h3>By tool</h3><${Donut} items=${D.by_source} /></div><div class="card stack"><h3>Signed in vs anonymous</h3><${Donut} items=${D.by_identity || []} /></div></div>
       <div class="card stack"><div class="row"><h3>Top rated</h3><span class="sp"></span><span class="xs mut3">all time</span></div>${D.top_reviewed.length ? html`<div>${D.top_reviewed.slice(0, 8).map((x) => html`<div class="hb" key=${x.name}><span class="hl"><a href=${"#/package/" + x.name}>${x.name}</a></span><span class="mut sm">${x.reviews} ${x.reviews === 1 ? "review" : "reviews"}</span><b>${x.avg}</b></div>`)}</div>` : html`<p class="mut sm">No reviews yet.</p>`}</div></div>`}
     ${f.tab === "activity" && (log.loading && !log.d ? html`<${Skels} n=2 />` : log.e ? html`<${Err} e=${log.e} /> ` : log.d && html`<div class="card stack"><div class="row"><h3>Activity log</h3><span class="sp"></span><span class="xs mut3">${log.d.total} events</span></div>
-      ${log.d.items.length ? html`<div class="tscroll"><table><thead><tr><th>When</th><th>Who</th><th>Event</th><th>Package</th><th>Component</th><th>Tool</th><th>Device</th></tr></thead><tbody>
-        ${log.d.items.map((e, i) => html`<tr key=${i}><td class="mut sm" title=${new Date(e.ts * 1000).toISOString()}>${ago(e.ts)}</td><td>${e.actor}</td><td><span class=${"badge " + ({ use: "blue", install: "green", error: "red", update: "orange" }[e.kind] || "")}>${e.kind}</span></td><td><a href=${"#/package/" + e.package}>${e.package}</a>${e.version ? html` <span class="mut sm">${e.version}</span>` : ""}</td><td class="mono sm">${e.component || ""}</td><td class="sm">${e.source}</td><td class="sm mut">${e.host || ""}</td></tr>`)}</tbody></table></div>
+      ${log.d.items.length ? html`<div class="tscroll"><table><thead><tr><th>When</th><th>Who</th><th>Event</th><th>Package</th><th>Component</th><th>Tool</th><th>Device</th><th>OS</th></tr></thead><tbody>
+        ${log.d.items.map((e, i) => html`<tr key=${i}><td class="mut sm" title=${new Date(e.ts * 1000).toISOString()}>${ago(e.ts)}</td><td>${e.actor}</td><td><span class=${"badge " + ({ use: "blue", install: "green", error: "red", update: "orange" }[e.kind] || "")}>${e.kind}</span></td><td><a href=${"#/package/" + e.package}>${e.package}</a>${e.version ? html` <span class="mut sm">${e.version}</span>` : ""}</td><td class="mono sm">${e.component || ""}</td><td class="sm">${e.source}</td><td class="sm mut">${e.host || ""}</td><td class="sm mut">${e.os || ""}</td></tr>`)}</tbody></table></div>
         <div class="row"><button class="btn sec sm" disabled=${f.page <= 1} onClick=${() => nav(dashHash({ ...f, page: f.page - 1 }))}>Previous</button><span class="sm mut">Page ${log.d.page} of ${Math.max(1, Math.ceil(log.d.total / log.d.per_page))}</span><button class="btn sec sm" disabled=${f.page * log.d.per_page >= log.d.total} onClick=${() => nav(dashHash({ ...f, page: f.page + 1 }))}>Next</button></div>`
         : html`<${Empty} t="No events match" d="Widen the period or clear a filter." />`}</div>`)}</div>`;
 }

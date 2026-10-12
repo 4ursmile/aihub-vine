@@ -70,7 +70,7 @@ LATE_COLUMNS = [
     ("groups", "owner_id", "INTEGER"),
     ("packages", "readme", "TEXT DEFAULT ''"), ("packages", "visibility", "TEXT NOT NULL DEFAULT 'public'"),
     ("events", "source", "TEXT"),
-    ("events", "local_user", "TEXT"), ("events", "host", "TEXT"), ("events", "detail", "TEXT"), ("events", "cwd", "TEXT"), ("events", "ip", "TEXT"),
+    ("events", "local_user", "TEXT"), ("events", "host", "TEXT"), ("events", "os", "TEXT"), ("events", "detail", "TEXT"), ("events", "cwd", "TEXT"), ("events", "ip", "TEXT"),
     ("events", "ext_id", "TEXT"), ("reviews", "reviewer", "TEXT"),
 ]
 

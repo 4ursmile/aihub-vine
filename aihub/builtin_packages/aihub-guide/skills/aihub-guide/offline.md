@@ -93,8 +93,23 @@ aihub flush                       # send queued usage events now
 aihub hooks install [--tool claude]   # or: aihub hooks remove
 aihub skill install [--tool claude]   # (re)install aihub-guide and aihub-package
 aihub skill remove                    # uninstall both
+aihub self-uninstall [--yes]          # remove aihub: packages, hooks, PATH block, ~/.aihub (not your published packages or git repos)
 aihub config                      # print settings as JSON
 aihub config set <key> <value>
+```
+
+Developer commands (`aihub dev`, run in a package folder or pass its path):
+
+```sh
+aihub dev init ./my-pkg --type skill --name my-pkg --description "..."
+aihub dev init . --mono --packages "a,b:mcp" --remote <url> --branch main   # one repo, one package per sub folder
+aihub dev init . --sub --name new-pkg          # add a package to a workspace folder
+aihub dev list . / aihub dev tree .            # packages; tree adds repository and [git] status
+aihub dev validate . / aihub dev build PATH    # a folder of packages is handled package by package
+aihub dev publish . [--only NAME] [--bump patch]
+aihub dev doctor [PATH] [--check] [--remote <url>]   # set [git] url/branch/subdir from the real repository
+aihub dev tree-solve [PATH] [--nested merge|keep]    # resolve a package folder with its own .git
+aihub dev index / aihub dev stats PATH
 ```
 
 Constraints: `name>=1.2`, `name==1.2.0`, `name>=1.0,<2`, `~=1.4`. An omitted operator means `==`. Empty or `*` matches any version.
@@ -106,6 +121,7 @@ Constraints: `name>=1.2`, `name==1.2.0`, `name>=1.0,<2`, `~=1.4`. An omitted ope
 - `update` skips disabled packages and never moves a package outside the range its enabled dependents allow.
 - `lock` records, per package: exact version, git commit, dependencies, `requested`, `enabled`. On another machine, `sync` installs those commits. It stops if the index can no longer provide a locked version.
 - Enable, disable and tree are local only and send no telemetry.
+- `self-uninstall` removes every installed package, the usage hooks, the PATH block the installer added and `~/.aihub` (or `$AIHUB_HOME`). It asks first unless `--yes`. For a pip install, also run `pip uninstall aihub-cli`.
 
 Install prompts: the CLI asks before running a platform install script and before registering components with tools. `--yes` skips these. When stdin is closed (non-interactive), prompts count as "no", so use `--yes` in scripts and CI.
 
@@ -224,6 +240,8 @@ It does not edit any index and never needs to. Afterwards the hub reads the even
 
 Published versions cannot be reused, so bump the version for every release.
 
+Several packages in one folder (monorepo): `aihub dev init . --mono --packages "a,b:mcp"` makes the folder one git repository and creates one package per sub folder (packages already there are kept, and their `[git]` is refreshed). `aihub dev tree` shows each package's repository and `[git]` status. `aihub dev doctor` sets `[git]` url, branch and subdir from the real repository, changing nothing else (`--check` only reports). A package folder with its own `.git` inside another repository is resolved with `aihub dev tree-solve --nested merge` (its `.git` moves to `~/.aihub/backups`) or `--nested keep` (the outer repository ignores it). Never put a package inside another package. Publishing several packages: each is prepared and validated on its own, a failing one is reported and skipped, the others are committed and pushed (one push per repository); `--only NAME` selects one. Exit status is non-zero if any failed.
+
 Final report to give the user: package name, version, type, files moved, warnings left, and `aihub install <name>`.
 
 ## 9. Manifest (`aihub.toml`)
@@ -237,6 +255,7 @@ description = "A short description"
 tags = []                     # lowercase search words
 readme = "README.md"          # lint warns if missing
 license = "MIT"
+authors = ["Ada Lovelace <ada@example.com>"]   # "Name", "Name <email>" or {name, email, url}; shown on the package page; credits developer rankings. dev init fills it from your hub username or OS user
 
 [git]                         # optional; set by dev init
 url = "https://git.example.com/team/my-tool.git"

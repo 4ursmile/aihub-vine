@@ -1,4 +1,5 @@
 import argparse
+import functools
 import getpass
 import json
 import os
@@ -7,7 +8,7 @@ import tempfile
 import urllib.parse
 
 from ..core import archive, ignore, manifest as M, naming, version as V
-from . import api, gitx, installer, paths, publish as pub, registry, remote_config, ui, updater
+from . import api, gitx, installer, paths, publish as pub, registry, remote_config, ui, updater, workspace as ws
 from .installer import _spec
 
 def cmd_config(a):
@@ -100,6 +101,52 @@ def cmd_uninstall(a):
         ui.info("nothing changed")
         return
     installer.uninstall(a.name)
+
+
+def _rc_files():
+    home = os.path.expanduser("~")
+    return [os.path.join(os.environ.get("ZDOTDIR") or home, ".zshrc"), os.path.join(home, ".bash_profile"), os.path.join(home, ".bashrc"),
+            os.path.join(home, ".profile"), os.path.join(home, ".config", "fish", "config.fish")]
+
+
+def cmd_self_uninstall(a):
+    """Remove aihub from this machine: installed packages, usage hooks, the PATH line install.sh added, and ~/.aihub."""
+    import re
+    import shutil
+    from . import hooks
+    home = paths.HOME()
+    pk = sorted(installer.state()["packages"])
+    rc = [f for f in _rc_files() if os.path.isfile(f) and "# >>> aihub" in open(f, encoding="utf-8", errors="replace").read()]
+    ui.out()
+    ui.out("  This removes aihub from this machine:")
+    ui.out("    - %d installed package(s)%s" % (len(pk), ": " + ", ".join(pk[:6]) + (" ..." if len(pk) > 6 else "") if pk else ""))
+    ui.out("    - usage hooks in your AI tools")
+    ui.out("    - the PATH line in %s" % (", ".join(rc) if rc else "your shell config (none found)"))
+    ui.out("    - %s (settings, credentials, queue, the aihub program)" % home)
+    ui.out("  " + ui.dim("Packages you published and your git repositories are not touched."))
+    if not a.yes and not (ui.INTERACTIVE and ui.confirm("Remove aihub?", False)):
+        return ui.info("nothing changed (pass --yes to skip this question)")
+    for n in pk:
+        try:
+            installer.uninstall(n, quiet=True)
+            ui.good("removed package %s" % n)
+        except (api.ApiError, OSError) as e:
+            ui.note("could not remove %s: %s" % (n, e))
+    for label, status in hooks.ensure(remove=True):
+        ui.good("%-12s hook %s" % (label, status))
+    for f in rc:
+        try:
+            text = open(f, encoding="utf-8").read()
+            new = re.sub(r"\n?# >>> aihub\n.*?# <<< aihub\n?", "\n", text, flags=re.S)
+            open(f, "w", encoding="utf-8", newline="").write(new)
+            ui.good("cleaned PATH in %s" % f)
+        except OSError as e:
+            ui.note("could not edit %s: %s" % (f, e))
+    if os.name == "nt":
+        ui.note("Windows: remove %s from your user PATH (System > Environment Variables); the folder is deleted below if it is not in use" % os.path.join(home, "bin"))
+    shutil.rmtree(home, ignore_errors=True)
+    ui.celebrate("aihub removed" if not os.path.exists(home) else "aihub removed, except %s (still in use; delete it by hand)" % home)
+    ui.info("open a new terminal so PATH is refreshed. A pip install can be removed with: pip uninstall aihub-cli")
 
 
 def cmd_list(a):
@@ -410,13 +457,88 @@ def cmd_menu():
 def _root(a): return os.path.abspath(a.path)
 
 
+def _init_conflicts(a, d, name):
+    """A package folder must not sit inside another package (the parent's archive would swallow it) nor above others (it would
+    swallow them). Returns the folder to create the package in: `d`, or a better one the user picked. Raises with a ready-to-run suggestion."""
+    if os.path.exists(os.path.join(d, "aihub.toml")) and not a.force:
+        return d                                       # re-init of this very package: handled further down (keeps the manifest)
+    rel = lambda p: os.path.relpath(p) if os.path.abspath(p).startswith(os.getcwd()) else p
+    parent = pub.enclosing(d)
+    if parent:
+        sib = os.path.join(os.path.dirname(parent), name)
+        msg = "%s is inside the package at %s (its archive would include this one)" % (rel(d), rel(parent))
+        if os.path.exists(sib):
+            raise ValueError("%s; use another name, or move the package out of it" % msg)
+        if ui.INTERACTIVE and ui.select("%s. Where should %s go?" % (msg, name), [(sib, "next to it: %s" % rel(sib)), (None, "cancel")]):
+            return sib
+        raise ValueError("%s. Create it beside instead: aihub dev init %s --name %s" % (msg, rel(os.path.dirname(parent)) or ".", name)
+                         + (" --sub" if os.path.dirname(parent) else ""))
+    below = [p for p in pub.discover(d) if p != d] if os.path.isdir(d) else []
+    if below:
+        inner = os.path.join(d, name)
+        msg = "%s already holds package(s) below it (%s); a package here would swallow them" % (rel(d), ", ".join(sorted(os.path.basename(p) for p in below)[:4]))
+        if not os.path.exists(inner) and ui.INTERACTIVE and ui.select("%s. Create %s as its own folder instead?" % (msg, name),
+                                                                        [(inner, "yes: %s" % rel(inner)), (None, "cancel")]):
+            return inner
+        raise ValueError("%s. Make it a sibling: aihub dev init %s --sub --name %s" % (msg, rel(d) or ".", name))
+    return d
+
+
+def _init_mono(a):
+    """One repository, several packages. Existing packages below PATH are kept and only get their [git] refreshed;
+    new ones come from --packages "a,b:mcp" (name or name:type) or are asked for."""
+    from ..core import naming
+    root = _root(a)
+    specs = [x.strip() for v in (a.packages or []) for x in v.split(",") if x.strip()]
+    if not specs and ui.INTERACTIVE:
+        raw = input("  packages to create, comma separated (name or name:type, blank for none): ").strip()
+        specs = [x.strip() for x in raw.split(",") if x.strip()]
+    plan = []
+    for s in specs:
+        n, _, t = s.partition(":")
+        t = t or a.type
+        if t not in ("skill", "agent", "mcp", "tool", "setup"):
+            raise ValueError("%r: type must be one of skill, agent, mcp, tool, setup" % s)
+        plan.append((naming.validate(n), t))
+    if len({n for n, _ in plan}) != len(plan):
+        raise ValueError("--packages lists the same name twice")
+    have = {os.path.basename(p): p for p in pub.discover(root)} if os.path.isdir(root) else {}
+    clash = [n for n, _ in plan if n in have and have[n] != os.path.join(root, n)]
+    if clash:
+        raise ValueError("%s already exists elsewhere in this workspace (%s)" % (", ".join(clash), ", ".join(have[n] for n in clash)))
+    if os.path.isfile(os.path.join(root, "aihub.toml")):
+        raise ValueError("%s is itself a package; a monorepo folder holds packages in sub folders. Pick a parent folder" % root)
+    ws.ensure_repo(root, a.remote or "", a.branch or "main")
+    for n, t in plan:
+        if n in have:
+            ui.note("%s already exists; keeping it" % n)
+            continue
+        dev_init(argparse.Namespace(**dict(vars(a), path=root, name=n, type=t, sub=True, mono=False, force=False, _mono_member=True)))
+    dirs = pub.discover(root)
+    for d in dirs:                                          # new and pre-existing packages alike: [git] must match this repository
+        rec, changes = ws.fix_git(d, root, remote=a.remote or None)
+        for c in changes:
+            ui.good("%s  [git] %s" % (rec["name"], c))
+    ui.celebrate("Monorepo ready: %d package(s)" % len(dirs))
+    ws.show_tree(root, ws.inspect(root, dirs))
+    ui.info("publish everything:  aihub dev publish %s        one package:  aihub dev publish %s --only NAME" % (a.path, a.path))
+
+
 def dev_init(a):
+    if getattr(a, "mono", False):
+        return _init_mono(a)
     from ..core import templates
     d = _root(a)
-    os.makedirs(d, exist_ok=True)
-    name = a.name or os.path.basename(d).lower().replace("_", "-")
     from ..core import naming
-    name = naming.validate(name)
+    if a.sub:                                          # PATH is a workspace folder: the package gets its own folder inside it
+        if not a.name:
+            raise ValueError("--sub needs --name: the package is created in PATH/<name>")
+        d = os.path.join(d, naming.validate(a.name))
+    name = naming.validate(a.name or os.path.basename(d).lower().replace("_", "-"))
+    d = _init_conflicts(a, d, name)
+    os.makedirs(d, exist_ok=True)
+    if getattr(a, "_mono_member", False):
+        pass                                           # the workspace repository was set up once by --mono
     f = os.path.join(d, "aihub.toml")
     existing = os.path.exists(f) and not a.force
     made = []
@@ -443,7 +565,7 @@ def dev_init(a):
     if pub.ensure_gitignore(d):
         made.append(".gitignore")
     m = M.parse(open(f, encoding="utf-8").read())
-    if not (m["git"].get("url") and m["git"].get("branch")):
+    if not (m["git"].get("url") and m["git"].get("branch")) and not getattr(a, "_mono_member", False):
         try:
             git = pub.detect(d, m["git"])
             pub.write_git_table(f, git)
@@ -464,6 +586,14 @@ def _load(a):
 def dev_validate(a, quiet=False):
     m = _load(a)
     errs, warns = M.lint(m, _root(a))
+    nested = []
+    for n in sorted(os.listdir(_root(a))):                # packages below this one would ship inside its archive
+        q = os.path.join(_root(a), n)
+        if os.path.isdir(q) and not n.startswith(".") and n not in pub.SKIP_DIRS:
+            nested += pub.discover(q, 3)
+    if nested:
+        warns.append("this package folder also contains other packages (%s); their files ship inside this one. Move them beside it"
+                     % ", ".join(os.path.relpath(p, _root(a)) for p in nested[:3]))
     for w in warns:
         ui.note(w)
     for e in errs:
@@ -487,22 +617,166 @@ def dev_build(a):
     return dest
 
 
-def dev_publish(a):
+def _projects(a):
+    """Package folders this command works on. PATH is a package (has aihub.toml) or a workspace folder holding several;
+    --only NAME narrows a workspace to some (matched on folder name, relative path or package name)."""
     root = _root(a)
-    if a.bump:
-        m = _load(a)
-        p = os.path.join(root, "aihub.toml")
-        t = open(p).read()
-        old = m["package"]["version"]
-        open(p, "w").write(t.replace('version = "%s"' % old, 'version = "%s"' % V.bump(old, a.bump), 1))
-    m = dev_validate(a, quiet=True)
-    info = pub.publish(root, m)
-    sent = pub.report(info)
-    ui.celebrate("Published %s %s" % (info["package"], info["version"]))
-    ui.info("repo:    %s @ %s (%s)" % (info["git_url"], info["git_branch"], info["commit"][:8]))
-    ui.info("install: aihub install %s" % info["package"])
-    if not sent:
+    found = pub.discover(root)
+    if not found:
+        raise ValueError("no aihub.toml in %s or the folders below it; run `aihub dev init <folder>` to start a package" % root)
+    only = [x.strip().strip("/") for v in (getattr(a, "only", None) or []) for x in v.split(",") if x.strip()]
+    if not only:
+        return found
+    def names(d):
+        try:
+            pkg = M.parse(open(os.path.join(d, "aihub.toml"), encoding="utf-8").read())["package"]["name"]
+        except (OSError, ValueError, KeyError):
+            pkg = ""
+        return {os.path.basename(d), os.path.relpath(d, root).replace(os.sep, "/"), pkg}
+    picked = [d for d in found if names(d) & set(only)]
+    missing = [x for x in only if not any(x in names(d) for d in found)]
+    if missing:
+        raise ValueError("no package matches %s; found: %s" % (", ".join(missing), ", ".join(sorted(os.path.basename(d) for d in found))))
+    return picked
+
+
+def _label(a, d):
+    return os.path.relpath(d, _root(a)).replace(os.sep, "/") if d != _root(a) else os.path.basename(d)
+
+
+def _each(fn):
+    """Run a single-package dev command on every package the PATH / --only selection covers; report failures at the end."""
+    @functools.wraps(fn)
+    def run(a):
+        roots = _projects(a)
+        if len(roots) == 1:
+            return fn(argparse.Namespace(**dict(vars(a), path=roots[0])))
+        failed = []
+        for d in roots:
+            ui.out()
+            ui.info("== %s" % _label(a, d))
+            try:
+                fn(argparse.Namespace(**dict(vars(a), path=d)))
+            except (api.ApiError, ValueError, KeyError, OSError) as e:
+                ui.bad(str(e))
+                failed.append(_label(a, d))
+        if failed:
+            raise ValueError("%d of %d packages failed: %s" % (len(failed), len(roots), ", ".join(failed)))
+    return run
+
+
+def dev_list(a):
+    """The packages in this workspace, with their version and whether they have unpublished changes."""
+    for d in _projects(a):
+        try:
+            pkg = M.parse(open(os.path.join(d, "aihub.toml"), encoding="utf-8").read())["package"]
+        except (OSError, ValueError) as e:
+            ui.bad("%s: %s" % (_label(a, d), e))
+            continue
+        dirty = pub.toplevel(d) and gitx.run(["status", "--porcelain", "--", "."], cwd=d)
+        ui.out("  %-24s %-9s %-6s %s%s" % (pkg["name"], pkg["version"], pkg["type"], _label(a, d), "  " + ui.dim("(uncommitted changes)") if dirty else ""))
+
+
+def dev_tree(a):
+    """The workspace as a tree: each package, its repository, and whether its [git] is in sync."""
+    roots = _projects(a)
+    recs = ws.inspect(_root(a), roots)
+    bad = ws.show_tree(_root(a), recs)
+    if not bad:
+        ui.out()
+        ui.good("%d package(s), everything in sync" % len(recs))
+
+
+def dev_doctor(a):
+    """Make every package's [git] (url, branch, subdir) match the repository it is really in. Blocking problems are listed, not guessed."""
+    root = _root(a)
+    dirs = _projects(a)
+    ui.out()
+    stuck = 0
+    for d in dirs:
+        try:
+            rec, changes = ws.fix_git(d, root, remote=a.remote, write=not a.check)
+        except (gitx.GitError, OSError, ValueError) as e:
+            ui.bad("%s: %s" % (os.path.basename(d), e))
+            stuck += 1
+            continue
+        if changes:
+            for c in changes:
+                (ui.note if a.check else ui.good)("%s  [git] %s%s" % (rec["name"], c, "  (would change)" if a.check else ""))
+        elif not ws.blocking(rec):
+            ui.good("%s  [git] already right (%s @ %s)" % (rec["name"], rec["actual"].get("url") or "no remote yet", rec["actual"].get("branch") or "-"))
+        for code, text in ws.blocking(rec):
+            ui.bad("%s  %s" % (rec["name"], text))
+            stuck += 1
+    ui.out()
+    if stuck:
+        ui.info("nested repositories:  aihub dev tree-solve      overview:  aihub dev tree")
+        raise ValueError("%d problem(s) need your decision" % stuck)
+    if a.check and any(ws.fix_git(d, root, write=False)[1] for d in dirs):
+        raise ValueError("[git] is out of date; run `aihub dev doctor` to fix it")
+
+
+def dev_tree_solve(a):
+    """Resolve nested repositories, then re-sync [git]. Asks per folder on a terminal; --nested merge|keep answers for all."""
+    root = _root(a)
+    dirs = _projects(a)
+    resolved, left = ws.solve(root, dirs, mode=a.nested, remote=a.remote)
+    ui.out()
+    if left:
+        raise ValueError("%d problem(s) still open; see `aihub dev tree`" % left)
+    ui.good("workspace is clean" if not resolved else "resolved %d nested repositor%s" % (resolved, "y" if resolved == 1 else "ies"))
+
+
+def dev_publish(a):
+    """Publish each selected package on its own: a problem in one is reported and skipped, the others still go out."""
+    roots = _projects(a)
+    top_root = _root(a)
+    if len(roots) > 1 and not a.only:
+        roots = ui.select("Publish which packages?", [(d, _label(a, d)) for d in roots], multi=True, preset=tuple(roots))
+        if not roots:
+            return ui.note("nothing selected")
+    with_path = lambda d: argparse.Namespace(**dict(vars(a), path=d))
+    failed, ready = [], []
+    for d in roots:                                  # phase 1: prepare. Nothing is pushed yet
+        label = _label(a, d)
+        try:
+            ws.fix_git(d, top_root)                  # [git] follows the repository's real remote / branch / folder
+            block = ws.blocking(ws.inspect_package(d, top_root))
+            if block:
+                raise ValueError("%s (fix with: aihub dev tree-solve)" % block[0][1])
+            if a.bump:
+                m = _load(with_path(d))
+                p = os.path.join(d, "aihub.toml")
+                t = open(p).read()
+                old = m["package"]["version"]
+                open(p, "w").write(t.replace('version = "%s"' % old, 'version = "%s"' % V.bump(old, a.bump), 1))
+            m = dev_validate(with_path(d), quiet=True)
+            ready.append((d, pub.publish(d, m, push_now=False)))      # one commit per package: history says which was released
+        except (api.ApiError, ValueError, KeyError, OSError, gitx.GitError) as e:
+            ui.bad("%s: %s" % (label, e))
+            failed.append(label)
+    pushed = []
+    repos = {}
+    for d, info in ready:
+        repos.setdefault(pub.toplevel(d), []).append((d, info))
+    for top, items in repos.items():                 # phase 2: one push per repository
+        try:
+            pub.push(items[0][0])
+            pushed += items
+        except (gitx.GitError, ValueError) as e:
+            ui.bad("push to %s failed: %s" % (gitx.redact_url(items[0][1]["git_url"]), e))
+            failed += [_label(a, d) for d, _ in items]
+    queued = False
+    for d, info in pushed:
+        queued = not pub.report(info) or queued
+        ui.celebrate("Published %s %s" % (info["package"], info["version"]))
+        ui.info("repo:    %s @ %s (%s)" % (info["git_url"], info["git_branch"], info["commit"][:8]))
+        ui.info("install: aihub install %s" % info["package"])
+    if queued:
         ui.note("publish event queued; it will be sent when Langfuse is reachable (aihub flush)")
+    if failed:
+        raise ValueError("%d of %d package(s) not published: %s%s" % (len(failed), len(roots), ", ".join(failed),
+                                                                 "; the other %d went out" % len(pushed) if pushed else ""))
 
 
 def dev_index(a):
@@ -601,7 +875,7 @@ def build_parser():
         ("Manage", ["enable", "disable", "tree", "lock", "sync"]),
         ("Account", ["config", "login", "register"]),
         ("Publish", ["dev"]),
-        ("Setup and maintenance", ["welcome", "doctor", "version", "upgrade", "hook", "flush", "hooks", "skill"]),
+        ("Setup and maintenance", ["welcome", "doctor", "version", "upgrade", "hook", "flush", "hooks", "skill", "self-uninstall"]),
     ]
 
     def add(name, fn, help, description, epilog, *args):
@@ -726,6 +1000,10 @@ def build_parser():
         "Examples:\n  aihub hooks install\n  aihub hooks install --tool claude\n  aihub hooks remove",
         arg("action", nargs="?", choices=["install", "remove"], default="install", metavar="ACTION", help="Install hooks (default) or remove them."),
         arg("--tool", action="append", metavar="TOOL", help="Only process this detected tool; repeat to filter multiple tools."))
+    add("self-uninstall", cmd_self_uninstall, "Remove aihub itself from this machine.",
+        "Uninstall every installed package, remove the usage hooks from your AI tools, delete the PATH line that install.sh added to your shell config, and delete the aihub folder (~/.aihub, or $AIHUB_HOME). Asks first unless --yes. Your published packages and git repositories are not touched. To remove one package, use `aihub uninstall NAME`.",
+        "Examples:\n  aihub self-uninstall\n  aihub self-uninstall --yes",
+        arg("-y", "--yes", action="store_true", help="Do not ask for confirmation."))
     add("skill", cmd_skill, "Install or remove the built-in skill packages.",
         "Install, repair or remove the built-in packages (aihub-guide and aihub-package). They are ordinary hub packages, published by the server on startup and installed automatically by the hub installer; this command re-runs that step. Use `aihub update` to upgrade them and `aihub uninstall <name>` to remove one.",
         "Examples:\n  aihub skill install\n  aihub skill install --tool claude\n  aihub skill remove",
@@ -734,16 +1012,21 @@ def build_parser():
 
     dev = sp.add_parser("dev", help="Create, validate, build, publish, and inspect packages.",
                         description="Develop an AI Hub package from an aihub.toml project: generate starter files, lint the manifest, build an archive, publish releases, or inspect usage statistics.",
-                        epilog="Examples:\n  aihub dev init . --type skill --name my-skill\n  aihub dev validate\n  aihub dev publish --bump patch",
+                        epilog="Examples:\n  aihub dev init . --type skill --name my-skill\n  aihub dev validate\n  aihub dev publish --bump patch\n  aihub dev publish ./builtin --only aihub-guide   (one package of a workspace)",
                         formatter_class=HelpFormatter)
     ds = dev.add_subparsers(dest="dcmd", required=True, metavar="command")
     dev_commands = [
         ("init", dev_init, "Create starter files for a package project.",
          "Create an aihub.toml manifest and starter files for the selected package type in PATH. Existing generated files are left alone unless --force is used; --force overwrites generated starter files.",
-         "Examples:\n  aihub dev init . --type skill --name my-skill\n  aihub dev init ./server --type mcp --description \"Example MCP server\"",
+         "Examples:\n  aihub dev init . --type skill --name my-skill\n  aihub dev init ./server --type mcp --description \"Example MCP server\"\n  aihub dev init builtin --sub --name my-skill   (-> builtin/my-skill, next to the other packages)",
          [arg("--name", metavar="NAME", help="Package name (default: derived from the project directory)."),
           arg("--type", default="skill", choices=["skill", "agent", "mcp", "tool", "setup"], metavar="TYPE", help="Starter package type (default: skill)."),
           arg("--description", metavar="TEXT", help="Starter package description."),
+          arg("--sub", action="store_true", help="Create the package in its own folder PATH/NAME, for a folder that holds several packages (needs --name)."),
+          arg("--mono", action="store_true", help="PATH becomes one git repository holding several packages (see --packages). Packages already below PATH are kept; only their [git] is refreshed."),
+          arg("--packages", action="append", metavar="LIST", help="With --mono: packages to create, comma separated, each NAME or NAME:TYPE (e.g. --packages guide,tools:mcp)."),
+          arg("--remote", metavar="URL", help="With --mono: git remote for the whole repository (asked once when omitted)."),
+          arg("--branch", metavar="BRANCH", help="With --mono: branch to publish (default: main)."),
           arg("--force", action="store_true", help="Overwrite generated starter files that already exist.")]),
         ("validate", dev_validate, "Validate and lint the package project.",
          "Parse and normalize PATH/aihub.toml, then lint the manifest and referenced package files. Report warnings and fail if validation errors are found.",
@@ -759,6 +1042,22 @@ def build_parser():
          "Ask the hub to read this project's pushed commit and add the version to the package index. Use it when the automatic step after `aihub dev publish` did not happen (lost event, Langfuse down). Needs `aihub login` with an account whose role has the 'index' permission. The hub checks aihub.toml at that commit; nothing from your machine is trusted but the repo location.",
          "Examples:\n  aihub dev index\n  aihub dev index --commit 1a2b3c4",
          [arg("--commit", metavar="SHA", default="", help="Index this commit instead of HEAD (must be pushed).")]),
+        ("tree", dev_tree, "Show the packages here as a tree, with repository status.",
+         "Show every package below PATH (or the one in PATH) with its version and type, the git repository it belongs to, and whether its [git] table matches that repository. Lists what to fix and the command that fixes it.",
+         "Example:\n  aihub dev tree ./builtin", []),
+        ("doctor", dev_doctor, "Fix [git] url, branch and subdir to match the real repository.",
+         "For the package in PATH, or every package below it, set [git] in aihub.toml from the working repository: its origin URL, the branch it is on, and the package's folder inside it. Nothing else in the manifest changes. Problems it cannot decide for you (no repository, nested .git, duplicate names) are listed. `aihub dev publish` does this fix automatically.",
+         "Examples:\n  aihub dev doctor\n  aihub dev doctor ./builtin\n  aihub dev doctor --check\n  aihub dev doctor --remote https://git.example/team/builtin.git",
+         [arg("--check", action="store_true", help="Only report what would change; exit with an error if anything is out of date."),
+          arg("--remote", metavar="URL", help="Point the repository's origin at this URL first, then update [git] everywhere.")]),
+        ("tree-solve", dev_tree_solve, "Resolve nested git repositories in the workspace.",
+         "Find package folders that hold their own .git inside another repository (the outer repository cannot publish those files) and resolve them. `merge` folds the folder into the outer repository and moves its old .git to ~/.aihub/backups; `keep` leaves it a separate repository and makes the outer one ignore it, so you manage it directly. Asks per folder on a terminal. Afterwards every [git] is refreshed.",
+         "Examples:\n  aihub dev tree-solve\n  aihub dev tree-solve --nested merge",
+         [arg("--nested", choices=["merge", "keep"], metavar="MODE", help="Answer for every nested repository: merge or keep."),
+          arg("--remote", metavar="URL", help="Also set the outer repository's origin to this URL.")]),
+        ("list", dev_list, "List the packages in this folder.",
+         "Show every package (folder with an aihub.toml) in PATH or below it, with its version and whether it has uncommitted changes. Use the names with --only.",
+         "Example:\n  aihub dev list ./builtin", []),
         ("stats", dev_stats, "Show usage statistics for this package.",
          "Read usage statistics for the package named in PATH/aihub.toml. Non-interactive output is JSON.",
          "Example:\n  aihub dev stats ./my-skill", []),
@@ -767,10 +1066,12 @@ def build_parser():
         p = ds.add_parser(n, help=help, description=description, epilog=epilog,
                           formatter_class=HelpFormatter)
         p.add_argument("path", nargs="?", default=".", metavar="PATH",
-                       help="Project directory containing aihub.toml (default: current directory).")
+                       help="Package directory containing aihub.toml, or a folder holding several packages (default: current directory).")
         for e in extra:
             p.add_argument(*e[0], **e[1])
-        p.set_defaults(fn=fn)
+        if n not in ("init", "list"):
+            p.add_argument("--only", action="append", metavar="NAME", help="In a folder of several packages, work on just these (folder or package name; repeat or comma-separate).")
+        p.set_defaults(fn=fn if n in ("init", "list", "publish", "tree", "doctor", "tree-solve") else _each(fn))
     return ap
 
 

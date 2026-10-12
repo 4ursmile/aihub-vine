@@ -70,7 +70,7 @@ class Force(unittest.TestCase):
 class Cli(unittest.TestCase):
     def test_command_registered(self):
         a = main.build_parser().parse_args(["dev", "index", "--commit", "abc123"])
-        self.assertIs(a.fn, main.dev_index)
+        self.assertIs(a.fn.__wrapped__, main.dev_index)   # wrapped to run once per package of a workspace
         self.assertEqual(a.commit, "abc123")
 
     def test_403_gets_a_clear_message(self):

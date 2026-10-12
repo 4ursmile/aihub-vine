@@ -238,7 +238,7 @@ class Repos:
     def _like(v):
         return "%" + str(v).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
-    def audit_search(self, source="tools", q="", actor="", action="", package="", kind="", since=0, until=0, limit=100, offset=0):
+    def audit_search(self, source="tools", q="", actor="", action="", package="", kind="", since=0, until=0, limit=100, offset=0, host="", os=""):
         """Security audit. source='tools': agent tool calls and installs (events). source='admin': account/role/setting changes."""
         c, args, w = self.db.conn(), [], ["1=1"]
         if source == "admin":
@@ -251,10 +251,12 @@ class Repos:
                 args += [self._like(q)] * 4
         else:
             t, tscol = "events e", "e.ts"
-            ts = ("e.id,e.ts,e.kind,e.package,e.version,e.component," + ACTOR + " AS actor,e.username,e.local_user,e.host,"
+            ts = ("e.id,e.ts,e.kind,e.package,e.version,e.component," + ACTOR + " AS actor,e.username,e.local_user,e.host,e.os,"
                   "e.source,e.detail,e.cwd,e.ip,e.client_id")
             if actor: w.append(ACTOR + "=?"); args.append(actor)
             if kind: w.append("e.kind=?"); args.append(kind)
+            if host: w.append("e.host=?"); args.append(host)
+            if os: w.append("e.os=?"); args.append(os)
             if package: w.append("e.package=?"); args.append(package)
             if action: w.append("e.component LIKE ? ESCAPE '\\'"); args.append(self._like(action))
             if q:
@@ -268,6 +270,11 @@ class Repos:
         rows = _rows(c.execute("SELECT " + ts + " FROM " + t + where + " ORDER BY " + tscol + " DESC, " + t.split()[1] + ".id DESC LIMIT ? OFFSET ?",
                                args + [limit, offset]))
         return {"total": int(total), "items": rows}
+
+    def audit_devices(self):
+        c = self.db.conn()
+        return {"hosts": [r[0] for r in c.execute("SELECT DISTINCT host FROM events WHERE host IS NOT NULL AND host<>'' ORDER BY 1 LIMIT 500")],
+                "oses": [r[0] for r in c.execute("SELECT DISTINCT os FROM events WHERE os IS NOT NULL AND os<>'' ORDER BY 1 LIMIT 50")]}
 
     def audit_actors(self):
         c = self.db.conn()
@@ -667,10 +674,10 @@ class Repos:
         with self.lock:
             c = self.db.conn()
             for r in rows:
-                for k in ("source", "local_user", "host", "detail", "cwd", "ip"):
+                for k in ("source", "local_user", "host", "os", "detail", "cwd", "ip"):
                     r.setdefault(k, None)
-            c.executemany("INSERT INTO events(ts,kind,package,version,client_id,username,component,duration,source,local_user,host,detail,cwd,ip) "
-                          "VALUES(:ts,:kind,:package,:version,:client_id,:username,:component,:duration,:source,:local_user,:host,:detail,:cwd,:ip)", rows)
+            c.executemany("INSERT INTO events(ts,kind,package,version,client_id,username,component,duration,source,local_user,host,os,detail,cwd,ip) "
+                          "VALUES(:ts,:kind,:package,:version,:client_id,:username,:component,:duration,:source,:local_user,:host,:os,:detail,:cwd,:ip)", rows)
             c.commit()
 
     def events_insert_ext(self, rows):
@@ -681,10 +688,10 @@ class Repos:
             c = self.db.conn()
             before = c.execute("SELECT COUNT(*) FROM events WHERE ext_id IS NOT NULL").fetchone()[0]
             for r in rows:
-                for k in ("source", "local_user", "host", "detail", "cwd", "ip", "version", "client_id", "component", "duration"):
+                for k in ("source", "local_user", "host", "os", "detail", "cwd", "ip", "version", "client_id", "component", "duration"):
                     r.setdefault(k, None)
-            c.executemany("INSERT OR IGNORE INTO events(ts,kind,package,version,client_id,username,component,duration,source,local_user,host,detail,cwd,ip,ext_id) "
-                          "VALUES(:ts,:kind,:package,:version,:client_id,:username,:component,:duration,:source,:local_user,:host,:detail,:cwd,:ip,:ext_id)", rows)
+            c.executemany("INSERT OR IGNORE INTO events(ts,kind,package,version,client_id,username,component,duration,source,local_user,host,os,detail,cwd,ip,ext_id) "
+                          "VALUES(:ts,:kind,:package,:version,:client_id,:username,:component,:duration,:source,:local_user,:host,:os,:detail,:cwd,:ip,:ext_id)", rows)
             c.commit()
             return c.execute("SELECT COUNT(*) FROM events WHERE ext_id IS NOT NULL").fetchone()[0] - before
 
@@ -753,7 +760,8 @@ class Repos:
                          "WHERE e.ts>=?" + (" AND e.ts<?" if until else "") + flt + " GROUP BY p.id",
                          [since] + ([until] if until else []) + list(args)).fetchall()
         score = {}
-        for pid, n in used:
+        for row in used:
+            pid, n = row[0], row[1]                  # by position: a Postgres Row iterates its keys, not its values
             live = [v for v in self.versions(pid) if not v["yanked"]]
             authors = [a.get("name") or a.get("email") for a in (((live[0]["manifest"] if live else {}).get("package") or {}).get("authors") or [])]
             if not any(authors):
@@ -798,7 +806,7 @@ class Repos:
         return (end - start).days + 1, start, since, until
 
     def _dash_filter(self, viewer, type=None, package=None, user=None, source=None, kind=None,
-                     identity=None, host=None, q=None):
+                     identity=None, host=None, q=None, os=None):
         """-> (sql, args) appended to `... WHERE e.ts>=? ...`. Only events of packages the viewer may see."""
         vsql, va = self.visible_sql(viewer, "vp")
         pf = " AND e.package IN (SELECT vp.name FROM packages vp WHERE %s%s)" % (vsql, " AND vp.type=?" if type else "")
@@ -817,20 +825,22 @@ class Repos:
             pf += " AND e.username IS NOT NULL"
         if host:
             pf += " AND e.host=?"; pa.append(host)
+        if os:
+            pf += " AND e.os=?"; pa.append(os)
         if q:
             pf += " AND (e.package LIKE ? ESCAPE '\\' OR e.component LIKE ? ESCAPE '\\')"
             pa += [self._like(q)] * 2
         return pf, pa
 
     def dashboard(self, days=30, package=None, viewer=None, type=None, user=None, source=None, kind=None,
-                  identity=None, host=None, q=None, date_from=None, date_to=None):
+                  identity=None, host=None, q=None, date_from=None, date_to=None, os=None):
         """Aggregated usage for the dashboard. All times UTC; one daily bucket per day of the window."""
         import datetime
         days, start_day, since, until = self._window(days, date_from, date_to)
         now = until - 1
         prev = since - days * 86400
         c = self.db.conn()
-        pf, pa = self._dash_filter(viewer, type, package, user, source, kind, identity, host, q)
+        pf, pa = self._dash_filter(viewer, type, package, user, source, kind, identity, host, q, os)
         pf += " AND e.ts<?"; pa.append(until)
         actor = "COALESCE(e.username, e.client_id)"
 
@@ -853,6 +863,12 @@ class Repos:
             d = (start_day + datetime.timedelta(days=i)).isoformat()
             daily.append(dict({"date": d, "install": 0, "use": 0, "update": 0, "uninstall": 0, "error": 0, "publish": 0}, **series.get(d, {})))
         rows = lambda q, a: [dict(r) for r in c.execute(q, a)]
+        by_day = {}
+        for d, o, n in c.execute("SELECT strftime('%Y-%m-%d',e.ts,'unixepoch'),COALESCE(e.os,'unknown'),COUNT(*) FROM events e WHERE e.ts>=?" + pf +
+                                 " GROUP BY 1,2", [since] + pa):
+            by_day.setdefault(d, {})[o] = n
+        os_names = sorted({o for v in by_day.values() for o in v})
+        os_daily = {"series": os_names, "daily": [dict({"date": x["date"]}, **by_day.get(x["date"], {})) for x in daily]}
         vs2, va2 = self.visible_sql(viewer, "vp")
         scope = " e.package IN (SELECT vp.name FROM packages vp WHERE %s) AND e.ts>=?" % vs2
         options = {
@@ -860,6 +876,7 @@ class Repos:
                                               + scope + " ORDER BY n LIMIT 200", va2 + [since])],
             "sources": [r[0] for r in c.execute("SELECT DISTINCT COALESCE(e.source,'cli') n FROM events e WHERE" + scope + " ORDER BY n", va2 + [since])],
             "types": [r[0] for r in c.execute("SELECT DISTINCT p.type FROM packages p WHERE " + vs2.replace("vp.", "p.") + " ORDER BY 1", va2)],
+            "oses": [r[0] for r in c.execute("SELECT DISTINCT e.os n FROM events e WHERE e.os IS NOT NULL AND" + scope + " ORDER BY n LIMIT 50", va2 + [since])],
             "hosts": [r[0] for r in c.execute("SELECT DISTINCT e.host n FROM events e WHERE e.host IS NOT NULL AND" + scope + " ORDER BY n LIMIT 200", va2 + [since])],
         }
         stamps = [r[0] for r in c.execute("SELECT e.ts FROM events e WHERE e.ts>=?" + pf + " LIMIT 50000", [since] + pa)]
@@ -869,13 +886,16 @@ class Repos:
             heat[d.weekday()][d.hour] += 1
         return {
             "days": days, "package": package,
-            "filters": {"type": type, "user": user, "source": source, "kind": kind, "identity": identity, "host": host, "q": q,
+            "filters": {"type": type, "user": user, "source": source, "kind": kind, "identity": identity, "host": host, "os": os, "q": q,
                         "from": start_day.isoformat(), "to": (start_day + datetime.timedelta(days=days - 1)).isoformat()},
             "heatmap": heat,
             "top_components": rows("SELECT e.component AS name,e.package AS package,COUNT(*) AS count FROM events e "
                                    "WHERE e.component IS NOT NULL AND e.ts>=?" + pf + " GROUP BY e.component,e.package ORDER BY count DESC LIMIT 10", [since] + pa),
             "by_host": rows("SELECT COALESCE(e.host,'unknown') AS name,COUNT(*) AS count FROM events e WHERE e.ts>=?" + pf +
                             " GROUP BY 1 ORDER BY count DESC LIMIT 10", [since] + pa),
+            "by_os": rows("SELECT COALESCE(e.os,'unknown') AS name,COUNT(*) AS count FROM events e WHERE e.ts>=?" + pf +
+                          " GROUP BY 1 ORDER BY count DESC LIMIT 10", [since] + pa),
+            "by_os_daily": os_daily,
             "by_identity": rows("SELECT CASE WHEN e.username IS NULL THEN 'anonymous' ELSE 'signed in' END AS name,COUNT(*) AS count FROM events e "
                                 "WHERE e.ts>=?" + pf + " GROUP BY 1 ORDER BY count DESC", [since] + pa),
             "options": options,
@@ -909,7 +929,7 @@ class Repos:
         total = c.execute("SELECT COUNT(*) FROM events e WHERE e.ts>=?" + pf, [since] + pa).fetchone()[0]
         per_page = max(1, min(int(per_page), 100)); page = max(1, int(page))
         items = [dict(r) for r in c.execute(
-            "SELECT e.ts,e.kind,e.package,e.version,e.component," + ACTOR + " AS actor,COALESCE(e.source,'cli') AS source,e.host "
+            "SELECT e.ts,e.kind,e.package,e.version,e.component," + ACTOR + " AS actor,COALESCE(e.source,'cli') AS source,e.host,e.os "
             "FROM events e WHERE e.ts>=?" + pf + " ORDER BY e.ts DESC,e.id DESC LIMIT ? OFFSET ?",
             [since] + pa + [per_page, (page - 1) * per_page])]
         return {"total": total, "page": page, "per_page": per_page, "items": items}

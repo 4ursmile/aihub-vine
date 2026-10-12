@@ -71,8 +71,12 @@ def _authors(raw) -> list:
     """authors = ["Ada <ada@x.org>", {name = "Bob", email = "b@x.org", url = "https://..."}] -> [{name, email?, url?}]."""
     if isinstance(raw, (str, dict)):
         raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return []                                    # display metadata must never stop a package from installing or syncing
     out = []
-    for a in raw or []:
+    for a in raw:
+        if not isinstance(a, (str, dict)):
+            continue
         if isinstance(a, dict):
             a = {k: str(a[k]).strip() for k in ("name", "email", "url") if a.get(k)}
         else:
