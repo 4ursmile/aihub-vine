@@ -1092,6 +1092,9 @@ def main(argv=None):
         if ui.INTERACTIVE and a.cmd not in ("hook", "flush", "welcome", "config") and not os.path.exists(paths.p(".welcomed")):
             cmd_welcome(argparse.Namespace(yes=False))
         a.fn(a)
+        if a.cmd not in ("hook", "flush", "hooks", "self-uninstall", "uninstall"):
+            from . import hooks
+            hooks.verify()      # install/use/update/...: make sure our usage hooks are still in place
         updater.auto(a.cmd)
         remote_config.auto(a.cmd)
     except (api.ApiError, ValueError, KeyError, OSError) as e:

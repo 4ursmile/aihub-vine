@@ -5,6 +5,7 @@ import tarfile
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
@@ -258,6 +259,29 @@ class Integrations(unittest.TestCase):
         g = json.load(open(p))["hooks"]["PreToolUse"]
         self.assertEqual(g[0]["hooks"][0]["command"], "mine")
         self.assertFalse(c.has_hook())
+
+    def test_claude_hook_minimal_edit_and_self_heal(self):
+        import json
+        from aihub.cli import hooks, integrations as I
+        p = os.path.join(self.h, ".claude", "settings.json")
+        os.makedirs(os.path.dirname(p))
+        orig = {"model": "x", "permissions": {"allow": ["Bash(ls)"]},
+                "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "bye"}]}]}}
+        json.dump(orig, open(p, "w"))
+        c = I.ClaudeCode()
+        self.assertTrue(c.install_hook("/x/aihub hook"))
+        d = json.load(open(p))
+        self.assertEqual(d["model"], "x"); self.assertEqual(d["permissions"], orig["permissions"])
+        self.assertEqual(d["hooks"]["Stop"], orig["hooks"]["Stop"])
+        self.assertEqual(set(d["hooks"]), {"Stop", "PreToolUse", "UserPromptSubmit"})
+        self.assertFalse(c.install_hook("/x/aihub hook"))          # already right: no write
+        self.assertFalse(c.has_hook("/y/aihub hook"))               # moved binary counts as outdated
+        d["hooks"]["PreToolUse"] = []
+        json.dump(d, open(p, "w"))
+        self.assertFalse(c.has_hook())
+        with mock.patch.object(hooks, "hook_cmd", return_value="/x/aihub hook"):
+            hooks.verify()
+        self.assertTrue(c.has_hook("/x/aihub hook"))
 
     def test_setup_profile_apply_and_revert(self):
         from aihub.cli import setup as S

@@ -36,11 +36,23 @@ def ensure(only=None, remove=False):
             elif t.name == "codex":
                 out.append((t.label, "no tool-call hook available (install/uninstall events only)"))
             else:
-                t.install_hook(hook_cmd())
-                out.append((t.label, "installed"))
+                out.append((t.label, "installed" if t.install_hook(hook_cmd()) is not False else "already installed"))
         except Exception as e:
             out.append((t.label, "failed: %s" % e))
     return out
+
+
+def verify():
+    """Cheap self-heal, run after commands: re-add a missing or outdated usage hook. Never raises, never prompts."""
+    try:
+        cmd = hook_cmd()
+        for t in integrations.detected():
+            if t.name == "claude" and not t.has_hook(cmd):
+                t.install_hook(cmd)
+            elif t.name == "opencode" and not t.has_hook():
+                t.install_hook(cmd)
+    except Exception:
+        pass
 
 
 def _components():

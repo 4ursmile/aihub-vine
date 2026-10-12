@@ -135,23 +135,40 @@ class ClaudeCode(Tool):
 
     EVENTS = ("PreToolUse", "UserPromptSubmit")     # tool calls, and "/skill" typed by the user (no tool call)
 
-    def has_hook(self):
+    def _want(self, cmd): return cmd + " --source claude"
+
+    def has_hook(self, cmd=None):
+        """True when every event has our hook; with `cmd`, also only when it is exactly the current command."""
         try:
             d = _read_json(self._settings())
         except ValueError:
             return False
-        return all(any(self._ours(h) for g in d.get("hooks", {}).get(ev, []) for h in g.get("hooks", [])) for ev in self.EVENTS)
+        hk = d.get("hooks")
+        hk = hk if isinstance(hk, dict) else {}
+        for ev in self.EVENTS:
+            ours = [h for g in hk.get(ev) or [] if isinstance(g, dict) for h in g.get("hooks") or [] if isinstance(h, dict) and self._ours(h)]
+            if len(ours) != 1 or (cmd and ours[0].get("command") != self._want(cmd)):
+                return False
+        return True
 
     def install_hook(self, cmd):
+        """Add only our hook entries; every other setting and hook is left as is. Writes nothing when already correct."""
+        if self.has_hook(cmd):
+            return False
         d = _read_json(self._settings())
+        if not isinstance(d.get("hooks"), dict):
+            d["hooks"] = {}
         for ev in self.EVENTS:
-            groups = d.setdefault("hooks", {}).setdefault(ev, [])
+            groups = d["hooks"].get(ev)
+            if not isinstance(groups, list):
+                groups = d["hooks"][ev] = []
             for g in groups:  # drop stale copies of ours, then add fresh
-                g["hooks"] = [h for h in g.get("hooks", []) if not self._ours(h)]
-            groups[:] = [g for g in groups if g.get("hooks")]
-            g = {"hooks": [{"type": "command", "command": cmd + " --source claude", "timeout": 5}]}
+                if isinstance(g, dict) and isinstance(g.get("hooks"), list):
+                    g["hooks"] = [h for h in g["hooks"] if not (isinstance(h, dict) and self._ours(h))]
+            groups[:] = [g for g in groups if not (isinstance(g, dict) and "hooks" in g and not g["hooks"])]
+            g = {"hooks": [{"type": "command", "command": self._want(cmd), "timeout": 5}]}
             if ev == "PreToolUse":
-                g["matcher"] = "*"
+                g["matcher"] = "*"      # every tool call: Skill, Task (agents), mcp__server__tool, ...
             groups.append(g)
         _write_json(self._settings(), d)
         return True
