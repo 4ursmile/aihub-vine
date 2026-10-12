@@ -10,8 +10,20 @@ class GitError(Exception):
     pass
 
 
+BATCH = False           # set by the server: no person is there to answer a prompt, so git must fail fast instead of waiting forever
+NETWORK = ("fetch", "push", "ls-remote", "clone", "pull")
+NETWORK_TIMEOUT = 300   # seconds; in BATCH mode a network command never runs without a limit
+
+
 def _env(extra_env=None):
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **tls.git_env())
+    env.setdefault("GIT_HTTP_LOW_SPEED_LIMIT", "1000")             # a stalled https transfer (proxy, dead link) aborts instead of hanging
+    env.setdefault("GIT_HTTP_LOW_SPEED_TIME", "60")
+    if BATCH:
+        env.setdefault("GCM_INTERACTIVE", "never")                 # Git Credential Manager: no sign-in window
+        env.setdefault("GIT_ASKPASS", "echo")                      # any askpass prompt gets an empty answer -> auth fails with a message
+        env.setdefault("SSH_ASKPASS", "echo")
+        env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=20")
     if extra_env:
         env.update(extra_env)
     return env
@@ -19,6 +31,8 @@ def _env(extra_env=None):
 
 def run(args, cwd=None, check=True, timeout=None, input=None, extra_env=None):
     env = _env(extra_env)
+    if timeout is None and BATCH and args and args[0] in NETWORK:
+        timeout = NETWORK_TIMEOUT
     try:
         r = subprocess.run(["git"] + list(args), cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout, input=input)
     except subprocess.TimeoutExpired:
@@ -134,23 +148,27 @@ def is_repo(cwd="."):
     return run(["rev-parse", "--is-inside-work-tree"], cwd=cwd, check=False) == "true"
 
 
-def remote_head(url, branch):
-    out = run(["ls-remote", url, "refs/heads/" + branch], check=False)
+def remote_head(url, branch, timeout=60):
+    out = run(["ls-remote", url, "refs/heads/" + branch], check=False, timeout=timeout)
     return out.split()[0] if out else None
 
 
 def remote_empty(url):
     """True when the remote is reachable but has no commits at all (a freshly created repo). An unreachable or
     unauthorised remote is NOT empty: that stays an error."""
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **tls.git_env())
-    r = subprocess.run(["git", "ls-remote", url], env=env, capture_output=True, text=True)
+    try:
+        r = subprocess.run(["git", "ls-remote", url], env=_env(), capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return False
     return r.returncode == 0 and not r.stdout.strip()
 
 
 def reachable(url):
     """True when `git ls-remote` succeeds (the repo exists and we may read it), whether or not it has any branch."""
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **tls.git_env())
-    return subprocess.run(["git", "ls-remote", url], env=env, capture_output=True, text=True).returncode == 0
+    try:
+        return subprocess.run(["git", "ls-remote", url], env=_env(), capture_output=True, text=True, timeout=60).returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def large_files(cwd, limit_mb=50):

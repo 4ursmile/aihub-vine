@@ -657,6 +657,23 @@ class Inbox(unittest.TestCase):
         self.assertTrue(self.sy.pull_events())
         self.assertEqual(self.refs(), [])
 
+    def test_data_dir_with_a_literal_tilde_still_archives(self):
+        """A .env saying AIHUB_DATA_DIR=~/.aihub/data is not expanded by any shell: git, run inside the repo folder, could not open the
+        scratch files ('could not open ~/.aihub/data/.../.archive/0.jsonl'), so nothing was archived and the inbox was never emptied."""
+        from aihub.cli import telemetry
+        from aihub.server.config import Settings as St
+        home = tempfile.mkdtemp()
+        with unittest.mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
+            st = St.load(env={"AIHUB_DATA_DIR": "~/.aihub/data", "AIHUB_TELEMETRY_URL": self.inbox}, env_file=os.devnull)
+            self.assertEqual(st.data_dir, os.path.join(home, ".aihub", "data"))
+            st.seed_builtin, st.sync_enabled = False, False
+            c = TestClient(create_app(st))
+            telemetry.push(self.inbox, [json.dumps(obs("tilde1"))])
+            c.app.state.sync.pull_events()
+        self.assertIsNone(c.app.state.sync.status["archive_error"])
+        self.assertEqual(self.refs(), [])
+        self.assertEqual(len(self.git("ls-tree", "-r", "--name-only", "telemetry-archive").split()), 1)
+
     def test_deliver_pushes_now_or_spools(self):
         from aihub.cli import telemetry
         with unittest.mock.patch.object(telemetry, "kick", lambda: None):

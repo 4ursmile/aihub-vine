@@ -33,6 +33,24 @@ def parse_env_file(path):
     return out
 
 
+def _path(p):
+    """~ and $VARS expanded, made absolute. A .env or a Windows service passes '~/.aihub/data' literally."""
+    return os.path.abspath(os.path.expandvars(os.path.expanduser(str(p)))) if p else p
+
+
+def _data_path(p):
+    """Like _path, but a server that already ran with the unexpanded value created a folder literally named '~' in its working directory
+    and keeps its database there. Keep using that folder (with a warning) until someone moves it, instead of starting an empty database."""
+    full = _path(p)
+    literal = os.path.abspath(str(p or ""))
+    if full != literal and not os.path.exists(full) and os.path.isdir(literal):
+        import logging
+        logging.getLogger("aihub").warning("data folder %s does not exist but %s does (created when '~' was not expanded); using it. "
+                                           "Move it to %s to silence this.", full, literal, full)
+        return literal
+    return full
+
+
 @dataclass
 class Settings:
     # --- server
@@ -80,7 +98,7 @@ class Settings:
     @classmethod
     def load(cls, env=None, env_file=None, **overrides):
         env = dict(os.environ if env is None else env)
-        data_dir = overrides.get("data_dir") or env.get("AIHUB_DATA_DIR") or "./aihub-data"
+        data_dir = _path(overrides.get("data_dir") or env.get("AIHUB_DATA_DIR") or "./aihub-data")
         cands = [env_file, env.get("AIHUB_ENV_FILE"), ".env", os.path.join(data_dir, ".env")]
         used, file_vals = "", {}
         for c in cands:
@@ -108,6 +126,9 @@ class Settings:
         for k, v in overrides.items():
             if v is not None and hasattr(s, k):
                 setattr(s, k, v)
+        s.data_dir = _data_path(s.data_dir)         # "~/.aihub/data" from a .env is NOT expanded by any shell; relative paths break git (cwd differs)
+        if s.sqlite_path:
+            s.sqlite_path = _path(s.sqlite_path)
         s.validate()
         return s
 

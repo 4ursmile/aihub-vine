@@ -148,6 +148,10 @@ class Sync:
             return 60
 
     def start(self):
+        gitx.BATCH = True                                   # server: git must never wait for a prompt nobody can answer
+        url, branch, path = self.index_source()
+        log.info("sync: usage inbox %s (branch %s, archive %s); package index %s (branch %s, folder %s)",
+                 gitx.redact_url(self.inbox()) or "-", self.inbox_branch(), self.archive_branch(), gitx.redact_url(url) or "-", branch, path)
         self.t = threading.Thread(target=self._loop, name="aihub-sync", daemon=True)
         self.t.start()
 
@@ -189,7 +193,7 @@ class Sync:
             if self.status.get("archive_error"):                        # pull_events handled it and carried on; it must still be visible
                 errors.append(self.status["archive_error"])
         try:
-            if first or new_publish or self.repos.setting("sync_index_dirty") == "1":
+            if first or new_publish or self.repos.setting("sync_index_dirty") == "1" or self._index_moved():
                 self.pull_index()
         except Exception as e:
             msg = gitx.redact_url(str(e))[:250]
@@ -201,6 +205,15 @@ class Sync:
         if errors:
             raise RuntimeError(self.status["last_error"])               # the loop and "Sync now" report it; the cursor is NOT advanced
         self.repos.set_setting("sync_cursor", time.time())             # "an events pass completed"; empty = never (first run, forced re-sync)
+
+    def _index_moved(self):
+        """True when the index branch has a commit this server has not read (someone pushed to it directly, or a publish event was missed).
+        One `ls-remote`: the index is no longer re-read only when a publish event arrives."""
+        url, branch, _ = self.index_source()
+        if not url or os.path.exists(url):
+            return bool(url)                                            # local file/folder: pull_index compares mtime/digest itself
+        head = gitx.remote_head(url, branch)
+        return not head or head != self.repos.setting("sync_index_rev")
 
     def _needs_replay(self):
         """True when the cursor says events were pulled before but the table holds none (database replaced / lost), or an admin asked
@@ -247,7 +260,7 @@ class Sync:
         return total
 
     def _inbox_dir(self, url):
-        work = os.path.join(self.s.data_dir, "telemetry-repo")
+        work = os.path.abspath(os.path.join(self.s.data_dir, "telemetry-repo"))
         os.makedirs(work, exist_ok=True)
         d = gitx.cache_dir(url, work)
         if not os.path.isdir(os.path.join(d, ".git")):
@@ -320,7 +333,9 @@ class Sync:
         self.status["archive_error"] = None
         d = self._inbox_dir(url)
         found = self._collect(d)
+        self.status["inbox_pending"] = len(found)
         if not found:
+            log.debug("sync: no batches waiting on %s", self.inbox_branch())
             return False                                                # idle inbox: nothing to read, archive, trim or gc
         sizes = gitx.objects(d, [blob for _, blob, _, _ in found])
         rows, pubs, publish, batches, done, texts = [], {}, False, [], [], {}
@@ -350,6 +365,7 @@ class Sync:
                 rows = []
         n = self._store(rows)
         self.status["events_total"] += n
+        log.info("sync: %d batch(es) read from %s, %d new event(s) stored", len(found), self.inbox_branch(), n)
         changed = False
         if pubs:
             try:
@@ -385,7 +401,7 @@ class Sync:
     def _trim_inbox(self, d, files):
         """Commit 'remove these files' on top of the CURRENT inbox tip and push. CLIs push to the same branch, so a rejected push means a
         newer tip exists: refetch it and redo the removal (the files still exist there, and new files are left alone)."""
-        branch, gone, idx = self.inbox_branch(), set(files), os.path.join(d, "index.trim")
+        branch, gone, idx = self.inbox_branch(), set(files), os.path.join(os.path.abspath(d), "index.trim")
         env = {"GIT_INDEX_FILE": idx}
         for attempt in range(6):
             if attempt:
@@ -422,6 +438,7 @@ class Sync:
         batches = [(key, good) for key, good in batches if good]
         if not batches:
             return True
+        d = os.path.abspath(d)                                          # git runs with cwd=d: every path handed to it must be absolute
         work = os.path.join(d, ".archive")
         branch, ref, env = self.archive_branch(), "refs/inbox/archive", {"GIT_INDEX_FILE": os.path.join(d, "index.archive")}
         try:
@@ -433,7 +450,8 @@ class Sync:
                 with open(f, "w") as fh:
                     fh.write("\n".join(good) + "\n")
                 names.append(f)
-            shas = gitx.run(["hash-object", "-w", "--stdin-paths"], cwd=d, input="".join(n + "\n" for n in names)).split()
+            shas = gitx.run(["hash-object", "-w", "--stdin-paths", "--no-filters"], cwd=d,
+                            input="".join(n + "\n" for n in names)).split()
             entries = []
             for (key, _), sha in zip(batches, shas):
                 parts = key.split("-")                                  # <client>-<unix>-<rand>
