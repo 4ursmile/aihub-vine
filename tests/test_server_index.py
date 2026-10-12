@@ -42,7 +42,9 @@ class ServerWritesIndex(unittest.TestCase):
             class Repos:
                 def setting(self, k, d=""): return d
             sy = Sync(Repos(), S())
-            self.assertFalse(sy.update_index([{"package": "demo-pkg", "version": "1.0.0", "git_url": "file://" + pkg, "commit": commit}]))   # file:// refused by default
+            res = []   # first run creates the empty index (root.json), which is a real change -> True; the package itself is refused
+            self.assertTrue(sy.update_index([{"package": "demo-pkg", "version": "1.0.0", "git_url": "file://" + pkg, "commit": commit}], results=res))
+            self.assertEqual(res[0][2], "git address not allowed")   # file:// refused by default
             from unittest import mock
             from aihub.server import sync as syncmod
             with mock.patch.object(syncmod, "SCHEMES", ("file://",)):

@@ -54,7 +54,7 @@ A failed pass reports the error on the Sync tab.
 
 ## Telemetry from the CLI
 
-Hooks append each event (with a unique `id`) to a local spool. A detached flusher waits `telemetry_interval` seconds (default 15, between 5 and 3600) so a burst becomes one batch, then pushes one orphan commit to `refs/telemetry/<client_id>/<unix>-<rand>`. Each client writes only its own refs, so pushes never conflict. Nothing is pushed when nothing is spooled. A failed push keeps the spool and retries on the next event or `aihub flush`. `aihub dev publish` pushes its publish event immediately so the package is indexed quickly, and spools it if the push fails.
+Hooks append each event (with a unique `id`) to a local spool. A detached flusher waits `telemetry_interval` seconds (default 15, between 5 and 3600) so a burst becomes one batch, then pushes one orphan commit to `refs/telemetry/<client_id>/<unix>-<rand>`. Each client writes only its own refs, so pushes never conflict. Nothing is pushed when nothing is spooled. A failed push keeps the spool; the CLI then starts no flusher for a back-off delay (30 s, doubling to 15 min, stored in `queue/backoff.json`), and `aihub flush` retries at once. `aihub dev publish` pushes its publish event immediately so the package is indexed quickly, and spools it if the push fails.
 
 The inbox is resolved as: environment (`AIHUB_TELEMETRY_URL`, `AIHUB_TELEMETRY_BRANCH`) > `config.json` (`telemetry_url`, `telemetry_branch`) > the bundled `aihub/core/defaults.json` (`telemetry.git_url`, `telemetry.branch`, shipped in both the pip package and `aihub.pyz`) > the package index repo (URL only). The server uses the same order with its admin settings in place of `config.json`.
 

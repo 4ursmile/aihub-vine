@@ -18,6 +18,9 @@ from . import gitx, paths
 STALE = 30      # heartbeat age after which a flusher is considered dead (it beats every 5s)
 MAX_SPOOL = 5 * 1024 * 1024
 BATCH = 5000    # events per pushed commit
+BACKOFF_BASE = 30       # seconds to leave the network alone after the first failed push; doubles per failure
+BACKOFF_MAX = 900
+MAX_PASSES = 20         # push passes one flusher process may run; a safety net so no failure mode can make it loop forever
 
 
 def _spool():
@@ -117,12 +120,50 @@ def _release():
         pass
 
 
+def _backoff_file():
+    return paths.p("queue", "backoff.json")
+
+
+def _backoff_state():
+    try:
+        with open(_backoff_file()) as f:
+            d = json.load(f)
+        return int(d.get("fails", 0)), float(d.get("next", 0))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0, 0.0
+
+
+def _backoff():
+    """Seconds left before an automatic push attempt is allowed again (0 = go). A `next` implausibly far ahead (clock moved) is ignored."""
+    left = _backoff_state()[1] - time.time()
+    return left if 0 < left <= BACKOFF_MAX else 0
+
+
+def _fail():
+    """A push failed (offline, no access): wait 30s, then 1m, 2m ... up to 15m before the next automatic attempt. The events stay on disk."""
+    try:
+        n = _backoff_state()[0] + 1
+        tmp = _backoff_file() + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"fails": n, "next": time.time() + min(BACKOFF_BASE * 2 ** (n - 1), BACKOFF_MAX)}, f)
+        os.replace(tmp, _backoff_file())
+    except Exception:
+        pass
+
+
+def _ok():
+    try:
+        os.remove(_backoff_file())
+    except OSError:
+        pass
+
+
 def kick():
-    """Start the detached flusher unless one is alive. The lock is taken here, before the process starts, so a burst
-    of hook calls spawns exactly one flusher instead of one per call."""
+    """Start the detached flusher unless one is alive or the last push failed recently. The lock is taken here, before the process
+    starts, so a burst of hook calls spawns exactly one flusher instead of one per call."""
     try:
         paths.ensure("queue")
-        if not _acquire():
+        if _backoff() or not _acquire():
             return
         kw = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
                   env=dict(os.environ, AIHUB_FLUSH_LOCKED="1"))
@@ -197,7 +238,7 @@ def _send_once(timeout=20):
     if os.path.exists(_spool()):
         os.replace(_spool(), paths.p("queue", "sending.%d.%d.jsonl" % (os.getpid(), time.time() * 1000)))
     files = glob.glob(paths.p("queue", "sending.*.jsonl"))
-    lines = []
+    lines, sizes = [], {}
     for f in files:
         try:
             with open(f) as fh:
@@ -207,17 +248,22 @@ def _send_once(timeout=20):
                         lines.append(line.strip())
                     except ValueError:
                         pass
+                sizes[f] = fh.tell()
         except OSError:
             pass
-    try:
-        for i in range(0, len(lines), BATCH):
-            push(url, lines[i:i + BATCH], timeout)
-    except Exception as e:
-        _send_once.error = gitx.redact_url(str(e))[:200]
-        return 0
-    for f in files:
+    if lines:
         try:
-            os.remove(f)
+            for i in range(0, len(lines), BATCH):
+                push(url, lines[i:i + BATCH], timeout)
+        except Exception as e:
+            _send_once.error = gitx.redact_url(str(e))[:200]
+            _fail()
+            return 0
+        _ok()
+    for f, size in sizes.items():                        # nothing valid in a file is also "done": it must not keep the flusher looping
+        try:
+            if os.path.getsize(f) == size:               # a hook that opened the spool just before the rename may still have appended: keep that file
+                os.remove(f)
         except OSError:
             pass
     return len(lines)
@@ -231,30 +277,42 @@ def _pending():
 
 
 def flush(timeout=20, linger=None, force=False):
-    """The one flusher. Waits one window (a burst of events becomes one batch), pushes, and exits once nothing is left or a push
-    failed (the events stay spooled; the next event or `aihub flush` retries). The lock's mtime is a heartbeat.
-    force=True (aihub flush) pushes right now and returns; if a background flusher is alive it leaves the spool to it."""
+    """The one flusher. Waits one window (a burst of events becomes one batch), pushes, and exits once nothing is left. After a failed
+    push it exits too and stays away for a growing delay (see _fail); the events stay spooled and the next event after that delay
+    starts a new flusher. The lock's mtime is a heartbeat.
+    force=True (aihub flush) pushes right now, ignores the delay and returns; if a background flusher is alive it leaves the spool to it."""
     total = 0
     owned = os.environ.pop("AIHUB_FLUSH_LOCKED", "") == "1"     # kick() already took the lock for this process
+    held = owned
     try:
         paths.ensure("queue")
-        if not owned and not _acquire():
-            return 0
+        if not owned:
+            if not _acquire():
+                return 0                                        # someone else is flushing: never touch their lock
+            held = True
         if force:
             return _send_once(timeout)
-        while True:
+        for _ in range(MAX_PASSES):
+            if not target():
+                break
             end = time.time() + interval()
             while time.time() < end:
                 os.utime(_lock(), None)
                 time.sleep(min(5, max(0.1, end - time.time())))
             n = _send_once(timeout)
             total += n
-            if not n or not _pending():
-                break
+            # Let go of the lock FIRST, then look at the spool once more. A hook that recorded an event while we held the lock saw a
+            # live flusher and started none; its event is already on disk by now, so this look cannot miss it.
+            _release()
+            held = False
+            if not n or not _pending() or _backoff() or not _acquire():
+                break                                   # n == 0: nothing was sent, so what is left cannot be sent either; never spin
+            held = True
     except Exception:
         pass
     finally:
-        _release()
+        if held:
+            _release()
     return total
 
 
@@ -270,10 +328,12 @@ def deliver(ev, timeout=20):
         url = target()
         if url:
             push(url, [line], timeout)
+            _ok()
             return True
         deliver.error = "no telemetry inbox configured"
     except Exception as e:
         deliver.error = gitx.redact_url(str(e))[:200]
+        _fail()
     record(ev)
     return False
 

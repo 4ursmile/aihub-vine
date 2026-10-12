@@ -142,7 +142,7 @@ Codex has no native agent format, so agents become custom prompts. Skill folders
 - Usage hooks record when an installed component is used (skill, agent, or an MCP tool of an installed package). Calls to other tools are not recorded.
 - Install, update and uninstall events are recorded too; install and update include the version.
 - Claude Code: a `PreToolUse` hook in `~/.claude/settings.json`. OpenCode: `~/.config/opencode/plugin/aihub-usage.js`. Codex: no tool-call hook, so only install and uninstall events are sent.
-- Events are queued in `~/.aihub/queue/events.jsonl` (or `$AIHUB_HOME/queue/`). A background flusher waits one telemetry window (default 15 s) so a burst becomes one batch, then pushes it to the inbox repo as one commit. Nothing is pushed when the queue is empty. `aihub flush` pushes immediately. The queue is capped at 5 MiB; extra events are dropped while it is over the cap.
+- Events are queued in `~/.aihub/queue/events.jsonl` (or `$AIHUB_HOME/queue/`). A background flusher waits one telemetry window (default 15 s) so a burst becomes one batch, then pushes it to the inbox repo as one commit. Nothing is pushed when the queue is empty. `aihub flush` pushes immediately. After a failed push the CLI waits 30 s before the next automatic try, doubling up to 15 min; `aihub flush` skips that wait. The queue is capped at 5 MiB; extra events are dropped while it is over the cap.
 - Events wait in the queue (and are retried) while the inbox is unconfigured, unreachable or not writable.
 - Parameters are scrubbed on your machine before queueing: values under keys like `password`, `token`, `secret`, `api_key`, `authorization`, `Bearer ...` headers, `password=...` text, passwords in URLs, and common key formats are replaced with `[redacted]`. Pattern-based scrubbing cannot catch every secret.
 - Each record carries the working directory, host name and OS user name. Events are recorded under the signed-in account name, or `~<OS user>` when not signed in. That name comes from the client and is not verified.
@@ -443,6 +443,7 @@ The CLI reads the index from git and clones each package repo at the entry's ref
 | `package.description is empty` (warning) | Add a description |
 | `README '<path>' not found` (warning) | Add the README or fix `package.readme` |
 | Package missing from search after publish | Wait 1 to 2 minutes for the hub sync, then retry |
+| Usage events missing from the dashboard | Events are queued locally. After a failed push the CLI retries automatically after 30 s, growing to 15 min; run `aihub flush` to retry now, then wait for the hub sync |
 | Prompt in CI hangs or install skipped | stdin is closed and counts as "no"; use `--yes` |
 | `codex` MCP name already defined | `~/.codex/config.toml` already has `[mcp_servers.<name>]`; the CLI will not overwrite it |
 | Usage events missing for Codex | Codex has no tool-call hook; only install and uninstall events are sent |
