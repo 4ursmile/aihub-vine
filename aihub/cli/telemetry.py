@@ -21,7 +21,8 @@ BATCH = 5000    # events per pushed commit
 BACKOFF_BASE = 30       # seconds to leave the network alone after the first failed push; doubles per failure
 BACKOFF_MAX = 900
 WINDOWS = os.name == "nt"
-PUSH_TRIES = 6          # a push can lose a race with another client (non-fast-forward): refetch the tip and add the file again
+PUSH_TRIES = 12         # a push can lose a race with another client (non-fast-forward): refetch the tip and add the file again.
+                        # Many clients flushing in the same second all race for the one branch tip; jittered, growing waits spread them out
 MAX_PASSES = 20         # push passes one flusher process may run; a safety net so no failure mode can make it loop forever
 
 
@@ -280,7 +281,7 @@ def push(url, lines, timeout=20):
         except gitx.GitError as e:
             if attempt == PUSH_TRIES - 1 or not any(w in str(e).lower() for w in _RACE):
                 raise                                                      # not a lost race (no access, offline, protected branch): do not hammer
-            time.sleep(random.uniform(0.2, 1.0) * (attempt + 1))
+            time.sleep(random.uniform(0.1, 1.0) * min(2 ** attempt, 8))         # full jitter, capped: ~30 s worst case for 12 tries
 
 
 def _send_once(timeout=20):
