@@ -10,9 +10,21 @@ from ..core import version as V
 from .db import ALL_PERMS, ANON_LOCKED
 
 
-# Who an event belongs to: the signed-in account, else the OS user on the machine that ran it, else a short client id.
+# Who an event belongs to when "localize user names" is off: the account, else the OS user, else a short client id.
 ACTOR = ("COALESCE(e.username, CASE WHEN COALESCE(e.local_user,'')<>'' THEN e.local_user||' (local)' END, "
          "'anon-'||substr(e.client_id,1,6))")
+# ... and when it is on: the stored `actor` key (see actor_key), so one person is one name however they ran the CLI.
+ACTOR_LOCAL = "COALESCE(NULLIF(e.actor,''), 'anon-'||substr(e.client_id,1,6))"
+
+
+def actor_key(username=None, local_user=None):
+    """One lowercase name per person: the hub username, else the OS user. A leading ~ (anonymous marker), a "(local)" suffix and
+    an e-mail domain are ignored, so `Sam`, `sam@corp.com` and the OS user `sam` are the same actor. None when nothing is known."""
+    for raw in (username, local_user):
+        n = str(raw or "").strip().lstrip("~").replace(" (local)", "").split("@")[0].strip().lower()
+        if n:
+            return n[:64]
+    return None
 
 
 def _rows(cur):
@@ -43,6 +55,25 @@ class Repos:
     def __init__(self, db):
         self.db = db
         self.lock = threading.Lock()  # serialize writers
+
+    def localize(self):
+        """Admin setting `localize_users` (default on): count one person once, by name, whatever way they ran the CLI."""
+        return self.setting("localize_users", "1") != "0"
+
+    def actor_sql(self):
+        return ACTOR_LOCAL if self.localize() else ACTOR
+
+    def backfill_actors(self):
+        """Fill events.actor for rows stored before the column existed (cheap no-op once done)."""
+        with self.lock:
+            c = self.db.conn()
+            rows = c.execute("SELECT DISTINCT username,local_user FROM events WHERE actor IS NULL").fetchall()
+            for r in rows:
+                c.execute("UPDATE events SET actor=? WHERE actor IS NULL AND username IS ? AND local_user IS ?",
+                          (actor_key(r[0], r[1]) or "", r[0], r[1])) if self.db.engine == "sqlite" else c.execute(
+                    "UPDATE events SET actor=? WHERE actor IS NULL AND username IS NOT DISTINCT FROM ? AND local_user IS NOT DISTINCT FROM ?",
+                    (actor_key(r[0], r[1]) or "", r[0], r[1]))
+            c.commit()
 
     # ---- users / auth
     def user_by_name(self, u):
@@ -254,9 +285,9 @@ class Repos:
                 args += [self._like(q)] * 4
         else:
             t, tscol = "events e", "e.ts"
-            ts = ("e.id,e.ts,e.kind,e.package,e.version,e.component," + ACTOR + " AS actor,e.username,e.local_user,e.host,e.os,"
+            ts = ("e.id,e.ts,e.kind,e.package,e.version,e.component," + self.actor_sql() + " AS actor,e.username,e.local_user,e.host,e.os,"
                   "e.source,e.detail,e.cwd,e.ip,e.client_id")
-            if actor: w.append(ACTOR + "=?"); args.append(actor)
+            if actor: w.append(self.actor_sql() + "=?"); args.append(actor)
             if kind: w.append("e.kind=?"); args.append(kind)
             if host: w.append("e.host=?"); args.append(host)
             if os: w.append("e.os=?"); args.append(os)
@@ -264,7 +295,7 @@ class Repos:
             if action: w.append("e.component LIKE ? ESCAPE '\\'"); args.append(self._like(action))
             if q:
                 w.append("(e.detail LIKE ? ESCAPE '\\' OR e.component LIKE ? ESCAPE '\\' OR e.package LIKE ? ESCAPE '\\' OR e.cwd LIKE ? ESCAPE '\\' "
-                         "OR e.host LIKE ? ESCAPE '\\' OR " + ACTOR + " LIKE ? ESCAPE '\\')")
+                         "OR e.host LIKE ? ESCAPE '\\' OR " + self.actor_sql() + " LIKE ? ESCAPE '\\')")
                 args += [self._like(q)] * 6
         if since: w.append(tscol + ">=?"); args.append(since)
         if until: w.append(tscol + "<?"); args.append(until)
@@ -281,7 +312,7 @@ class Repos:
 
     def audit_actors(self):
         c = self.db.conn()
-        return {"tools": [r[0] for r in c.execute("SELECT DISTINCT " + ACTOR + " n FROM events e ORDER BY n LIMIT 500")],
+        return {"tools": [r[0] for r in c.execute("SELECT DISTINCT " + self.actor_sql() + " n FROM events e ORDER BY n LIMIT 500")],
                 "admin": [r[0] for r in c.execute("SELECT DISTINCT actor FROM audit_log ORDER BY actor LIMIT 500")]}
 
     def audit_list(self, limit=200):
@@ -690,8 +721,9 @@ class Repos:
             for r in rows:
                 for k in ("source", "local_user", "host", "os", "detail", "cwd", "ip"):
                     r.setdefault(k, None)
-            c.executemany("INSERT INTO events(ts,kind,package,version,client_id,username,component,duration,source,local_user,host,os,detail,cwd,ip) "
-                          "VALUES(:ts,:kind,:package,:version,:client_id,:username,:component,:duration,:source,:local_user,:host,:os,:detail,:cwd,:ip)", rows)
+                r["actor"] = actor_key(r.get("username"), r.get("local_user")) or ""
+            c.executemany("INSERT INTO events(ts,kind,package,version,client_id,username,component,duration,source,local_user,host,os,detail,cwd,ip,actor) "
+                          "VALUES(:ts,:kind,:package,:version,:client_id,:username,:component,:duration,:source,:local_user,:host,:os,:detail,:cwd,:ip,:actor)", rows)
             c.commit()
 
     def events_insert_ext(self, rows):
@@ -704,8 +736,9 @@ class Repos:
             for r in rows:
                 for k in ("source", "local_user", "host", "os", "detail", "cwd", "ip", "version", "client_id", "component", "duration"):
                     r.setdefault(k, None)
-            c.executemany("INSERT OR IGNORE INTO events(ts,kind,package,version,client_id,username,component,duration,source,local_user,host,os,detail,cwd,ip,ext_id) "
-                          "VALUES(:ts,:kind,:package,:version,:client_id,:username,:component,:duration,:source,:local_user,:host,:os,:detail,:cwd,:ip,:ext_id)", rows)
+                r["actor"] = actor_key(r.get("username"), r.get("local_user")) or ""
+            c.executemany("INSERT OR IGNORE INTO events(ts,kind,package,version,client_id,username,component,duration,source,local_user,host,os,detail,cwd,ip,ext_id,actor) "
+                          "VALUES(:ts,:kind,:package,:version,:client_id,:username,:component,:duration,:source,:local_user,:host,:os,:detail,:cwd,:ip,:ext_id,:actor)", rows)
             c.commit()
             return c.execute("SELECT COUNT(*) FROM events WHERE ext_id IS NOT NULL").fetchone()[0] - before
 
@@ -745,7 +778,7 @@ class Repos:
         c = self.db.conn()
         by = {r[0]: r[1] for r in c.execute(
             "SELECT kind,COUNT(*) FROM events WHERE package=? AND ts>=? GROUP BY kind", (package, since))}
-        users = c.execute("SELECT COUNT(DISTINCT COALESCE(username,client_id)) FROM events WHERE package=? AND ts>=?",
+        users = c.execute("SELECT COUNT(DISTINCT " + self.actor_sql() + ") FROM events e WHERE e.package=? AND e.ts>=?",
                           (package, since)).fetchone()[0]
         return {"by_kind": by, "active_users": users, "days": days}
 
@@ -760,7 +793,7 @@ class Repos:
             return self.top_reviewed(what, limit, viewer)
         if what == "developers":
             return self._top_developers(since, " AND " + vsql, va, limit)
-        col = {"packages": "e.package", "users": ACTOR}[what]
+        col = {"packages": "e.package", "users": self.actor_sql()}[what]
         return _rows(c.execute(
             "SELECT %s AS name, COUNT(*) AS count FROM events e JOIN packages p ON p.name=e.package "
             "WHERE e.ts>=? AND %s IS NOT NULL AND %s GROUP BY 1 ORDER BY count DESC LIMIT ?" % (col, col, vsql), [since] + va + [limit]))
@@ -773,16 +806,23 @@ class Repos:
         used = c.execute("SELECT p.id, COUNT(e.id) FROM events e JOIN packages p ON p.name=e.package "
                          "WHERE e.ts>=?" + (" AND e.ts<?" if until else "") + flt + " GROUP BY p.id",
                          [since] + ([until] if until else []) + list(args)).fetchall()
-        score = {}
+        score, names = {}, {}
         for row in used:
             pid, n = row[0], row[1]                  # by position: a Postgres Row iterates its keys, not its values
             live = [v for v in self.versions(pid) if not v["yanked"]]
             authors = [a.get("name") or a.get("email") for a in (((live[0]["manifest"] if live else {}).get("package") or {}).get("authors") or [])]
             if not any(authors):
                 authors = [m["username"] for m in self.maintainers(pid)]
-            for a in {x.strip() for x in authors if x and x.strip()}:
-                score[a] = score.get(a, 0) + n
-        return [{"name": k, "count": v} for k, v in sorted(score.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]]
+            loc = self.localize()
+            seen = {}
+            for x in authors:
+                if x and x.strip():
+                    seen.setdefault(actor_key(x) if loc else x.strip(), x.strip())     # localized: "Sam", "sam@corp.com" = one developer
+            for k, shown in seen.items():
+                if k:
+                    names.setdefault(k, shown)
+                    score[k] = score.get(k, 0) + n
+        return [{"name": names[k], "count": v} for k, v in sorted(score.items(), key=lambda kv: (-kv[1], names[kv[0]]))[:limit]]
 
     def top_reviewed(self, mode, limit=20, viewer=None):
         """Best-rated packages (Bayesian average, so one 5-star review can't beat 200 reviews at 4.8) or most-reviewed.
@@ -820,15 +860,17 @@ class Repos:
         return (end - start).days + 1, start, since, until
 
     def _dash_filter(self, viewer, type=None, package=None, user=None, source=None, kind=None,
-                     identity=None, host=None, q=None, os=None):
+                     identity=None, host=None, q=None, os=None, with_cli=False):
         """-> (sql, args) appended to `... WHERE e.ts>=? ...`. Only events of packages the viewer may see."""
         vsql, va = self.visible_sql(viewer, "vp")
         pf = " AND e.package IN (SELECT vp.name FROM packages vp WHERE %s%s)" % (vsql, " AND vp.type=?" if type else "")
         pa = list(va) + ([type] if type else [])
+        if with_cli and not type:                           # the CLI's own install/uninstall events: listed in the event log only, never counted
+            pf = " AND (e.package='aihub-cli' OR" + pf[4:] + ")"
         if package:
             pf += " AND e.package=?"; pa.append(package)
         if user:
-            pf += " AND " + ACTOR + "=?"; pa.append(user)
+            pf += " AND " + self.actor_sql() + "=?"; pa.append(user)
         if source:
             pf += " AND COALESCE(e.source,'cli')=?"; pa.append(source)
         if kind:
@@ -856,7 +898,7 @@ class Repos:
         c = self.db.conn()
         pf, pa = self._dash_filter(viewer, type, package, user, source, kind, identity, host, q, os)
         pf += " AND e.ts<?"; pa.append(until)
-        actor = "COALESCE(e.username, e.client_id)"
+        actor = self.actor_sql()
 
         def kinds(a, b):
             return {r[0]: r[1] for r in c.execute(
@@ -886,7 +928,7 @@ class Repos:
         vs2, va2 = self.visible_sql(viewer, "vp")
         scope = " e.package IN (SELECT vp.name FROM packages vp WHERE %s) AND e.ts>=?" % vs2
         options = {
-            "users": [r[0] for r in c.execute("SELECT DISTINCT " + ACTOR + " n FROM events e WHERE"
+            "users": [r[0] for r in c.execute("SELECT DISTINCT " + self.actor_sql() + " n FROM events e WHERE"
                                               + scope + " ORDER BY n LIMIT 200", va2 + [since])],
             "sources": [r[0] for r in c.execute("SELECT DISTINCT COALESCE(e.source,'cli') n FROM events e WHERE" + scope + " ORDER BY n", va2 + [since])],
             "types": [r[0] for r in c.execute("SELECT DISTINCT p.type FROM packages p WHERE " + vs2.replace("vp.", "p.") + " ORDER BY 1", va2)],
@@ -923,27 +965,27 @@ class Repos:
                                  " GROUP BY e.package ORDER BY count DESC LIMIT 10", [since] + pa),
             "top_reviewed": [dict(x, avg=round(float(x["avg"]), 2), score=round(float(x["score"]), 2)) for x in self.top_reviewed("reviews", 10, viewer)],
             "top_developers": self._top_developers(since, pf, pa, 10),
-            "top_users": rows("SELECT " + ACTOR + " AS name,COUNT(*) AS count FROM events e "
+            "top_users": rows("SELECT " + self.actor_sql() + " AS name,COUNT(*) AS count FROM events e "
                               "WHERE e.ts>=? AND (e.username IS NOT NULL OR e.client_id IS NOT NULL)" + pf +
                               " GROUP BY 1 ORDER BY count DESC LIMIT 10", [since] + pa),
             "by_type": rows("SELECT COALESCE(p.type,'unknown') AS name,COUNT(*) AS count FROM events e "
                             "LEFT JOIN packages p ON p.name=e.package WHERE e.ts>=?" + pf + " GROUP BY COALESCE(p.type,'unknown') ORDER BY count DESC", [since] + pa),
             "by_source": rows("SELECT COALESCE(e.source,'cli') AS name,COUNT(*) AS count FROM events e WHERE e.ts>=?" + pf +
                               " GROUP BY 1 ORDER BY count DESC", [since] + pa),
-            "recent": rows("SELECT e.ts,e.kind,e.package,e.version,e.component," + ACTOR + " AS actor,"
+            "recent": rows("SELECT e.ts,e.kind,e.package,e.version,e.component," + self.actor_sql() + " AS actor,"
                            "e.source FROM events e WHERE e.ts>=?" + pf + " ORDER BY e.id DESC LIMIT 20", [since] + pa),
         }
 
     def dashboard_events(self, viewer, days=30, date_from=None, date_to=None, page=1, per_page=25, **flt):
         """Paginated activity log under the same filters. Deliberately omits detail/cwd/ip (those stay on the audit page)."""
         days, start_day, since, until = self._window(days, date_from, date_to)
-        pf, pa = self._dash_filter(viewer, **flt)
+        pf, pa = self._dash_filter(viewer, with_cli=True, **flt)
         pf += " AND e.ts<?"; pa.append(until)
         c = self.db.conn()
         total = c.execute("SELECT COUNT(*) FROM events e WHERE e.ts>=?" + pf, [since] + pa).fetchone()[0]
         per_page = max(1, min(int(per_page), 100)); page = max(1, int(page))
         items = [dict(r) for r in c.execute(
-            "SELECT e.ts,e.kind,e.package,e.version,e.component," + ACTOR + " AS actor,COALESCE(e.source,'cli') AS source,e.host,e.os "
+            "SELECT e.ts,e.kind,e.package,e.version,e.component," + self.actor_sql() + " AS actor,COALESCE(e.source,'cli') AS source,e.host,e.os "
             "FROM events e WHERE e.ts>=?" + pf + " ORDER BY e.ts DESC,e.id DESC LIMIT ? OFFSET ?",
             [since] + pa + [per_page, (page - 1) * per_page])]
         return {"total": total, "page": page, "per_page": per_page, "items": items}

@@ -31,6 +31,15 @@ def cmd_login(a):
     ui.celebrate("Welcome back, %s" % u)
 
 
+def cmd_logout(a):
+    """Forget the saved token. Later usage events are anonymous again (attributed by OS user name)."""
+    cred = paths.load("credentials.json", {})
+    if not cred.get("token") and not cred.get("username"):
+        return ui.info("not signed in")
+    paths.save("credentials.json", {}, private=True)
+    ui.good("Signed out %s" % (cred.get("username") or ""))
+
+
 def cmd_register(a):
     u = input("username: ")
     api.call("POST", "/auth/register", {"username": u, "password": getpass.getpass("password: ")})
@@ -109,6 +118,30 @@ def _rc_files():
             os.path.join(home, ".profile"), os.path.join(home, ".config", "fish", "config.fish")]
 
 
+CLI_PACKAGE = "aihub-cli"          # the CLI itself, reported as a package so installs show up on the dashboard
+
+
+def _cli_origin():
+    """'web' when run from the aihub.pyz the hub's install script downloaded, else 'git' (pip install from a git URL)."""
+    return "web" if os.path.basename(sys.argv[0] or "").endswith(".pyz") or ".pyz" in (getattr(sys.modules.get("__main__"), "__file__", "") or "") else "git"
+
+
+def record_cli_install():
+    """Once per machine: tell the hub this CLI was installed (web or git). Never fails a command."""
+    try:
+        from ..core.release import VERSION
+        from . import hooks, telemetry
+        marker = paths.p(".cli_installed")
+        if os.path.exists(marker) or os.environ.get("AIHUB_NO_TELEMETRY"):
+            return
+        paths.ensure()
+        open(marker, "w").write(VERSION)
+        telemetry.record({"kind": "install", "package": CLI_PACKAGE, "version": VERSION, "client_id": hooks.client_id(),
+                          "detail": "origin=" + _cli_origin()})
+    except Exception:
+        pass
+
+
 def cmd_self_uninstall(a):
     """Remove aihub from this machine: installed packages, usage hooks, the PATH line install.sh added, and ~/.aihub."""
     import re
@@ -126,6 +159,13 @@ def cmd_self_uninstall(a):
     ui.out("  " + ui.dim("Packages you published and your git repositories are not touched."))
     if not a.yes and not (ui.INTERACTIVE and ui.confirm("Remove aihub?", False)):
         return ui.info("nothing changed (pass --yes to skip this question)")
+    try:
+        from ..core.release import VERSION
+        from . import hooks as _h, telemetry
+        telemetry.deliver({"kind": "uninstall", "package": CLI_PACKAGE, "version": VERSION, "client_id": _h.client_id(),
+                           "detail": "origin=" + _cli_origin()}, timeout=10)      # before ~/.aihub (and the spool) is deleted
+    except Exception:
+        pass
     for n in pk:
         try:
             installer.uninstall(n, quiet=True)
@@ -875,7 +915,7 @@ def build_parser():
         ("Discover", ["search", "info"]),
         ("Install", ["install", "uninstall", "update", "list", "download"]),
         ("Manage", ["enable", "disable", "tree", "lock", "sync"]),
-        ("Account", ["config", "login", "register"]),
+        ("Account", ["config", "login", "logout", "register"]),
         ("Publish", ["dev"]),
         ("Setup and maintenance", ["welcome", "doctor", "version", "upgrade", "hook", "flush", "hooks", "skill", "self-uninstall"]),
     ]
@@ -899,6 +939,9 @@ def build_parser():
         "Sign in to the configured hub. If USERNAME is omitted, the CLI prompts for it; the password is entered without echo and the token is saved locally.",
         "Examples:\n  aihub login\n  aihub login sam",
         arg("username", nargs="?", metavar="USERNAME", help="Account username; prompted for when omitted."))
+    add("logout", cmd_logout, "Sign out and forget the saved token.",
+        "Delete the saved access token. Usage events are anonymous afterwards; the hub still groups them with your account by user name when the OS user name matches.",
+        "Example:\n  aihub logout")
     add("register", cmd_register, "Create an account on the configured hub.",
         "Prompt for a username and password and create an account on the configured hub. Registration is subject to the hub's signup policy; sign in separately with 'aihub login'.",
         "Example:\n  aihub register")
@@ -1092,6 +1135,8 @@ def main(argv=None):
         if ui.INTERACTIVE and a.cmd not in ("hook", "flush", "welcome", "config") and not os.path.exists(paths.p(".welcomed")):
             cmd_welcome(argparse.Namespace(yes=False))
         a.fn(a)
+        if a.cmd not in ("hook", "flush", "self-uninstall"):
+            record_cli_install()
         if a.cmd not in ("hook", "flush", "hooks", "self-uninstall", "uninstall"):
             from . import hooks
             hooks.verify()      # install/use/update/...: make sure our usage hooks are still in place

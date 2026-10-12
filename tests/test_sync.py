@@ -164,6 +164,11 @@ class DashboardV2(unittest.TestCase):
         r = self.c.get("/api/v1" + path, params=p, headers=self.h)
         return r
 
+    def test_cli_events_listed_not_counted(self):
+        self.r.events_insert_ext([{"ts": time.time() - 60, "kind": "install", "package": "aihub-cli", "client_id": "c9", "username": None, "ext_id": "cli1"}])
+        self.assertNotIn("install", self.get("/dashboard", days=30).json()["totals"])
+        self.assertIn("aihub-cli", [i["package"] for i in self.get("/dashboard/events", days=30).json()["items"]])
+
     def test_filters_and_aggregates(self):
         d = self.get("/dashboard", days=30).json()
         self.assertEqual(d["totals"].get("use"), 3)

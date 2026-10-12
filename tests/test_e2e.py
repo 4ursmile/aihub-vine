@@ -163,14 +163,14 @@ class Server(unittest.TestCase):
         push_events(self.c, [dict(ev, local_user="", kind="install")])
         t = self.c.get("/api/v1/audit?source=tools&q=select", headers=h).json()
         self.assertEqual(t["total"], 2)
-        self.assertEqual({x["actor"] for x in t["items"]}, {"dan (local)", "anon-" + "c" * 6})
+        self.assertEqual({x["actor"] for x in t["items"]}, {"dan", "anon-" + "c" * 6})
         self.assertNotIn("hunter2", str(t))
-        self.assertEqual(self.c.get("/api/v1/audit?source=tools&actor=dan%20(local)", headers=h).json()["total"], 1)
+        self.assertEqual(self.c.get("/api/v1/audit?source=tools&actor=dan", headers=h).json()["total"], 1)
         self.assertEqual(self.c.get("/api/v1/audit?source=tools&kind=install", headers=h).json()["total"], 1)
         self.assertEqual(self.c.get("/api/v1/audit?source=tools&q=%25", headers=h).json()["total"], 0)       # % is literal
         self.assertEqual(self.c.get("/api/v1/audit?source=nope", headers=h).status_code, 400)
         csv_ = self.c.get("/api/v1/audit/export?source=tools", headers=h)
-        self.assertIn("dan (local)", csv_.text)
+        self.assertIn("dan", csv_.text)
         self.assertEqual(self.c.get("/api/v1/audit/export", headers=hb).status_code, 403)
 
 

@@ -1410,7 +1410,7 @@ def dashboard_events(request: Request, days: int = 30, page: int = 1, per_page: 
 
 
 # ---------------- sync (git telemetry inbox + git index -> SQLite)
-SYNC_KEYS = ("telemetry_url", "telemetry_inbox_branch", "telemetry_branch", "telemetry_archive", "index_url", "index_branch", "index_path", "sync_interval",
+SYNC_KEYS = ("telemetry_url", "telemetry_inbox_branch", "telemetry_branch", "telemetry_archive", "localize_users", "index_url", "index_branch", "index_path", "sync_interval",
              "cli_git_url", "cli_git_branch", "cli_git_subdir", "client_refresh_hours")
 SECRET_KEYS = ()
 
@@ -1447,8 +1447,8 @@ def sync_update(body: dict, request: Request, u=admin):
             v = str(body[k]).strip()
             if k in SECRET_KEYS and v in ("", "set"):
                 continue                                 # blank/echo = keep the stored secret
-            if k == "telemetry_archive" and v not in ("0", "1"):
-                raise HTTPException(400, "telemetry_archive must be 0 or 1")
+            if k in ("telemetry_archive", "localize_users") and v not in ("0", "1"):
+                raise HTTPException(400, "%s must be 0 or 1" % k)
             if k in ("cli_git_branch", "cli_git_subdir"):
                 _check_cli_git(k, v)
             if k == "sync_interval":

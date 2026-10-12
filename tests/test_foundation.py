@@ -220,3 +220,11 @@ class EventDrivenFlusher(unittest.TestCase):
         with mock.patch.object(self.t, "target", return_value=""), mock.patch("time.sleep", lambda s: None):
             self.assertEqual(self.t.flush(), 0)
         self.assertTrue(self.t._pending())                                      # kept until an inbox is configured
+
+
+class ActorKey(unittest.TestCase):
+    def test_same_person_is_one_actor(self):
+        from aihub.server.repos import actor_key
+        for u, l in (("Sam", None), ("sam@corp.com", None), ("~sam", None), (None, "sam"), ("", "Sam (local)")):
+            self.assertEqual(actor_key(u, l), "sam")
+        self.assertIsNone(actor_key(None, None))

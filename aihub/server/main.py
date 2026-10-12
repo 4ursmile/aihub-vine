@@ -219,6 +219,7 @@ def create_app(settings: Settings = None) -> FastAPI:
     db = init_db(s)
     app.state.settings = s
     app.state.repos = Repos(db)
+    app.state.repos.backfill_actors()
     app.state.cache = init_cache(s)
     app.state.events = EventBuffer(app.state.repos, s.event_flush_rows, s.event_flush_secs)
     app.state.sync = Sync(app.state.repos, s, app.state.cache)

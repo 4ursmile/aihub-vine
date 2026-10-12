@@ -93,6 +93,7 @@ aihub flush                       # send queued usage events now
 aihub hooks install [--tool claude]   # or: aihub hooks remove
 aihub skill install [--tool claude]   # (re)install aihub-guide and aihub-package
 aihub skill remove                    # uninstall both
+aihub logout                          # forget the saved token (usage becomes anonymous, still merged by user name)
 aihub self-uninstall [--yes]          # remove aihub: packages, hooks, PATH block, ~/.aihub (not your published packages or git repos)
 aihub config                      # print settings as JSON
 aihub config set <key> <value>
