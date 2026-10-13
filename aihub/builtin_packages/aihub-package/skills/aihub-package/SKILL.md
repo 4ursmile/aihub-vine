@@ -39,7 +39,13 @@ Without `curl`, use `python3 -c "import urllib.request,sys;print(urllib.request.
 
 ## 3. Follow it
 
-Do the five steps of "Assistant packaging workflow": detect the situation, choose the type (skill, agent, mcp, tool, setup), restructure the project, write `aihub.toml` and the files, then validate, build and publish. Use `aihub dev init . --type <type> --name <name> --description "..."` for a new project and `aihub dev validate` for any project.
+Do the five steps of "Assistant packaging workflow": detect the situation, choose the type (skill, agent, mcp, tool, setup), restructure the project, write `aihub.toml` and the files, then validate, build and publish. For an existing project, do not hand-write `aihub.toml`; let the CLI read it:
+
+- One existing project (no `aihub.toml`, with skills, agents, MCP config, `bin/` or install scripts): `aihub dev init . --convert -y`
+- Several projects in one repository: `aihub dev init . --convert-mono --packages "a,b" -y`. Without `--packages`, ask the user which folders to convert first.
+- New empty project: `aihub dev init . --type <type> --name <name> --description "..."`
+
+Then review the `aihub.toml` it wrote and note the script renames (e.g. `setup_mac.sh` -> `install-macos.sh`) for the report. If the CLI stops with a question (nothing recognizable, invalid name, two scripts for one OS), re-run with `--type`, `--name` or `--description`, not by hand. Run `aihub dev validate` and fix every error and warning. Hand-edit only what the converter cannot know, such as the README, setup steps or a `[requires]` hint.
 
 **Several packages in one folder (monorepo).** If the folder should hold several packages, make it one repository with one package per sub folder: `aihub dev init . --mono --packages "name1,name2:mcp"` (each `NAME` or `NAME:TYPE`; add `--remote <url>` if known). Then run `aihub dev tree` to check the status, and `aihub dev doctor` if a `[git]` table is out of date. Run `aihub dev validate` on the workspace folder to check every package. Never create a package inside another package (a package folder must not sit within another). To work on one package, add `--only NAME` to `validate`, `build`, `publish` or `stats`. A nested `.git` shown by `aihub dev tree` is fixed with `aihub dev tree-solve`; ask the user which mode (merge or keep) they want. Publish only with `aihub dev publish --bump patch` (or `minor`/`major`) after the user agrees. It needs no hub account, only push access to the `[git]` repository. It pushes the repo and sends an `aihub.publish` event; never edit the package index by hand. The hub lists the package on its next sync (1-2 minutes) and reads the README from the repo.
 

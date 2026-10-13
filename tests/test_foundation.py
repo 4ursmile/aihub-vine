@@ -58,7 +58,7 @@ class Telemetry(unittest.TestCase):
 
     def test_interval_is_clamped_and_defaults_to_15s(self):
         from aihub.cli import telemetry
-        with mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_INTERVAL": ""}):
+        with mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_INTERVAL": ""}), mock.patch("aihub.core.defaults.load", return_value={}):
             self.assertEqual(telemetry.interval(), 15.0)
             with mock.patch("aihub.core.defaults.load", return_value={"telemetry": {"interval": 40}}):
                 self.assertEqual(telemetry.interval(), 40.0)                         # defaults.json is honoured
@@ -82,7 +82,7 @@ class Telemetry(unittest.TestCase):
 
     def test_nothing_is_pushed_when_nothing_is_spooled(self):
         from aihub.cli import telemetry
-        with mock.patch.object(telemetry, "push") as push, mock.patch.object(telemetry, "target", return_value="file:///x"):
+        with mock.patch.object(telemetry, "send") as push, mock.patch.object(telemetry, "enabled", return_value=True):
             self.assertEqual(telemetry._send_once(), 0)
             push.assert_not_called()
 
@@ -113,7 +113,8 @@ class EventDrivenFlusher(unittest.TestCase):
         from aihub.cli import telemetry
         self.t = telemetry
         self.home = tempfile.mkdtemp()
-        self.env = mock.patch.dict(os.environ, {"AIHUB_HOME": self.home, "AIHUB_TELEMETRY_URL": "file:///x", "AIHUB_TELEMETRY_INTERVAL": "5"})
+        self.env = mock.patch.dict(os.environ, {"AIHUB_HOME": self.home, "AIHUB_TELEMETRY_URL": "file:///x", "AIHUB_TELEMETRY_INTERVAL": "5",
+                                                 "AIHUB_KAFKA_BOOTSTRAP": "localhost:9092"})
         self.env.start()
         paths.ensure("queue")
 
@@ -122,7 +123,7 @@ class EventDrivenFlusher(unittest.TestCase):
 
     def test_failed_push_backs_off_and_hook_does_not_start_a_flusher(self):
         self.t.enqueue({"kind": "use", "package": "p"})
-        with mock.patch.object(self.t, "push", side_effect=RuntimeError("offline")):
+        with mock.patch.object(self.t, "send", side_effect=RuntimeError("offline")):
             self.assertEqual(self.t._send_once(), 0)
         self.assertGreater(self.t._backoff(), 0)
         with mock.patch("subprocess.Popen") as popen:
@@ -138,7 +139,7 @@ class EventDrivenFlusher(unittest.TestCase):
         self.assertEqual(waits[:4], [30, 60, 120, 240])
         self.assertEqual(waits[-1], self.t.BACKOFF_MAX)
         self.t.enqueue({"kind": "use", "package": "p"})
-        with mock.patch.object(self.t, "push"):
+        with mock.patch.object(self.t, "send"):
             self.assertEqual(self.t._send_once(), 1)
         self.assertEqual(self.t._backoff(), 0)
         self.assertEqual(self.t._backoff_state()[0], 0)
@@ -155,7 +156,7 @@ class EventDrivenFlusher(unittest.TestCase):
     def test_manual_flush_ignores_the_delay(self):
         self.t.enqueue({"kind": "use", "package": "p"})
         self.t._fail()
-        with mock.patch.object(self.t, "push") as push:
+        with mock.patch.object(self.t, "send") as push:
             self.assertEqual(self.t.flush(force=True), 1)
             push.assert_called_once()
 
@@ -164,11 +165,11 @@ class EventDrivenFlusher(unittest.TestCase):
         self.t.enqueue({"kind": "use", "package": "first"})
         pushes = []
 
-        def fake_push(url, lines, timeout=20):
+        def fake_push(lines, timeout=20):
             pushes.append(len(lines))
             if len(pushes) == 1:
                 self.t.enqueue({"kind": "use", "package": "late"})             # arrives mid-push, lock is held: kick() would do nothing
-        with mock.patch.object(self.t, "push", side_effect=fake_push), mock.patch.object(self.t, "interval", return_value=0.05), \
+        with mock.patch.object(self.t, "send", side_effect=fake_push), mock.patch.object(self.t, "interval", return_value=0.05), \
                 mock.patch("time.sleep", lambda s: None):
             self.t.flush()
         self.assertEqual(pushes, [1, 1])                                        # two batches, nothing left behind
@@ -176,7 +177,7 @@ class EventDrivenFlusher(unittest.TestCase):
         self.assertFalse(os.path.exists(self.t._lock()))
 
     def test_idle_flusher_exits_and_pushes_nothing(self):
-        with mock.patch.object(self.t, "push") as push, mock.patch.object(self.t, "interval", return_value=0.05), \
+        with mock.patch.object(self.t, "send") as push, mock.patch.object(self.t, "interval", return_value=0.05), \
                 mock.patch("time.sleep", lambda s: None):
             self.assertEqual(self.t.flush(), 0)
             push.assert_not_called()
@@ -190,7 +191,7 @@ class EventDrivenFlusher(unittest.TestCase):
     def test_file_with_no_valid_lines_is_removed_so_the_flusher_cannot_loop(self):
         with open(paths.p("queue", "sending.1.1.jsonl"), "w") as f:
             f.write("garbage\nmore garbage\n")
-        with mock.patch.object(self.t, "push") as push:
+        with mock.patch.object(self.t, "send") as push:
             self.assertEqual(self.t._send_once(), 0)
             push.assert_not_called()
         self.assertFalse(self.t._pending())
@@ -198,7 +199,7 @@ class EventDrivenFlusher(unittest.TestCase):
     def test_unremovable_leftover_cannot_make_the_flusher_spin(self):
         self.t.enqueue({"kind": "use", "package": "p"})
         runs = []
-        with mock.patch.object(self.t, "push", side_effect=lambda *a, **k: runs.append(1)), mock.patch("os.remove", side_effect=OSError("read-only")), \
+        with mock.patch.object(self.t, "send", side_effect=lambda *a, **k: runs.append(1)), mock.patch("os.remove", side_effect=OSError("read-only")), \
                 mock.patch.object(self.t, "interval", return_value=0.05), mock.patch("time.sleep", lambda s: None):
             self.t.flush()
         self.assertLessEqual(len(runs), 2)                                      # bounded: one pass, maybe one re-check, never a loop
@@ -209,17 +210,17 @@ class EventDrivenFlusher(unittest.TestCase):
             f.write('{"id":"a","kind":"use","package":"p"}\n')
         runs = []
         real_remove = os.remove
-        with mock.patch.object(self.t, "push", side_effect=lambda *a, **k: runs.append(1)), \
+        with mock.patch.object(self.t, "send", side_effect=lambda *a, **k: runs.append(1)), \
                 mock.patch("os.remove", side_effect=lambda p: None if "sending." in p else real_remove(p)), \
                 mock.patch.object(self.t, "interval", return_value=0.01), mock.patch("time.sleep", lambda s: None):
             self.t.flush()
         self.assertEqual(len(runs), self.t.MAX_PASSES)
 
-    def test_no_url_keeps_the_spool_and_the_flusher_exits(self):
+    def test_no_kafka_keeps_the_spool_and_the_flusher_exits(self):
         self.t.enqueue({"kind": "use", "package": "p"})
-        with mock.patch.object(self.t, "target", return_value=""), mock.patch("time.sleep", lambda s: None):
+        with mock.patch.object(self.t, "enabled", return_value=False), mock.patch("time.sleep", lambda s: None):
             self.assertEqual(self.t.flush(), 0)
-        self.assertTrue(self.t._pending())                                      # kept until an inbox is configured
+        self.assertTrue(self.t._pending())                                      # kept until Kafka is configured
 
 
 class ActorKey(unittest.TestCase):

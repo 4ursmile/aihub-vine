@@ -6,10 +6,11 @@
     "path": "index"
   },
   "telemetry": {
-    "git_url": "https://github.com/4ursmile/aftest",
-    "branch": "telemetry-archive",
-    "inbox_branch": "telemetry-inbox",
     "interval": 60
+  },
+  "kafka": {
+    "bootstrap": "",
+    "topic": "aihub.events"
   },
   "cli": {
     "git_url": "",

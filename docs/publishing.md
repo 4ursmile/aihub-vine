@@ -71,16 +71,16 @@ aihub dev publish --bump patch builtin          # bump every selected package
 - `tree` reports `own .git`: `aihub dev tree-solve PATH`
 - Overview of the packages and what to fix: `aihub dev tree PATH`
 
-`aihub dev publish` is a wrapper around git. It needs no hub account: access is whatever your git host grants you, and the publish is recorded in the telemetry inbox under your account name, or `~<your-os-username>` when you are not signed in.
+`aihub dev publish` is a wrapper around git. It needs no hub account: access is whatever your git host grants you, and the publish event is sent to Kafka under your account name, or `~<your-os-username>` when you are not signed in.
 
 What it does, in order:
 
 1. Reads `[git]` (`url`, `branch`, `subdir`) from `aihub.toml`. `aihub dev init` fills this in from the repo's `origin` and current branch; it asks only for what is still missing.
 2. Checks that the repo's remote and branch still match, and stops if they do not.
 3. Runs `git init` and adds `origin` if the project is not a repo yet, tracks files over 50 MB with git-lfs (it stops if git-lfs is missing), commits, and pushes, setting the upstream the first time.
-4. Pushes an `aihub.publish` event to the telemetry inbox with the package, version and commit.
+4. Sends an `aihub.publish` event to Kafka with the package, version and commit.
 
-Git credentials are yours alone: they come from your git credential helper, and the hub never sends or stores them. If none are stored, git (or the CLI, in a terminal) asks you once. `aihub dev publish` pushes your code, then pushes a publish event to the telemetry inbox ("publish event sent; the hub will add it to the package index shortly"). The hub batches events, fetches the latest index branch, adds the versions and pushes once (retrying from a fresh fetch if the push is rejected), creating the index if the repo has none. The package appears in the catalogue after that pass.
+Git credentials are yours alone: they come from your git credential helper, and the hub never sends or stores them. If none are stored, git (or the CLI, in a terminal) asks you once. `aihub dev publish` pushes your code, then sends a publish event to Kafka ("publish event sent; the hub shows it now and adds it to the git index at its next sync"). If Kafka is unreachable the event is queued and retried. The hub batches events, fetches the latest index branch, adds the versions and pushes once (retrying from a fresh fetch if the push is rejected), creating the index if the repo has none. The package appears in the catalogue after that pass.
 
 ## Let your assistant package it for you
 
@@ -105,7 +105,7 @@ The `aihub-package` skill fetches this section and follows it, so it is the sing
 ### Step 1: Detect the situation
 
 - `aihub.toml` exists -> existing package: run `aihub dev validate`, fix every error and warning, go to step 5.
-- No `aihub.toml`, folder has code/skills/agents -> **existing project**: follow step 3 (restructure).
+- No `aihub.toml`, folder has code/skills/agents -> **existing project**: convert it with `aihub dev init . --convert -y`, or `aihub dev init . --convert-mono --packages "a,b" -y` for several projects in one repository (`--convert-mono` alone asks which folders), then follow step 3 (restructure) for what the converter cannot do.
 - Empty or new folder -> **new project**: pick a type (step 2) and run `aihub dev init . --type <type> --name <name>`.
 - The folder should hold several packages (one repository, one package per sub folder) -> **monorepo**: run `aihub dev init . --mono --packages "a,b:mcp"` (names and types), then `aihub dev tree`. Never create a package inside another package.
 - `aihub dev tree` shows any `[git]` out of date (fix with `aihub dev doctor`) or a nested `.git` (fix with `aihub dev tree-solve`).

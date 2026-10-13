@@ -78,15 +78,13 @@ class GetStartedPrecedence(unittest.TestCase):
             self.assertEqual(s.env_get("AIHUB_CLI_GIT_URL"), "https://real.example/aihub.git")
 
     def test_env_file_values_are_visible_to_public_reads(self):
-        c = self.app(["AIHUB_INDEX_URL=https://file.example/index.git", "AIHUB_TELEMETRY_URL=https://file.example/telemetry.git"])
-        self.set_admin(c, index_url="https://admin.example/index.git", telemetry_url="https://admin.example/t.git")
+        c = self.app(["AIHUB_INDEX_URL=https://file.example/index.git"])
+        self.set_admin(c, index_url="https://admin.example/index.git")
         cfg = c.get("/api/v1/client-config", headers=self.h).json()
         self.assertEqual(cfg["index"]["url"], "https://file.example/index.git")                  # env beats admin
-        self.assertEqual(cfg["telemetry"]["url"], "https://file.example/telemetry.git")
         sync = c.get("/api/v1/admin/sync", headers=self.h).json()
         self.assertTrue(sync["from_env"]["index"])
         self.assertTrue(sync["from_env"]["index_url"])
-        self.assertTrue(sync["from_env"]["telemetry_url"])
 
     def test_client_config_falls_back_to_defaults_json(self):
         c = self.app([])
@@ -116,21 +114,6 @@ class CliLookupDefaults(unittest.TestCase):
         self.assertEqual(src["url"], DEF["index"]["git_url"])
         self.assertEqual(src["branch"], DEF["index"]["branch"])
         self.assertEqual(src["path"], DEF["index"]["path"])
-
-    def test_telemetry_source_comes_from_defaults_json(self):
-        from aihub.cli import telemetry
-        with mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_URL": "", "AIHUB_TELEMETRY_BRANCH": ""}):
-            src = telemetry.source()
-        self.assertEqual(src["url"], DEF["telemetry"]["git_url"])
-        self.assertEqual(src["branch"], DEF["telemetry"]["branch"])
-
-    def test_telemetry_target_order_env_then_config_then_index(self):
-        from aihub.cli import telemetry
-        with mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_URL": "", "AIHUB_INDEX_URL": "https://i.example/index.git"}), \
-                mock.patch("aihub.core.defaults.load", return_value={"index": {}, "telemetry": {}}):
-            self.assertEqual(telemetry.target(), "https://i.example/index.git")
-        with mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_URL": "https://t.example/t.git"}):
-            self.assertEqual(telemetry.target(), "https://t.example/t.git")
 
     def test_config_set_and_environment_still_override(self):
         from aihub.cli import registry
@@ -197,7 +180,7 @@ class SetupAsksOnlyForGit(unittest.TestCase):
     def test_defaults_are_filled_silently_without_any_prompt(self):
         from aihub.cli import remote_config
         home = tempfile.mkdtemp()
-        with mock.patch.dict(os.environ, {"AIHUB_HOME": home, "AIHUB_INDEX_URL": "", "AIHUB_TELEMETRY_URL": "", "AIHUB_TELEMETRY_BRANCH": ""}), \
+        with mock.patch.dict(os.environ, {"AIHUB_HOME": home, "AIHUB_INDEX_URL": ""}), \
                 mock.patch("builtins.input", side_effect=AssertionError("must not prompt")), \
                 mock.patch("getpass.getpass", side_effect=AssertionError("must not prompt")), \
                 mock.patch("aihub.cli.ui.INTERACTIVE", True):
@@ -205,11 +188,6 @@ class SetupAsksOnlyForGit(unittest.TestCase):
             cfg = json.load(open(os.path.join(home, "config.json")))
         self.assertEqual(missing, [])
         self.assertEqual(cfg["index_url"], DEF["index"]["git_url"])
-        self.assertNotIn("telemetry_url", cfg)                       # not frozen: a new defaults.json value must reach existing installs
-        self.assertNotIn("telemetry_branch", cfg)
-        with mock.patch.dict(os.environ, {"AIHUB_HOME": home, "AIHUB_TELEMETRY_URL": "", "AIHUB_TELEMETRY_BRANCH": ""}):
-            from aihub.cli import telemetry
-            self.assertEqual(telemetry.source()["url"], DEF["telemetry"]["git_url"])
 
     def test_no_credentials_prompt_when_git_access_already_works(self):
         from aihub.cli import remote_config
@@ -218,7 +196,7 @@ class SetupAsksOnlyForGit(unittest.TestCase):
                 mock.patch("getpass.getpass", side_effect=AssertionError("must not prompt")):
             self.assertTrue(remote_config.ensure_git_access("https://git.example/x.git"))
 
-    def test_asks_for_credentials_only_when_git_refuses(self):
+    def test_asks_for_git_credentials_only_when_git_refuses(self):
         from aihub.cli import remote_config
         denied = mock.Mock(returncode=128, stderr="fatal: Authentication failed")
         good = mock.Mock(returncode=0, stderr="")
@@ -227,3 +205,14 @@ class SetupAsksOnlyForGit(unittest.TestCase):
                 mock.patch.object(remote_config, "store_git", return_value=True) as store:
             self.assertTrue(remote_config.ensure_git_access("https://git.example/x.git"))
         store.assert_called_once_with("https://git.example/x.git", "bob", "tok")
+
+    def test_client_uses_kafka_credentials_when_set_and_needs_none_otherwise(self):
+        from aihub.cli import telemetry
+        from aihub.core import kafkacfg
+        with mock.patch.dict(os.environ, {"AIHUB_KAFKA_BOOTSTRAP": "b:9092"}), mock.patch("builtins.input", side_effect=AssertionError("no prompt")):
+            self.assertEqual(telemetry.kafka_config()["username"], "")                     # nothing required
+            self.assertNotIn("sasl_plain_username", kafkacfg.client_kwargs(telemetry.kafka_config()))
+        with mock.patch.dict(os.environ, {"AIHUB_KAFKA_BOOTSTRAP": "b:9092", "AIHUB_KAFKA_USERNAME": "u", "AIHUB_KAFKA_PASSWORD": "p",
+                                          "AIHUB_KAFKA_SASL_MECHANISM": "plain", "AIHUB_KAFKA_SECURITY_PROTOCOL": "sasl_ssl"}):
+            kw = kafkacfg.client_kwargs(telemetry.kafka_config())
+        self.assertEqual((kw["sasl_plain_username"], kw["sasl_plain_password"], kw["sasl_mechanism"]), ("u", "p", "PLAIN"))   # taken as is

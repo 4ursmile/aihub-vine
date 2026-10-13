@@ -1,4 +1,4 @@
-"""`aihub dev publish` as a git wrapper: verify remote+branch, commit, push (LFS if needed), report to the telemetry inbox."""
+"""`aihub dev publish` as a git wrapper: verify remote+branch, commit, push (LFS if needed), report to the hub over Kafka."""
 import os
 import re
 import shutil
@@ -179,7 +179,7 @@ def publish(root, m, bump=None, push_now=True):
 
 
 def report(info):
-    """Push the publish event now so the hub indexes it quickly; it is spooled for the background flusher if the inbox is unreachable."""
+    """Push the publish event now so the hub indexes it quickly; it is spooled for the background flusher if Kafka is unreachable."""
     ok = telemetry.deliver(dict(info, ts=__import__("time").time()))
     report.error = "" if ok else telemetry.deliver.error
     return ok

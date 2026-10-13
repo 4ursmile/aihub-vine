@@ -1,9 +1,11 @@
-"""Non-blocking usage telemetry, batched through git.
+"""Non-blocking usage telemetry, sent to Kafka.
 
 `enqueue()` is a single O_APPEND write (microseconds). `kick()` starts a detached flusher process unless one is alive.
-The flusher waits one short window so a burst of events becomes ONE batch, then pushes it to the inbox repo as an orphan
-commit on its own ref (`refs/telemetry/<client_id>/<batch>`). Nobody else writes that ref, so pushes never conflict. The
-hub fetches the refs, stores the events, archives them and deletes the refs. Nothing here may raise or block the agent.
+The flusher waits one short window so a burst of events becomes ONE batch, then produces every event as a message on the
+hub's Kafka topic (kafka-python). The hub consumes the topic and updates the web at once. A failed send keeps the events on
+disk and retries with a growing delay (see `_fail`). Git is no longer used for usage events; the one exception is a `publish`
+event when Kafka cannot be reached (`deliver`),.
+Nothing here may raise or block the agent.
 """
 import glob
 import json
@@ -21,8 +23,6 @@ BATCH = 5000    # events per pushed commit
 BACKOFF_BASE = 30       # seconds to leave the network alone after the first failed push; doubles per failure
 BACKOFF_MAX = 900
 WINDOWS = os.name == "nt"
-PUSH_TRIES = 12         # a push can lose a race with another client (non-fast-forward): refetch the tip and add the file again.
-                        # Many clients flushing in the same second all race for the one branch tip; jittered, growing waits spread them out
 MAX_PASSES = 20         # push passes one flusher process may run; a safety net so no failure mode can make it loop forever
 
 
@@ -69,12 +69,18 @@ def _prep(ev):
 
 
 def enqueue(ev):
+    """Append one event to the spool. Never drops: a spool past MAX_SPOOL is sealed into its own `sending.*` file (kept until Kafka
+    takes it) and a fresh spool is started, so a long outage only costs disk."""
     try:
         paths.ensure("queue")
         line = (_prep(ev) + "\n").encode()
-        if os.path.exists(_spool()) and os.path.getsize(_spool()) > MAX_SPOOL:
-            return
-        fd = os.open(_spool(), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        sp = _spool()
+        if os.path.exists(sp) and os.path.getsize(sp) > MAX_SPOOL:
+            try:
+                os.replace(sp, paths.p("queue", "sending.%d.%d.jsonl" % (os.getpid(), time.time() * 1000000)))
+            except OSError:
+                pass
+        fd = os.open(sp, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
             os.write(fd, line)
         finally:
@@ -225,79 +231,62 @@ def interval():
     return max(5.0, min(v, 3600.0))
 
 
-def source():
-    """Where telemetry goes. Lookup order for each value: environment > ~/.aihub/config.json (`aihub config set telemetry_url|telemetry_branch`)
-    > aihub/core/defaults.json (bundled in both the pip package and aihub.pyz) > the package index repo (url only).
-    The CLI pushes to refs/telemetry/* of `url`; `branch` is the branch the hub archives ingested batches to."""
-    from ..core import defaults
-    d, c = defaults.load().get("telemetry", {}), paths.config()
-    url = os.environ.get("AIHUB_TELEMETRY_URL") or c.get("telemetry_url") or d.get("git_url") or ""
-    if not url:
-        from . import registry
-        url = registry.source()["url"]
-    return {"url": url, "branch": os.environ.get("AIHUB_TELEMETRY_BRANCH") or c.get("telemetry_branch") or d.get("branch") or "telemetry-archive",
-            "inbox": os.environ.get("AIHUB_TELEMETRY_INBOX_BRANCH") or c.get("telemetry_inbox_branch") or d.get("inbox_branch") or "telemetry-inbox"}
+def kafka_config():
+    """Kafka settings, or {} when none is configured (events then stay spooled). Lookup order for each field: environment
+    AIHUB_KAFKA_<FIELD> > ~/.aihub/config.json `kafka_<field>` (the hub writes these on setup) > aihub/core/defaults.json `kafka.<field>`."""
+    from ..core import defaults, kafkacfg
+    d, c = defaults.load().get("kafka", {}), paths.config()
+    return kafkacfg.resolve(lambda k: os.environ.get("AIHUB_KAFKA_" + k.upper()) or c.get("kafka_" + k) or d.get(k))
 
 
-def target():
-    return source()["url"]
+def enabled():
+    return bool(kafka_config())
 
 
-def _scratch():
-    """A private bare repo used only to build commits; nothing is ever checked out."""
-    d = paths.p("queue", "git")
-    if os.path.isdir(d) and not _scratch_sound(d):
-        gitx.rmtree(d)                                  # half-removed leftover (e.g. after self-uninstall): start clean
-    if not os.path.isdir(os.path.join(d, "objects")):
-        os.makedirs(d, exist_ok=True)
-        gitx.run(["init", "-q", "--bare"], cwd=d)
-    return d
-
-
-def _scratch_sound(d):
-    """The scratch repo still has HEAD, objects and refs, and git accepts it as a bare repo."""
-    return all(os.path.exists(os.path.join(d, x)) for x in ("HEAD", "objects", "refs")) \
-        and gitx.run(["rev-parse", "--is-bare-repository"], cwd=d, check=False) == "true"
-
-
-_RACE = ("non-fast-forward", "fetch first", "stale info", "failed to update ref", "cannot lock ref", "couldn't find remote ref")
-
-
-def push(url, lines, timeout=20):
-    """Add one file, inbox/<client>-<unix>-<rand>.jsonl, on top of the tip of the single inbox branch (default `telemetry-inbox`).
-    Only the tip is fetched (depth 1), so the cost does not grow with history. Every client writes a different file name, so two
-    clients racing never conflict in content: the loser is rejected as non-fast-forward, refetches the new tip and adds its file again.
-    However long the server is down, the repo still has this ONE branch; the files just pile up inside it.
-    Raises on any failure; the caller keeps the events."""
-    import random
-    from . import hooks
-    d = _scratch()
-    branch = source()["inbox"]
-    name = "inbox/%s-%d-%s.jsonl" % (hooks.client_id(), int(time.time()), uuid.uuid4().hex[:8])
-    blob = gitx.run(["hash-object", "-w", "--stdin"], cwd=d, input="".join(l + "\n" for l in lines), timeout=timeout)
-    env = {"GIT_INDEX_FILE": os.path.join(d, "index.push")}
-    for attempt in range(PUSH_TRIES):
-        parent = gitx.fetch_tip(d, url, branch, "refs/inbox/tip", depth=1, timeout=timeout)     # "" = no branch yet: this push creates it
-        gitx.run(["read-tree", parent or "--empty"], cwd=d, extra_env=env)
-        gitx.run(["update-index", "--add", "--cacheinfo", "100644,%s,%s" % (blob, name)], cwd=d, extra_env=env)
-        tree = gitx.run(["write-tree"], cwd=d, extra_env=env)
-        commit = gitx.run(["-c", "user.name=aihub", "-c", "user.email=aihub@localhost", "commit-tree", tree, "-m", "telemetry"]
-                          + (["-p", parent] if parent else []), cwd=d, timeout=timeout)
+def kafka_reachable(timeout=3):
+    """True when a TCP connection to any bootstrap server opens (a cheap check for `doctor` / `setup`; no Kafka protocol involved)."""
+    import socket
+    from ..core import kafkacfg
+    for host, port in kafkacfg.hosts(kafka_config()):
         try:
-            gitx.run(["push", "-q", url, "%s:refs/heads/%s" % (commit, branch)], cwd=d, timeout=timeout)
-            return
-        except gitx.GitError as e:
-            if attempt == PUSH_TRIES - 1 or not any(w in str(e).lower() for w in _RACE):
-                raise                                                      # not a lost race (no access, offline, protected branch): do not hammer
-            time.sleep(random.uniform(0.1, 1.0) * min(2 ** attempt, 8))         # full jitter, capped: ~30 s worst case for 12 tries
+            socket.create_connection((host, port), timeout=timeout).close()
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def send(lines, timeout=20):
+    """Produce every line (one JSON event) as one Kafka message and wait until the broker has them all. Raises on any failure; the caller
+    keeps the events. The message key is the client id, so one client's events stay in order on one partition."""
+    cfg = kafka_config()
+    if not cfg:
+        raise RuntimeError("no Kafka server configured")
+    from ..core import kafkacfg
+    try:
+        from kafka import KafkaProducer
+    except ImportError:
+        raise RuntimeError("kafka-python is not installed (pip install kafka-python)")
+    from . import hooks
+    key = hooks.client_id().encode()
+    producer = KafkaProducer(acks="all", retries=3, linger_ms=50, request_timeout_ms=int(timeout * 1000),
+                             max_block_ms=int(timeout * 1000), bootstrap_timeout_ms=int(timeout * 1000),
+                             **kafkacfg.client_kwargs(cfg))
+    try:
+        futures = [producer.send(cfg["topic"], key=key, value=l.encode()) for l in lines]
+        producer.flush(timeout=timeout)
+        for f in futures:
+            f.get(timeout=1)                             # raises the broker's error for a message that was not stored
+    finally:
+        producer.close(timeout=2)
+
 
 
 def _send_once(timeout=20):
     """Push everything spooled. Returns the number of events sent. The spool files are deleted only after the push succeeded;
     a failure leaves them for the next pass, and a crash between push and delete only causes a resend the hub dedups by id."""
-    url = target()
-    if not url:
-        return 0                                         # keep the spool until an inbox is configured
+    if not enabled():
+        return 0                                         # keep the spool until Kafka is configured
     if os.path.exists(_spool()):
         os.replace(_spool(), paths.p("queue", "sending.%d.%d.jsonl" % (os.getpid(), time.time() * 1000)))
     files = glob.glob(paths.p("queue", "sending.*.jsonl"))
@@ -317,7 +306,7 @@ def _send_once(timeout=20):
     if lines:
         try:
             for i in range(0, len(lines), BATCH):
-                push(url, lines[i:i + BATCH], timeout)
+                send(lines[i:i + BATCH], timeout)
         except Exception as e:
             _send_once.error = gitx.redact_url(str(e))[:200]
             _status(False, _send_once.error)
@@ -358,7 +347,7 @@ def flush(timeout=20, linger=None, force=False):
         if force:
             return _send_once(timeout)
         for _ in range(MAX_PASSES):
-            if not target():
+            if not enabled():
                 break
             end = time.time() + interval()
             while time.time() < end:
@@ -387,19 +376,23 @@ def record(ev):
 
 
 def deliver(ev, timeout=20):
-    """Push one event now (publish needs the hub to hear about it quickly). Falls back to the spool. -> True when it was pushed."""
-    try:
-        line = _prep(ev)
-        url = target()
-        if url:
-            push(url, [line], timeout)
+    """Send one event now (publish needs the hub to hear about it quickly). Over Kafka; if that fails the event is spooled and the
+    background flusher retries it. -> True when sent."""
+    line = _prep(ev)
+    errors = []
+    if enabled():
+        try:
+            send([line], timeout)
             _ok()
             _status(True, "", 1)
             return True
-        deliver.error = "no telemetry inbox configured"
-    except Exception as e:
-        deliver.error = gitx.redact_url(str(e))[:200]
-        _status(False, deliver.error)
+        except Exception as e:
+            errors.append("kafka: " + str(e))
+    else:
+        errors.append("no Kafka server configured")
+    deliver.error = gitx.redact_url("; ".join(errors))[:300]
+    _status(False, deliver.error)
+    if enabled():
         _fail()
     record(ev)
     return False

@@ -1,6 +1,6 @@
 # Server configuration
 
-AI Hub selects its database, cache, and package-file storage independently. The defaults run on one machine without external services: SQLite metadata and an in-process memory cache. Packages are not stored by the server: they live in git, and usage events travel through a git inbox repo (see [architecture](architecture.md)).
+AI Hub selects its database, cache, and package-file storage independently. The defaults run on one machine without external services: SQLite metadata and an in-process memory cache. Packages are not stored by the server: they live in git, and usage and publish events travel through a Kafka topic (see [architecture](architecture.md)).
 
 ## Configuration sources
 
@@ -219,24 +219,26 @@ docker compose up -d --build
 
 The Compose file's bundled-service fallback variables are intended for the matching profiles; for external services, supply explicit `AIHUB_DATABASE_URL` (recommended for external PostgreSQL), `AIHUB_REDIS_URL`, and S3-compatible endpoint/credentials in `.env`. Compose explicitly sets `AIHUB_PG_PASSWORD` from `POSTGRES_PASSWORD`, so when using external PostgreSQL connection parts instead of `AIHUB_DATABASE_URL`, set `POSTGRES_PASSWORD` in the Compose `.env` file as well as `AIHUB_PG_HOST` and other parts. `AIHUB_S3_ENDPOINT` is empty by default (AWS S3); set it to `http://minio:9000` in `.env` when you use the bundled MinIO profile, or to your provider's URL for R2/Ceph. Review `docker compose config` to see the effective configuration before launch. Keep credentials out of shell history and version control.
 
-## Telemetry inbox and package index
+## Usage events and package index
 
 These can be set here or in Admin > Sync. **Environment wins over Admin settings**: a value set in the real environment or the `.env` file is used everywhere (Get started, `/api/v1/client-config`, the sync job), and the saved Admin value is ignored. The admin page shows "Set by environment" next to such a field. Order for each value: environment (or `.env`) > Admin settings > `aihub/core/defaults.json`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AIHUB_TELEMETRY_URL` | `aihub/core/defaults.json`, then the index repo | Git repo CLIs push usage files to. Users need write access to the `telemetry-inbox` branch only, not `main`. The server also removes the ingested files from that branch and pushes the archive branch. |
-| `AIHUB_TELEMETRY_INBOX_BRANCH` | `telemetry-inbox` (`telemetry.inbox_branch` in `defaults.json`) | The one branch CLIs add an `inbox/<client>-<unix>-<rand>.jsonl` file to on each push, and the server reads and empties. Set it the same on the hub and in the CLI defaults, because the hub does not send it to CLIs. Not editable in Admin > Sync. |
-| `AIHUB_TELEMETRY_BRANCH` | `telemetry-archive` | Permanent branch the server archives ingested files to (`archive/<day>/<client>-<unix>-<rand>.jsonl`). |
+| `AIHUB_KAFKA_BOOTSTRAP` | unset | Kafka bootstrap servers, `host:9092` (comma separated). Without a Kafka server the CLI keeps usage events queued. Admin > Sync (`kafka_*` keys) and `defaults.json` `kafka` are the fallbacks. |
+| `AIHUB_KAFKA_TOPIC` | `aihub.events` | Topic CLIs produce usage events to and the server consumes from (group `aihub-server`). |
+| `AIHUB_KAFKA_SECURITY_PROTOCOL`, `AIHUB_KAFKA_SASL_MECHANISM` | unset | Broker security settings, passed to kafka-python. |
+| `AIHUB_KAFKA_USERNAME`, `AIHUB_KAFKA_PASSWORD` | unset | SASL credentials. Never sent to clients. The admin page shows the password only as "set". |
+| `AIHUB_KAFKA_SSL_CAFILE` | unset | CA file for TLS to the brokers. |
 | `AIHUB_INDEX_URL` | empty | Git URL of the repo holding the index, an `https://...json` URL, or a local file. |
 | `AIHUB_INDEX_BRANCH` / `AIHUB_INDEX_PATH` | `main` / `index` | Branch and folder inside that repo (a folder index; an old `index.json` file is still read). |
 | `AIHUB_CLI_GIT_URL` | empty | Repo to `pip install` the CLI from when this server is unreachable (shown on Get started). |
 | `AIHUB_CLI_GIT_BRANCH` | empty | Optional branch to install from. Shown as `git+<url>@<branch>`; empty hides it. |
 | `AIHUB_CLI_GIT_SUBDIR` | empty | Optional sub folder of the repo to install from. Shown as `#subdirectory=<dir>`; empty hides it. Cannot contain spaces, `#`, `?`, `..` or a leading `/`. |
 
-The pull schedule (seconds or a cron expression such as `*/5 * * * *`), the archive switch (`telemetry_archive`, on by default) and the CLI refresh interval are admin settings stored in the database: Admin > Sync.
+The pull schedule (seconds or a cron expression such as `*/5 * * * *`), the git index commit interval (seconds, 10 to 86400, or cron; default 60) and the CLI refresh interval are admin settings stored in the database: Admin > Sync. The Kafka settings (`kafka_*`) are set there too, and the Sync tab shows whether the consumer is connected, how many messages it has consumed and its last error.
 
-The server writes the index folder only from publish events, committing and pushing the change to the index branch. It needs git push access to the index repo for this and for backups. Git credentials are never sent to clients. A publish event may only name a repo on a public host or on the same host as the index; other events are ignored.
+The server writes the index folder from publish events in batches: once per git index commit interval it makes one commit and one push to the index branch. It needs git push access to the index repo for this and for backups. Git credentials are never sent to clients. A publish event may only name a repo on a public host or on the same host as the index; other events are ignored.
 
 ## Database backup
 
@@ -249,6 +251,7 @@ The server can back up its database into the index git repo, under `backups/`. I
 | `backup_events_chunk` | `20000` | Admin setting: rows per file for `events` and `audit_log`, from 1000 to 1000000. |
 
 - A backup needs the index git URL and push access for the server's git credentials. A local-file index is not backed up.
+- Each scheduled run starts after a random delay of up to 10% of the wait (at most 15 minutes; none when the wait is under 2 minutes), so backups do not hit the git remote at the same second every night.
 - Layout: `backups/index.json` lists each file with row count, sha256 and size. `backups/db/<table>.sqlite.gz` holds one table per file. `events` and `audit_log` are split into `<table>-000001.sqlite.gz`, `<table>-000002.sqlite.gz`, and so on. Full chunks are not rewritten.
 - Passwords and tokens are written as one-way hashes. Secret-like settings are hashed, and event details are redacted.
 - Admin UI: Admin > Backup shows the last run and next run, the on/off switch, the schedule (with presets), rows per file, and a Back up now button. If `AIHUB_BACKUP_ENABLED` is set in the environment, the switch is shown as set by the environment and ignored.
@@ -266,4 +269,14 @@ The server can back up its database into the index git repo, under `backups/`. I
 
 `--recover ask|local|remote|latest|skip` sets the behaviour. Before a restore, local data is copied to `<data>/pre-recover-<time>/`, so the side you did not pick is still recoverable. Restored secrets are hashes: a secret that already exists locally is kept, otherwise re-enter it in the admin page.
 
-A backup also runs once right after the first sync pass at startup (`AIHUB_BACKUP_ON_START=0` disables it). Events that waited in the inbox while the server was down are pulled first, so they reach git before the next cron slot. If the database is replaced, events that were already archived stay in the `telemetry-archive` branch. A backup never overwrites a backup that holds data with an empty database.
+A backup also runs once right after the first sync pass at startup (`AIHUB_BACKUP_ON_START=0` disables it). The database backup is the durable copy of usage and publish events; a backup never overwrites a backup that holds data with an empty database.
+
+## Testing against a real Kafka broker
+
+`tests/test_kafka_index.py` mocks Kafka where it can, and `tests/test_kafka_e2e.py` runs against a real broker when `AIHUB_TEST_KAFKA` is set to its bootstrap address. The test creates a unique topic with kafka-python's `KafkaAdminClient` and deletes it afterwards:
+
+```sh
+AIHUB_TEST_KAFKA=localhost:9092 python -m unittest tests.test_kafka_e2e
+```
+
+Without the variable the end-to-end test is skipped.

@@ -7,7 +7,7 @@ name = "aihub-cli"
 dynamic = ["version"]
 description = "AI Hub command line: install, publish and track skills, agents and MCP servers backed by git."
 requires-python = ">=3.9"
-dependencies = []            # the CLI is standard-library only; `pip install aihub-cli[certs]` adds CA certificates
+dependencies = ["kafka-python>=3.0"]   # usage events go to Kafka; everything else in the CLI is standard library. `[certs]` adds CA certificates
 
 [project.optional-dependencies]
 certs = ["certifi"]

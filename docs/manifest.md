@@ -109,7 +109,7 @@ install_macos = "./scripts/install-macos.sh"
 uninstall_macos = "./scripts/uninstall-macos.sh"
 ```
 
-The install script asks for confirmation unless install is run with `--yes`. The uninstall script is run during uninstall. These are shell commands executed from the package directory.
+The install script asks for confirmation unless install is run with `--yes`. The uninstall script is run during uninstall. These are shell commands executed from the package directory. `aihub dev init --convert` writes these `[scripts]` keys from the install scripts it detects, and renames the files to match (e.g. `setup_mac.sh` becomes `install-macos.sh`).
 
 ## Setup profiles
 

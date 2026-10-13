@@ -4,10 +4,10 @@ This is a bundled snapshot, condensed from the hub docs (cli, manifest, publishi
 
 ## 1. Core model
 
-- **Git** holds package files and the package index. The index is a folder in a git repo (default branch `main`, path `index`) with `root.json`, `catalog/` and `packages/<xx>/<name>.json`. An older single `index.json` is still read.
+- **Git** holds package files and the package index. The index is a folder in a git repo (default branch `main`, path `index`) with `root.json`, `catalog/` and `packages/<xx>/<name>.json`. An older single `index.json` is still read. The hub serves the whole index at `GET /api/v1/index`; the CLI uses git only when the hub cannot be reached.
 - **Only the hub server writes the index.** The CLI only reads it. Nobody edits the index by hand.
-- **The telemetry inbox** (a git repo, often the index repo) holds usage and lifecycle events as files on one branch, `telemetry-inbox`. Each CLI push adds one file; the server ingests the files, archives them to the `telemetry-archive` branch and removes them from the inbox.
-- **The hub server** caches the index and events, and serves accounts, reviews and the web UI. It stores no package files and has no upload routes.
+- **Usage and publish events go to a Kafka topic** (`aihub.events` by default). Each CLI sends one message per event; the server consumes them into its database as they arrive. Nothing is sent to git for telemetry.
+- **The hub server** stores the index and events, and serves accounts, reviews and the web UI. It stores no package files and has no upload routes.
 - Package versions are immutable. A version that was published cannot be re-published.
 
 ## 2. Install the CLI
@@ -24,7 +24,7 @@ aihub register          # prompts for username and password; signup policy appli
 aihub login             # prompts for username if omitted; password is not echoed
 ```
 
-- `aihub setup` asks the hub for the index location and the telemetry inbox. `aihub setup --manual` works without a hub (see section 3).
+- `aihub setup` asks the hub for the index location and the Kafka settings. `aihub setup --manual` works without a hub (see section 3).
 - `aihub welcome` runs first-time setup for detected tools. The hub installer and `welcome` also install the built-in skills.
 
 ## 3. Config precedence and keys
@@ -42,20 +42,25 @@ Keys and environment variables:
 | `hub` | `AIHUB_URL` (default when no saved `hub`) | Hub URL |
 | `index_url` | `AIHUB_INDEX_URL` | Git URL of the index repo, an `https://...json` URL, or a local file |
 | `index_branch` / `index_path` | - | Branch (default `main`) and folder (default `index`) in that repo |
-| `telemetry_url`, `telemetry_inbox_branch` | `AIHUB_TELEMETRY_URL`, `AIHUB_TELEMETRY_INBOX_BRANCH` | Git repo and branch CLIs push usage files to (default: bundled `defaults.json`, then the index repo; branch `telemetry-inbox`) |
+| `kafka_bootstrap` | `AIHUB_KAFKA_BOOTSTRAP` | Kafka servers, `host:9092` comma separated. Usage events are produced here; without it they stay queued |
+| `kafka_topic` | `AIHUB_KAFKA_TOPIC` | Topic for usage events (default `aihub.events`) |
+| `kafka_security_protocol`, `kafka_sasl_mechanism` | `AIHUB_KAFKA_SECURITY_PROTOCOL`, `AIHUB_KAFKA_SASL_MECHANISM` | Broker security settings |
+| `kafka_username`, `kafka_password`, `kafka_ssl_cafile` | `AIHUB_KAFKA_USERNAME`, `AIHUB_KAFKA_PASSWORD`, `AIHUB_KAFKA_SSL_CAFILE` | SASL login and CA file. Used as given when set (environment or `config.json`); with none set the CLI connects anonymously. The hub never sends them |
+| `index_ttl`, `index_from` | `AIHUB_INDEX_TTL`, `AIHUB_INDEX_FROM` | Seconds the hub index is cached (default 300). `index_from` = `git` skips the hub |
 | `telemetry_interval` | `AIHUB_TELEMETRY_INTERVAL` | Seconds per telemetry window (default 15, allowed 5 to 3600) |
 | `auto_update` | `AIHUB_NO_UPDATE=1` | Set `false` to turn off the daily self-update check |
 
 - `AIHUB_HOME` moves the CLI state directory from `~/.aihub` to another path.
-- Git logins are kept by `aihub credential`, a git credential helper that `aihub setup` registers for the index and telemetry hosts only (macOS Keychain, Windows DPAPI, Linux Secret Service, else a 0600 file). One entry per host; if already configured, setup changes nothing. Check: `git config --global --get-all credential.https://<host>.helper`.
-- Without a hub: `aihub setup --manual`, or `aihub config set index_url <git url>`, or export `AIHUB_INDEX_URL` (and `AIHUB_TELEMETRY_URL`).
+- Git logins are kept by `aihub credential`, a git credential helper that `aihub setup` registers for the index host only (macOS Keychain, Windows DPAPI, Linux Secret Service, else a 0600 file). One entry per host; if already configured, setup changes nothing. Check: `git config --global --get-all credential.https://<host>.helper`.
+- Without a hub: `aihub setup --manual`, or `aihub config set index_url <git url>`, or export `AIHUB_INDEX_URL` (and `AIHUB_KAFKA_BOOTSTRAP` for usage events).
 
 Local files under `~/.aihub/`:
 
 ```text
-config.json       hub URL, index and telemetry settings, client ID
+config.json       hub URL, index, Kafka and telemetry settings, client ID
 credentials.json  hub login token (restrictive permissions)
 index-cache.json  cached copy of an http(s) .json index, used when it cannot be fetched
+index-hub.json    cached copy of the hub index (`GET /api/v1/index`), kept 5 minutes
 state.json        installed packages (version, rev, dependencies, enabled)
 packages/<name>/  installed package files
 repos/            cached git checkouts (index and packages)
@@ -88,7 +93,7 @@ aihub lock                        # write aihub.lock (commit it)
 aihub lock --check                # fail if the lock is out of date
 aihub sync                        # install exactly the locked commits
 aihub sync --check | --prune | --yes
-aihub doctor                      # index and telemetry inbox reachable? signed in? hooks? python3?
+aihub doctor                      # index and Kafka reachable? signed in? hooks? python3?
 aihub version                     # CLI version and the one the hub offers
 aihub upgrade [--check|--force|--rollback]
 aihub flush                       # send queued usage events now
@@ -105,6 +110,8 @@ Developer commands (`aihub dev`, run in a package folder or pass its path):
 
 ```sh
 aihub dev init ./my-pkg --type skill --name my-pkg --description "..."
+aihub dev init . --convert -y                          # ONE existing project: fill aihub.toml from what is there
+aihub dev init . --convert-mono --packages "a,b" -y    # several projects in one repository
 aihub dev init . --mono --packages "a,b:mcp" --remote <url> --branch main   # one repo, one package per sub folder
 aihub dev init . --sub --name new-pkg          # add a package to a workspace folder
 aihub dev list . / aihub dev tree .            # packages; tree adds repository and [git] status
@@ -114,6 +121,14 @@ aihub dev doctor [PATH] [--check] [--remote <url>]   # set [git] url/branch/subd
 aihub dev tree-solve [PATH] [--nested merge|keep]    # resolve a package folder with its own .git
 aihub dev index / aihub dev stats PATH
 ```
+
+`aihub dev init` has three modes. With no mode flag, a terminal asks "What is in <path>?": (1) start a new package here (starter files), (2) convert this folder, which is ONE existing package, or (3) convert several packages in this repository, picked from a checklist.
+
+- `--convert`: PATH already holds one project. The CLI reads it (no template needed) and fills `aihub.toml`: skills (folders with SKILL.md), agents (agents/*.md), MCP servers (.mcp.json, mcp.json or package.json "mcp"), `[bin]` from bin/*, install scripts, requirements (commands the scripts use, such as git/node/python/docker; requirements.txt or pyproject dependencies as `[python] requires`; package.json adds node), description (package.json or README) and the type (mcp if MCP servers, skill if only skills, agent if only agents, tool if only bin or scripts). Install scripts whose names the installer does not read are renamed (`setup_mac.sh` -> `install-macos.sh`, `Setup.ps1` -> `install-windows.ps1`, `setup.sh` -> `install.sh`; unix scripts serve both macOS and Linux; `uninstall`/`remove`/`teardown` -> `uninstall-*`). In a terminal it shows the renames and asks first. `[git]` comes from the repository, an existing `aihub.toml` is kept, and `requires.os` stays empty (all OSes), so one OS's script never blocks other OSes.
+- `--convert-mono`: PATH is a repository of projects. It offers each sub folder that looks like a package (SKILL.md, agents/, .mcp.json, bin/, install scripts) as a checklist, all ticked (`--packages a,b` names them instead). Each is converted like `--convert`; folders already holding `aihub.toml` are kept; `[git]` is then set for each from the real repository. A failing folder does not stop the rest (exit 1 at the end).
+- `-y` / `--yes`: never ask; accept what was detected.
+- The CLI asks only for custom structure: nothing recognizable (asks the package type), an invalid name, or two scripts competing for the same OS. Without a terminal, or with `--yes`, that case fails with a message naming the question; answer it with `--type` / `--name`. `--type` and `--description` override detection.
+- `--mono --packages ...` (new empty packages in one repository) is unchanged.
 
 Constraints: `name>=1.2`, `name==1.2.0`, `name>=1.0,<2`, `~=1.4`. An omitted operator means `==`. Empty or `*` matches any version.
 
@@ -145,8 +160,8 @@ Codex has no native agent format, so agents become custom prompts. Skill folders
 - Usage hooks record when an installed component is used (skill, agent, or an MCP tool of an installed package). Calls to other tools are not recorded.
 - Install, update and uninstall events are recorded too; install and update include the version.
 - Claude Code: `PreToolUse` and `UserPromptSubmit` hooks in `~/.claude/settings.json`. OpenCode: `~/.config/opencode/plugin/aihub-usage.js`. Codex: no tool-call hook, so only install and uninstall events are sent.
-- Events are queued in `~/.aihub/queue/events.jsonl` (or `$AIHUB_HOME/queue/`). A background flusher waits one telemetry window (default 15 s) so a burst becomes one batch, then pushes it to the inbox repo as one commit. Nothing is pushed when the queue is empty. `aihub flush` pushes immediately. After a failed push the CLI waits 30 s before the next automatic try, doubling up to 15 min; `aihub flush` skips that wait. The queue is capped at 5 MiB; extra events are dropped while it is over the cap.
-- Events wait in the queue (and are retried) while the inbox is unconfigured, unreachable or not writable.
+- Events are queued in `~/.aihub/queue/events.jsonl` (or `$AIHUB_HOME/queue/`). A background flusher waits one telemetry window (default 15 s) so a burst becomes one batch, then sends each event as one message to the Kafka topic (keyed by client id). Nothing is sent when the queue is empty. `aihub flush` sends immediately. After a failed send the CLI waits 30 s before the next automatic try, doubling up to 15 min; `aihub flush` skips that wait. Events are never dropped: a large spool is sealed into a `sending.*` file and kept until Kafka accepts it. `aihub dev publish` sends its publish event at once through the same Kafka path.
+- Events wait in the queue (and are retried) while Kafka is unconfigured or unreachable. Without a Kafka server, usage reporting is paused.
 - Parameters are scrubbed on your machine before queueing: values under keys like `password`, `token`, `secret`, `api_key`, `authorization`, `Bearer ...` headers, `password=...` text, passwords in URLs, and common key formats are replaced with `[redacted]`. Pattern-based scrubbing cannot catch every secret.
 - Each record carries the working directory, host name and OS user name. Events are recorded under the signed-in account name, or `~<OS user>` when not signed in. That name comes from the client and is not verified.
 - Event names: `aihub.use`, `aihub.install`, `aihub.update`, `aihub.uninstall`, `aihub.error`, `aihub.publish`.
@@ -176,14 +191,14 @@ Entry shape (written by the server, not by hand):
 - The index entry's `requires` is used for planning. The `aihub.toml` in the package repo is authoritative at install time.
 - The entry's README text is the first README found in the package root (`README.md`, `readme.md`, `Readme.md`, `README.markdown`, or `README`), capped at 20000 characters.
 - Each version has a Source link on the package page that points to the exact commit.
-- The server writes the index only from publish events, committing and pushing to the index branch. It needs git push access to the index repo.
+- The server writes the index only from publish events, in batches: one commit and push per git index commit interval (default 60 seconds). It needs git push access to the index repo.
 
 ## 8. Publishing a package, step by step
 
 No hub account is needed to publish: it uses your own git access. The git remote must be writable by you.
 
 **Step 1. Create or detect the project.**
-- No `aihub.toml` and an existing project: restructure it (step 3). Show planned moves before moving files.
+- No `aihub.toml` and an existing project: run `aihub dev init . --convert -y` (one project) or `aihub dev init . --convert-mono --packages "a,b" -y` (several), then restructure (step 3) only what the converter cannot do. Show planned moves before moving files.
 - New project: `aihub dev init ./my-pkg --type <type> --name <name> --description "..."`
 
 **Step 2. Pick the type.**
@@ -237,9 +252,9 @@ aihub uninstall <name>
 1. Reads `[git]` (`url`, `branch`, `subdir`) from `aihub.toml`. `dev init` fills it from `origin` and the current branch.
 2. Checks that the repo's remote and branch still match `[git]`, and stops if they do not.
 3. Runs `git init` and adds `origin` if needed, tracks files over 50 MB with git-lfs (stops if git-lfs is missing), commits, and pushes (setting upstream the first time).
-4. Sends a public `aihub.publish` event (package, version, commit, repo, branch) to the telemetry inbox right away. It is queued if the inbox is unreachable.
+4. Sends a public `aihub.publish` event (package, version, commit, repo, branch) to Kafka right away. If Kafka is unreachable it is queued and retried.
 
-It does not edit any index and never needs to. Afterwards the hub reads the event on its next sync (about 60 s, so 1 to 2 minutes), fetches the repo at that commit, checks `aihub.toml`, writes the index entry with its README, and pushes an `index: ...` commit. The package then appears in search, and its version shows a Source link to the commit. Do not edit the index by hand.
+It does not edit any index and never needs to. The hub shows the version at once, so the package appears in search. Later the hub fetches the repo at that commit, checks `aihub.toml`, and pushes an `index: ...` commit to the index repo (within the git index commit interval, default 60 seconds). The version then shows a Source link to the commit. Do not edit the index by hand.
 
 Published versions cannot be reused, so bump the version for every release.
 
@@ -376,10 +391,10 @@ Uninstall scripts only print a message. AI Hub removes package files and registr
 
 All routes use `/api/v1`. Send `Authorization: Bearer <token>` on protected routes. Create a token with `aihub login` or `POST /api/v1/auth/tokens`.
 
-- Public: `GET /meta`, `GET /healthz`, `GET /packages?q=&type=&tag=&sort=&page=&per_page=` (per_page 1 to 100), `GET /facets`, `GET /packages/{name}`, `GET /packages/{name}/versions`, `GET /packages/{name}/readme`, `GET /resolve?name=&spec=`, `POST /resolve/tree`, `GET /packages/{name}/reviews`, `GET /packages/{name}/stats?days=30`, `GET /rankings/{what}?days=30`, `GET /stats/overview`.
+- Public: `GET /meta`, `GET /healthz`, `GET /index` (whole index, ETag), `GET /packages?q=&type=&tag=&sort=&page=&per_page=` (per_page 1 to 100), `GET /facets`, `GET /packages/{name}`, `GET /packages/{name}/versions`, `GET /packages/{name}/readme`, `GET /resolve?name=&spec=`, `POST /resolve/tree`, `GET /packages/{name}/reviews`, `GET /packages/{name}/stats?days=30`, `GET /rankings/{what}?days=30`, `GET /stats/overview`.
 - Docs: `GET /api/v1/docs` (list), `GET /api/v1/docs/{slug}/raw` (Markdown). Live endpoint list: `/openapi.json`.
 - Auth: `POST /auth/register`, `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST /auth/password`, `GET|POST /auth/tokens`, `DELETE /auth/tokens/{id}`.
-- Client config: `GET /client-config` (index and telemetry locations, never credentials).
+- Client config: `GET /client-config` (index, Kafka and telemetry locations, never credentials).
 - Maintainers and access (signed in, maintainer or admin): `GET|POST /packages/{name}/maintainers`, `DELETE /packages/{name}/maintainers/{username}`, `PATCH /packages/{name}`, `GET /me/packages`.
 - Reviews: `POST /packages/{name}/reviews` with `{"rating":1..5,"body":"..."}` (needs `review` permission).
 - Admin (needs `admin`): `GET|PUT /admin/sync`, `POST /admin/sync/run?full=false`, `GET|PUT /admin/backup`, `POST /admin/backup/run`, `GET|PUT /admin/settings/registration` (`open`, `approval`, `closed`), `GET|PUT /admin/settings`, `GET /admin/roles`, `GET /admin/users?q=`, `POST /admin/users/{u}/status|role|reset-password`, `DELETE /admin/users/{u}`, `GET /admin/audit`.
@@ -411,7 +426,7 @@ All routes use `/api/v1`. Send `Authorization: Bearer <token>` on protected rout
 | `AIHUB_ENV_FILE` | unset | Selects a `.env` file |
 | `AIHUB_INDEX_URL` | empty | Index repo URL (environment wins over Admin > Sync) |
 | `AIHUB_INDEX_BRANCH`, `AIHUB_INDEX_PATH` | `main`, `index` | Branch and folder of the index |
-| `AIHUB_TELEMETRY_URL`, `AIHUB_TELEMETRY_INBOX_BRANCH`, `AIHUB_TELEMETRY_BRANCH` | defaults.json, then the index repo / `telemetry-inbox`, `telemetry-archive` | Telemetry inbox repo, its inbox branch (CLIs add files there) and the archive branch (CLIs need write access to `telemetry-inbox` only, not `main`; the server also removes the ingested files and pushes the archive branch) |
+| `AIHUB_KAFKA_BOOTSTRAP`, `AIHUB_KAFKA_TOPIC`, `AIHUB_KAFKA_SECURITY_PROTOCOL`, `AIHUB_KAFKA_SASL_MECHANISM`, `AIHUB_KAFKA_USERNAME`, `AIHUB_KAFKA_PASSWORD`, `AIHUB_KAFKA_SSL_CAFILE` | Admin > Sync (`kafka_*`), then defaults.json `kafka`; topic default `aihub.events` | Kafka servers the consumer reads usage events from (password shown only as "set") |
 | `AIHUB_CLI_GIT_URL`, `_BRANCH`, `_SUBDIR` | empty | Where `pip install` gets the CLI when the server is unreachable |
 | `AIHUB_BACKUP_ENABLED` | `0` | Backup schedule on or off (real environment only; else admin `backup_enabled`) |
 
@@ -422,7 +437,7 @@ All routes use `/api/v1`. Send `Authorization: Bearer <token>` on protected rout
 
 ## 14. Architecture in one paragraph
 
-The CLI reads the index from git and clones each package repo at the entry's ref, then follows that repo's `aihub.toml` to install and register. It records the commit; `lock` pins it and `sync` reinstalls exactly it. Usage events are pushed to a git inbox repo in batches. The hub fetches those batches and the index on a schedule and serves the catalogue, accounts and dashboard. Git applies its own access rules; the hub adds none in front of it.
+The CLI reads the index from the hub (or from git when the hub is unreachable) and clones each package repo at the entry's ref, then follows that repo's `aihub.toml` to install and register. It records the commit; `lock` pins it and `sync` reinstalls exactly it. Usage and publish events are sent to a Kafka topic, and the hub consumes them as they arrive. The hub writes the git index on a schedule, and serves the catalogue, accounts and dashboard. Git applies its own access rules; the hub adds none in front of it.
 
 ## 15. Troubleshooting
 
@@ -445,9 +460,9 @@ The CLI reads the index from git and clones each package repo at the entry's ref
 | `[[mcp_servers]] '<name>' needs a command` | Set `command` |
 | `package.description is empty` (warning) | Add a description |
 | `README '<path>' not found` (warning) | Add the README or fix `package.readme` |
-| Package missing from search after publish | Wait 1 to 2 minutes for the hub sync, then retry |
-| Usage events missing from the dashboard | Events are queued locally. After a failed push the CLI retries automatically after 30 s, growing to 15 min; run `aihub flush` to retry now, then wait for the hub sync |
+| Package missing from search after publish | Run `aihub flush -v` to check the publish reached the hub. The hub shows the version at once; the git index follows within the git index commit interval (default 60 seconds) |
+| Usage events missing from the dashboard | Events are queued locally. After a failed send the CLI retries automatically after 30 s, growing to 15 min; run `aihub flush` to retry now. Check `AIHUB_KAFKA_BOOTSTRAP` and `aihub doctor` |
 | Prompt in CI hangs or install skipped | stdin is closed and counts as "no"; use `--yes` |
 | `codex` MCP name already defined | `~/.codex/config.toml` already has `[mcp_servers.<name>]`; the CLI will not overwrite it |
 | Usage events missing for Codex | Codex has no tool-call hook; only install and uninstall events are sent |
-| Events not appearing in the dashboard | Check `aihub doctor` and `aihub flush`; events wait in the queue while the telemetry inbox is unreachable or not writable. The hub ingests on its sync schedule |
+| Events not appearing in the dashboard | Check `aihub doctor` and `aihub flush`; events wait in the queue while Kafka is unreachable or not configured. The hub consumes them as they arrive |

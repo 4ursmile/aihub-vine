@@ -403,7 +403,7 @@ def cmd_doctor(a):
 
 
 def _check_backends(detail=False):
-    """The package index and the telemetry inbox (both git) are what the CLI depends on; the hub is optional."""
+    """The package index (hub, or git as the fallback) and Kafka (usage events) are what the CLI depends on."""
     from . import telemetry, gitx
     idx = registry.source()
     with ui.Spinner("Checking the package index") as sp:
@@ -415,17 +415,17 @@ def _check_backends(detail=False):
                 sp.text("Package index OK (%d packages) - %s, branch %s, folder %s" % (n, gitx.redact_url(idx["url"]), idx["branch"], idx["path"]))
             except Exception as e:
                 sp.problem("package index unreachable [%s, branch %s]: %s" % (gitx.redact_url(idx["url"]), idx["branch"], gitx.redact_url(str(e))))
-    url = telemetry.target()
-    with ui.Spinner("Checking the telemetry inbox") as sp:
-        if not url:
-            sp.problem("no telemetry inbox configured, so usage reporting is paused. run: aihub setup")
-        elif gitx.reachable(url):
-            sp.text("Telemetry inbox reachable (%s)" % gitx.redact_url(url))
+    kc = telemetry.kafka_config()
+    with ui.Spinner("Checking Kafka") as sp:
+        if not kc:
+            sp.problem("no Kafka server configured, so usage reporting is paused. run: aihub setup   (or: aihub config set kafka_bootstrap host:9092)")
+        elif telemetry.kafka_reachable():
+            sp.text("Kafka reachable (%s, topic %s)" % (kc["bootstrap"], kc["topic"]))
             st = telemetry.last_status()
             if st and not st.get("ok"):
-                ui.note("the last usage push FAILED: %s (events are kept and retried; try: aihub flush -v)" % (st.get("error") or "unknown error"))
+                ui.note("the last usage send FAILED: %s (events are kept and retried; try: aihub flush -v)" % (st.get("error") or "unknown error"))
         else:
-            sp.problem("telemetry inbox unreachable or not writable: %s" % gitx.redact_url(url))
+            sp.problem("Kafka unreachable: %s (events are kept and retried)" % kc["bootstrap"])
     if detail:
         hub = paths.config()["hub"]
         try:
@@ -504,7 +504,7 @@ def cmd_flush(a):
         st = telemetry.last_status()
         if st and not st.get("ok"):
             print("last push failed: %s" % (st.get("error") or "unknown error"))
-            print("inbox: %s" % gitx.redact_url(telemetry.target()))
+            print("kafka: %s" % (telemetry.kafka_config().get("bootstrap") or "not configured"))
 
 
 def cmd_skill(a):
@@ -627,9 +627,171 @@ def _init_mono(a):
     ui.info("publish everything:  aihub dev publish %s        one package:  aihub dev publish %s --only NAME" % (a.path, a.path))
 
 
+def _answer_questions(plan, interactive):
+    """Ask only what the analysis could not decide (custom structure). Without a terminal that is an error that names every open question."""
+    for q in list(plan["questions"]):
+        if not interactive:
+            raise ValueError("cannot convert %s without help: %s (run `aihub dev init` in a terminal, or pass --type/--name)" % (plan["path"], q["text"]))
+        if q["id"] == "type":
+            plan["type"] = ui.select(q["text"], [(c, c) for c in q["choices"]]) or plan["type"]
+        elif q["id"] == "name":
+            plan["name"] = input("  %s: " % q["text"]).strip() or plan["name"]
+        elif q["id"].startswith("script:"):
+            f = q["id"][7:]
+            if not ui.confirm("%s  Use %s instead of the one already chosen?" % (q["text"], f), default=False):
+                continue
+        else:
+            ui.note(q["text"])
+    plan["questions"] = []
+    return plan
+
+
+def _convert_one(a, d, name=None, plan=None, interactive=None):
+    """Make the existing project in D a package: read it (convert.analyze), rename install scripts to the names the installer looks for,
+    write aihub.toml. Existing files are never overwritten, and an existing aihub.toml is kept."""
+    from ..core import convert, naming
+    interactive = ui.INTERACTIVE and not a.yes if interactive is None else interactive
+    f = os.path.join(d, "aihub.toml")
+    if os.path.isfile(f) and not a.force:
+        ui.note("%s already has an aihub.toml; keeping it" % os.path.basename(d))
+        return None
+    plan = plan or convert.analyze(d)
+    if name:
+        plan["name"] = naming.validate(name)
+    if a.type_given:
+        plan["type"] = a.type
+    plan["questions"] = [q for q in plan["questions"] if not (q["id"] == "type" and plan["type"]) and not (q["id"] == "name" and name)]
+    if a.description:
+        plan["description"] = a.description
+    _answer_questions(plan, interactive)
+    if plan["renames"]:
+        for old, new in plan["renames"]:
+            ui.info("rename  %s  ->  %s" % (old, new))
+        if not interactive or ui.confirm("Rename %d install script(s) so the installer finds them?" % len(plan["renames"])):
+            done = convert.apply_renames(plan, d)
+            for old, new in done:
+                ui.good("renamed %s -> %s" % (old, new))
+        else:
+            for old, new in plan["renames"]:                     # keep the files as they are: point [scripts] at the original names
+                for k, v in list(plan["scripts"].items()):
+                    if v == new:
+                        plan["scripts"][k] = old
+    from . import identity
+    who = identity.current()
+    toml = convert.build(plan, authors=[who["local_user"] if who["anonymous"] else who["user"]])
+    with open(f, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(toml)
+    made = ["aihub.toml"]
+    if not os.path.isfile(os.path.join(d, "README.md")):
+        from ..core import templates
+        with open(os.path.join(d, "README.md"), "w", newline="\n") as fh:
+            fh.write(templates.README.format(name=plan["name"], title=plan["name"].replace("-", " ").title(), description=plan["description"] or ""))
+        made.append("README.md")
+    if not getattr(a, "_mono_member", False) and pub.ensure_gitignore(d):
+        made.append(".gitignore")
+    for n in plan["notes"]:
+        ui.info(n)
+    try:
+        errs, warns = M.lint(M.parse(toml), d)
+    except ValueError as e:
+        raise ValueError("generated aihub.toml for %s is invalid: %s" % (os.path.basename(d), e))
+    for w in warns:
+        ui.note(w)
+    for e in errs:
+        ui.bad(e)
+    ui.good("converted %s as %s (%s): %s" % (os.path.basename(d) or d, plan["name"], plan["type"], ", ".join(made)))
+    return plan
+
+
+def _init_convert(a):
+    """One folder that already holds a project -> one package."""
+    d = _root(a)
+    if not os.path.isdir(d):
+        raise ValueError("%s is not a folder" % d)
+    plan = _convert_one(a, d, name=a.name or None)
+    if plan is None:
+        return
+    m = M.parse(open(os.path.join(d, "aihub.toml"), encoding="utf-8").read())
+    if not (m["git"].get("url") and m["git"].get("branch")):
+        try:
+            pub.write_git_table(os.path.join(d, "aihub.toml"), pub.detect(d, m["git"]))
+            ui.good("[git] filled in aihub.toml")
+        except ValueError as e:
+            ui.note("%s - set it before publishing" % e)
+    ui.info("next: review aihub.toml, then  aihub dev validate  &&  aihub dev publish")
+
+
+def _init_convert_mono(a):
+    """A repository holding several projects: list the folders that look like packages as a checklist and convert the ticked ones."""
+    from ..core import convert
+    root = _root(a)
+    if os.path.isfile(os.path.join(root, "aihub.toml")):
+        raise ValueError("%s is itself a package; pick the parent folder of the packages" % root)
+    cands = convert.candidates(root)
+    if not cands:
+        raise ValueError("no sub folder of %s looks like a package (looked for SKILL.md, agents/, .mcp.json, bin/, install scripts)" % root)
+    todo = [c for c in cands if not c[2]]
+    for name, _, is_pkg in cands:
+        if is_pkg:
+            ui.note("%s is already a package; keeping it" % name)
+    if a.packages:
+        want = {x.strip() for v in a.packages for x in v.split(",") if x.strip()}
+        todo = [c for c in todo if c[0] in want]
+    elif ui.INTERACTIVE and not a.yes and todo:
+        opts = [(c[0], "%-24s %s%s" % (c[0], c[1]["type"] or "?", "  (" + ", ".join(n for n in ("skills", "agents", "mcp_servers", "bin", "scripts") if c[1][n]) + ")")) for c in todo]
+        picked = ui.select("Convert which folders into AI Hub packages?", opts, multi=True, preset=[c[0] for c in todo])
+        todo = [c for c in todo if c[0] in set(picked or [])]
+    if not todo and not any(c[2] for c in cands):
+        ui.note("nothing selected")
+        return
+    ws.ensure_repo(root, a.remote or "", a.branch or "main")
+    failed = []
+    for name, plan, _ in todo:
+        try:
+            _convert_one(argparse.Namespace(**dict(vars(a), _mono_member=True)), os.path.join(root, name), plan=plan)
+        except (ValueError, OSError) as e:
+            ui.bad("%s: %s" % (name, e))
+            failed.append(name)
+    dirs = pub.discover(root)
+    for d in dirs:
+        rec, changes = ws.fix_git(d, root, remote=a.remote or None)
+        for c in changes:
+            ui.good("%s  [git] %s" % (rec["name"], c))
+    ui.celebrate("Monorepo ready: %d package(s)" % len(dirs))
+    ws.show_tree(root, ws.inspect(root, dirs))
+    if failed:
+        raise ValueError("%d folder(s) not converted: %s" % (len(failed), ", ".join(failed)))
+
+
+def _init_mode(a):
+    """Interactive `aihub dev init` with no mode flag: what is PATH?"""
+    d = _root(a)
+    has_children = os.path.isdir(d) and any(os.path.isdir(os.path.join(d, x)) and not x.startswith(".") for x in os.listdir(d))
+    has_files = os.path.isdir(d) and any(not x.startswith(".") for x in os.listdir(d))
+    opts = [("new", "Start a new package here (starter files)")]
+    if has_files:
+        opts.append(("one", "Convert this folder: it is ONE existing package"))
+    if has_children:
+        opts.append(("mono", "Convert several packages in this repository (pick them from a list)"))
+    if len(opts) == 1:
+        return "new"
+    return ui.select("What is in %s?" % (a.path if a.path != "." else "this folder"), opts) or "new"
+
+
 def dev_init(a):
-    if getattr(a, "mono", False):
+    a.type_given = bool(a.type)                         # an explicit --type wins over what the analysis finds
+    if not a.type:
+        a.type = "skill"
+    mode = "mono-new" if a.mono else "mono" if a.convert_mono else "one" if a.convert else None
+    if mode is None and ui.INTERACTIVE and not a.yes and not a.name and not a.sub and not getattr(a, "_mono_member", False) \
+            and not os.path.isfile(os.path.join(_root(a), "aihub.toml")):
+        mode = {"new": None, "one": "one", "mono": "mono"}[_init_mode(a)]
+    if mode == "mono-new":
         return _init_mono(a)
+    if mode == "mono":
+        return _init_convert_mono(a)
+    if mode == "one":
+        return _init_convert(a)
     from ..core import templates
     d = _root(a)
     from ..core import naming
@@ -890,11 +1052,11 @@ def dev_publish(a):
         ui.info("repo:    %s @ %s (%s)" % (info["git_url"], info["git_branch"], info["commit"][:8]))
         ui.info("install: aihub install %s" % info["package"])
     if pushed and not queued:
-        ui.note("publish event sent; the hub will add it to the package index shortly")
+        ui.note("publish event sent; the hub shows it now and adds it to the git index at its next sync")
     if queued:
-        ui.note("WARNING: the telemetry inbox is not reachable, so the hub has NOT been told about this publish and the package is not in the index yet (%s)"
+        ui.note("WARNING: Kafka is not reachable, so the hub has NOT been told about this publish and the package is not in the index yet (%s)"
                 % (pub.report.error or "unknown error"))
-        ui.info("the event is queued and goes out when the inbox is back (aihub flush), then the hub indexes it. To skip the wait: aihub dev index")
+        ui.info("the event is queued and goes out when Kafka is back (aihub flush), then the hub indexes it. To skip the wait: aihub dev index")
     if failed:
         raise ValueError("%d of %d package(s) not published: %s%s" % (len(failed), len(roots), ", ".join(failed),
                                                                  "; the other %d went out" % len(pushed) if pushed else ""))
@@ -1107,7 +1269,7 @@ def build_parser():
         "Example:\n  git config --global --get-all credential.https://git.example.com.helper",
         arg("action", choices=["get", "store", "erase"], help="Credential protocol action."))
     add("flush", cmd_flush, "Send queued usage events to the hub.",
-        "Push queued usage events to the telemetry inbox (a git repo) now. Events are normally pushed in the background as one batch, a few seconds after the last event (aihub config set telemetry_interval 15).",
+        "Produce queued usage events to the hub's Kafka topic now. Events are normally sent in the background as one batch, a few seconds after the last event (aihub config set telemetry_interval 15). A failed send keeps them and retries with a growing delay.",
         "Examples:\n  aihub flush\n  aihub flush --verbose",
         arg("-v", "--verbose", action="store_true", help="Print the number of events sent."),
         arg("--background", action="store_true", help=argparse.SUPPRESS))
@@ -1136,13 +1298,16 @@ def build_parser():
          "Create an aihub.toml manifest and starter files for the selected package type in PATH. Existing generated files are left alone unless --force is used; --force overwrites generated starter files.",
          "Examples:\n  aihub dev init . --type skill --name my-skill\n  aihub dev init ./server --type mcp --description \"Example MCP server\"\n  aihub dev init builtin --sub --name my-skill   (-> builtin/my-skill, next to the other packages)",
          [arg("--name", metavar="NAME", help="Package name (default: derived from the project directory)."),
-          arg("--type", default="skill", choices=["skill", "agent", "mcp", "tool", "setup"], metavar="TYPE", help="Starter package type (default: skill)."),
+          arg("--type", default=None, choices=["skill", "agent", "mcp", "tool", "setup"], metavar="TYPE", help="Package type (default: detected when converting, else skill)."),
           arg("--description", metavar="TEXT", help="Starter package description."),
           arg("--sub", action="store_true", help="Create the package in its own folder PATH/NAME, for a folder that holds several packages (needs --name)."),
           arg("--mono", action="store_true", help="PATH becomes one git repository holding several packages (see --packages). Packages already below PATH are kept; only their [git] is refreshed."),
-          arg("--packages", action="append", metavar="LIST", help="With --mono: packages to create, comma separated, each NAME or NAME:TYPE (e.g. --packages guide,tools:mcp)."),
+          arg("--packages", action="append", metavar="LIST", help="With --mono: packages to create, comma separated, each NAME or NAME:TYPE (e.g. --packages guide,tools:mcp). With --convert-mono: the folder names to convert."),
           arg("--remote", metavar="URL", help="With --mono: git remote for the whole repository (asked once when omitted)."),
           arg("--branch", metavar="BRANCH", help="With --mono: branch to publish (default: main)."),
+          arg("--convert", action="store_true", help="PATH already holds ONE project: read it, fill aihub.toml from what is there (skills, agents, MCP servers, bin, install scripts, requirements) and rename install scripts to the names the installer expects. Asks only when the structure is custom."),
+          arg("--convert-mono", dest="convert_mono", action="store_true", help="PATH is a repository holding several projects: pick the folders to convert from a checklist (or name them with --packages) and convert each one."),
+          arg("-y", "--yes", action="store_true", help="Never ask: accept what was detected (fails when a custom structure needs an answer)."),
           arg("--force", action="store_true", help="Overwrite generated starter files that already exist.")]),
         ("validate", dev_validate, "Validate and lint the package project.",
          "Parse and normalize PATH/aihub.toml, then lint the manifest and referenced package files. Report warnings and fail if validation errors are found.",
@@ -1155,7 +1320,7 @@ def build_parser():
          "Examples:\n  aihub dev publish\n  aihub dev publish --bump patch",
          [arg("--bump", choices=["major", "minor", "patch"], metavar="PART", help="Increment this version part before building (major/minor/patch; lower parts reset).")]),
         ("index", dev_index, "Force the hub to index this project (maintainers).",
-         "Ask the hub to read this project's pushed commit and add the version to the package index. Use it when the automatic step after `aihub dev publish` did not happen (lost event, telemetry inbox down). Needs `aihub login` with an account whose role has the 'index' permission. The hub checks aihub.toml at that commit; nothing from your machine is trusted but the repo location.",
+         "Ask the hub to read this project's pushed commit and add the version to the package index. Use it when the automatic step after `aihub dev publish` did not happen (lost event, Kafka down). Needs `aihub login` with an account whose role has the 'index' permission. The hub checks aihub.toml at that commit; nothing from your machine is trusted but the repo location.",
          "Examples:\n  aihub dev index\n  aihub dev index --commit 1a2b3c4",
          [arg("--commit", metavar="SHA", default="", help="Index this commit instead of HEAD (must be pushed).")]),
         ("tree", dev_tree, "Show the packages here as a tree, with repository status.",

@@ -302,6 +302,7 @@ class Integrations(unittest.TestCase):
         import json
         from aihub.cli import hooks, paths, telemetry
         paths.save("state.json", {"packages": {"pk": {"components": ["skill:s1", "mcp:srv"]}}})
+        self.addCleanup(setattr, telemetry, "kick", telemetry.kick)          # the stub must not leak into other test modules
         telemetry.kick = lambda: None
         hooks.handle(json.dumps({"tool_name": "Skill", "tool_input": {"skill": "s1"}}))
         hooks.handle(json.dumps({"tool_name": "Skill", "tool_input": {"skill": "s1"}}))        # same call twice: both are counted
@@ -315,6 +316,7 @@ class Integrations(unittest.TestCase):
         import json
         from aihub.cli import hooks, paths, telemetry
         paths.save("state.json", {"packages": {"pk": {"components": ["skill:my-skill"]}}})
+        self.addCleanup(setattr, telemetry, "kick", telemetry.kick)          # the stub must not leak into other test modules
         telemetry.kick = lambda: None
         f = paths.p("queue", "events.jsonl")
         if os.path.exists(f):

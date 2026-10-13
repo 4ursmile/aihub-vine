@@ -1,4 +1,4 @@
-"""Pull setup values (index location, telemetry inbox) from the hub, and keep them fresh. Git credentials stay with the user."""
+"""Pull setup values (index location, Kafka address) from the hub, and keep them fresh. Git credentials stay with the user."""
 import json
 import os
 import subprocess
@@ -56,12 +56,11 @@ def apply(cfg, index_host=None):
         if idx.get(k_src) and not os.environ.get(env_for[k_dst]):          # environment wins over what the hub sends
             c[k_dst] = idx[k_src]
     got = []
-    tel = cfg.get("telemetry") or {}
-    for k_src, k_dst, env in (("url", "telemetry_url", "AIHUB_TELEMETRY_URL"), ("branch", "telemetry_branch", "AIHUB_TELEMETRY_BRANCH"),
-                                  ("inbox", "telemetry_inbox_branch", "AIHUB_TELEMETRY_INBOX_BRANCH")):
-        if tel.get(k_src) and not os.environ.get(env):                    # environment wins over what the hub sends
-            c[k_dst] = tel[k_src]
-            got.append(k_dst)
+    kc = cfg.get("kafka") or {}
+    for k in ("bootstrap", "topic", "security_protocol", "sasl_mechanism"):
+        if kc.get(k) and not os.environ.get("AIHUB_KAFKA_" + k.upper()):      # username/password are never sent by the hub: set them yourself
+            c["kafka_" + k] = kc[k]
+            got.append("kafka_" + k)
     c["remote_config_at"] = time.time()
     c["remote_config_hours"] = cfg.get("refresh_hours", 24)
     paths.save("config.json", c)
@@ -119,7 +118,7 @@ def cmd_setup(a):
             cfg = fetch(hub)
     except (urllib.error.URLError, OSError, ValueError) as e:
         ui.bad("cannot reach the hub: %s" % e)
-        ui.info("manual setup:  aihub config set index_url <git url>  |  aihub config set telemetry_url <git url> (defaults to the index repo)")
+        ui.info("manual setup:  aihub config set index_url <git url>")
         return _manual(a)
     got = apply(cfg)
     ui.good("index: %s" % (cfg.get("index", {}).get("url") or "not set"))
@@ -160,7 +159,7 @@ def ensure_access(interactive=None):
     from . import registry, telemetry
     interactive = ui.INTERACTIVE if interactive is None else interactive
     urls = []
-    for u in (registry.source()["url"], telemetry.target()):
+    for u in (registry.source()["url"],):
         if u and u.startswith("http") and u not in urls:
             urls.append(u)
     changed, ok = ensure_helper(urls)
@@ -184,10 +183,10 @@ def _manual(a):
 
 def _verify():
     from . import telemetry
-    url = telemetry.target()
-    if not url:
-        ui.note("no telemetry inbox yet; usage reporting is paused")
-    elif gitx.reachable(url):
-        ui.good("telemetry inbox reachable (%s)" % gitx.redact_url(url))
+    cfg = telemetry.kafka_config()
+    if not cfg:
+        ui.note("no Kafka server yet; usage reporting is paused (run: aihub setup, or: aihub config set kafka_bootstrap host:9092)")
+    elif telemetry.kafka_reachable():
+        ui.good("Kafka reachable (%s, topic %s)" % (cfg["bootstrap"], cfg["topic"]))
     else:
-        ui.note("telemetry inbox not reachable or no access: %s" % gitx.redact_url(url))
+        ui.note("Kafka not reachable: %s" % cfg["bootstrap"])

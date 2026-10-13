@@ -742,6 +742,63 @@ class Repos:
             c.commit()
             return c.execute("SELECT COUNT(*) FROM events WHERE ext_id IS NOT NULL").fetchone()[0] - before
 
+    def index_export(self, viewer=None):
+        """The package index as the CLI reads it ({"packages": [entry...]}, see cli/registry.py), built from the database so it includes
+        versions the git index does not have yet. Only what `viewer` may see, never hidden packages or yanked versions."""
+        sql, args = self.visible_sql(viewer, "p")
+        c = self.db.conn()
+        pk = {r[0]: r for r in c.execute("SELECT p.id,p.name,p.type,p.description,p.tags,p.latest_version,p.readme FROM packages p "
+                                         "WHERE p.hidden=0 AND " + sql, args)}
+        vers = {}
+        for r in c.execute("SELECT package_id,version,manifest FROM versions WHERE yanked=0 ORDER BY id"):
+            if r[0] in pk:
+                vers.setdefault(r[0], []).append((r[1], r[2]))
+        out = []
+        for pid, p in sorted(pk.items(), key=lambda kv: kv[1][1]):
+            items = []
+            for ver, js in vers.get(pid, []):
+                try:
+                    items.append((ver, json.loads(js or "{}")))
+                except ValueError:
+                    items.append((ver, {}))
+            if not items:
+                continue
+            latest = p[5] if any(v == p[5] for v, _ in items) else items[-1][0]
+            lm = next((m for v, m in items if v == latest), {})
+            repo = {k: v for k, v in (lm.get("repo") or {}).items() if k in ("url", "branch", "subdir") and v}
+            e = {"name": p[1], "type": p[2] or "tool", "description": p[3] or "", "tags": [t for t in (p[4] or "").split(",") if t],
+                 "latest_version": latest, "repo": repo, "versions": []}
+            meta = lm.get("package") or {}
+            for k in ("authors", "license"):
+                if meta.get(k):
+                    e[k] = meta[k]
+            if p[6]:
+                e["readme"] = p[6]
+            if (lm.get("python") or {}).get("requires") or (lm.get("python") or {}).get("requirements_file"):
+                e["python"] = lm["python"]
+            for ver, m in items:
+                v = {"version": ver, "requires": m.get("requires") or {}}
+                r = m.get("repo") or {}
+                if r.get("ref"):
+                    v["ref"] = r["ref"]
+                other = {k: r[k] for k in ("url", "branch", "subdir") if r.get(k) and r.get(k) != repo.get(k)}
+                if other:
+                    v["repo"] = other
+                e["versions"].append(v)
+            out.append(e)
+        return {"packages": out}
+
+    def version_ref(self, name, version):
+        """The commit a stored version was published at ('' if unknown), or None when the database has no such version."""
+        r = self.db.conn().execute("SELECT v.manifest FROM versions v JOIN packages p ON p.id=v.package_id WHERE p.name=? AND v.version=?",
+                                   (name, version)).fetchone()
+        if not r:
+            return None
+        try:
+            return str((json.loads(r[0] or "{}").get("repo") or {}).get("ref") or "")
+        except ValueError:
+            return ""
+
     def version_sync(self, pid, version, manifest, sha="", file=None):
         """Add a version from the git index if new; refresh its manifest if it changed. -> True when new."""
         with self.lock:

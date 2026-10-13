@@ -17,9 +17,10 @@ import urllib.request
 from ..core import manifest as M, naming, pkgindex, version as V
 from . import api, gitx, paths, tls
 
-TTL = 300       # in-process cache of the reader; the on-disk checkout is checked against the remote far more often (CHECK)
-CHECK = 20      # seconds a checkout counts as current without asking the remote. After that ONE `ls-remote` (cheap, no download)
-                # says whether the branch moved; only then is it fetched. So a new publish shows up within seconds, not 5 minutes.
+CHECK = 300     # seconds the index counts as current without asking anyone (hub or git), env AIHUB_INDEX_TTL. After that the hub is asked
+                # with an ETag (304 = unchanged, nothing downloaded); only if the hub cannot be reached is git asked: ONE `ls-remote`,
+                # and the branch is fetched only when it moved. 5 minutes keeps a fleet of CLIs from hammering either.
+HUB_RETRY = 60  # seconds to leave an unreachable hub alone before trying it again (git is used meanwhile)
 
 
 def _defaults():
@@ -36,10 +37,58 @@ def source():
             "path": os.environ.get("AIHUB_INDEX_PATH") or c.get("index_path") or d.get("path") or "index"}
 
 
+def ttl():
+    try:
+        return max(0.0, float(os.environ.get("AIHUB_INDEX_TTL") or paths.config().get("index_ttl") or CHECK))
+    except (TypeError, ValueError):
+        return float(CHECK)
+
+
+def _hub_index(refresh=False):
+    """The package index as the hub serves it (GET /index), cached in ~/.aihub/index-hub.json. Within the TTL no request is made at all;
+    after it, one conditional request (If-None-Match): 304 keeps the cache and restarts the TTL, 200 replaces it. -> a Legacy reader,
+    or None when the hub cannot be asked (not configured, down, refused): the caller then falls back to git."""
+    if os.environ.get("AIHUB_INDEX_FROM") == "git" or paths.config().get("index_from") == "git":
+        return None
+    hub = paths.config()["hub"].rstrip("/")
+    cache = paths.load("index-hub.json", {})
+    mine = cache.get("hub") == hub and isinstance(cache.get("data"), dict)
+    now = time.time()
+    if mine and not refresh and now - cache.get("at", 0) < ttl():
+        return pkgindex.Legacy(cache["data"])
+    if not refresh and now - cache.get("failed", 0) < HUB_RETRY:
+        return None                                       # the hub was down a moment ago: do not wait for it again on every command
+    try:
+        rq = api._req("GET", "/index", headers={"If-None-Match": cache["etag"]} if mine and cache.get("etag") else None, timeout=8)
+        with rq as r:
+            etag, data = r.headers.get("ETag", ""), json.loads(r.read() or b"{}")
+        if not isinstance(data.get("packages"), list):
+            raise api.ApiError("hub returned no index")
+        paths.save("index-hub.json", {"hub": hub, "at": now, "etag": etag, "data": data})
+        return pkgindex.Legacy(data)
+    except api.ApiError as e:
+        if str(e).startswith("304") and mine:
+            cache["at"] = now
+            cache.pop("failed", None)
+            paths.save("index-hub.json", cache)
+            return pkgindex.Legacy(cache["data"])
+        cache["failed"] = now
+        paths.save("index-hub.json", cache)
+        return None
+    except (OSError, ValueError):
+        cache["failed"] = now
+        paths.save("index-hub.json", cache)
+        return None
+
+
 def _reader(src, refresh=False):
     """A pkgindex reader for the configured source. Git sources are fetched at most every TTL seconds; if the network is down
     the last checkout is used (a stale index beats none)."""
     u = src["url"]
+    if not os.path.exists(u or "-"):
+        hub = _hub_index(refresh)                         # a local file/folder index is explicit: never replaced by the hub's
+        if hub is not None:
+            return hub
     if not u:
         raise api.ApiError("no package index configured; run: aihub config set index_url <git url>")
     if os.path.isfile(u):
@@ -60,7 +109,7 @@ def _reader(src, refresh=False):
     base = paths.ensure("repos", "_index")        # own folder: a package checkout of the same repo (pinned commit) must not replace the index
     d = gitx.cache_dir(u, base)
     stamp = os.path.join(d, ".aihub-index-fetched")
-    fresh = not refresh and os.path.isfile(stamp) and time.time() - os.path.getmtime(stamp) < CHECK
+    fresh = not refresh and os.path.isfile(stamp) and time.time() - os.path.getmtime(stamp) < ttl()
     if not fresh and not refresh and os.path.isfile(stamp):
         head = gitx.remote_head(u, src["branch"], timeout=15)
         if head and head == gitx.run(["rev-parse", "-q", "--verify", "HEAD"], cwd=d, check=False):
@@ -88,7 +137,7 @@ _cache = {}
 def reader(refresh=False):
     src = source()
     key = (src["url"], src["branch"], src["path"])
-    if refresh or key not in _cache or time.time() - _cache[key][0] > CHECK:
+    if refresh or key not in _cache or time.time() - _cache[key][0] > ttl():
         _cache[key] = (time.time(), _reader(src, refresh))
     return _cache[key][1]
 

@@ -26,6 +26,7 @@ from .sync import next_delay, parse_schedule
 log = logging.getLogger("aihub")
 FORMAT = 1
 DEFAULT_SCHEDULE = "0 3 * * *"
+JITTER_MAX = 900                          # seconds: the longest a scheduled backup is delayed
 DEFAULT_CHUNK = 20000                     # rows per file for events / audit_log
 CHUNKED = ("events", "audit_log")         # tables with an integer id that only grows
 SKIP = {"sqlite_sequence"}                # never dumped; FTS shadow tables are not in TABLES, so they are not either
@@ -118,6 +119,13 @@ def write_sqlite(path, table, cols, rows):
         con.close()
 
 
+def jitter(base):
+    """A few random minutes added to a scheduled run, so a backup does not hit the git remote at exactly 03:00:00 every night (a fixed,
+    machine-regular push is what bot detection looks for). Up to 10% of the wait, capped at JITTER_MAX; none for a short interval."""
+    import random
+    return random.uniform(0, min(JITTER_MAX, base * 0.1)) if base >= 120 else 0.0
+
+
 class Backup:
     def __init__(self, repos, settings, sync):
         self.repos, self.s, self.sync = repos, settings, sync
@@ -141,9 +149,10 @@ class Backup:
 
     def delay(self):
         try:
-            return next_delay(parse_schedule(self.schedule_text()))
+            base = next_delay(parse_schedule(self.schedule_text()))
         except ValueError:
-            return next_delay(parse_schedule(DEFAULT_SCHEDULE))
+            base = next_delay(parse_schedule(DEFAULT_SCHEDULE))
+        return base + jitter(base)
 
     # ----- cron loop
     def start(self):
@@ -166,7 +175,7 @@ class Backup:
             self.repos.db.release()
 
     def _loop(self):
-        # One backup right after the first sync pass: events pulled from the inbox while the server was down reach git
+        # One backup right after the first sync pass: events consumed while the server was down reach the backup
         # now, not at the next cron slot. This disk can fail later; git then still has them.
         if self.on_start() and self.sync.first_pass.wait(300) and not self.stop.is_set() and self.enabled():
             self._try()

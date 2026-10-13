@@ -21,7 +21,7 @@ If none exists, the CLI is not installed: ask the user to run the hub's installe
 
 ```
 aihub config        # JSON; the "hub" key is the URL
-aihub doctor        # checks the package index and the telemetry inbox, whether you are signed in, and python3 (the hub is optional)
+aihub doctor        # checks the package index and the Kafka server, whether you are signed in, and python3 (the hub is optional)
 ```
 
 Use that value as `$HUB` (default `http://localhost:8000`). If the CLI is missing, ask the user for the hub address.
@@ -42,7 +42,7 @@ curl -fsSL $HUB/api/v1/docs/<slug>/raw       # one document as Markdown
 | api | REST endpoints, auth, admin routes |
 | configuration | server environment variables |
 | server-setup | deploying, upgrading and operating a hub |
-| architecture | how git, the index, the telemetry inbox and the hub fit together |
+| architecture | how git, the index, Kafka and the hub fit together |
 
 **HTTPS with a private or self-signed certificate:** if `curl` reports a certificate error, add `--cacert /path/ca.pem` (preferred) or `-k` to the `curl` calls above, and for Python use `ssl._create_unverified_context()` as `context=`. Only do this for a hub the user trusts; `aihub config set ca_bundle <ca.pem>` / `insecure_tls true` makes the aihub CLI itself accept it.
 

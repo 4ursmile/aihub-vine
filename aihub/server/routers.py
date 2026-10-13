@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from typing import Optional
@@ -38,8 +39,9 @@ def R(request): return request.app.state.repos
 
 # admin setting key -> environment variable that overrides it (environment / .env wins; the UI shows "set by environment")
 CLI_GIT_ENV = {"cli_git_url": "AIHUB_CLI_GIT_URL", "cli_git_branch": "AIHUB_CLI_GIT_BRANCH", "cli_git_subdir": "AIHUB_CLI_GIT_SUBDIR"}
-SYNC_ENV = dict(CLI_GIT_ENV, telemetry_url="AIHUB_TELEMETRY_URL", telemetry_branch="AIHUB_TELEMETRY_BRANCH", telemetry_inbox_branch="AIHUB_TELEMETRY_INBOX_BRANCH", index_url="AIHUB_INDEX_URL", index_branch="AIHUB_INDEX_BRANCH",
-                index_path="AIHUB_INDEX_PATH")
+SYNC_ENV = dict(CLI_GIT_ENV, index_url="AIHUB_INDEX_URL", index_branch="AIHUB_INDEX_BRANCH",
+                index_path="AIHUB_INDEX_PATH", **{"kafka_" + k: "AIHUB_KAFKA_" + k.upper() for k in
+                ("bootstrap", "topic", "security_protocol", "sasl_mechanism", "username", "password", "ssl_cafile")})
 SETTING_DEFAULTS = {"public_browse": "1", "public_install": "0", "default_visibility": "public", "allow_private": "1", "allow_source_download": "1",
                     "signup": None}
 
@@ -608,6 +610,7 @@ def patch_package(name: str, body: dict, request: Request, u=Depends(require_use
         _set_visibility(request, p, body["visibility"], u)
     R(request).audit(u["username"], "package.patch", p["name"], json.dumps(body)[:300])
     C(request).invalidate("pkg")
+    C(request).invalidate("index")
     return {"ok": True}
 
 
@@ -645,6 +648,7 @@ def access_put(name: str, body: dict, request: Request, u=Depends(require_user))
     R(request).access_grant(p["id"], ptype, t["id"], access)
     R(request).audit(u["username"], "access.grant", p["name"], "%s:%s=%s" % (ptype, pname, access))
     C(request).invalidate("pkg")
+    C(request).invalidate("index")
     return {"ok": True}
 
 
@@ -656,6 +660,7 @@ def access_delete(name: str, ptype: str, pname: str, request: Request, u=Depends
         R(request).access_revoke(p["id"], ptype, t["id"])
         R(request).audit(u["username"], "access.revoke", p["name"], "%s:%s" % (ptype, pname))
         C(request).invalidate("pkg")
+        C(request).invalidate("index")
     return {"ok": True}
 
 
@@ -665,6 +670,7 @@ def _yank(request, name, version, flag, u):
     R(request).version_yank(p["id"], version, flag)
     R(request).audit(u["username"], "yank" if flag else "unyank", name, version)
     C(request).invalidate("pkg")
+    C(request).invalidate("index")
     return {"ok": True}
 
 
@@ -733,6 +739,7 @@ def review_post(name: str, body: dict, request: Request, u=Depends(require_perm(
         raise HTTPException(400, "please enter your name (2-40 characters) to post a review")
     R(request).review_upsert(p["id"], u["id"], rating, str(body.get("body", ""))[:2000], who)
     C(request).invalidate("pkg")
+    C(request).invalidate("index")
     return {"ok": True}
 
 
@@ -949,6 +956,7 @@ def a_settings_put(body: dict, request: Request, u=admin):
         R(request).set_setting(k, v)
     R(request).audit(u["username"], "settings.update", "", json.dumps(done))
     C(request).invalidate("pkg")
+    C(request).invalidate("index")
     return {"ok": True}
 
 
@@ -1067,6 +1075,7 @@ def group_delete(name: str, request: Request, u=Depends(require_user)):
     R(request).group_delete(g["id"])
     R(request).audit(u["username"], "group.delete", name)
     C(request).invalidate("pkg")
+    C(request).invalidate("index")
     return {"ok": True}
 
 
@@ -1079,6 +1088,7 @@ def group_members_add(name: str, body: dict, request: Request, u=Depends(require
     R(request).group_member_add(g["id"], [f["id"] for f in found if f])
     R(request).audit(u["username"], "group.members.add", name, ",".join(str(n) for n in names[:20]))
     C(request).invalidate("pkg")
+    C(request).invalidate("index")
     return {"ok": True, "missing": missing}
 
 
@@ -1089,6 +1099,7 @@ def group_member_remove(name: str, username: str, request: Request, u=Depends(re
     if t:
         R(request).group_member_remove(g["id"], t["id"])
         C(request).invalidate("pkg")
+        C(request).invalidate("index")
     return {"ok": True}
 
 
@@ -1266,6 +1277,7 @@ async def a_batch(request: Request, role: str = "user", u=admin):
     repos.audit(u["username"], "users.batch", "", "created=%d rows=%d groups=%d" % (created, len(items), len(group_ids)))
     if group_ids:
         C(request).invalidate("pkg")   # group membership changes who can see private repositories
+        C(request).invalidate("index")
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["username", "display_name", "title", "role", "groups", "password", "status"])
@@ -1409,10 +1421,11 @@ def dashboard_events(request: Request, days: int = 30, page: int = 1, per_page: 
         raise HTTPException(400, str(e))
 
 
-# ---------------- sync (git telemetry inbox + git index -> SQLite)
-SYNC_KEYS = ("telemetry_url", "telemetry_inbox_branch", "telemetry_branch", "telemetry_archive", "localize_users", "index_url", "index_branch", "index_path", "sync_interval",
-             "cli_git_url", "cli_git_branch", "cli_git_subdir", "client_refresh_hours")
-SECRET_KEYS = ()
+# ---------------- sync (Kafka events + git index -> database)
+SYNC_KEYS = ("localize_users", "index_url", "index_branch", "index_path", "sync_interval",
+             "cli_git_url", "cli_git_branch", "cli_git_subdir", "client_refresh_hours",
+             "kafka_bootstrap", "kafka_topic", "kafka_security_protocol", "kafka_sasl_mechanism", "kafka_username", "kafka_password", "kafka_ssl_cafile")
+SECRET_KEYS = ("kafka_password",)
 
 
 def _check_cli_git(k, v):
@@ -1447,7 +1460,7 @@ def sync_update(body: dict, request: Request, u=admin):
             v = str(body[k]).strip()
             if k in SECRET_KEYS and v in ("", "set"):
                 continue                                 # blank/echo = keep the stored secret
-            if k in ("telemetry_archive", "localize_users") and v not in ("0", "1"):
+            if k == "localize_users" and v not in ("0", "1"):
                 raise HTTPException(400, "%s must be 0 or 1" % k)
             if k in ("cli_git_branch", "cli_git_subdir"):
                 _check_cli_git(k, v)
@@ -1525,6 +1538,23 @@ def sync_run(request: Request, full: bool = False, u=admin):
     return sync_status(request, u)
 
 
+@r.get("/index")
+def index_json(request: Request, u=Depends(current_user)):
+    """The whole package index for the CLI, served from the database: a new publish is in it the moment the hub has the event, with no
+    wait for the git index commit. Honours visibility. The ETag lets a CLI ask "changed?" and get a 304 with no body."""
+    need_login_unless(request, u, "public_browse")
+    v = viewer(request, u)
+    key = "index:" + _cache_scope(v)
+    hit = C(request).get(key)
+    if hit is None:
+        body = json.dumps(R(request).index_export(v), separators=(",", ":"), sort_keys=True)
+        hit = {"body": body, "etag": '"%s"' % hashlib.sha256(body.encode()).hexdigest()[:24]}
+        C(request).set(key, hit, ttl=3600)           # dropped explicitly on any package/version/visibility change
+    if request.headers.get("if-none-match") == hit["etag"]:
+        return Response(status_code=304, headers={"ETag": hit["etag"], "Cache-Control": "no-cache"})
+    return Response(hit["body"], media_type="application/json", headers={"ETag": hit["etag"], "Cache-Control": "no-cache"})
+
+
 @r.post("/index/package")
 def index_package(body: dict, request: Request, u=Depends(require_perm("index"))):
     """Force one package version into the index (for a publish event that was lost or never reached the hub).
@@ -1556,8 +1586,8 @@ def index_package(body: dict, request: Request, u=Depends(require_perm("index"))
 # ---------------- client config (what the CLI pulls to get set up)
 @r.get("/client-config")
 def client_config(request: Request):
-    """Settings the CLI needs: where the package index and the telemetry inbox are. Locations only, never credentials
-    (git access stays with the user's own git credential helper). Never cached."""
+    """Settings the CLI needs: where the package index and Kafka are. Locations only, never credentials
+    (the CLI never asks for a login). Never cached."""
     repos = R(request)
     env = request.app.state.settings.env_get
     from ..core import defaults
@@ -1566,12 +1596,10 @@ def client_config(request: Request):
     out = {"index": {"url": idx_url,
                      "branch": env("AIHUB_INDEX_BRANCH") or repos.setting("index_branch", "") or dx.get("branch", "main"),
                      "path": env("AIHUB_INDEX_PATH") or repos.setting("index_path", "") or dx.get("path", "index")},
-           "telemetry": {"url": env("AIHUB_TELEMETRY_URL") or repos.setting("telemetry_url", "")
-                         or defaults.load().get("telemetry", {}).get("git_url", "") or idx_url,
-                         "inbox": env("AIHUB_TELEMETRY_INBOX_BRANCH") or repos.setting("telemetry_inbox_branch", "")
-                         or defaults.load().get("telemetry", {}).get("inbox_branch", "") or "telemetry-inbox",
-                         "branch": env("AIHUB_TELEMETRY_BRANCH") or repos.setting("telemetry_branch", "")
-                         or defaults.load().get("telemetry", {}).get("branch", "") or "telemetry-archive"},
            "refresh_hours": int(repos.setting("client_refresh_hours", "") or 24)}
+    from ..core import kafkacfg
+    kc = request.app.state.sync.kafka_cfg()
+    if kc:                                                                       # where to produce; username/password stay with the deployment
+        out["kafka"] = {k: kc[k] for k in kafkacfg.PUBLIC}
     from fastapi.responses import JSONResponse
     return JSONResponse(out, headers={"Cache-Control": "no-store"})

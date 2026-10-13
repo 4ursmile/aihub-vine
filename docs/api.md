@@ -33,6 +33,7 @@ Routes marked **No** are public. **User** means an active account token is requi
 | GET | `/api/v1/packages/{name}` | No | Package metadata, manifest, maintainers, and version information. The response includes `authors` (list of `{name, email?, url?}` from the latest manifest) and `license` (string, empty if unset). |
 | GET | `/api/v1/packages/{name}/versions` | No | List package versions with `version`, `sha256`, `size`, `downloads`, `yanked`, `created`, and `source`, a web link to the version's exact commit and subfolder (empty if the repo URL is not http(s)). |
 | GET | `/api/v1/packages/{name}/readme` | No | Return the stored README (from the index). If none is stored, fetch it raw from a non-yanked version's repo (public hosts only; GitHub or GitLab-style). Response has `markdown` and `html`. |
+| GET | `/api/v1/index` | Per `public_browse` | The whole package index as `{"packages": [...]}`, built from the database, so it includes versions not yet committed to git. Honors package visibility. Cached on the server for one hour and dropped only when a package, version or its visibility changes, so usage events never rebuild it. Sends an `ETag`; `If-None-Match` gets `304`. |
 | GET | `/api/v1/resolve?name={name}&spec={constraint}` | No | Resolve the newest non-yanked version matching a version constraint. |
 | POST | `/api/v1/resolve/tree` | No (public install setting) | Resolve `{"roots": [{"name", "spec"}], "installed": {name: version}}` and all dependencies in one request. Returns `{"packages": [...]}` in install order, each with `name`, `version`, `sha256`, `size`, `repo`, `manifest`, `requires`, `root`. Constraints from all dependents are combined; `409` names the package and its dependents when none satisfy them all. |
 | PATCH | `/api/v1/packages/{name}` | User + package manager | Change package `hidden` status, `tags`, and/or `visibility` (`public` or `private`). |
@@ -43,7 +44,7 @@ Routes marked **No** are public. **User** means an active account token is requi
 
 ## Publishing and version control
 
-The server stores no package files and has no upload or download routes (`/upload`, `/uploads`, `/files/...` and `/dl/...` return 404). Packages are published with `aihub dev publish`, which pushes to git; see [architecture](architecture.md). The server is the only writer of the package index (a folder, default `index`). It turns `aihub.publish` events (public data the CLI pushes to the telemetry inbox) into index entries, README text included, and pushes them to the index repo. The CLI never writes the index.
+The server stores no package files and has no upload or download routes (`/upload`, `/uploads`, `/files/...` and `/dl/...` return 404). Packages are published with `aihub dev publish`, which pushes to git; see [architecture](architecture.md). The server is the only writer of the package index (a folder, default `index`). It turns `aihub.publish` events (public data the CLI sends to Kafka) into index versions. They appear in `/api/v1/index` at once and are written to the index repo in batches, one commit per git index commit interval. An event never changes an existing package's description, type or README. The CLI never writes the index.
 
 | Method | Path | Auth required | Purpose |
 | --- | --- | --- | --- |
@@ -51,7 +52,7 @@ The server stores no package files and has no upload or download routes (`/uploa
 | POST | `/api/v1/packages/{name}/versions/{version}/unyank` | User + package manager | Make a yanked version resolvable again. |
 | GET | `/api/v1/resolve?name=&spec=` | Per `public_install` | Pick a version. The response carries `repo` (`url`, `branch`, `subdir`, `ref`) and the manifest, not a download URL. |
 | POST | `/api/v1/resolve/tree` | Per `public_install` | Resolve several packages and their dependencies, constraints merged. |
-| GET | `/api/v1/client-config` | No | Locations for the CLI: `index` (`url`, `branch`, `path`, default folder `index`), `telemetry` (`url`, `inbox`, `branch`: the inbox repo, the one branch CLIs push to, and the archive branch) and `refresh_hours`. No credentials are stored or sent. Never cached. |
+| GET | `/api/v1/client-config` | No | Locations for the CLI: `index` (`url`, `branch`, `path`, default folder `index`), `kafka` (`bootstrap`, `topic`, `security_protocol`, `sasl_mechanism`; never the username or password) and `refresh_hours`. No credentials are stored or sent. Never cached. |
 
 ## Reviews
 
@@ -62,7 +63,7 @@ The server stores no package files and has no upload or download routes (`/uploa
 
 ## Usage events, statistics, and rankings
 
-The server no longer accepts events (`POST /api/v1/events` is gone). The CLI adds them as files to the `telemetry-inbox` branch of a git inbox repo, and the server reads them on a schedule into the same `events` table, keyed by the event id so re-reads never duplicate. Ingested files are archived to the `telemetry-archive` branch and then removed from the inbox. Event kinds: `use`, `install`, `update`, `uninstall`, `error`, `publish`.
+The server no longer accepts events (`POST /api/v1/events` is gone). The CLI sends them to a Kafka topic (`aihub.events` by default), and the server's consumer writes them into the same `events` table as they arrive, keyed by the event id so a redelivered message never duplicates. Publish events use the same topic. Event kinds: `use`, `install`, `update`, `uninstall`, `error`, `publish`.
 
 | Method | Path | Auth required | Purpose |
 | --- | --- | --- | --- |
@@ -80,7 +81,7 @@ Dashboard filters (query parameters): `days` (7, 14, 30, 90, 180, 365) or a cust
 | Method | Path | Auth required | Purpose |
 | --- | --- | --- | --- |
 | GET | `/api/v1/admin/sync` | `admin` | Sync status and settings. Secrets are reported as `"set"`, never returned. |
-| PUT | `/api/v1/admin/sync` | `admin` | Update the telemetry inbox (`telemetry_url`, `telemetry_inbox_branch`, `telemetry_branch` for the archive, `telemetry_archive`: `0` or `1`) and index settings, the CLI git source (`cli_git_url`, `cli_git_branch`, `cli_git_subdir`), the schedule (`sync_interval`: seconds or a 5-field cron expression) and the CLI refresh interval. |
+| PUT | `/api/v1/admin/sync` | `admin` | Update the index settings, the Kafka settings (`kafka_*`), the CLI git source (`cli_git_url`, `cli_git_branch`, `cli_git_subdir`), the schedule (`sync_interval`: seconds or a 5-field cron expression), the git index commit interval (10 to 86400 seconds, or cron) and the CLI refresh interval. |
 | POST | `/api/v1/admin/sync/run?full=false` | `admin` | Run a sync now. `full=true` forgets the cursor and looks back over everything (duplicates are skipped). |
 
 ### Backup administration

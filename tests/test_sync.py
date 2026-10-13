@@ -88,13 +88,13 @@ class Server(unittest.TestCase):
 
     def test_admin_sync_settings_validate_schedule_and_archive_flag(self):
         h = self.admin()
-        self.assertEqual(self.c.put("/api/v1/admin/sync", json={"sync_interval": "*/10 * * * *", "telemetry_url": "https://git.example/t.git"}, headers=h).status_code, 200)
+        self.assertEqual(self.c.put("/api/v1/admin/sync", json={"sync_interval": "*/10 * * * *"}, headers=h).status_code, 200)
         g = self.c.get("/api/v1/admin/sync", headers=h).json()
         self.assertEqual(g["config"]["sync_interval"], "*/10 * * * *")
-        self.assertEqual(g["config"]["telemetry_url"], "https://git.example/t.git")
+        self.assertNotIn("telemetry_url", g["config"])                               # no git inbox any more
         self.assertEqual(self.c.put("/api/v1/admin/sync", json={"sync_interval": "nope"}, headers=h).status_code, 400)
-        self.assertEqual(self.c.put("/api/v1/admin/sync", json={"telemetry_archive": "maybe"}, headers=h).status_code, 400)
-        self.assertEqual(self.c.put("/api/v1/admin/sync", json={"telemetry_archive": "0"}, headers=h).status_code, 200)
+        self.assertEqual(self.c.put("/api/v1/admin/sync", json={"localize_users": "maybe"}, headers=h).status_code, 400)
+        self.assertEqual(self.c.put("/api/v1/admin/sync", json={"localize_users": "0"}, headers=h).status_code, 200)
         self.assertEqual(self.c.get("/api/v1/admin/sync").status_code, 401)
 
     def test_backup_settings_api_for_the_admin_tab(self):
@@ -135,15 +135,9 @@ class ClientConfig(unittest.TestCase):
     def test_locations_only_never_credentials(self):
         r = self.c.get("/api/v1/client-config")
         self.assertEqual(r.json()["index"]["url"], "https://git.example/x.git")
-        from aihub.core import defaults
-        self.assertEqual(r.json()["telemetry"]["url"], defaults.load()["telemetry"]["git_url"])      # bundled default
-        self.assertEqual(r.json()["telemetry"]["branch"], defaults.load()["telemetry"]["branch"])
+        self.assertNotIn("telemetry", r.json())
         self.assertNotIn("credentials", r.json())
         self.assertEqual(r.headers["cache-control"], "no-store")
-        self.c.put("/api/v1/admin/sync", headers=self.h, json={"telemetry_url": "https://git.example/t.git"})
-        self.assertEqual(self.c.get("/api/v1/client-config").json()["telemetry"]["url"], "https://git.example/t.git")
-        self.c.put("/api/v1/admin/sync", headers=self.h, json={"telemetry_branch": "usage"})
-        self.assertEqual(self.c.get("/api/v1/client-config").json()["telemetry"]["branch"], "usage")
 
 
 class DashboardV2(unittest.TestCase):
@@ -248,447 +242,178 @@ class DashboardV2(unittest.TestCase):
         self.assertIn("hush", [x["package"] for x in self.get("/dashboard/events", per_page=100).json()["items"]])   # admin sees it
 
 
-class Inbox(unittest.TestCase):
-    """CLI -> bare git inbox -> server, with real git. No mocks between the two halves."""
+class Pipeline(unittest.TestCase):
+    """CLI -> (fake Kafka topic) -> server. The real spool, flusher, batching and backoff; only the broker is replaced by a list that
+    `drain()` hands to Sync.ingest, exactly what the consumer thread does. The real broker is covered by test_kafka_e2e."""
 
     def setUp(self):
+        self.schemes = unittest.mock.patch.object(S, "SCHEMES", S.SCHEMES + ("file://",))      # a file:// repo stands in for a public host
+        self.schemes.start()
         self.home = tempfile.mkdtemp()
-        self.inbox = os.path.join(tempfile.mkdtemp(), "inbox.git")
-        subprocess.run(["git", "init", "-q", "--bare", self.inbox], check=True)
-        self.env = unittest.mock.patch.dict(os.environ, {"AIHUB_HOME": self.home, "AIHUB_TELEMETRY_URL": self.inbox})
+        self.env = unittest.mock.patch.dict(os.environ, {"AIHUB_HOME": self.home})
         self.env.start()
+        from aihub.cli import telemetry
+        self.topic, self.down = [], False
+        def send(lines, timeout=20):
+            if self.down:
+                raise RuntimeError("broker down")
+            self.topic.extend(json.loads(l) for l in lines)
+        self.tp = [unittest.mock.patch.object(telemetry, "enabled", return_value=True), unittest.mock.patch.object(telemetry, "send", side_effect=send)]
+        for t in self.tp:
+            t.start()
         self.c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=tempfile.mkdtemp())))
         self.r, self.sy = self.c.app.state.repos, self.c.app.state.sync
 
     def tearDown(self):
+        for t in self.tp:
+            t.stop()
+        self.schemes.stop()
         self.env.stop()
 
-    def git(self, *a):
-        return subprocess.run(["git", "-C", self.inbox, *a], capture_output=True, text=True).stdout
-
-    def refs(self):
-        """What is still waiting for the server: files on the ONE inbox branch, plus any old-layout per-batch branch or hidden ref."""
-        files = self.git("ls-tree", "-r", "--name-only", "telemetry-inbox", "--", "inbox/").split() if self.git("branch", "--list", "telemetry-inbox").strip() else []
-        old = [x for x in self.git("for-each-ref", "--format=%(refname)", "refs/heads/telemetry/", "refs/telemetry/").split() if x]
-        return files + old
-
-    def branches(self):
-        return sorted(b.strip("* ") for b in self.git("branch", "--list").split())
+    def drain(self):
+        msgs, self.topic = self.topic, []
+        return self.sy.ingest(msgs)
 
     def spool(self, n, **k):
         from aihub.cli import telemetry
         for i in range(n):
             telemetry.enqueue(dict({"kind": "use", "package": "demo", "component": "skill:x"}, **k))
 
-    def test_batch_roundtrip_dedup_archive_and_cleanup(self):
-        from aihub.cli import telemetry
-        self.spool(50)
-        self.assertEqual(telemetry.flush(force=True), 50)                         # 50 events -> ONE push
-        self.assertEqual(len(self.refs()), 1)
-        self.assertEqual(telemetry.flush(force=True), 0)                          # nothing spooled -> no push at all
-        self.assertEqual(len(self.refs()), 1)
-        self.sy.pull_events()
-        self.assertEqual(self.r.db.conn().execute("SELECT COUNT(*) FROM events WHERE package='demo'").fetchone()[0], 50)
-        self.assertEqual(self.refs(), [])                                         # ingested and archived: ref deleted
-        arch = subprocess.run(["git", "-C", self.inbox, "ls-tree", "-r", "--name-only", S.ARCHIVE], capture_output=True, text=True).stdout.split()
-        self.assertEqual(len(arch), 1)
-        self.assertTrue(arch[0].startswith("archive/"))
-        self.sy.pull_events()                                                     # idempotent
-        self.assertEqual(self.r.db.conn().execute("SELECT COUNT(*) FROM events WHERE package='demo'").fetchone()[0], 50)
-
-    def test_failed_push_keeps_events_and_resend_does_not_duplicate(self):
-        from aihub.cli import telemetry
-        self.spool(3)
-        with unittest.mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_URL": "/nonexistent/inbox.git"}):
-            self.assertEqual(telemetry.flush(force=True), 0)                      # unreachable: nothing lost
-        self.assertEqual(telemetry.flush(force=True), 3)                          # next pass delivers
-        # crash after push, before the spool file was removed: the same events go out again
-        import glob
-        lines = [l for l in self.sent_lines()]
-        telemetry.push(self.inbox, lines)
-        self.assertEqual(len(self.refs()), 2)
-        self.sy.pull_events()
-        self.assertEqual(self.r.db.conn().execute("SELECT COUNT(*) FROM events WHERE package='demo'").fetchone()[0], 3)
-
-    def sent_lines(self):
-        f = self.git("ls-tree", "-r", "--name-only", "telemetry-inbox", "--", "inbox/").split()[0]
-        return self.git("show", "telemetry-inbox:" + f).splitlines()
-
-    def test_garbage_and_oversized_batches_are_dropped_without_blocking_good_ones(self):
-        from aihub.cli import telemetry
-        telemetry.push(self.inbox, ["not json", '{"kind":"use"}', json.dumps(obs("good1"))])
-        self.sy.pull_events()
-        self.assertEqual(self.r.db.conn().execute("SELECT COUNT(*) FROM events WHERE ext_id='good1'").fetchone()[0], 1)
-        self.assertEqual(self.refs(), [])
-
-    def test_archive_failure_keeps_refs_for_retry(self):
-        from aihub.cli import telemetry
-        telemetry.push(self.inbox, [json.dumps(obs("keep1"))])
-        with unittest.mock.patch.object(S.Sync, "_archive", return_value=False):
-            self.sy.pull_events()
-        self.assertEqual(len(self.refs()), 1)                                     # not deleted: nothing may be lost
-        self.sy.pull_events()
-        self.assertEqual(self.refs(), [])
-        self.assertEqual(self.r.db.conn().execute("SELECT COUNT(*) FROM events WHERE ext_id='keep1'").fetchone()[0], 1)
-
-    def test_two_clients_push_without_conflict(self):
-        from aihub.cli import telemetry
-        for cid in ("aaa", "bbb"):
-            with unittest.mock.patch("aihub.cli.hooks.client_id", return_value=cid):
-                telemetry.push(self.inbox, [json.dumps(obs("ev-" + cid))])
-        self.assertEqual(len(self.refs()), 2)
-        self.sy.pull_events()
-        self.assertEqual(self.r.db.conn().execute("SELECT COUNT(*) FROM events WHERE ext_id LIKE 'ev-%'").fetchone()[0], 2)
-
     def count(self, r=None, where="package='demo'"):
         return (r or self.r).db.conn().execute("SELECT COUNT(*) FROM events WHERE " + where).fetchone()[0]
 
-    def test_repo_without_archive_branch_gets_it_created(self):
+    def test_batch_roundtrip_and_redelivery_is_idempotent(self):
         from aihub.cli import telemetry
-        self.assertEqual(subprocess.run(["git", "-C", self.inbox, "branch", "--list"], capture_output=True, text=True).stdout.strip(), "")
-        self.spool(4)
-        telemetry.flush(force=True)                                                # the CLI needs no branch at all
-        self.sy.pull_events()
-        branches = subprocess.run(["git", "-C", self.inbox, "branch", "--list"], capture_output=True, text=True).stdout
-        self.assertIn(self.sy.archive_branch(), branches)
+        self.spool(50)
+        self.assertEqual(telemetry.flush(force=True), 50)
+        self.assertEqual(len(self.topic), 50)
+        self.assertEqual(telemetry.flush(force=True), 0)                          # nothing spooled -> nothing sent
+        msgs = list(self.topic)
+        self.assertEqual(self.drain(), 50)
+        self.assertEqual(self.count(), 50)
+        self.assertEqual(self.sy.ingest(msgs), 0)                                 # Kafka redelivers: no duplicate rows
+        self.assertEqual(self.count(), 50)
 
-    def test_server_down_while_clis_keep_pushing_then_catches_up(self):
-        from aihub.cli import telemetry
-        for round_ in range(3):                                                    # server is "down": three batches pile up in git
-            self.spool(5)
-            telemetry.flush(force=True)
-        self.assertEqual(len(self.refs()), 3)
-        self.assertEqual(self.count(), 0)
-        self.sy.run_once()                                                         # server comes back
-        self.assertEqual(self.count(), 15)
-        self.assertEqual(self.refs(), [])
-
-    def test_lost_database_is_rebuilt_from_the_archive_branch(self):
-        from aihub.cli import telemetry
-        self.spool(7)
-        telemetry.flush(force=True)
-        self.sy.run_once()
-        self.assertEqual(self.count(), 7)
-        self.assertEqual(self.refs(), [])                                          # refs are gone: only the archive has the data now
-        c2 = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=tempfile.mkdtemp())))       # brand new, empty database
-        self.assertEqual(self.count(c2.app.state.repos), 0)
-        c2.app.state.sync.run_once()
-        self.assertEqual(self.count(c2.app.state.repos), 7)
-        c2.app.state.sync.run_once()                                               # idempotent
-        self.assertEqual(self.count(c2.app.state.repos), 7)
-
-    def test_database_wiped_but_cursor_survived_still_replays(self):
+    def test_broker_down_keeps_events_and_resend_does_not_duplicate(self):
         from aihub.cli import telemetry
         self.spool(3)
-        telemetry.flush(force=True)
-        self.sy.run_once()
-        self.r.db.conn().execute("DELETE FROM events"); self.r.db.conn().commit()
-        self.sy._lookback_checked = False                                          # a restart
-        self.sy.run_once()
+        self.down = True
+        self.assertEqual(telemetry.flush(force=True), 0)
+        self.assertEqual(self.topic, [])
+        self.down = False
+        self.assertEqual(telemetry.flush(force=True), 3)
+        self.drain()
+        self.sy.ingest(self.topic or [])
         self.assertEqual(self.count(), 3)
 
-    def test_forced_full_sync_replays_archive(self):
+    def test_garbage_messages_are_dropped_without_blocking_good_ones(self):
+        self.assertEqual(self.sy.ingest(["not json", {"kind": "use"}, obs("good1")]), 1)
+        self.assertEqual(self.count(where="ext_id='good1'"), 1)
+
+    def test_failed_send_is_recorded_where_the_user_can_see_it(self):
         from aihub.cli import telemetry
-        self.spool(2)
+        self.spool(1)
+        self.down = True
         telemetry.flush(force=True)
-        self.sy.run_once()
-        self.r.db.conn().execute("DELETE FROM events"); self.r.db.conn().commit()
-        self.r.set_setting("sync_cursor", "")                                      # admin: "re-read everything"
-        self.sy.run_once()
-        self.assertEqual(self.count(), 2)
-
-    def test_all_clients_share_one_inbox_branch_however_long_the_server_is_down(self):
-        """The point of the design: a long outage must not create a branch per batch."""
-        from aihub.cli import telemetry
-        for k in range(12):
-            self.spool(2)
-            telemetry.flush(force=True)
-        self.assertEqual(self.branches(), ["telemetry-inbox"])                         # 12 batches, ONE branch
-        self.assertEqual(len(self.refs()), 12)
-        self.assertEqual(self.count(), 0)                                              # nothing ingested yet: the server is "down"
-        self.sy.pull_events()
-        self.assertEqual(self.count(), 24)
-        self.assertEqual(self.refs(), [])                                              # inbox emptied...
-        self.assertEqual(self.branches(), ["telemetry-archive", "telemetry-inbox"])    # ...and still just two branches
-        arch = self.git("ls-tree", "-r", "--name-only", "telemetry-archive").split()
-        self.assertEqual(len(arch), 12)
-
-    def test_cli_fetches_only_the_tip_not_the_history(self):
-        from aihub.cli import telemetry
-        for k in range(5):
-            self.spool(1)
-            telemetry.flush(force=True)
-        shallow = os.path.join(self.home, "queue", "git", "shallow")
-        self.assertTrue(os.path.exists(shallow))                                       # depth-1 fetch: cost does not grow with history
-
-    def test_racing_clients_both_land_and_server_trim_never_touches_new_files(self):
-        from aihub.cli import telemetry
-        real_run, raced = telemetry.gitx.run, []
-
-        def run(args, *a, **k):
-            # the instant before this client pushes, another client pushes first -> ours is rejected as non-fast-forward and must retry
-            if args[:2] == ["push", "-q"] and not raced and str(args[2:3]) != "[]" and "telemetry-inbox" in " ".join(args):
-                raced.append(1)
-                with unittest.mock.patch("aihub.cli.hooks.client_id", return_value="other"):
-                    telemetry.gitx.run = real_run
-                    telemetry.push(self.inbox, [json.dumps(obs("raced-other"))])
-                telemetry.gitx.run = run
-            return real_run(args, *a, **k)
-        telemetry.gitx.run = run
-        try:
-            with unittest.mock.patch("aihub.cli.hooks.client_id", return_value="mine"):
-                telemetry.push(self.inbox, [json.dumps(obs("raced-mine"))])
-        finally:
-            telemetry.gitx.run = real_run
-        self.assertEqual(raced, [1])
-        self.assertEqual(len(self.refs()), 2)                                          # both files are on the one branch
-        self.sy.pull_events()
-        self.assertEqual(self.count(where="ext_id IN ('raced-mine','raced-other')"), 2)
-
-    def test_batch_pushed_during_ingest_is_left_for_the_next_pass(self):
-        """The server trims only the files it ingested; a file a CLI added after the server's fetch must survive."""
-        from aihub.cli import telemetry
-        telemetry.push(self.inbox, [json.dumps(obs("first"))])
-        real = S.Sync._archive
-
-        def archive_then_late_push(sy, d, batches):
-            ok = real(sy, d, batches)
-            with unittest.mock.patch("aihub.cli.hooks.client_id", return_value="late"):
-                telemetry.push(self.inbox, [json.dumps(obs("late-one"))])
-            return ok
-        with unittest.mock.patch.object(S.Sync, "_archive", archive_then_late_push):
-            self.sy.pull_events()
-        self.assertEqual(self.count(where="ext_id='first'"), 1)
-        self.assertEqual(len(self.refs()), 1)                                          # only the late file remains
-        self.sy.pull_events()
-        self.assertEqual(self.count(where="ext_id='late-one'"), 1)
-        self.assertEqual(self.refs(), [])
-
-    def test_previous_layout_branch_per_batch_is_still_ingested(self):
-        """CLIs from the previous release pushed telemetry/<client>/<batch> branches: they must still be read and cleaned up."""
-        from aihub.cli import telemetry
-        d = telemetry._scratch()
-        blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=d, input=json.dumps(obs("prev1")) + "\n", capture_output=True, text=True).stdout.strip()
-        tree = subprocess.run(["git", "mktree"], cwd=d, input="100644 blob %s\tevents.jsonl\n" % blob, capture_output=True, text=True).stdout.strip()
-        commit = subprocess.run(["git", "-c", "user.name=a", "-c", "user.email=a@b", "commit-tree", tree, "-m", "t"], cwd=d, capture_output=True, text=True).stdout.strip()
-        subprocess.run(["git", "push", "-q", self.inbox, commit + ":refs/heads/telemetry/prevclient/1791000000-abcd1234"], cwd=d, check=True)
-        self.spool(1)
-        telemetry.flush(force=True)                                                    # plus one current-layout batch
-        self.sy.pull_events()
-        self.assertEqual(self.count(where="ext_id='prev1'"), 1)
-        self.assertEqual(self.count(), 2)                                              # the old-layout event + the current-layout one
-        self.assertEqual(self.refs(), [])
-        self.assertEqual(self.branches(), ["telemetry-archive", "telemetry-inbox"])    # the old branch is gone
-
-    def test_old_cli_refs_are_still_ingested_and_removed(self):
-        """A CLI that has not updated yet pushes to refs/telemetry/*: nothing it sent may be lost."""
-        from aihub.cli import telemetry
-        d = telemetry._scratch()
-        blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=d, input=json.dumps(obs("legacy1")) + "\n", capture_output=True, text=True).stdout.strip()
-        tree = subprocess.run(["git", "mktree"], cwd=d, input="100644 blob %s\tevents.jsonl\n" % blob, capture_output=True, text=True).stdout.strip()
-        commit = subprocess.run(["git", "-c", "user.name=a", "-c", "user.email=a@b", "commit-tree", tree, "-m", "t"], cwd=d, capture_output=True, text=True).stdout.strip()
-        subprocess.run(["git", "push", "-q", self.inbox, commit + ":refs/telemetry/oldclient/1791000000-abcd1234"], cwd=d, check=True)
-        self.spool(1)
-        telemetry.flush(force=True)                                                # plus one new-style batch
-        self.sy.pull_events()
-        self.assertEqual(self.count(where="ext_id='legacy1'"), 1)
-        self.assertEqual(self.count(), 2)                                          # the legacy event + the new-style one
-        self.assertEqual(self.refs(), [])
-
-    def test_failed_push_is_recorded_where_the_user_can_see_it(self):
-        from aihub.cli import telemetry
-        self.spool(1)
-        with unittest.mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_URL": "/nonexistent/inbox.git"}):
-            telemetry.flush(force=True)
         st = telemetry.last_status()
         self.assertFalse(st["ok"])
         self.assertTrue(st["error"])
-        telemetry.flush(force=True)                                                # back online
+        self.down = False
+        telemetry.flush(force=True)
         self.assertTrue(telemetry.last_status()["ok"])
         self.assertEqual(telemetry.last_status()["last_sent"], 1)
 
-    def test_unreachable_inbox_is_reported_and_does_not_stop_the_index_sync(self):
-        """Repo down / no access: the admin page must say so (not 'OK'), the cursor must not claim success, and the package index still syncs."""
-        self.sy.cfg = lambda key, env, default="": {"telemetry_url": "/nonexistent/inbox.git"}.get(key, default)
-        indexed = []
-        self.sy.pull_index = lambda: indexed.append(1)
-        with self.assertRaises(RuntimeError):
-            self.sy.run_once()
-        self.assertEqual(indexed, [1])                                              # the other half still ran
-        self.assertIn("usage sync", self.sy.status["last_error"])
-        self.assertIsNotNone(self.sy.status["events_error"])
-        self.assertIsNone(self.sy.status["index_error"])
-        self.assertFalse(self.r.setting("sync_cursor"))                             # a failed pass is not "completed"
-        self.assertTrue(self.sy.status["last_run"])
-
-    def test_index_failure_is_reported_and_does_not_stop_usage_ingest(self):
+    def test_index_failure_is_reported_and_usage_is_still_stored(self):
         from aihub.cli import telemetry
         self.spool(3)
         telemetry.flush(force=True)
+        self.drain()
         def broken():
             raise RuntimeError("index: cannot reach git")
         self.sy.pull_index = broken
         with self.assertRaises(RuntimeError):
             self.sy.run_once()
-        self.assertEqual(self.count(), 3)                                           # usage was still stored
+        self.assertEqual(self.count(), 3)
         self.assertIn("cannot reach git", self.sy.status["last_error"])
         self.assertIsNotNone(self.sy.status["index_error"])
-        self.assertIsNone(self.sy.status["events_error"])
 
     def test_error_persists_until_a_clean_pass_then_clears(self):
-        from aihub.cli import telemetry
-        good = self.sy.cfg
-        self.sy.cfg = lambda key, env, default="": {"telemetry_url": "/nonexistent/inbox.git"}.get(key, default)
-        self.sy.pull_index = lambda: None
-        for _ in range(2):                                                          # repeated failures keep failing visibly
+        calls = {"n": 0}
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise RuntimeError("index: down")
+        self.sy.pull_index = flaky
+        for _ in range(2):
             with self.assertRaises(RuntimeError):
                 self.sy.run_once()
             self.assertTrue(self.sy.status["last_error"])
-        self.sy.cfg = good                                                          # repo is back
-        self.spool(2)
-        telemetry.flush(force=True)
         self.sy.run_once()
         self.assertIsNone(self.sy.status["last_error"])
-        self.assertEqual(self.count(), 2)
         self.assertTrue(self.r.setting("sync_cursor"))
 
-    def test_index_update_failure_after_ingest_is_reported_not_swallowed(self):
-        """pull_events used to 'return False' here, so run_once cleared last_error and advanced the cursor while the package was never indexed."""
-        from aihub.cli import telemetry
-        telemetry.push(self.inbox, [json.dumps(dict(obs("pub1", kind="publish"), version="1.0.0", git_url="https://example.invalid/x.git"))])
+
+    def test_publish_is_shown_at_once_and_the_index_commit_is_batched(self):
+        """A new version is on the web the moment the event is ingested; git is written once per interval, for the whole queue."""
+        pubs = [dict(obs("pub%d" % i, kind="publish", package="pk%d" % i), version="1.0.0", git_url="file:///tmp/x.git", commit="c%d" % i,
+                     description="d%d" % i, type="skill") for i in range(3)]
+        self.assertEqual(self.sy.ingest(pubs), 3)
+        for i in range(3):
+            self.assertEqual(self.r.package("pk%d" % i)["latest_version"], "1.0.0")        # visible with no git work at all
+        self.assertEqual(len(self.sy._queue_read()), 3)
+        calls = []
+        self.sy.update_index = lambda items, *a, **k: calls.append(len(items)) or True
         self.sy.pull_index = lambda: None
-        def boom(pubs, *a, **k):
+        self.sy.flush_index()
+        self.assertEqual(calls, [3])                                                        # ONE index commit for three publishes
+        self.assertEqual(self.sy._queue_read(), [])
+        self.sy.flush_index()
+        self.assertEqual(calls, [3])                                                        # empty queue: no git at all
+        self.assertEqual(self.sy.ingest(pubs), 0)                                           # redelivery: same version and commit, nothing queued
+        self.assertEqual(self.sy._queue_read(), [])
+
+    def test_same_version_same_commit_never_touches_git_but_a_new_commit_does(self):
+        pub = dict(obs("p1", kind="publish", package="same"), version="1.0.0", git_url="file:///tmp/x.git", commit="aaa", type="tool")
+        self.sy.ingest([pub])
+        self.sy._queue_write([])
+        self.sy.ingest([dict(pub, id="p2")])                                                # a "use" style repeat: nothing differs
+        self.assertEqual(self.sy._queue_read(), [])
+        self.sy.ingest([dict(pub, id="p3", commit="bbb")])                                  # the same version re-published at another commit
+        self.assertEqual([i["commit"] for i in self.sy._queue_read()], ["bbb"])
+
+    def test_publish_event_cannot_rewrite_an_existing_package(self):
+        pid = self.r.package_upsert("owned", "skill", "the real description", ["a"], "readme", visibility="public")
+        self.sy.ingest([dict(obs("p9", kind="publish", package="owned"), version="2.0.0", git_url="file:///tmp/x.git", commit="c",
+                             description="HIJACKED", type="mcp")])
+        p = self.r.package("owned")
+        self.assertEqual((p["description"], p["type"]), ("the real description", "skill"))
+        self.assertEqual(self.r.package_readme(pid), "readme")
+        self.assertEqual(p["latest_version"], "2.0.0")
+
+    def test_provisional_package_survives_an_index_pull_until_git_has_it(self):
+        self.sy.ingest([dict(obs("p5", kind="publish", package="fresh"), version="1.0.0", git_url="file:///tmp/x.git", commit="c", type="tool")])
+        self.sy.update_index = lambda *a, **k: False
+        self.sy.read_index = lambda: (S.pkgindex.Legacy({}), "rev1")
+        self.sy.pull_index()                                                                # git index does not list it yet
+        self.assertEqual(self.r.package("fresh")["hidden"], 0)                              # still shown: it is queued, not removed
+
+    def test_index_commit_failure_keeps_the_queue_and_is_reported(self):
+        self.sy.ingest([dict(obs("p6", kind="publish", package="later"), version="1.0.0", git_url="file:///tmp/x.git", commit="c", type="tool")])
+        self.sy.pull_index = lambda: None
+        def boom(items, *a, **k):
             raise RuntimeError("index repository not reachable")
         self.sy.update_index = boom
         with self.assertRaises(RuntimeError):
             self.sy.run_once()
-        self.assertIn("index update", self.sy.status["last_error"])
+        self.assertIn("index repository not reachable", self.sy.status["last_error"])
         self.assertFalse(self.r.setting("sync_cursor"))
-        self.assertEqual(self.count(where="ext_id='pub1'"), 1)                       # the event itself was stored
-        self.assertEqual(len(self.refs()), 1)                                         # and the batch is still in git for the retry
-        self.sy.update_index = lambda pubs, *a, **k: True                             # repo is back
+        self.assertEqual(self.r.package("later")["latest_version"], "1.0.0")                # the web still has it
+        self.assertEqual(len(self.sy._queue_read()), 1)                                     # and the commit is retried next interval
+        self.sy.update_index = lambda items, *a, **k: True
         self.sy.run_once()
         self.assertIsNone(self.sy.status["last_error"])
-        self.assertEqual(self.refs(), [])
+        self.assertEqual(self.sy._queue_read(), [])
 
-    def test_archive_failure_is_visible_not_silent(self):
-        from aihub.cli import telemetry
-        self.sy.pull_index = lambda: None
-        self.spool(2)
-        telemetry.flush(force=True)
-        with unittest.mock.patch.object(S.Sync, "_archive", lambda sy, d, b: sy.status.update(archive_error="archiving usage: boom") or False):
-            with self.assertRaises(RuntimeError):
-                self.sy.run_once()
-        self.assertIn("archiving usage", self.sy.status["last_error"])                # used to be logged only; the admin page said OK
-        self.assertEqual(len(self.refs()), 1)                                        # and the batch is still in git
-        self.sy.run_once()                                                           # next pass succeeds and clears it
-        self.assertIsNone(self.sy.status["last_error"])
-        self.assertEqual(self.refs(), [])
-
-    def test_leftover_archive_folder_from_a_killed_server_does_not_block_archiving(self):
-        """A server stopped mid-archive left '.archive' behind; every later pass failed with 'already exists' and nothing was ever stored."""
-        from aihub.cli import telemetry
-        self.spool(3)
-        telemetry.flush(force=True)
-        self.sy.pull_events()                                                      # a normal pass creates the inbox clone
-        d = self.sy._inbox_dir(self.sy.inbox())
-        for kind in ("plain-folder", "registered-worktree"):
-            stale = os.path.join(d, ".archive")
-            os.makedirs(stale, exist_ok=True)
-            open(os.path.join(stale, "junk.txt"), "w").write("left by a crash")
-            if kind == "registered-worktree":
-                subprocess.run(["git", "worktree", "add", "-q", "--detach", stale + "2"], cwd=d, capture_output=True)
-            self.spool(2)
-            telemetry.flush(force=True)
-            self.sy.pull_events()
-            self.assertEqual(self.refs(), [], kind)                                # archived, so the batch was removed
-            self.assertFalse(os.path.exists(os.path.join(d, ".archive")), kind)  # and nothing is left behind
-        self.assertEqual(self.count(), 3 + 2 + 2)
-
-    def git_calls(self, fn):
-        """Run fn, return the git sub-commands the server ran (gitx.run only; batched reads go through gitx._batch)."""
-        real, seen = S.gitx.run, []
-
-        def run(args, *a, **k):
-            seen.append(args[0])
-            return real(args, *a, **k)
-        with unittest.mock.patch.object(S.gitx, "run", run):
-            fn()
-        return seen
-
-    def test_idle_pass_costs_one_ls_remote_and_no_fetch(self):
-        from aihub.cli import telemetry
-        self.spool(2)
-        telemetry.flush(force=True)
-        self.sy.pull_events()
-        calls = self.git_calls(self.sy.pull_events)                                   # nothing new since the last pass
-        self.assertEqual(calls.count("ls-remote"), 1)
-        self.assertNotIn("fetch", calls)
-        self.assertNotIn("push", calls)
-        self.assertNotIn("gc", calls)
-
-    def test_many_batches_are_read_without_one_process_per_batch(self):
-        from aihub.cli import telemetry
-        for k in range(30):
-            with unittest.mock.patch("aihub.cli.hooks.client_id", return_value="c%02d" % k):
-                telemetry.push(self.inbox, [json.dumps(obs("many-%d" % k))])
-        calls = self.git_calls(self.sy.pull_events)
-        self.assertEqual(self.count(where="ext_id LIKE 'many-%'"), 30)
-        self.assertEqual(self.refs(), [])
-        self.assertLess(len(calls), 30)                                                # constant, not per batch
-        self.assertEqual(len(self.git("ls-tree", "-r", "--name-only", "telemetry-archive").split()), 30)
-
-    def test_archive_keeps_earlier_batches_and_retry_is_a_no_op(self):
-        from aihub.cli import telemetry
-        for k in range(3):
-            telemetry.push(self.inbox, [json.dumps(obs("arch-%d" % k))])
-            self.sy.pull_events()
-        self.assertEqual(len(self.git("ls-tree", "-r", "--name-only", "telemetry-archive").split()), 3)
-        head = self.git("rev-parse", "telemetry-archive").strip()
-        d = self.sy._inbox_dir(self.sy.inbox())
-        self.assertTrue(self.sy._archive(d, [("x-1790000000-ab", [json.dumps(obs("arch-0"))])]))
-        self.sy._archive(d, [("x-1790000000-ab", [json.dumps(obs("arch-0"))])])     # same batch again: nothing new to commit
-        self.assertEqual(len(self.git("rev-list", "telemetry-archive").split()), 4)
-        self.assertNotEqual(head, self.git("rev-parse", "telemetry-archive").strip())
-
-    def test_retried_publish_batch_still_triggers_an_index_reread(self):
-        """Pass 1 stores the publish event but the index update fails; pass 2 inserts nothing new, yet the index changed and must be re-read."""
-        from aihub.cli import telemetry
-        telemetry.push(self.inbox, [json.dumps(dict(obs("pub2", kind="publish"), version="1.0.0", git_url="https://example.invalid/x.git"))])
-        self.sy.update_index = lambda pubs, *a, **k: (_ for _ in ()).throw(RuntimeError("down"))
-        with self.assertRaises(RuntimeError):
-            self.sy.pull_events()
-        self.sy.update_index = lambda pubs, *a, **k: True
-        self.assertTrue(self.sy.pull_events())
-        self.assertEqual(self.refs(), [])
-
-    def test_data_dir_with_a_literal_tilde_still_archives(self):
-        """A .env saying AIHUB_DATA_DIR=~/.aihub/data is not expanded by any shell: git, run inside the repo folder, could not open the
-        scratch files ('could not open ~/.aihub/data/.../.archive/0.jsonl'), so nothing was archived and the inbox was never emptied."""
-        from aihub.cli import telemetry
-        from aihub.server.config import Settings as St
-        home = tempfile.mkdtemp()
-        with unittest.mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
-            st = St.load(env={"AIHUB_DATA_DIR": "~/.aihub/data", "AIHUB_TELEMETRY_URL": self.inbox}, env_file=os.devnull)
-            self.assertEqual(st.data_dir, os.path.join(home, ".aihub", "data"))
-            st.seed_builtin, st.sync_enabled = False, False
-            c = TestClient(create_app(st))
-            telemetry.push(self.inbox, [json.dumps(obs("tilde1"))])
-            c.app.state.sync.pull_events()
-        self.assertIsNone(c.app.state.sync.status["archive_error"])
-        self.assertEqual(self.refs(), [])
-        self.assertEqual(len(self.git("ls-tree", "-r", "--name-only", "telemetry-archive").split()), 1)
-
-    def test_archive_result_is_reported_for_the_admin_page(self):
-        from aihub.cli import telemetry
-        self.spool(2)
-        telemetry.flush(force=True)
-        self.sy.pull_events()
-        st = self.sy.status
-        self.assertTrue(st["archive_last"])
-        self.assertEqual(st["archive_batches"], 1)
-        self.assertEqual(st["archive_files"], 1)
-        self.assertEqual(st["archive_commit"], self.git("rev-parse", "telemetry-archive").strip()[:10])
 
     def test_windows_children_never_open_a_console_window(self):
         from aihub.cli import gitx, telemetry
@@ -706,14 +431,80 @@ class Inbox(unittest.TestCase):
         self.assertTrue(flags & 0x08000000)                                         # hidden console, shared by every git it runs
         self.assertFalse(flags & 0x00000008)                                        # NOT detached: that made each git open its own window
 
-    def test_deliver_pushes_now_or_spools(self):
+
+    def test_deliver_uses_kafka_else_the_spool_and_never_git(self):
         from aihub.cli import telemetry
         with unittest.mock.patch.object(telemetry, "kick", lambda: None):
             self.assertTrue(telemetry.deliver({"kind": "publish", "package": "demo", "version": "1.0.0"}))
-            with unittest.mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_URL": "/nonexistent/x.git"}):
-                self.assertFalse(telemetry.deliver({"kind": "publish", "package": "demo", "version": "1.0.1"}))
-        self.assertEqual(len(self.refs()), 1)
+            self.assertEqual(len(self.topic), 1)
+            self.down = True
+            self.assertFalse(telemetry.deliver({"kind": "publish", "package": "demo", "version": "1.0.1"}))
+        self.assertIn("kafka", telemetry.deliver.error)
         self.assertTrue(os.path.getsize(os.path.join(self.home, "queue", "events.jsonl")) > 0)       # kept for the flusher
+        self.assertFalse(hasattr(telemetry, "push_git"))
+
+    def test_events_are_retried_with_backoff_when_kafka_is_down(self):
+        from aihub.cli import telemetry
+        self.spool(3)
+        self.down = True
+        self.assertEqual(telemetry.flush(force=True), 0)
+        self.assertGreater(telemetry._backoff(), 0)
+        self.down = False
+        self.assertEqual(telemetry.flush(force=True), 3)
+
+    def test_a_spool_past_its_cap_is_sealed_not_dropped(self):
+        from aihub.cli import telemetry
+        with unittest.mock.patch.object(telemetry, "MAX_SPOOL", 200):
+            self.down = True
+            self.spool(40)                                                                   # far more than 200 bytes
+            self.assertEqual(telemetry.flush(force=True), 0)
+            self.down = False
+            os.path.exists(telemetry._backoff_file()) and os.remove(telemetry._backoff_file())
+            self.assertEqual(telemetry.flush(force=True), 40)
+        self.assertEqual(len(self.topic), 40)                                                # not one event lost
+
+    def test_hub_username_and_local_user_are_recorded_as_sent(self):
+        self.sy.ingest([obs("a1", user="alice"), obs("a2", user="~dan", local_user="dan"), obs("a3", user="")])
+        rows = {r[0]: (r[1], r[2]) for r in self.r.db.conn().execute("SELECT ext_id, username, local_user FROM events WHERE ext_id IN ('a1','a2','a3')").fetchall()}
+        self.assertEqual(rows["a1"], ("alice", "dan"))            # signed in: hub username AND the OS user are both kept
+        self.assertEqual(rows["a2"], (None, "dan"))               # anonymous: no hub name, local user kept
+        self.assertEqual(rows["a3"], (None, "dan"))
+
+    def test_a_database_failure_on_a_publish_is_not_swallowed_so_kafka_redelivers(self):
+        pub = dict(obs("p77", kind="publish", package="lostpkg"), version="1.0.0", git_url="file:///tmp/x.git", commit="c", type="tool")
+        with unittest.mock.patch.object(type(self.r), "version_sync", side_effect=RuntimeError("db down")):
+            with self.assertRaises(RuntimeError):
+                self.sy.ingest([pub])
+        self.assertEqual([i["package"] for i in self.sy._queue_read()], ["lostpkg"])        # already queued for git
+        self.sy.ingest([pub])                                                                # redelivery completes it (the event row already exists)
+        self.assertEqual(self.r.package("lostpkg")["latest_version"], "1.0.0")
+
+    def test_usage_events_do_not_drop_the_cached_index_but_a_publish_does(self):
+        cache = self.c.app.state.cache
+        cache.set("index:anon", {"body": "{}"}, ttl=3600)
+        cache.set("pkg:list:x", {"a": 1}, ttl=60)
+        self.sy.ingest([obs("u1")])
+        self.assertIsNone(cache.get("pkg:list:x"))                                     # counts/feed refreshed
+        self.assertIsNotNone(cache.get("index:anon"))                                  # the CLI index is untouched
+        self.sy.ingest([dict(obs("p1", kind="publish", package="newpkg"), version="1.0.0", git_url="file:///tmp/x.git", commit="c", type="tool")])
+        self.assertIsNone(cache.get("index:anon"))
+
+    def test_the_index_is_built_from_the_database_once_then_served_from_the_cache(self):
+        self.sy.ingest([dict(obs("p1", kind="publish", package="cached"), version="1.0.0", git_url="file:///tmp/x.git", commit="c", type="tool")])
+        n = {"c": 0}
+        real = type(self.r).index_export
+        def counted(repo, viewer=None):
+            n["c"] += 1
+            return real(repo, viewer)
+        with unittest.mock.patch.object(type(self.r), "index_export", counted):
+            first = self.c.get("/api/v1/index")
+            for _ in range(5):
+                self.c.get("/api/v1/index")
+            self.sy.ingest([obs("u%d" % i) for i in range(5)])                          # usage only
+            self.c.get("/api/v1/index")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(n["c"], 1)
+
 
 
 class CountedSpans(unittest.TestCase):
