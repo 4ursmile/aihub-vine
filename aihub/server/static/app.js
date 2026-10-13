@@ -24,7 +24,7 @@ const hue = (n) => { let h = 0; for (const c of String(n)) h = (h * 31 + c.charC
 const shown = (p) => (p && (p.display_name || p.username)) || "";
 const Avatar = ({ p, size = 32 }) => p && p.avatar_url ? html`<img class="av" src=${p.avatar_url} alt="" width=${size} height=${size} style=${`width:${size}px;height:${size}px`} loading="lazy" />`
   : html`<span class="av" aria-hidden="true" style=${`width:${size}px;height:${size}px;font-size:${Math.round(size * .4)}px;background:hsl(${hue(p && p.username)} 55% 45%)`}>${initials(shown(p))}</span>`;
-const can = (perm) => !!(store.me && store.me.permissions.includes(perm));
+const can = (perm) => !!(store.me ? store.me.permissions.includes(perm) : store.brand && (store.brand.anonymous_perms || []).includes(perm));
 function saveBlob(blob, name) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }
 const nav = (p) => (location.hash = "#" + p);
 const fmt = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n || 0));
@@ -675,13 +675,12 @@ function Dashboard() {
   const go = (patch) => nav(dashHash({ ...f, page: 1, ...patch }));
   const ser = new URLSearchParams(); if (f.from || f.to) { f.from && ser.set("from", f.from); f.to && ser.set("to", f.to); } ser.set("days", f.days); DASH_KEYS.forEach((k) => f[k] && ser.set(k, f[k]));
   const qs = ser.toString();
-  const d = useLoad(() => me && can("view_dashboard") ? api("/dashboard?" + qs) : Promise.resolve(null), [me, qs, tick]);
-  const log = useLoad(() => me && can("view_dashboard") && f.tab === "activity" ? api("/dashboard/events?per_page=25&page=" + f.page + "&" + qs) : Promise.resolve(null), [me, qs, f.tab, f.page, tick]);
+  const d = useLoad(() => can("view_dashboard") ? api("/dashboard?" + qs) : Promise.resolve(null), [me, qs, tick, store.brand]);
+  const log = useLoad(() => can("view_dashboard") && f.tab === "activity" ? api("/dashboard/events?per_page=25&page=" + f.page + "&" + qs) : Promise.resolve(null), [me, qs, f.tab, f.page, tick, store.brand]);
   const pk = useLoad(() => api("/packages?per_page=100&sort=name"), []);
   const [series, setSeries] = useState({ use: true, install: true, error: true, update: false, publish: false });
   const [qd, setQd] = useState(f.q); useEffect(() => setQd(f.q), [f.q]);
   useEffect(() => { const t = setInterval(() => setTick((x) => x + 1), 60000); return () => clearInterval(t); }, []);
-  if (!me) return html`<${Empty} t="Sign in required" d="Sign in to view the dashboard." />`;
   if (!can("view_dashboard")) return html`<${Empty} t="No access" d="Your role doesn’t include the usage dashboard. Ask an admin to grant “View the usage dashboard”." />`;
   const D = d.d, t = (D && D.totals) || {}, pv = (D && D.previous) || {}, o = (D && D.options) || {};
   const custom = !!(f.from || f.to), active = DASH_KEYS.filter((k) => f[k]);
@@ -738,7 +737,7 @@ function App() {
   return html`<div>${br.announcement && html`<div class="announce" role="status" dangerouslySetInnerHTML=${{ __html: br.announcement }}></div>`}<header class="nav"><div class="nav-in"><a class="brand glow" href="#/">${br.logo_url && html`<img class="logo" src=${br.logo_url} alt="" />`}<span>${br.name || "AI Hub"}</span></a>
     <nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
     <div class="r">${s.me ? html`<a href="#/account" class="me-link"><${Avatar} p=${s.me} size=${24} /><span>${shown(s.me)}</span></a>${s.showGroups ? html`<a class=${on("groups")} href="#/groups">Groups</a>` : ""}${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}${can("audit") ? html`<a class=${on("audit")} href="#/audit">Audit</a>` : ""}${can("admin") || can("reset_password") ? html`<a href="#/admin">Admin</a>` : ""}<a href="#/" onClick=${logout}>Sign out</a>` :
-      html`<a href="#/login">Sign in</a>`}</div></div></header>
+      html`${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}<a href="#/login">Sign in</a>`}</div></div></header>
     <main><div class="page" key=${path}>${page}</div></main>
     <footer class="foot"><b class="glow">${br.logo_url && html`<img class="logo sm" src=${br.logo_url} alt="" />`}${br.name || "AI Hub"}</b><span>Skills, agents and MCP servers for your team.</span>
       ${(ct.name || ct.email || ct.url || ct.phone) && html`<span class="contact" aria-label="Contact">${ct.name && html`<span>${ct.name}</span>`}${ct.email && html`<a href=${"mailto:" + ct.email}>${ct.email}</a>`}${ct.phone && html`<span>${ct.phone}</span>`}${ct.url && /^https?:\/\//i.test(ct.url) && html`<a href=${ct.url} target="_blank" rel="noopener noreferrer">Support</a>`}</span>`}<nav aria-label="Footer"><a href="#/browse">Browse</a><a href="#/rankings">Rankings</a><a href="#/start">Get started</a><a href="#/docs">Docs</a></nav>${br.server_version && html`<span class="ver xs">v${br.server_version}</span>`}</footer>

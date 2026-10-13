@@ -300,7 +300,7 @@ def branding(request):
 def meta(request: Request, u=Depends(current_user)):
     b = branding(request)
     return {"name": b["name"], "theme": b["theme"], "logo_url": b["logo_url"], "contact": b["contact"], "announcement": b.get("announcement", ""), "public_url": public_url(request),
-            "anonymous_review": "review" in R(request).perms("anonymous"),
+            "anonymous_review": "review" in R(request).perms("anonymous"), "anonymous_perms": sorted(R(request).perms("anonymous")),
             "cli_version": VERSION, "server_version": VERSION,
             "index_git_url": _index_public(request),
             "cli_git_url": env_first(request, "cli_git_url", "AIHUB_CLI_GIT_URL", _cli_default("git_url"))[0],

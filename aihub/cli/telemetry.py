@@ -246,10 +246,18 @@ def target():
 def _scratch():
     """A private bare repo used only to build commits; nothing is ever checked out."""
     d = paths.p("queue", "git")
+    if os.path.isdir(d) and not _scratch_sound(d):
+        gitx.rmtree(d)                                  # half-removed leftover (e.g. after self-uninstall): start clean
     if not os.path.isdir(os.path.join(d, "objects")):
         os.makedirs(d, exist_ok=True)
         gitx.run(["init", "-q", "--bare"], cwd=d)
     return d
+
+
+def _scratch_sound(d):
+    """The scratch repo still has HEAD, objects and refs, and git accepts it as a bare repo."""
+    return all(os.path.exists(os.path.join(d, x)) for x in ("HEAD", "objects", "refs")) \
+        and gitx.run(["rev-parse", "--is-bare-repository"], cwd=d, check=False) == "true"
 
 
 _RACE = ("non-fast-forward", "fetch first", "stale info", "failed to update ref", "cannot lock ref", "couldn't find remote ref")
