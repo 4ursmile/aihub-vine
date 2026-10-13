@@ -226,7 +226,7 @@ def cmd_self_uninstall(a):
             ui.note("could not edit %s: %s" % (f, e))
     if os.name == "nt":
         ui.note("Windows: remove %s from your user PATH (System > Environment Variables); the folder is deleted below if it is not in use" % os.path.join(home, "bin"))
-    shutil.rmtree(home, ignore_errors=True)
+    gitx.rmtree(home)
     ui.celebrate("aihub removed" if not os.path.exists(home) else "aihub removed, except %s (still in use; delete it by hand)" % home)
     ui.info("open a new terminal so PATH is refreshed. A pip install can be removed with: pip uninstall aihub-cli")
 

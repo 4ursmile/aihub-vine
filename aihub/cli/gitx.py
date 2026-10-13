@@ -121,10 +121,34 @@ def cache_dir(url, base=None):
     return paths.ensure("repos", key)
 
 
+def rmtree(path):
+    """Delete a folder tree even when it holds read-only files (git objects on Windows) or is half removed."""
+    import shutil
+    import stat
+
+    def _force(fn, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+            fn(p)
+        except OSError:
+            pass
+    shutil.rmtree(path, onerror=_force)
+
+
+def _sound(d):
+    """A cached checkout whose .git lost pieces (interrupted removal) cannot be fetched into."""
+    g = os.path.join(d, ".git")
+    return os.path.isfile(os.path.join(g, "HEAD")) and os.path.isdir(os.path.join(g, "objects")) \
+        and run(["rev-parse", "--git-dir"], cwd=d, check=False) == ".git"
+
+
 def fetch(url, branch="main", ref=None, base=None):
     """Clone or update a cached checkout and leave it at `ref` (tag, branch or commit) or the branch tip.
     A ref that cannot be resolved is an error: a pinned install must never fall back to something else."""
     d = cache_dir(url, base)
+    if os.path.isdir(os.path.join(d, ".git")) and not _sound(d):
+        rmtree(d)                                   # broken leftover (e.g. after self-uninstall): start clean
+        d = cache_dir(url, base)
     if not os.path.isdir(os.path.join(d, ".git")):
         run(["init", "-q"], cwd=d)
         run(["remote", "add", "origin", url], cwd=d)
