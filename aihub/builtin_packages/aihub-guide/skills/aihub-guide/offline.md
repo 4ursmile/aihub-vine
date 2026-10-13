@@ -47,7 +47,7 @@ Keys and environment variables:
 | `auto_update` | `AIHUB_NO_UPDATE=1` | Set `false` to turn off the daily self-update check |
 
 - `AIHUB_HOME` moves the CLI state directory from `~/.aihub` to another path.
-- Git credentials are never stored by AI Hub. They come from your git credential helper.
+- Git logins are kept by `aihub credential`, a git credential helper that `aihub setup` registers for the index and telemetry hosts only (macOS Keychain, Windows DPAPI, Linux Secret Service, else a 0600 file). One entry per host; if already configured, setup changes nothing. Check: `git config --global --get-all credential.https://<host>.helper`.
 - Without a hub: `aihub setup --manual`, or `aihub config set index_url <git url>`, or export `AIHUB_INDEX_URL` (and `AIHUB_TELEMETRY_URL`).
 
 Local files under `~/.aihub/`:

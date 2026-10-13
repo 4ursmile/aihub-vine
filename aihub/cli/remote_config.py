@@ -19,13 +19,32 @@ def fetch(hub=None, timeout=8):
         return json.loads(r.read())
 
 
+def _git(*args, **kw):
+    return subprocess.run(["git"] + list(args), capture_output=True, text=True, **kw, **gitx.popen_kw())
+
+
+def ensure_helper(urls=()):
+    """Make git remember logins for the hub/index hosts through our own helper (`aihub credential`, see credhelper). Only those
+    hosts are touched; helpers you configured for other hosts stay as they are. Idempotent: a host already set up is left alone.
+    Returns (changed, already_ok) host lists."""
+    from . import credhelper
+    try:
+        return credhelper.register(urls)
+    except Exception:
+        return [], []
+
+
 def store_git(host_url, username, token):
-    """Save a credential the USER typed to their own git credential helper. Never sent by the hub, never kept in our config."""
+    """Save a credential the USER typed to their own git credential helper. Never sent by the hub, never kept in our config.
+    Persistent: a helper is ensured first. No duplicate: any older entry for the same host and user is rejected before the new one
+    is approved, so a changed token replaces the stale one instead of living beside it."""
     if not (username and token and host_url):
         return False
     u = urllib.parse.urlsplit(host_url)
-    payload = "protocol=%s\nhost=%s\nusername=%s\npassword=%s\n\n" % (u.scheme or "https", u.netloc, username, token)
-    return subprocess.run(["git", "credential", "approve"], input=payload, text=True, capture_output=True, **gitx.popen_kw()).returncode == 0
+    ensure_helper([host_url])
+    base = "protocol=%s\nhost=%s\n" % (u.scheme or "https", u.netloc)
+    _git("credential", "reject", input=base + "username=%s\n\n" % username)
+    return _git("credential", "approve", input=base + "username=%s\npassword=%s\n\n" % (username, token)).returncode == 0
 
 
 def apply(cfg, index_host=None):
@@ -144,6 +163,12 @@ def ensure_access(interactive=None):
     for u in (registry.source()["url"], telemetry.target()):
         if u and u.startswith("http") and u not in urls:
             urls.append(u)
+    changed, ok = ensure_helper(urls)
+    if changed:
+        from . import credhelper
+        ui.good("git logins for %s are now kept in: %s" % (", ".join(changed), credhelper.describe()))
+    if ok:
+        ui.good("git credentials already configured for %s; nothing changed" % ", ".join(ok))
     for u in urls:
         try:
             ensure_git_access(u)

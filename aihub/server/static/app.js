@@ -313,8 +313,8 @@ function Start() {
       <button class="btn sec sm" style="align-self:flex-start" onClick=${() => setAlt(!alt)} aria-expanded=${alt}>${alt ? "Hide" : "Can’t reach this server from your machine?"}</button>
       ${alt && html`<div class="stack"><p class="mut">Install straight from git instead. It needs only git and Python, not this website.</p><${Cmd} text=${pip} />
         <p class="mut">Then tell the CLI where the package index is. Export it (the CLI picks it up automatically), or run <code>aihub setup --manual</code> and it asks:</p><${Cmd} text=${envs} /><${Cmd} text="aihub setup --manual" />
-        <p class="mut">${idx ? html`The package index is <code>${idx}</code>; ` : ""}if git asks for a login, enter your username and an access token once. Your git credential helper remembers it.</p></div>`}</div>
-    ${step(2, "Connect to the package index", "Pulls the index location and the usage inbox from this server. Asks you for anything missing. Refreshes itself later.", "aihub setup")}
+        <p class="mut">${idx ? html`The package index is <code>${idx}</code>; ` : ""}if git asks for a login, enter your username and an access token once. <code>aihub setup</code> registers a small credential helper for this host (Keychain on macOS, DPAPI on Windows, Secret Service or a private file on Linux), so it is remembered and not asked again. If it is already set up, nothing changes.</p></div>`}</div>
+    ${step(2, "Connect to the package index", "Pulls the index location and the usage inbox from this server, and makes sure git remembers your login (already set up? it just says so). Asks only for anything missing. Refreshes itself later.", "aihub setup")}
     ${step(3, "Install something", "You'll be asked which tools to connect it to. Everything is reversible.", "aihub install <package>")}
     ${step(4, "Publish your own", "Scaffold a manifest, then publish. aihub commits and pushes to your git repo for you.", "aihub dev init && aihub dev publish")}</div>`;
 }

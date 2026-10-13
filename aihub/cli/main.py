@@ -214,6 +214,11 @@ def cmd_self_uninstall(a):
             ui.good("removed package %s" % n)
         except (api.ApiError, OSError) as e:
             ui.note("could not remove %s: %s" % (n, e))
+    try:
+        from . import credhelper
+        credhelper.unregister()
+    except Exception:
+        pass
     for label, status in hooks.ensure(remove=True):
         ui.good("%-12s hook %s" % (label, status))
     for f in rc:
@@ -506,6 +511,12 @@ def cmd_skill(a):
     """(Re)install or remove the built-in packages (aihub-guide, aihub-package) from the hub."""
     for name, status in installer.install_builtin(remove=a.action == "remove", tools=a.tool):
         (ui.bad if status.startswith("failed") else ui.good)("%-14s %s" % (name, status))
+
+
+def cmd_credential(a):
+    """Git credential helper protocol (get/store/erase on stdin). Registered by `aihub setup`; not meant to be typed."""
+    from . import credhelper
+    return credhelper.run(a.action)
 
 
 def cmd_hooks(a):
@@ -1091,6 +1102,10 @@ def build_parser():
         "Read a tool-call event as JSON from standard input, match it to an installed package component, and queue usage telemetry. Intended for integration hooks: it spools one event and exits without blocking the AI tool.",
         "Example:\n  printf '{}' | aihub hook --source claude",
         arg("--source", default="claude", metavar="TOOL", help="Source label recorded with the event (default: claude)."))
+    add("credential", cmd_credential, "Git credential helper used for the hub and index hosts.",
+        "Speaks git's credential protocol so a login you type once is remembered: macOS Keychain, Windows DPAPI, Linux Secret Service, else a private 0600 file. 'aihub setup' registers it for your hub and index hosts only; you never call it yourself.",
+        "Example:\n  git config --global --get-all credential.https://git.example.com.helper",
+        arg("action", choices=["get", "store", "erase"], help="Credential protocol action."))
     add("flush", cmd_flush, "Send queued usage events to the hub.",
         "Push queued usage events to the telemetry inbox (a git repo) now. Events are normally pushed in the background as one batch, a few seconds after the last event (aihub config set telemetry_interval 15).",
         "Examples:\n  aihub flush\n  aihub flush --verbose",
@@ -1189,12 +1204,14 @@ def main(argv=None):
                 return 0
             cmd_menu()
             return 0
-        if ui.INTERACTIVE and a.cmd not in ("hook", "flush", "welcome", "config") and not os.path.exists(paths.p(".welcomed")):
+        if ui.INTERACTIVE and a.cmd not in ("hook", "flush", "welcome", "config", "credential") and not os.path.exists(paths.p(".welcomed")):
             cmd_welcome(argparse.Namespace(yes=False))
+        if a.cmd == "credential":
+            return a.fn(a)              # git calls this on every fetch: no welcome, updater or network
         a.fn(a)
-        if a.cmd not in ("hook", "flush", "self-uninstall"):
+        if a.cmd not in ("hook", "flush", "credential", "self-uninstall"):
             record_cli_install()
-        if a.cmd not in ("hook", "flush", "hooks", "self-uninstall", "uninstall"):
+        if a.cmd not in ("hook", "flush", "credential", "hooks", "self-uninstall", "uninstall"):
             from . import hooks
             hooks.verify()      # install/use/update/...: make sure our usage hooks are still in place
         updater.auto(a.cmd)
