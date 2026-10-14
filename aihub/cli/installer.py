@@ -189,18 +189,18 @@ def _load_manifest(rec):
 
 # ---------- install
 
-def _fetch(r, td):
+def _fetch(r, td, indirect=False):
     dest = os.path.join(td, r["name"])
-    r["rev"] = registry.checkout(r, dest)
+    r["rev"] = (registry.checkout_via_hub if indirect else registry.checkout)(r, dest)
     return dest
 
 
-def _install_one(r, assume_yes, tools, requested, archive_path=None):
+def _install_one(r, assume_yes, tools, requested, archive_path=None, indirect=False):
     name = r["name"].lower()
     td = tempfile.mkdtemp()
     try:
-        with ui.Spinner("Fetching %s from git" % name):
-            src = archive_path or _fetch(r, td)
+        with ui.Spinner("Fetching %s from %s" % (name, "the hub" if indirect else "git")):
+            src = archive_path or _fetch(r, td, indirect)
         toml = os.path.join(src, "aihub.toml")          # the repo's aihub.toml is authoritative
         m = M.normalize(M.parse(open(toml, encoding="utf-8").read()))
         req = m["requires"]
@@ -249,7 +249,7 @@ def _install_one(r, assume_yes, tools, requested, archive_path=None):
     return rec
 
 
-def install_plan(pkgs, assume_yes=False, tools=None, roots=()):
+def install_plan(pkgs, assume_yes=False, tools=None, roots=(), indirect=False):
     """Install resolved packages in order. Several archives are downloaded in parallel first."""
     if not pkgs:
         return []
@@ -258,12 +258,12 @@ def install_plan(pkgs, assume_yes=False, tools=None, roots=()):
     for r in pkgs:
         if len(pkgs) > 1:
             ui.step("%s %s" % (ui.accent(r["name"]), r["version"]) + ("" if r["name"] in roots else ui.dim("  (dependency)")))
-        _install_one(r, assume_yes, tools, r["name"] in roots)
+        _install_one(r, assume_yes, tools, r["name"] in roots, indirect=indirect)
         done.append(r)
     return done
 
 
-def install(name, spec="", assume_yes=False, tools=None):
+def install(name, spec="", assume_yes=False, tools=None, indirect=False):
     name = naming.normalize(name)
     st = state()
     cur = st["packages"].get(name)
@@ -283,7 +283,7 @@ def install(name, spec="", assume_yes=False, tools=None):
     deps = [p["name"] for p in pkgs if p["name"] != name]
     if deps:
         ui.step("dependencies: %s" % ", ".join(ui.accent(d) for d in deps))
-    done = install_plan(pkgs, assume_yes, tools, roots=[name])
+    done = install_plan(pkgs, assume_yes, tools, roots=[name], indirect=indirect)
     for rec_name in [p["name"] for p in done] or [name]:
         _enable_deps(rec_name, assume_yes, tools)
     r = state()["packages"][name]

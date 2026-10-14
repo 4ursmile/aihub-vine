@@ -65,6 +65,7 @@ aihub install package-name --yes
 aihub install pkg-a pkg-b "pkg-c>=1.0"
 aihub install -r requirements.txt
 aihub install package-name --tool claude --tool opencode
+aihub install package-name -i      # --indirect: the hub fetches from git and sends the files
 aihub list
 aihub update
 aihub update package-name
@@ -82,7 +83,7 @@ aihub upgrade
 
 - `search [term]` prints up to 30 matching packages.
 - `info <name>` prints package metadata and versions (as JSON when output is not a terminal).
-- `install <name>...` takes several packages and/or `-r FILE` (pip-style requirements file: one `name[<spec>]` per line, `#` comments, nested `-r`); a failing package is reported and the rest still install, exit 1 if any failed. `install <name>` resolves the package from the git index, clones its repository at the version's ref, installs dependencies, and can register components with detected tools. Version constraints such as `"name>=1.2"` or `"name==1.2.0"` are accepted. Interactive mode asks for confirmation. `--yes` skips prompts; `--tool` can be repeated to select tools explicitly.
+- `install <name>...` takes several packages and/or `-r FILE` (pip-style requirements file: one `name[<spec>]` per line, `#` comments, nested `-r`); a failing package is reported and the rest still install, exit 1 if any failed. `install <name>` resolves the package from the git index, clones its repository at the version's ref, installs dependencies, and can register components with detected tools. Version constraints such as `"name>=1.2"` or `"name==1.2.0"` are accepted. Interactive mode asks for confirmation. `--yes` skips prompts; `--tool` can be repeated to select tools explicitly. `-i` / `--indirect` asks the hub for the files instead of cloning git yourself (for machines that cannot reach the git host): the hub fetches the version from git once, caches it, and sends a tar.gz that the CLI checks (sha256) and installs as usual. Needs the `indirect` permission (on by default for every role except `anonymous`, so sign in first; an admin can turn it off per role).
 - `download <name>[@version]` copies a package's files out of git into `./<name>-<version>` (or the `-o` folder) without installing it.
 - `list` shows installed package names, versions and enabled status.
 - `update [name]` updates all installed packages or the named one.

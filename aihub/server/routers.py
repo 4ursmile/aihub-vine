@@ -4,6 +4,7 @@ import os
 from typing import Optional
 import re
 import tempfile
+import threading
 import time
 
 import csv
@@ -440,6 +441,99 @@ def activity(request: Request, u=Depends(current_user)):
 def versions(name: str, request: Request, u=Depends(current_user)):
     need_login_unless(request, u, "public_browse")
     return {"versions": _ser(request, _pkg_or_404(request, name, u), True)["versions"]}
+
+
+# ---------------- indirect install (aihub install -i): the hub fetches from git once, caches, and hands the files to the CLI
+BUNDLE_TTL = 600                                    # a bundle of a branch tip (no pinned commit) is rebuilt after this many seconds
+_bundle_locks, _bundle_guard = {}, threading.Lock()
+
+
+def _repo_snapshot(data_dir, repo):
+    """A plain copy (no .git) of the whole repository at the version's commit, made with ONE git fetch and shared by every package of a
+    monorepo at that commit. A pinned commit is kept for good; a branch tip is refetched after BUNDLE_TTL. -> folder"""
+    import hashlib
+    import shutil
+    url, branch, ref = str(repo.get("url") or ""), str(repo.get("branch") or "main"), str(repo.get("ref") or "")
+    key = hashlib.sha256(("%s\0%s\0%s" % (url, branch, ref)).encode()).hexdigest()[:24]
+    root = os.path.join(data_dir, "bundles", "src")
+    snap = os.path.join(root, key)
+    ok = os.path.join(snap, ".aihub-ready")
+    fresh = lambda: os.path.isfile(ok) and (ref or time.time() - os.path.getmtime(ok) < BUNDLE_TTL)
+    if fresh():
+        return snap
+    with _bundle_guard:
+        lock = _bundle_locks.setdefault("src:" + key, threading.Lock())
+    with lock:                                      # packages of one repo asking at once wait for a single fetch
+        if fresh():
+            return snap
+        os.makedirs(root, exist_ok=True)
+        src = gitx.fetch(url, branch, ref or None, base=os.path.join(data_dir, "repos"))
+        tmp = snap + ".%d.new" % os.getpid()
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.copytree(src, tmp, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+        open(os.path.join(tmp, ".aihub-ready"), "w").close()
+        shutil.rmtree(snap, ignore_errors=True)
+        os.replace(tmp, snap)
+        for f in os.listdir(root):                  # snapshots untouched for a day are dropped
+            d = os.path.join(root, f)
+            try:
+                if f != key and time.time() - os.path.getmtime(d) > 86400:
+                    shutil.rmtree(d, ignore_errors=True)
+            except OSError:
+                pass
+        return snap
+
+
+def _bundle_build(data_dir, name, ver, repo):
+    """tar.gz of the version's folder, built once per (package, version, commit) and kept under <data>/bundles. -> path.
+    The files come from the repo snapshot, so the other packages of a monorepo cost no further git traffic."""
+    import re
+    import tarfile
+    ref = str(repo.get("ref") or "")
+    key = re.sub(r"[^A-Za-z0-9._-]+", "_", "%s-%s-%s" % (name, ver, ref[:40] or "tip"))
+    out = os.path.join(data_dir, "bundles", key + ".tar.gz")
+    fresh = lambda: os.path.isfile(out) and (ref or time.time() - os.path.getmtime(out) < BUNDLE_TTL)
+    if fresh():
+        return out
+    with _bundle_guard:
+        lock = _bundle_locks.setdefault(key, threading.Lock())
+    with lock:
+        if fresh():
+            return out
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        src = _repo_snapshot(data_dir, repo)
+        proj = os.path.join(src, str(repo.get("subdir") or "").strip("/"))
+        if not os.path.realpath(proj).startswith(os.path.realpath(src)) or not os.path.isfile(os.path.join(proj, "aihub.toml")):
+            raise ValueError("no aihub.toml in the package folder")
+        tmp = out + ".%d.part" % os.getpid()
+
+        def keep(ti):                               # never ship git data, the marker, nor symlinks (they could point at files on the server)
+            n = ti.name
+            return None if ti.issym() or ti.islnk() or n == "./.aihub-ready" or n.split("/")[0] == ".git" or "/.git/" in n else ti
+        with tarfile.open(tmp, "w:gz") as t:
+            t.add(proj, arcname=".", filter=keep)
+        os.replace(tmp, out)
+        return out
+
+
+@r.get("/packages/{name}/versions/{version}/bundle")
+async def package_bundle(name: str, version: str, request: Request, u=Depends(require_perm("indirect"))):
+    """The package files as a tar.gz, fetched from git by the hub (and cached) instead of by the client. Needs the `indirect` permission
+    and view access to the package; the CLI checks the X-Bundle-Sha256 header."""
+    p = _pkg_or_404(request, name, u)
+    vrow = next((v for v in R(request).versions(p["id"]) if v["version"] == version and not v["yanked"]), None)
+    if not vrow:
+        raise HTTPException(404, "version not found")
+    repo = (vrow.get("manifest") or {}).get("repo") or {}
+    if not repo.get("url"):
+        raise HTTPException(404, "this version has no git source")
+    try:
+        path = await run_in_threadpool(_bundle_build, request.app.state.settings.data_dir, p["name"], version, repo)
+    except (gitx.GitError, ValueError, OSError) as e:
+        raise HTTPException(502, "hub could not fetch the package: %s" % gitx.redact_url(str(e))[:200])
+    sha = await run_in_threadpool(archive.sha256_file, path)
+    return FileResponse(path, media_type="application/gzip", filename="%s-%s.tar.gz" % (p["name"], version),
+                        headers={"X-Bundle-Sha256": sha, "Cache-Control": "no-store"})
 
 
 README_NAMES = ("README.md", "readme.md", "Readme.md", "README.markdown", "README")

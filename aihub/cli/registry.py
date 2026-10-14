@@ -289,3 +289,37 @@ def checkout(r, dest):
     shutil.rmtree(dest, ignore_errors=True)
     shutil.copytree(src, dest, ignore=shutil.ignore_patterns(".git"))
     return rev
+
+
+def checkout_via_hub(r, dest):
+    """Like checkout(), but the hub fetches from git (and caches) and sends the files: for machines that cannot reach the git host.
+    Needs the `indirect` permission. -> the commit the hub built it from ('' when unknown)."""
+    import tarfile
+    import tempfile
+    from urllib.parse import quote
+    from ..core import archive
+    td = tempfile.mkdtemp()
+    try:
+        part = os.path.join(td, "bundle.tar.gz")
+        sha = {}
+
+        def get():
+            with api._req("GET", "/packages/%s/versions/%s/bundle" % (quote(r["name"]), quote(r["version"])), timeout=300) as resp:
+                sha["v"] = resp.headers.get("X-Bundle-Sha256") or ""
+                with open(part, "wb") as f:
+                    shutil.copyfileobj(resp, f, 1 << 16)
+        try:
+            api._retry(get)
+        except api.ApiError as e:
+            if str(e).startswith("403"):
+                raise api.ApiError("%s: your role may not install through the hub (permission 'indirect'); ask an admin or drop -i" % r["name"])
+            raise
+        if sha["v"] and archive.sha256_file(part) != sha["v"]:
+            raise api.ApiError("%s: download from the hub is corrupt (sha256 mismatch); try again" % r["name"])
+        shutil.rmtree(dest, ignore_errors=True)
+        archive.safe_extract(part, dest)
+        if not os.path.isfile(os.path.join(dest, "aihub.toml")):
+            raise api.ApiError("%s: the hub sent no aihub.toml" % r["name"])
+        return (r.get("repo") or {}).get("ref") or ""
+    finally:
+        shutil.rmtree(td, ignore_errors=True)

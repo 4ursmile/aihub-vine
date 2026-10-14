@@ -54,13 +54,15 @@ ALL_PERMS = {
     "reset_password": "Reset other people's passwords",
     "audit": "View the security audit (tool calls and admin actions)",
     "index": "Force a package into the index (aihub dev index)",
+    "indirect": "Install through the hub (aihub install -i) instead of straight from git",
 }
 PERMS = {
     "admin": list(ALL_PERMS),
-    "publisher": ["publish", "review"],
-    "user": ["publish", "review"],
+    "publisher": ["publish", "review", "indirect"],
+    "user": ["publish", "review", "indirect"],
 }
 # Permissions a visitor who is not signed in can never hold: they would hand out control of accounts and the audit trail
+DEFAULT_ON = ("indirect",)       # permissions added after the first release: granted once to every existing role except anonymous
 ANON_LOCKED = ("admin", "manage_all", "reset_password", "audit", "create_groups")   # create_groups: groups need a real owner
 DESCR = {"admin": "Full access", "publisher": "Can publish and review", "user": "Default role for new accounts"}
 
@@ -345,6 +347,11 @@ class DB:
                         c.execute("INSERT OR IGNORE INTO role_permissions VALUES(?,?)", (r, p))
                 c.execute("INSERT OR IGNORE INTO app_settings VALUES('perms_seeded','1')")
             c.execute("INSERT OR IGNORE INTO roles VALUES('anonymous','Visitors who are not signed in',1)")
+            for p in DEFAULT_ON:                      # once per permission, so an admin who later removes it is respected
+                if not c.execute("SELECT 1 FROM app_settings WHERE key=?", ("perm_default_" + p,)).fetchone():
+                    for role in [r[0] for r in c.execute("SELECT name FROM roles WHERE name<>'anonymous'").fetchall()]:
+                        c.execute("INSERT OR IGNORE INTO role_permissions VALUES(?,?)", (role, p))
+                    c.execute("INSERT OR IGNORE INTO app_settings VALUES(?,'1')", ("perm_default_" + p,))
             for p in ALL_PERMS:
                 c.execute("INSERT OR IGNORE INTO role_permissions VALUES('admin',?)", (p,))
             c.execute("DELETE FROM role_permissions WHERE role='anonymous' AND permission IN (%s)" % ",".join("?" * len(ANON_LOCKED)), ANON_LOCKED)

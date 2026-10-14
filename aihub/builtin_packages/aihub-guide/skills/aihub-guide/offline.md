@@ -77,6 +77,7 @@ aihub search "code review"        # up to 30 matches
 aihub info <name>                 # metadata and versions (JSON when output is not a terminal)
 aihub install <name>              # resolve from the index, clone at the version ref, install
 aihub install <name> --yes        # skip confirmations
+aihub install <name> -i           # --indirect: the hub fetches from git and sends the files (needs the "indirect" permission)
 aihub install a b "c>=1.0"        # several packages at once; one failing never stops the rest
 aihub install -r requirements.txt # pip-style file: one name[<spec>] per line, # comments, nested -r
 aihub install <name> --tool claude --tool opencode   # only these tools
