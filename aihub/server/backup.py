@@ -15,6 +15,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import random
 import threading
 import time
 
@@ -145,6 +146,15 @@ class Backup:
         except ValueError:
             return next_delay(parse_schedule(DEFAULT_SCHEDULE))
 
+    def jittered(self):
+        """The wait before the next scheduled run, moved a little at random so backups never form a fixed pattern on the git host.
+        Up to `backup_jitter` percent of the wait (admin, default 10), at most `backup_jitter_max` seconds (default 600), either way,
+        and never so early that the run lands before the moment the schedule names by more than that."""
+        base = self.delay()
+        pct, cap = self.sync.num("backup_jitter") / 100.0, self.sync.num("backup_jitter_max")
+        span = min(base * pct, cap)
+        return max(5.0, base + random.uniform(-span, span))
+
     # ----- cron loop
     def start(self):
         self.t = threading.Thread(target=self._loop, name="aihub-backup", daemon=True)
@@ -159,7 +169,7 @@ class Backup:
 
     def _try(self):
         try:
-            self.run_once()
+            self.run_once(scheduled=True)
         except Exception as e:
             log.warning("backup failed: %s", gitx.redact_url(str(e)))
         finally:
@@ -171,14 +181,15 @@ class Backup:
         if self.on_start() and self.sync.first_pass.wait(300) and not self.stop.is_set() and self.enabled():
             self._try()
         while not self.stop.is_set():
-            if self.wake.wait(self.delay()):          # woken early: settings changed or shutdown, not a scheduled run
+            if self.wake.wait(self.jittered()):          # woken early: settings changed or shutdown, not a scheduled run
                 self.wake.clear()
                 continue
             if self.enabled():
                 self._try()
 
     # ----- one backup
-    def run_once(self):
+    def run_once(self, scheduled=False):
+        """scheduled=True (the cron loop) waits for the sync job's git gap; "Back up now" (False) runs at once."""
         if not self.lock.acquire(blocking=False):
             raise RuntimeError("a backup is already running")
         self.status["last_run"] = time.time()
@@ -186,13 +197,20 @@ class Backup:
             url, branch, _ = self.sync.index_source()
             if not url or os.path.isfile(url):
                 raise RuntimeError("backup needs a git repository: set the index URL (Admin > Sync)")
-            out = self._backup(url, branch)
+            self.sync.forget()
+            self.status["waiting"] = scheduled
+            with self.sync.gate.job("backup", gap=self.sync.num("git_job_gap"), stop=self.stop, wait_gap=True, force=not scheduled):
+                self.status["waiting"] = False
+                out = self._backup(url, branch)
             self.status.update(last_ok=time.time(), last_error=None, **out)
             return out
+        except InterruptedError:
+            return {}
         except Exception as e:
             self.status["last_error"] = gitx.redact_url(str(e))[:300]
             raise
         finally:
+            self.status["waiting"] = False
             self.lock.release()
 
     def _backup(self, url, branch):

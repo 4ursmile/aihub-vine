@@ -59,7 +59,8 @@ class Telemetry(unittest.TestCase):
     def test_interval_is_clamped_and_defaults_to_15s(self):
         from aihub.cli import telemetry
         with mock.patch.dict(os.environ, {"AIHUB_TELEMETRY_INTERVAL": ""}):
-            self.assertEqual(telemetry.interval(), 15.0)
+            with mock.patch("aihub.core.defaults.load", return_value={}):
+                self.assertEqual(telemetry.interval(), 15.0)                         # the built-in fallback
             with mock.patch("aihub.core.defaults.load", return_value={"telemetry": {"interval": 40}}):
                 self.assertEqual(telemetry.interval(), 40.0)                         # defaults.json is honoured
                 paths.save("config.json", {"telemetry_interval": "25"})
@@ -132,11 +133,17 @@ class EventDrivenFlusher(unittest.TestCase):
 
     def test_backoff_grows_is_capped_and_a_success_resets_it(self):
         waits = []
-        for _ in range(8):
+        for _ in range(12):
             self.t._fail()
-            waits.append(round(self.t._backoff_state()[1] - time.time()))
-        self.assertEqual(waits[:4], [30, 60, 120, 240])
-        self.assertEqual(waits[-1], self.t.BACKOFF_MAX)
+            waits.append(self.t._backoff_state()[1] - time.time())
+        for n, w in enumerate(waits[:5]):                                   # 30s, 1m, 2m ... each randomly 50-100% of that (no lock-step retries)
+            full = self.t.BACKOFF_BASE * 2 ** n
+            self.assertTrue(full * 0.5 - 1 <= w <= full + 1, (n, w))
+        self.assertLessEqual(max(waits), self.t.BACKOFF_MAX)
+        self.assertGreater(waits[-1], self.t.BACKOFF_MAX * 0.5 - 1)          # an hour at most, not shorter than half of it by then
+        self.assertEqual(self.t.BACKOFF_MAX, 3600)
+        self.t._fail(retry_after=1800)                                      # the hub's Retry-After is a floor
+        self.assertGreaterEqual(self.t._backoff_state()[1] - time.time(), 1799)
         self.t.enqueue({"kind": "use", "package": "p"})
         with mock.patch.object(self.t, "push"):
             self.assertEqual(self.t._send_once(), 1)

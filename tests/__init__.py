@@ -9,3 +9,7 @@ Tests that exercise the real push (tests/test_sync.py::Inbox) set their own bare
 import os
 
 os.environ.setdefault("AIHUB_TELEMETRY_URL", "/nonexistent/aihub-tests-must-not-push.git")
+# The CLI sends events and reads the index through the hub first; tests that exercise git set their own repos, and none may call a hub
+# that happens to run on this machine.
+os.environ.setdefault("AIHUB_TELEMETRY_VIA", "git")
+os.environ.setdefault("AIHUB_INDEX_VIA", "git")

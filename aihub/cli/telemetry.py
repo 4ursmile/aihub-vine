@@ -1,11 +1,16 @@
-"""Non-blocking usage telemetry, batched through git.
+"""Non-blocking usage telemetry. The hub is the way in; git is the fallback.
 
 `enqueue()` is a single O_APPEND write (microseconds). `kick()` starts a detached flusher process unless one is alive.
-The flusher waits one short window so a burst of events becomes ONE batch, then pushes it to the inbox repo as an orphan
-commit on its own ref (`refs/telemetry/<client_id>/<batch>`). Nobody else writes that ref, so pushes never conflict. The
-hub fetches the refs, stores the events, archives them and deletes the refs. Nothing here may raise or block the agent.
+The flusher waits one short window so a burst of events becomes ONE batch, then sends it:
+  1. POST /api/v1/telemetry to the hub (cheap for everyone: the hub keeps events in memory and writes the database in batches);
+  2. only if the hub cannot be reached (down, unreachable, no such route on an old hub) push the batch to the git inbox instead
+     (one file on the `telemetry-inbox` branch). A hub that answers 429/503 is busy, not gone: the batch stays spooled and the
+     flusher backs off (honoring Retry-After) instead of also hitting git.
+Events leave the spool only after a success. The retry delay grows with every failure, with jitter, so clients never retry in step.
+Nothing here may raise or block the agent.
 """
 import glob
+import gzip
 import json
 import os
 import subprocess
@@ -18,8 +23,11 @@ from . import gitx, paths
 STALE = 30      # heartbeat age after which a flusher is considered dead (it beats every 5s)
 MAX_SPOOL = 5 * 1024 * 1024
 BATCH = 5000    # events per pushed commit
-BACKOFF_BASE = 30       # seconds to leave the network alone after the first failed push; doubles per failure
-BACKOFF_MAX = 900
+BACKOFF_BASE = 30       # seconds to leave the network alone after the first failed send; doubles per failure
+BACKOFF_MAX = 3600      # ...up to an hour; the events stay spooled meanwhile
+HUB_TIMEOUT = 15
+GZIP_MIN = 512          # smaller bodies are not worth compressing
+GIT_AFTER = 3           # consecutive hub failures (down, not busy) before git is tried at all: a hub restart must not send everyone to git
 WINDOWS = os.name == "nt"
 PUSH_TRIES = 12         # a push can lose a race with another client (non-fast-forward): refetch the tip and add the file again.
                         # Many clients flushing in the same second all race for the one branch tip; jittered, growing waits spread them out
@@ -127,13 +135,13 @@ def _status_file():
     return paths.p("queue", "status.json")
 
 
-def _status(ok, error="", sent=0):
+def _status(ok, error="", sent=0, via=""):
     """Remember the outcome of the last push, because the flusher is a detached process nobody watches. `aihub flush -v` and `aihub doctor` show it."""
     try:
         cur = last_status()
         cur.update(at=time.time(), ok=bool(ok), error=error)
         if ok:
-            cur.update(last_ok=cur["at"], last_sent=sent)
+            cur.update(last_ok=cur["at"], last_sent=sent, via=via)
         tmp = _status_file() + ".tmp"
         with open(tmp, "w") as f:
             json.dump(cur, f)
@@ -170,13 +178,17 @@ def _backoff():
     return left if 0 < left <= BACKOFF_MAX else 0
 
 
-def _fail():
-    """A push failed (offline, no access): wait 30s, then 1m, 2m ... up to 15m before the next automatic attempt. The events stay on disk."""
+def _fail(retry_after=0):
+    """A send failed (offline, no access, hub busy): wait 30s, 1m, 2m ... up to an hour before the next automatic attempt, each wait
+    randomly 50-100% of that (so many clients never retry in step). The hub's Retry-After is a floor. The events stay on disk."""
+    import random
     try:
         n = _backoff_state()[0] + 1
+        wait = min(BACKOFF_BASE * 2 ** (n - 1), BACKOFF_MAX) * random.uniform(0.5, 1.0)
+        wait = min(max(wait, float(retry_after or 0)), BACKOFF_MAX)
         tmp = _backoff_file() + ".tmp"
         with open(tmp, "w") as f:
-            json.dump({"fails": n, "next": time.time() + min(BACKOFF_BASE * 2 ** (n - 1), BACKOFF_MAX)}, f)
+            json.dump({"fails": n, "next": time.time() + wait}, f)
         os.replace(tmp, _backoff_file())
     except Exception:
         pass
@@ -219,7 +231,7 @@ def interval():
     from ..core import defaults
     try:
         v = float(os.environ.get("AIHUB_TELEMETRY_INTERVAL") or paths.config().get("telemetry_interval")
-                  or defaults.load().get("telemetry", {}).get("interval") or 15)
+                  or paths.config().get("hub_telemetry_interval") or defaults.load().get("telemetry", {}).get("interval") or 15)
     except (TypeError, ValueError):
         v = 15
     return max(5.0, min(v, 3600.0))
@@ -292,12 +304,111 @@ def push(url, lines, timeout=20):
             time.sleep(random.uniform(0.1, 1.0) * min(2 ** attempt, 8))         # full jitter, capped: ~30 s worst case for 12 tries
 
 
+class HubBusy(Exception):
+    """The hub answered but asked us to slow down (429/503) or is overloaded. Not a reason to use git."""
+    def __init__(self, msg, retry_after=0):
+        super().__init__(msg)
+        self.retry_after = retry_after
+
+
+def hub_url():
+    return paths.config()["hub"].rstrip("/") + "/api/v1/telemetry"
+
+
+def post(lines, timeout=HUB_TIMEOUT):
+    """Send events to the hub. -> number accepted. Raises HubBusy (429/503: hub alive, wait), ValueError (hub says the batch is bad:
+    retrying cannot help) or OSError (cannot reach it / no such route: git is the way)."""
+    import urllib.error
+    import urllib.request
+    from . import api
+    events = []
+    for l in lines:
+        try:
+            events.append(json.loads(l))
+        except ValueError:
+            pass
+    body = json.dumps({"events": events}, separators=(",", ":")).encode()
+    h = {"Content-Type": "application/json", "User-Agent": "aihub-cli"}
+    tok = paths.load("credentials.json", {}).get("token")
+    if tok:
+        h["Authorization"] = "Bearer " + tok
+    zipped = len(body) >= GZIP_MIN
+    for attempt in (0, 1):
+        data, hh = (gzip.compress(body, 6, mtime=0), dict(h, **{"Content-Encoding": "gzip"})) if zipped else (body, h)
+        rq = urllib.request.Request(hub_url(), data=data, headers=hh, method="POST")
+        try:
+            with api._opener.open(rq, timeout=timeout) as r:
+                ans = json.loads(r.read() or b"{}")
+            _note_index(ans.get("index_etag"))
+            return int(ans.get("accepted", len(events)))
+        except urllib.error.HTTPError as e:
+            if zipped and not attempt and e.code in (400, 415):
+                zipped = False                                           # an older hub that cannot read gzip: once more, plain
+                continue
+            return _hub_error(e)
+    raise OSError("hub unreachable")
+
+
+def _note_index(etag):
+    """The hub tells us the current index ETag with every answer. If our cached catalog is another one, expire its trust window so the
+    next command revalidates (one small request) instead of waiting out the TTL."""
+    if not etag:
+        return
+    try:
+        f = paths.p("index-hub", "catalog.json")
+        with open(f, encoding="utf-8") as fh:
+            if json.load(fh).get("etag") != etag:
+                os.utime(f, (0, 0))
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def _hub_error(e):
+    import urllib.error
+    if e.code in (429, 502, 503, 504):
+        try:
+            ra = float(e.headers.get("Retry-After") or 0)
+        except (TypeError, ValueError):
+            ra = 0
+        raise HubBusy("hub busy (%d)" % e.code, min(ra, BACKOFF_MAX))
+    if e.code in (404, 405, 501):
+        raise OSError("hub has no telemetry route (%d)" % e.code)    # an older hub: use git
+    if e.code == 401:
+        raise OSError("hub refused the token (401)")                 # stale login: events are still wanted, anonymous sending is not offered
+    if e.code in (400, 413):
+        raise ValueError("hub rejected the batch (%d)" % e.code)
+    raise OSError("hub error %d" % e.code)
+
+
+def send(url, lines, timeout=20):
+    """Hub first, git as the fallback. -> "hub" | "git". Raises when neither worked (the caller keeps the events).
+    Git is tried only when the hub is unreachable (not when it is merely busy) and not before GIT_AFTER failures in a row, so a short
+    hub restart never moves the whole fleet onto the git host."""
+    last = None
+    try:
+        post(lines, min(timeout, HUB_TIMEOUT))
+        return "hub"
+    except HubBusy:
+        raise
+    except ValueError:
+        raise
+    except Exception as e:
+        last = e
+    if _backoff_state()[0] + 1 < GIT_AFTER and not os.environ.get("AIHUB_TELEMETRY_GIT_ONLY"):
+        raise OSError("hub unreachable (%s); will retry before using git" % gitx.redact_url(str(last))[:100])
+    if not url:
+        raise last
+    for i in range(0, len(lines), BATCH):
+        push(url, lines[i:i + BATCH], timeout)
+    return "git"
+
+
 def _send_once(timeout=20):
     """Push everything spooled. Returns the number of events sent. The spool files are deleted only after the push succeeded;
     a failure leaves them for the next pass, and a crash between push and delete only causes a resend the hub dedups by id."""
     url = target()
-    if not url:
-        return 0                                         # keep the spool until an inbox is configured
+    if not url and not hub_enabled():
+        return 0                                         # keep the spool until the hub or an inbox is configured
     if os.path.exists(_spool()):
         os.replace(_spool(), paths.p("queue", "sending.%d.%d.jsonl" % (os.getpid(), time.time() * 1000)))
     files = glob.glob(paths.p("queue", "sending.*.jsonl"))
@@ -316,15 +427,19 @@ def _send_once(timeout=20):
             pass
     if lines:
         try:
-            for i in range(0, len(lines), BATCH):
-                push(url, lines[i:i + BATCH], timeout)
+            via = send(url, lines, timeout) if hub_enabled() else (push_all(url, lines, timeout) or "git")
+        except HubBusy as e:
+            _send_once.error = str(e)
+            _status(False, _send_once.error)
+            _fail(e.retry_after)
+            return 0
         except Exception as e:
             _send_once.error = gitx.redact_url(str(e))[:200]
             _status(False, _send_once.error)
             _fail()
             return 0
         _ok()
-        _status(True, "", len(lines))
+        _status(True, "", len(lines), via)
     for f, size in sizes.items():                        # nothing valid in a file is also "done": it must not keep the flusher looping
         try:
             if os.path.getsize(f) == size:               # a hook that opened the spool just before the rename may still have appended: keep that file
@@ -335,6 +450,17 @@ def _send_once(timeout=20):
 
 
 _send_once.error = ""
+
+
+def hub_enabled():
+    """Send to the hub first. Off with AIHUB_TELEMETRY_VIA=git, or `aihub config set telemetry_via git`."""
+    via = (os.environ.get("AIHUB_TELEMETRY_VIA") or paths.config().get("telemetry_via") or "hub").lower()
+    return via != "git" and paths.hub_configured()
+
+
+def push_all(url, lines, timeout=20):
+    for i in range(0, len(lines), BATCH):
+        push(url, lines[i:i + BATCH], timeout)
 
 
 def _pending():
@@ -358,7 +484,7 @@ def flush(timeout=20, linger=None, force=False):
         if force:
             return _send_once(timeout)
         for _ in range(MAX_PASSES):
-            if not target():
+            if not target() and not hub_enabled():
                 break
             end = time.time() + interval()
             while time.time() < end:
@@ -391,16 +517,28 @@ def deliver(ev, timeout=20):
     try:
         line = _prep(ev)
         url = target()
+        if hub_enabled():
+            try:
+                post([line], min(timeout, HUB_TIMEOUT))
+                _ok()
+                _status(True, "", 1, "hub")
+                return True
+            except HubBusy as e:
+                raise OSError(str(e))                                    # busy hub: spool it, do not add load to git
+            except ValueError:
+                raise
+            except Exception:
+                pass                                                     # unreachable: a publish is rare and wants to arrive, try git below
         if url:
             push(url, [line], timeout)
             _ok()
-            _status(True, "", 1)
+            _status(True, "", 1, "git")
             return True
         deliver.error = "no telemetry inbox configured"
     except Exception as e:
         deliver.error = gitx.redact_url(str(e))[:200]
         _status(False, deliver.error)
-        _fail()
+        _fail(getattr(e, "retry_after", 0))
     record(ev)
     return False
 

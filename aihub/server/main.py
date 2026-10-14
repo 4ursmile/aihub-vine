@@ -16,6 +16,8 @@ from fastapi.staticfiles import StaticFiles
 from ..core.release import VERSION
 from .cache import init_cache
 from .sync import Sync
+from .transfer import Transfer
+from .ingest import Ingest
 from .backup import Backup
 from .config import Settings
 from .db import init_db
@@ -203,10 +205,12 @@ def create_app(settings: Settings = None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(_app):
         logging.getLogger("aihub").info("backends: %s", json.dumps(s.describe()))
+        _app.state.ingest.start()
         if s.sync_enabled:
             _app.state.sync.start()
             _app.state.backup.start()
         yield
+        _app.state.ingest.close()           # last events reach the database (and the git queue) before the sync stops
         _app.state.sync.close()
         _app.state.backup.close()
         _app.state.events.close()  # drain queued usage events on shutdown
@@ -223,6 +227,8 @@ def create_app(settings: Settings = None) -> FastAPI:
     app.state.cache = init_cache(s)
     app.state.events = EventBuffer(app.state.repos, s.event_flush_rows, s.event_flush_secs)
     app.state.sync = Sync(app.state.repos, s, app.state.cache)
+    app.state.transfer = Transfer(s.data_dir, lambda: app.state.sync.num("transfer_repo_ttl"))
+    app.state.ingest = Ingest(app.state.repos, app.state.sync, app.state.cache, os.path.join(s.data_dir, "ingest-journal"))
     app.state.backup = Backup(app.state.repos, s, app.state.sync)
     app.add_middleware(GZipMiddleware, minimum_size=800)
     app.include_router(api)

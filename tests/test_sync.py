@@ -103,7 +103,8 @@ class Server(unittest.TestCase):
         self.assertEqual(sorted(g()), ["config", "from_env", "status", "target"])
         self.assertEqual(g()["config"]["backup_enabled"], "0")                            # off until an admin turns it on
         self.assertEqual(self.c.put("/api/v1/admin/backup", headers=h, json={"backup_enabled": "1", "backup_schedule": "0 */6 * * *", "backup_events_chunk": "5000"}).status_code, 200)
-        self.assertEqual(g()["config"], {"backup_enabled": "1", "backup_schedule": "0 */6 * * *", "backup_events_chunk": "5000"})
+        self.assertEqual(g()["config"], {"backup_enabled": "1", "backup_schedule": "0 */6 * * *", "backup_events_chunk": "5000",
+                                         "backup_jitter": "10", "backup_jitter_max": "600"})       # start time is spread a little so backups form no pattern
         for bad in ({"backup_enabled": "2"}, {"backup_schedule": "nope"}, {"backup_events_chunk": "5"}):
             self.assertEqual(self.c.put("/api/v1/admin/backup", headers=h, json=bad).status_code, 400, bad)
         self.assertEqual(self.c.get("/api/v1/admin/backup").status_code, 401)             # admins only

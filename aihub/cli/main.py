@@ -121,6 +121,7 @@ def cmd_install(a):
     if not specs:
         raise ValueError("nothing to install: give package names or -r requirements.txt")
     specs = list(dict.fromkeys(specs))               # same line twice installs once
+    registry.INDIRECT = bool(getattr(a, "indirect", False))
     ui.out()
     failed = []
     for s in specs:
@@ -1027,7 +1028,8 @@ def build_parser():
         arg("name", nargs="*", metavar="PACKAGE[<SPEC>]", help="One or more package names, each optionally followed by a version constraint such as name>=1.0,<2."),
         arg("-r", "--requirement", action="append", metavar="FILE", help="Install every package listed in FILE (pip style: one per line, # comments, nested -r); repeatable."),
         arg("-y", "--yes", action="store_true", help="Skip install-script and tool-registration prompts; use detected tools unless --tool is given."),
-        arg("--tool", action="append", metavar="TOOL", help="Register components with this tool; repeat to select multiple (claude, codex, or opencode)."))
+        arg("--tool", action="append", metavar="TOOL", help="Register components with this tool; repeat to select multiple (claude, codex, or opencode)."),
+        arg("-i", "--indirect", action="store_true", help="Get the package through the hub instead of straight from git (needs the install_indirect permission; falls back to git if the hub cannot fetch it)."))
     add("enable", cmd_enable, "Switch a disabled package back on.",
         "Re-register an installed but disabled package with your AI tools and put its commands back on PATH. Uses the files already on disk, so it works offline. Disabled dependencies are enabled first. 'aihub install' on a disabled package does the same.",
         "Examples:\n  aihub enable my-skill\n  aihub enable --all",

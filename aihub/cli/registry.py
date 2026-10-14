@@ -11,11 +11,12 @@ Index entry = the package row derived from its manifest, plus where its files li
 import json
 import os
 import shutil
+import tarfile
 import time
 import urllib.request
 
 from ..core import manifest as M, naming, pkgindex, version as V
-from . import api, gitx, paths, remote_config, tls
+from . import api, gitx, paths, remote_config, tls, ui
 
 TTL = 300       # in-process cache of the reader; the on-disk checkout is checked against the remote far more often (CHECK)
 CHECK = 20      # seconds a checkout counts as current without asking the remote. After that ONE `ls-remote` (cheap, no download)
@@ -36,10 +37,117 @@ def source():
             "path": os.environ.get("AIHUB_INDEX_PATH") or c.get("index_path") or d.get("path") or "index"}
 
 
+class HubReader:
+    """The package index as the hub serves it (GET /index/catalog, /index/packages/<name>). Every answer is cached on disk with its ETag and
+    revalidated with If-None-Match, so an unchanged index costs one tiny 304 and no body. Quacks like pkgindex.Reader/Legacy."""
+
+    def __init__(self, base):
+        self.base = base
+        self._cat = None
+        self.count = 0
+
+    def _path(self, *a):
+        return os.path.join(self.base, *a)
+
+    def _get(self, path, cache_file, force=False):
+        """-> parsed JSON. Sends If-None-Match from the cached copy; 304 reuses it. Raises ApiError/OSError when the hub cannot answer."""
+        import urllib.error
+        cached = None
+        try:
+            with open(cache_file, encoding="utf-8") as f:
+                cached = json.load(f)
+        except (OSError, ValueError):
+            pass
+        h = {"Accept": "application/json", "User-Agent": "aihub-cli"}
+        tok = paths.load("credentials.json", {}).get("token")
+        if tok:
+            h["Authorization"] = "Bearer " + tok
+        if cached and cached.get("etag") and not force:
+            h["If-None-Match"] = cached["etag"]
+        rq = urllib.request.Request(paths.config()["hub"].rstrip("/") + "/api/v1" + path, headers=h)
+        try:
+            with api._opener.open(rq, timeout=8) as r:
+                data = json.loads(r.read())
+                etag = r.headers.get("ETag") or ""
+        except urllib.error.HTTPError as e:
+            if e.code == 304 and cached:
+                os.utime(cache_file, None)                       # still current: restart the trust window
+                return cached["data"]
+            raise OSError("hub index %d" % e.code)
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+        tmp = cache_file + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"etag": etag, "data": data}, f)
+        os.replace(tmp, cache_file)
+        return data
+
+    def load(self, ttl, force=False):
+        f = self._path("catalog.json")
+        if not force and os.path.isfile(f) and time.time() - os.path.getmtime(f) < ttl:
+            with open(f, encoding="utf-8") as fh:
+                data = json.load(fh)["data"]                      # inside the trust window: no request at all
+        else:
+            data = self._get("/index/catalog", f, force)
+        self._cat = data.get("packages", [])
+        self.count = len(self._cat)
+        return self
+
+    def catalog(self):
+        return list(self._cat or [])
+
+    def entry(self, name):
+        name = naming.normalize(name)
+        if not any(p["name"] == name for p in self._cat or []):
+            return None
+        f = self._path("packages", name + ".json")
+        row = next(p for p in self._cat if p["name"] == name)
+        try:
+            with open(f, encoding="utf-8") as fh:
+                c = json.load(fh)
+            if c.get("etag") == '"%s"' % row.get("h") and c.get("data"):
+                return c["data"]                                  # the catalog hash says this entry did not change: no request
+        except (OSError, ValueError):
+            pass
+        try:
+            return self._get("/index/packages/" + name, f, True)
+        except OSError as e:
+            if "404" in str(e):
+                return None
+            raise
+
+    def entries(self):
+        for row in self.catalog():
+            e = self.entry(row["name"])
+            if e:
+                yield e
+
+
+def hub_ttl():
+    try:
+        return max(5.0, float(os.environ.get("AIHUB_INDEX_TTL") or paths.config().get("hub_index_ttl") or CHECK))
+    except (TypeError, ValueError):
+        return float(CHECK)
+
+
+def _hub_reader(src, refresh=False):
+    """The index from the hub, or None when the hub cannot serve it (down, old hub, needs a login we lack). The caller then uses git."""
+    if (os.environ.get("AIHUB_INDEX_VIA") or paths.config().get("index_via") or "hub").lower() == "git":
+        return None
+    if os.environ.get("AIHUB_INDEX_URL") or not paths.hub_configured():
+        return None                                            # the user pointed the CLI at a specific index: honor it
+    try:
+        return HubReader(paths.ensure("index-hub")).load(hub_ttl(), force=refresh)
+    except (OSError, ValueError, api.ApiError, KeyError):
+        return None
+
+
 def _reader(src, refresh=False):
     """A pkgindex reader for the configured source. Git sources are fetched at most every TTL seconds; if the network is down
     the last checkout is used (a stale index beats none)."""
     u = src["url"]
+    hub = _hub_reader(src, refresh)
+    if hub is not None:
+        return hub
     if not u:
         raise api.ApiError("no package index configured; run: aihub config set index_url <git url>")
     if os.path.isfile(u):
@@ -88,7 +196,7 @@ _cache = {}
 def reader(refresh=False):
     src = source()
     key = (src["url"], src["branch"], src["path"])
-    if refresh or key not in _cache or time.time() - _cache[key][0] > CHECK:
+    if refresh or key not in _cache or time.time() - _cache[key][0] > hub_ttl():
         _cache[key] = (time.time(), _reader(src, refresh))
     return _cache[key][1]
 
@@ -226,8 +334,40 @@ def plan(roots, installed=None):
     return out
 
 
+INDIRECT = False        # `aihub install -i`: the hub fetches from git and sends the package
+
+
+def _from_hub(r, dest):
+    """Download the package as tar.gz from the hub (it caches git, and a monorepo is fetched once for all its packages)."""
+    import tempfile
+    from ..core import archive
+    tmp = tempfile.mkdtemp()
+    try:
+        part = os.path.join(tmp, "pkg.tar.gz")
+        with api._req("GET", "/index/packages/%s/transfer/%s" % (r["name"], r["version"]), timeout=300) as resp, open(part, "wb") as f:
+            rev = resp.headers.get("X-Aihub-Rev") or ""
+            shutil.copyfileobj(resp, f)
+        src = archive.safe_extract(part, os.path.join(tmp, "x"))
+        if not os.path.isfile(os.path.join(src, "aihub.toml")):
+            raise api.ApiError("%s: the hub sent no aihub.toml" % r["name"])
+        shutil.rmtree(dest, ignore_errors=True)
+        shutil.copytree(src, dest)
+        return rev
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def checkout(r, dest):
     """Materialise a resolved package into dest (its subdir of the repo at the requested ref/branch)."""
+    if INDIRECT:
+        try:
+            return _from_hub(r, dest)
+        except api.ApiError as e:
+            if str(e).startswith(("401", "403")):
+                raise
+            ui.note("hub transfer failed for %s (%s); using git" % (r["name"], e))
+        except (OSError, ValueError, tarfile.TarError) as e:
+            ui.note("hub transfer failed for %s (%s); using git" % (r["name"], e))
     repo = r["repo"]
     try:
         src = remote_config.with_access(repo["url"], lambda: gitx.fetch(repo["url"], repo.get("branch") or "main", repo.get("ref")))

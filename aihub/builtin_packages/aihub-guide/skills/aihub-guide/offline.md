@@ -6,7 +6,7 @@ This is a bundled snapshot, condensed from the hub docs (cli, manifest, publishi
 
 - **Git** holds package files and the package index. The index is a folder in a git repo (default branch `main`, path `index`) with `root.json`, `catalog/` and `packages/<xx>/<name>.json`. An older single `index.json` is still read.
 - **Only the hub server writes the index.** The CLI only reads it. Nobody edits the index by hand.
-- **The telemetry inbox** (a git repo, often the index repo) holds usage and lifecycle events as files on one branch, `telemetry-inbox`. Each CLI push adds one file; the server ingests the files, archives them to the `telemetry-archive` branch and removes them from the inbox.
+- **The telemetry inbox** (a git repo, often the index repo) holds usage and lifecycle events as files on one branch, `telemetry-inbox`. Git is the fallback: the CLI sends usage to the hub first (`POST /api/v1/telemetry`, a busy hub is waited for) and adds a file to this branch only when the hub cannot be reached; the server ingests the files, archives them to the `telemetry-archive` branch and removes them from the inbox. The CLI also reads the package index from the hub first (with ETag/304) and from git as the fallback.
 - **The hub server** caches the index and events, and serves accounts, reviews and the web UI. It stores no package files and has no upload routes.
 - Package versions are immutable. A version that was published cannot be re-published.
 
@@ -43,7 +43,8 @@ Keys and environment variables:
 | `index_url` | `AIHUB_INDEX_URL` | Git URL of the index repo, an `https://...json` URL, or a local file |
 | `index_branch` / `index_path` | - | Branch (default `main`) and folder (default `index`) in that repo |
 | `telemetry_url`, `telemetry_inbox_branch` | `AIHUB_TELEMETRY_URL`, `AIHUB_TELEMETRY_INBOX_BRANCH` | Git repo and branch CLIs push usage files to (default: bundled `defaults.json`, then the index repo; branch `telemetry-inbox`) |
-| `telemetry_interval` | `AIHUB_TELEMETRY_INTERVAL` | Seconds per telemetry window (default 15, allowed 5 to 3600) |
+| `telemetry_interval` | `AIHUB_TELEMETRY_INTERVAL` | Seconds per telemetry window (default 15 without a hub, 60 from the hub; allowed 5 to 3600) |
+| `telemetry_via`, `index_via` | `AIHUB_TELEMETRY_VIA`, `AIHUB_INDEX_VIA` | `git` = skip the hub and use git only (default: hub first, git as the fallback) |
 | `auto_update` | `AIHUB_NO_UPDATE=1` | Set `false` to turn off the daily self-update check |
 
 - `AIHUB_HOME` moves the CLI state directory from `~/.aihub` to another path.
@@ -72,6 +73,7 @@ aihub search "code review"        # up to 30 matches
 aihub info <name>                 # metadata and versions (JSON when output is not a terminal)
 aihub install <name>              # resolve from the index, clone at the version ref, install
 aihub install <name> --yes        # skip confirmations
+aihub install <name> -i           # --indirect: get it through the hub instead of git (needs install_indirect; falls back to git)
 aihub install a b "c>=1.0"        # several packages at once; one failing never stops the rest
 aihub install -r requirements.txt # pip-style file: one name[<spec>] per line, # comments, nested -r
 aihub install <name> --tool claude --tool opencode   # only these tools

@@ -37,3 +37,9 @@ def config():
     c = load("config.json", {})
     c.setdefault("hub", os.environ.get("AIHUB_URL", "http://localhost:8000"))
     return c
+
+
+def hub_configured():
+    """True when a hub was chosen (aihub setup / config set hub / AIHUB_URL), not just the built-in localhost default. The CLI talks to a hub
+    first only then; otherwise git is the only route, as before."""
+    return bool(os.environ.get("AIHUB_URL") or load("config.json", {}).get("hub"))

@@ -17,10 +17,31 @@ log = logging.getLogger("aihub.cache")
 
 class Cache:
     name = "none"
+    STRIPES = 64
+    epoch = 0                                           # bumped by every invalidate(): a value computed across one is not stored
+
     def get(self, key): return None
     def set(self, key, value, ttl=None): pass
     def delete(self, key): pass
     def invalidate(self, prefix): pass
+
+    def get_or_set(self, key, ttl, fn):
+        """Cached value, or fn() computed ONCE however many requests miss at the same moment (the others wait for it and reuse the result,
+        so a cold or just-invalidated hot key costs one database query, not one per concurrent client). A value computed while an
+        invalidate() ran is returned but not stored, so a stale answer never outlives the write that invalidated it."""
+        v = self.get(key)
+        if v is not None:
+            return v
+        locks = self.__dict__.setdefault("_stripes", [threading.Lock() for _ in range(self.STRIPES)])
+        with locks[hash(key) % self.STRIPES]:
+            v = self.get(key)                           # somebody else may have filled it while we waited
+            if v is not None:
+                return v
+            epoch = self.epoch
+            v = fn()
+            if self.epoch == epoch:
+                self.set(key, v, ttl)
+            return v
     def health(self): return True
     def stats(self): return {"backend": self.name}
 
@@ -61,6 +82,7 @@ class MemoryCache(Cache):
 
     def invalidate(self, prefix):
         with self.lock:
+            self.epoch += 1
             for k in [k for k in self.d if k.startswith(prefix)]:
                 del self.d[k]
 
@@ -117,6 +139,7 @@ class RedisCache(Cache):
 
     def invalidate(self, prefix):
         try:
+            self.epoch += 1
             self.r.incr("%sgen:%s" % (self.prefix, self._group(prefix)))      # old generation's keys are now unreachable and expire by TTL
         except Exception as e:
             self.errors += 1; log.warning("redis invalidate failed: %s", e)

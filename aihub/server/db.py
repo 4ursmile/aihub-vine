@@ -54,11 +54,12 @@ ALL_PERMS = {
     "reset_password": "Reset other people's passwords",
     "audit": "View the security audit (tool calls and admin actions)",
     "index": "Force a package into the index (aihub dev index)",
+    "install_indirect": "Install through the hub (aihub install -i) instead of straight from git",
 }
 PERMS = {
     "admin": list(ALL_PERMS),
-    "publisher": ["publish", "review"],
-    "user": ["publish", "review"],
+    "publisher": ["publish", "review", "install_indirect"],
+    "user": ["publish", "review", "install_indirect"],
 }
 # Permissions a visitor who is not signed in can never hold: they would hand out control of accounts and the audit trail
 ANON_LOCKED = ("admin", "manage_all", "reset_password", "audit", "create_groups")   # create_groups: groups need a real owner
@@ -205,7 +206,9 @@ class DB:
         if c is None:
             raw = sqlite3.connect(self.path, timeout=30)
             raw.row_factory = sqlite3.Row
-            raw.execute("PRAGMA journal_mode=WAL")
+            raw.execute("PRAGMA journal_mode=WAL")           # readers never block the writer or each other
+            raw.execute("PRAGMA cache_size=-32768")          # 32 MiB page cache per connection
+            raw.execute("PRAGMA temp_store=MEMORY")
             c = self._local.c = Conn(self, raw)
         return c
 
@@ -344,6 +347,10 @@ class DB:
                     for p in ps:
                         c.execute("INSERT OR IGNORE INTO role_permissions VALUES(?,?)", (r, p))
                 c.execute("INSERT OR IGNORE INTO app_settings VALUES('perms_seeded','1')")
+            if not c.execute("SELECT 1 FROM app_settings WHERE key='perm_install_indirect'").fetchone():     # existing databases: on for every role but anonymous, once
+                for (r,) in c.execute("SELECT name FROM roles WHERE name<>'anonymous'").fetchall():
+                    c.execute("INSERT OR IGNORE INTO role_permissions VALUES(?,?)", (r, "install_indirect"))
+                c.execute("INSERT OR IGNORE INTO app_settings VALUES('perm_install_indirect','1')")
             c.execute("INSERT OR IGNORE INTO roles VALUES('anonymous','Visitors who are not signed in',1)")
             for p in ALL_PERMS:
                 c.execute("INSERT OR IGNORE INTO role_permissions VALUES('admin',?)", (p,))

@@ -1,4 +1,6 @@
+import hashlib
 import json
+import zlib
 import os
 from typing import Optional
 import re
@@ -19,7 +21,8 @@ from pydantic import BaseModel
 from ..core.release import VERSION
 from ..cli import gitx
 from ..core import archive, manifest as M, naming, redact, version as V
-from .sync import parse_schedule
+from .sync import LIMITS, parse_schedule
+from .transfer import TransferError
 from . import builtin, image, markdown, nethost, safehtml, sheet
 from .categories import category_of
 from .db import ALL_PERMS, ANON_LOCKED
@@ -357,25 +360,17 @@ def packages(request: Request, q: str = "", type: str = None, tag: str = None, s
     v = viewer(request, u)
     per_page = min(max(per_page, 1), 100)
     key = "pkg:list:%s:%s|%s|%s|%s|%s|%s|%s|%s" % (_cache_scope(v), q, type, tag, sort, page, per_page, mine, category)
-    hit = C(request).get(key)
-    if hit:
-        return hit
-    total, rows = R(request).packages(q, type, tag, sort, page, per_page, viewer=v, mine=mine, category=category)
-    res = {"total": total, "page": page, "per_page": per_page, "items": [_ser(request, p) for p in rows]}
-    C(request).set(key, res, TTL)
-    return res
+    def build():
+        total, rows = R(request).packages(q, type, tag, sort, page, per_page, viewer=v, mine=mine, category=category)
+        return {"total": total, "page": page, "per_page": per_page, "items": [_ser(request, p) for p in rows]}
+    return C(request).get_or_set(key, TTL, build)
 
 
 @r.get("/facets")
 def facets(request: Request, u=Depends(current_user)):
     need_login_unless(request, u, "public_browse")
     v = viewer(request, u)
-    c, key = C(request), "pkg:facets:" + _cache_scope(v)
-    hit = c.get(key)
-    if not hit:
-        hit = R(request).facets(v)
-        c.set(key, hit, TTL)
-    return hit
+    return C(request).get_or_set("pkg:facets:" + _cache_scope(v), TTL, lambda: R(request).facets(v))
 
 
 def _pkg_or_404(request, name, u=None, need="view"):
@@ -407,17 +402,14 @@ def related(name: str, request: Request, u=Depends(current_user)):
     p = _pkg_or_404(request, name, u)
     v = viewer(request, u)
     key = "pkg:related:%s:%s" % (_cache_scope(v), p["name"])
-    hit = C(request).get(key)
-    if hit:
-        return hit
-    items = []
-    for n in R(request).related(p["name"], v):
-        q = R(request).package(n)
-        if q:
-            items.append(_ser(request, q))
-    res = {"items": items}
-    C(request).set(key, res, TTL)
-    return res
+    def build():
+        items = []
+        for n in R(request).related(p["name"], v):
+            q = R(request).package(n)
+            if q:
+                items.append(_ser(request, q))
+        return {"items": items}
+    return C(request).get_or_set(key, TTL, build)
 
 
 @r.get("/activity")
@@ -426,12 +418,7 @@ def activity(request: Request, u=Depends(current_user)):
     need_login_unless(request, u, "public_browse")
     v = viewer(request, u)
     key = "pkg:activity:" + _cache_scope(v)
-    hit = C(request).get(key)
-    if hit:
-        return hit
-    res = {"items": R(request).recent_activity(v, 15)}
-    C(request).set(key, res, 5)
-    return res
+    return C(request).get_or_set(key, 5, lambda: {"items": R(request).recent_activity(v, 15)})
 
 
 @r.get("/packages/{name}/versions")
@@ -1378,18 +1365,16 @@ def dashboard(request: Request, days: int = 30, package: str = None, type: str =
     v = viewer(request, u)
     if package:
         package = _pkg_or_404(request, package, u)["name"]      # also enforces that the viewer may see it
-    request.app.state.events.flush()
     key = "dash:%s:%s" % (_cache_scope(v), "|".join(str(x) for x in (days, package, type, user, source, kind, identity, host, os, q, date_from, date_to)))
-    hit = C(request).get(key)
-    if hit:
-        return hit
+
+    def build():
+        request.app.state.events.flush()                          # only on a miss: a cached answer needs no write
+        return R(request).dashboard(days, package, viewer=v, type=type, user=user, source=source, kind=kind,
+                                    identity=identity, host=host, os=os, q=(q or "").strip()[:80] or None, date_from=date_from, date_to=date_to)
     try:
-        res = R(request).dashboard(days, package, viewer=v, type=type, user=user, source=source, kind=kind,
-                                   identity=identity, host=host, os=os, q=(q or "").strip()[:80] or None, date_from=date_from, date_to=date_to)
+        return C(request).get_or_set(key, 15, build)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    C(request).set(key, res, 15)
-    return res
 
 
 @r.get("/dashboard/events")
@@ -1411,7 +1396,7 @@ def dashboard_events(request: Request, days: int = 30, page: int = 1, per_page: 
 
 # ---------------- sync (git telemetry inbox + git index -> SQLite)
 SYNC_KEYS = ("telemetry_url", "telemetry_inbox_branch", "telemetry_branch", "telemetry_archive", "localize_users", "index_url", "index_branch", "index_path", "sync_interval",
-             "cli_git_url", "cli_git_branch", "cli_git_subdir", "client_refresh_hours")
+             "cli_git_url", "cli_git_branch", "cli_git_subdir", "client_refresh_hours") + tuple(LIMITS)
 SECRET_KEYS = ()
 
 
@@ -1421,6 +1406,16 @@ def _check_cli_git(k, v):
         raise HTTPException(400, f"{k} must not contain spaces or control characters")
     if k == "cli_git_subdir" and (any(ch in v for ch in "#?") or ".." in v or v.startswith("/")):
         raise HTTPException(400, "cli_git_subdir must be a relative folder without '#', '?', '..' or a leading '/'")
+
+
+def _check_limit(k, v):
+    """Admin number from LIMITS: whole seconds/percent within its range. Blank = back to the default."""
+    if v == "":
+        return ""
+    lo, hi = LIMITS[k][1], LIMITS[k][2]
+    if not re.fullmatch(r"\d{1,7}", v) or not lo <= int(v) <= hi:
+        raise HTTPException(400, "%s must be a whole number from %d to %d" % (k, lo, hi))
+    return str(int(v))
 
 
 @r.get("/admin/sync")
@@ -1433,8 +1428,14 @@ def sync_status(request: Request, u=admin):
             cfg[k] = envget(e)                                                   # what is really used: environment / .env wins
     for k in SECRET_KEYS:
         cfg[k] = "set" if cfg[k] else ""                                         # never echo secrets
-    cfg["sync_interval"] = cfg["sync_interval"] or "60"
-    return {"config": cfg, "status": dict(sy.status, next_in=round(sy.delay())), "cursor": repos.setting("sync_cursor"),
+    cfg["sync_interval"] = cfg["sync_interval"] or "300"
+    for k in LIMITS:
+        cfg[k] = str(sy.num(k))                                                  # the value really in use (stored, environment or default)
+    limits = [{"key": k, "label": v[3], "min": v[1], "max": v[2], "default": v[0]} for k, v in LIMITS.items()]
+    ing = request.app.state.ingest
+    st = dict(sy.status, next_in=round(sy.delay()), git_flush_in=sy.git_flush_in(), index_push_in=sy.index_push_in(),
+              held_batches=len(sy.held), staged_publishes=len(sy.staged), ingest=dict(ing.stats, buffered=len(ing.rows)))
+    return {"config": cfg, "limits": limits, "status": st, "cursor": repos.setting("sync_cursor"),
             "from_env": {"index": bool(request.app.state.settings.env_get("AIHUB_INDEX_URL")),
                          **{k: bool(request.app.state.settings.env_get(e)) for k, e in SYNC_ENV.items()}}}
 
@@ -1456,18 +1457,23 @@ def sync_update(body: dict, request: Request, u=admin):
                     parse_schedule(v)
                 except ValueError as e:
                     raise HTTPException(400, str(e))
+            if k in LIMITS:
+                v = _check_limit(k, v)
             repos.set_setting(k, v)
     repos.audit(u["username"], "settings.sync", "", ",".join(k for k in SYNC_KEYS if k in body))
+    request.app.state.sync.forget()
     request.app.state.sync.wake.set()                    # re-plan with the new schedule now
     return sync_status(request, u)
 
 
-BACKUP_KEYS = ("backup_enabled", "backup_schedule", "backup_events_chunk")
+BACKUP_KEYS = ("backup_enabled", "backup_schedule", "backup_events_chunk", "backup_jitter", "backup_jitter_max")
 
 
 def _backup_view(request, u):
     bk, repos = request.app.state.backup, R(request)
-    return {"config": {"backup_enabled": "1" if bk.enabled() else "0", "backup_schedule": bk.schedule_text(), "backup_events_chunk": str(bk.chunk())},
+    sy = request.app.state.sync
+    return {"config": {"backup_enabled": "1" if bk.enabled() else "0", "backup_schedule": bk.schedule_text(), "backup_events_chunk": str(bk.chunk()),
+                       "backup_jitter": str(sy.num("backup_jitter")), "backup_jitter_max": str(sy.num("backup_jitter_max"))},
             "status": dict(bk.status, next_in=round(bk.delay())),
             "from_env": {"backup_enabled": bool(request.app.state.settings.env_get("AIHUB_BACKUP_ENABLED"))},     # the environment wins over the saved switch
             "target": {"url": gitx.redact_url(request.app.state.sync.index_source()[0]), "branch": request.app.state.sync.index_source()[1]}}
@@ -1493,8 +1499,11 @@ def backup_update(body: dict, request: Request, u=admin):
                     raise HTTPException(400, str(e))
             if k == "backup_events_chunk" and not (v.isdigit() and 1000 <= int(v) <= 1000000):
                 raise HTTPException(400, "backup_events_chunk must be between 1000 and 1000000")
+            if k in LIMITS:
+                v = _check_limit(k, v)
             repos.set_setting(k, v)
     repos.audit(u["username"], "settings.backup", "", ",".join(k for k in BACKUP_KEYS if k in body))
+    request.app.state.sync.forget()
     request.app.state.backup.wake.set()
     return _backup_view(request, u)
 
@@ -1503,6 +1512,7 @@ def backup_update(body: dict, request: Request, u=admin):
 def backup_run(request: Request, u=admin):
     """Back up now (to the index git repo), whether or not the schedule is enabled."""
     try:
+        request.app.state.ingest.flush()                  # events still in memory go into this backup
         request.app.state.backup.run_once()
     except Exception as e:
         raise HTTPException(502, "backup failed: %s" % str(e)[:300])
@@ -1519,6 +1529,7 @@ def sync_run(request: Request, full: bool = False, u=admin):
         repos.set_setting("sync_index_dirty", "1")
         repos.set_setting("sync_index_hashes", "")
     try:
+        request.app.state.ingest.flush()                  # what is buffered in memory goes to the database and the git queue first
         request.app.state.sync.run_once()
     except Exception as e:
         raise HTTPException(502, "sync failed: %s" % str(e)[:300])
@@ -1553,6 +1564,137 @@ def index_package(body: dict, request: Request, u=Depends(require_perm("index"))
     return {"package": name, "version": ver, "status": status, "index_changed": bool(changed)}
 
 
+# ---------------- telemetry intake (CLI -> hub; git is the CLI's fallback)
+MAX_TELEMETRY_BYTES = 4 * 1024 * 1024
+MAX_TELEMETRY_EVENTS = 5000
+
+
+@r.post("/telemetry")
+async def telemetry_in(request: Request, u=Depends(current_user)):
+    """Usage events from a CLI. Nothing is written to the database here: events wait in memory and one transaction stores a whole window
+    (`ingest_db_interval`). 429/503 carry Retry-After; the CLI keeps its spool, backs off and falls back to git."""
+    ing = request.app.state.ingest
+    ip = request.client.host if request.client else "?"
+    ok, wait = ing.allow(ip)
+    if not ok:
+        return JSONResponse({"detail": "too many requests"}, status_code=429, headers={"Retry-After": str(wait)})
+    if ing.full():                                                        # counted in ing.stats["busy"]
+        return JSONResponse({"detail": "busy"}, status_code=503, headers={"Retry-After": str(30 + secrets.randbelow(30))})
+    n = request.headers.get("content-length")
+    if n and n.isdigit() and int(n) > MAX_TELEMETRY_BYTES:
+        raise HTTPException(413, "batch too large")
+    raw = await request.body()
+    if len(raw) > MAX_TELEMETRY_BYTES:
+        raise HTTPException(413, "batch too large")
+    enc = request.headers.get("content-encoding", "").strip().lower()
+    if enc == "gzip":
+        try:
+            d = zlib.decompressobj(31)                                    # 31 = gzip wrapper; the output cap stops a zip bomb
+            raw = d.decompress(raw, MAX_TELEMETRY_BYTES + 1)
+            if len(raw) > MAX_TELEMETRY_BYTES or d.unconsumed_tail:
+                raise HTTPException(413, "batch too large")
+        except zlib.error:
+            raise HTTPException(400, "body is not valid gzip")
+        ing.stats["gzip"] += 1
+    elif enc not in ("", "identity"):
+        raise HTTPException(415, "unsupported Content-Encoding")
+    try:
+        body = json.loads(raw or b"{}")
+    except ValueError:
+        raise HTTPException(400, "body must be JSON")
+    events = body.get("events") if isinstance(body, dict) else None
+    if not isinstance(events, list) or len(events) > MAX_TELEMETRY_EVENTS:
+        raise HTTPException(400, "send {\"events\": [...]} with at most %d events" % MAX_TELEMETRY_EVENTS)
+    try:
+        accepted = await run_in_threadpool(ing.add, events, u["username"] if u else None)   # fsync must not block the event loop
+    except OSError:                                                       # cannot journal (disk full / read-only): do NOT acknowledge what could be lost
+        return JSONResponse({"detail": "cannot store events right now"}, status_code=503, headers={"Retry-After": "30"})
+    out = {"accepted": accepted, "received": len(events)}
+    try:
+        out["index_etag"] = _index_view(request, u)["etag"]               # lets the CLI see its cached index is stale without polling
+    except HTTPException:
+        pass                                                              # index not ready: the CLI simply keeps its own schedule
+    return out
+
+
+# ---------------- the package index, served by the hub (CLI asks here first; git is the fallback). ETag + 304.
+def _index_view(request, u):
+    """(rows, etag, names->h) of the index as THIS viewer may see it. Cached per viewer scope; any change drops it ('pkg' prefix)."""
+    v = viewer(request, u)
+    sy = request.app.state.sync
+    rows, tag = sy.served_catalog()
+    if not tag:
+        raise HTTPException(503, "index not ready; use git", headers={"Retry-After": "30"})
+    key = "pkg:idx:%s:%s" % (_cache_scope(v), tag)
+    hit = C(request).get(key)
+    if hit:
+        return hit
+    seen = R(request).package_names_visible(v)
+    pub = [x for x in rows if x["name"] in seen]                       # a package the database does not know yet is hidden until the next sync
+    etag = '"%s"' % hashlib.sha256((tag + "|" + ",".join(x["name"] for x in pub)).encode()).hexdigest()[:20]
+    out = {"etag": etag, "rows": pub, "h": {x["name"]: x["h"] for x in pub}}
+    C(request).set(key, out, ttl=3600)
+    return out
+
+
+def _not_modified(request, etag):
+    inm = request.headers.get("if-none-match", "")
+    return etag in [x.strip() for x in inm.split(",")] or inm.strip() == "*"
+
+
+@r.get("/index/catalog")
+def index_catalog(request: Request, u=Depends(current_user)):
+    need_login_unless(request, u, "public_browse")
+    view = _index_view(request, u)
+    hdr = {"ETag": view["etag"], "Cache-Control": "private, max-age=0, must-revalidate"}
+    if _not_modified(request, view["etag"]):
+        return Response(status_code=304, headers=hdr)
+    return JSONResponse({"etag": view["etag"], "count": len(view["rows"]), "packages": view["rows"]}, headers=hdr)
+
+
+@r.get("/index/packages/{name}")
+def index_entry(name: str, request: Request, u=Depends(current_user)):
+    need_login_unless(request, u, "public_browse")
+    name = naming.normalize(name)
+    view = _index_view(request, u)
+    h = view["h"].get(name)
+    if h is None:
+        raise HTTPException(404, "package not found")                  # same answer for "private" and "missing"
+    etag = '"%s"' % h
+    hdr = {"ETag": etag, "Cache-Control": "private, max-age=0, must-revalidate"}
+    if _not_modified(request, etag):
+        return Response(status_code=304, headers=hdr)
+    rd, _ = request.app.state.sync.served()
+    entry = rd.entry(name) if rd is not None else None
+    if not entry:
+        raise HTTPException(404, "package not found")
+    return JSONResponse(entry, headers=hdr)
+
+
+@r.get("/index/packages/{name}/transfer/{version}")
+def index_transfer(name: str, version: str, request: Request, u=Depends(require_perm("install_indirect"))):
+    """`aihub install -i`: the hub fetches the package from git (cached; a monorepo once for all its packages) and sends a tar.gz."""
+    name = naming.normalize(name)
+    if name not in _index_view(request, u)["h"]:
+        raise HTTPException(404, "package not found")
+    rd, _ = request.app.state.sync.served()
+    entry = rd.entry(name) if rd is not None else None
+    if not entry:
+        raise HTTPException(404, "package not found")
+    if version not in [v["version"] for v in entry.get("versions") or []] + [entry.get("latest_version")]:
+        raise HTTPException(404, "version not found")
+    v = next((x for x in entry.get("versions") or [] if x["version"] == version), {})
+    repo = dict(entry.get("repo") or {}, **(v.get("repo") or {}))
+    if v.get("ref"):
+        repo["ref"] = v["ref"]
+    tr = request.app.state.transfer
+    try:
+        path, rev = tr.get(repo)
+    except TransferError as e:
+        raise HTTPException(502, "cannot fetch %s: %s" % (name, e), headers={"Retry-After": "30"})
+    return FileResponse(path, media_type="application/gzip", filename="%s-%s.tar.gz" % (name, version), headers={"X-Aihub-Rev": rev, "ETag": '"%s"' % rev})
+
+
 # ---------------- client config (what the CLI pulls to get set up)
 @r.get("/client-config")
 def client_config(request: Request):
@@ -1572,6 +1714,9 @@ def client_config(request: Request):
                          or defaults.load().get("telemetry", {}).get("inbox_branch", "") or "telemetry-inbox",
                          "branch": env("AIHUB_TELEMETRY_BRANCH") or repos.setting("telemetry_branch", "")
                          or defaults.load().get("telemetry", {}).get("branch", "") or "telemetry-archive"},
-           "refresh_hours": int(repos.setting("client_refresh_hours", "") or 24)}
+           "refresh_hours": int(repos.setting("client_refresh_hours", "") or 24),
+           "hub": {"telemetry": True, "index": True,                                  # the hub takes events and serves the index; git is the CLI's fallback
+                   "telemetry_interval": request.app.state.sync.num("client_telemetry_interval"),
+                   "index_ttl": request.app.state.sync.num("client_index_ttl")}}
     from fastapi.responses import JSONResponse
     return JSONResponse(out, headers={"Cache-Control": "no-store"})

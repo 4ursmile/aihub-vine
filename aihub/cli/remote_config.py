@@ -62,6 +62,11 @@ def apply(cfg, index_host=None):
         if tel.get(k_src) and not os.environ.get(env):                    # environment wins over what the hub sends
             c[k_dst] = tel[k_src]
             got.append(k_dst)
+    hub = cfg.get("hub") or {}
+    if hub.get("telemetry_interval"):
+        c["hub_telemetry_interval"] = hub["telemetry_interval"]       # admin-set; AIHUB_TELEMETRY_INTERVAL / `config set telemetry_interval` still win
+    if hub.get("index_ttl"):
+        c["hub_index_ttl"] = hub["index_ttl"]
     c["remote_config_at"] = time.time()
     c["remote_config_hours"] = cfg.get("refresh_hours", 24)
     paths.save("config.json", c)
