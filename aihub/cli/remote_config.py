@@ -87,14 +87,35 @@ def auto(cmd):
         paths.save("config.json", c)
 
 
+_AUTH_WORDS = ("authentication", "could not read", "denied", "403", "401", "terminal prompts disabled")
+
+
+def is_auth_error(err):
+    return any(w in str(err).lower() for w in _AUTH_WORDS)
+
+
+def with_access(url, fn):
+    """Run fn() (a git operation on `url`) for any remote, whatever its host: the index, a package repo, another team's repo.
+    The helper is registered for that host first (idempotent, other hosts untouched). If fn fails for lack of credentials and a
+    person is at a terminal, ask once for this host, store the login in its own entry and retry. Hosts already known never prompt."""
+    if (url or "").startswith("http"):
+        ensure_helper([url])
+    try:
+        return fn()
+    except gitx.GitError as e:
+        if not (is_auth_error(e) and ui.INTERACTIVE and (url or "").startswith("http")):
+            raise
+        ensure_git_access(url)
+        return fn()
+
+
 def ensure_git_access(url):
     """Make sure `git ls-remote url` works; if it needs credentials we do not have, ask for them once."""
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **tls.git_env())
     r = subprocess.run(["git", "ls-remote", "--exit-code", "-h", url, "HEAD"], env=env, capture_output=True, text=True, **gitx.popen_kw())
     if r.returncode in (0, 2):
         return True
-    err = (r.stderr or "").lower()
-    if not any(w in err for w in ("authentication", "could not read", "denied", "403", "401", "terminal prompts disabled")):
+    if not is_auth_error(r.stderr):
         raise gitx.GitError(gitx.redact_url(r.stderr.strip()))
     if not ui.INTERACTIVE or not url.startswith("http"):
         raise gitx.GitError("git credentials are needed for %s; sign in with your git host (for example `git credential approve`, or run this in a terminal and enter them when asked)" % gitx.redact_url(url))

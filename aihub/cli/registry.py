@@ -15,7 +15,7 @@ import time
 import urllib.request
 
 from ..core import manifest as M, naming, pkgindex, version as V
-from . import api, gitx, paths, tls
+from . import api, gitx, paths, remote_config, tls
 
 TTL = 300       # in-process cache of the reader; the on-disk checkout is checked against the remote far more often (CHECK)
 CHECK = 20      # seconds a checkout counts as current without asking the remote. After that ONE `ls-remote` (cheap, no download)
@@ -68,7 +68,7 @@ def _reader(src, refresh=False):
             fresh = True
     if not fresh:
         try:
-            d = gitx.fetch(u, src["branch"], base=base)
+            d = remote_config.with_access(u, lambda: gitx.fetch(u, src["branch"], base=base))
             open(stamp, "w").close()
         except gitx.GitError as e:
             if gitx.remote_empty(u):
@@ -230,7 +230,7 @@ def checkout(r, dest):
     """Materialise a resolved package into dest (its subdir of the repo at the requested ref/branch)."""
     repo = r["repo"]
     try:
-        src = gitx.fetch(repo["url"], repo.get("branch") or "main", repo.get("ref"))
+        src = remote_config.with_access(repo["url"], lambda: gitx.fetch(repo["url"], repo.get("branch") or "main", repo.get("ref")))
     except gitx.GitError as e:
         raise api.ApiError("%s: %s" % (r["name"], e))
     rev = gitx.run(["rev-parse", "HEAD"], cwd=src)
