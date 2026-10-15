@@ -609,7 +609,8 @@ def _init_mono(a):
     from ..core import naming
     root = _root(a)
     specs = [x.strip() for v in (a.packages or []) for x in v.split(",") if x.strip()]
-    if not specs and ui.INTERACTIVE:
+    adopt = list(getattr(a, "adopt", None) or [])
+    if not specs and not adopt and ui.INTERACTIVE:
         raw = input("  packages to create, comma separated (name or name:type, blank for none): ").strip()
         specs = [x.strip() for x in raw.split(",") if x.strip()]
     plan = []
@@ -628,11 +629,17 @@ def _init_mono(a):
     if os.path.isfile(os.path.join(root, "aihub.toml")):
         raise ValueError("%s is itself a package; a monorepo folder holds packages in sub folders. Pick a parent folder" % root)
     ws.ensure_repo(root, a.remote or "", a.branch or "main")
+    for n in adopt:                                         # existing sub folders become packages in place
+        q = os.path.join(root, n)
+        if not os.path.isdir(q):
+            raise ValueError("%s is not a folder below %s" % (n, root))
+        dev_init(argparse.Namespace(**dict(vars(a), path=q, name=naming.validate(n.lower().replace("_", "-")), sub=False, mono=False,
+                                           wizard=False, force=False, _mono_member=True)))
     for n, t in plan:
         if n in have:
             ui.note("%s already exists; keeping it" % n)
             continue
-        dev_init(argparse.Namespace(**dict(vars(a), path=root, name=n, type=t, sub=True, mono=False, force=False, _mono_member=True)))
+        dev_init(argparse.Namespace(**dict(vars(a), path=root, name=n, type=t, sub=True, mono=False, wizard=False, force=False, _mono_member=True)))
     dirs = pub.discover(root)
     for d in dirs:                                          # new and pre-existing packages alike: [git] must match this repository
         rec, changes = ws.fix_git(d, root, remote=a.remote or None)
@@ -643,7 +650,80 @@ def _init_mono(a):
     ui.info("publish everything:  aihub dev publish %s        one package:  aihub dev publish %s --only NAME" % (a.path, a.path))
 
 
+def _ask_text(label, default=""):
+    ans = ui._ask("  %s %s %s " % (ui.accent("?"), label, ui.dim("[%s]" % default) if default else "")).strip()
+    return ans or default
+
+
+def _ask_type(default="skill"):
+    types = ["skill", "agent", "mcp", "tool", "setup"]
+    return ui.select("Package type?", [(t, t) for t in [default] + [x for x in types if x != default]]) or default
+
+
+def _subdirs(root):
+    """Folders directly below root that could become packages: not hidden, not build output, not already packages."""
+    out = []
+    for n in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        q = os.path.join(root, n)
+        if (os.path.isdir(q) and not n.startswith(".") and n not in pub.SKIP_DIRS
+                and not os.path.exists(os.path.join(q, "aihub.toml")) and not pub.discover(q, 3)):
+            out.append(n)
+    return out
+
+
+def _init_wizard(a):
+    """`dev init -w`: ask what to make of PATH, then run the same code paths the flags use."""
+    from ..core import naming
+    if not ui.INTERACTIVE:
+        raise ValueError("--wizard needs a terminal; pass --mono / --sub / --name / --type instead")
+    root = _root(a)
+    here = os.path.basename(root).lower().replace("_", "-")
+    ui.heading("aihub dev init wizard")
+    ui.info("folder: %s" % root)
+    mode = ui.select("What should this folder become?", [
+        ("single", "One package: this folder is the package"),
+        ("mono", "A monorepo: this folder is one git repository, each sub folder a package"),
+        ("sub", "Add one more package inside this workspace (new sub folder)")])
+    if not mode:
+        raise ValueError("cancelled")
+    ns = dict(vars(a), wizard=False)
+    if mode == "single":
+        name = _ask_text("Package name?", naming.validate(here) if _valid(naming, here) else "")
+        ns.update(name=name, type=_ask_type(a.type), description=_ask_text("Description?", a.description or ""), sub=False, mono=False)
+        return dev_init(argparse.Namespace(**ns))
+    if mode == "sub":
+        name = _ask_text("New package name?")
+        ns.update(name=name, type=_ask_type(a.type), description=_ask_text("Description?", a.description or ""), sub=True, mono=False)
+        return dev_init(argparse.Namespace(**ns))
+    adopt = []
+    subs = _subdirs(root)
+    if subs:
+        adopt = ui.select("Turn which existing sub folders into packages?", [(n, n) for n in subs], multi=True, preset=tuple(subs))
+    packages = []
+    if ui.confirm("Create new (empty) packages as well?", default=not adopt):
+        raw = _ask_text("New packages, comma separated (name or name:type)?")
+        packages = [raw] if raw else []
+    kind = a.type
+    if adopt:
+        kind = _ask_type(a.type)
+        ui.info("existing sub folders become '%s' packages (change each type in its aihub.toml)" % kind)
+    remote = a.remote or _ask_text("Git remote URL for the whole repository (blank to set later)?", "")
+    branch = a.branch or _ask_text("Branch?", "main")
+    ns.update(mono=True, packages=packages, adopt=adopt, remote=remote or None, branch=branch, type=kind)
+    return _init_mono(argparse.Namespace(**ns))
+
+
+def _valid(naming, n):
+    try:
+        naming.validate(n)
+        return True
+    except ValueError:
+        return False
+
+
 def dev_init(a):
+    if getattr(a, "wizard", False):
+        return _init_wizard(a)
     if getattr(a, "mono", False):
         return _init_mono(a)
     from ..core import templates
@@ -1162,6 +1242,7 @@ def build_parser():
           arg("--packages", action="append", metavar="LIST", help="With --mono: packages to create, comma separated, each NAME or NAME:TYPE (e.g. --packages guide,tools:mcp)."),
           arg("--remote", metavar="URL", help="With --mono: git remote for the whole repository (asked once when omitted)."),
           arg("--branch", metavar="BRANCH", help="With --mono: branch to publish (default: main)."),
+          arg("-w", "--wizard", action="store_true", help="Interactive setup wizard: choose one package, a monorepo (and which sub folders become packages), or a new package in this workspace."),
           arg("--force", action="store_true", help="Overwrite generated starter files that already exist.")]),
         ("validate", dev_validate, "Validate and lint the package project.",
          "Parse and normalize PATH/aihub.toml, then lint the manifest and referenced package files. Report warnings and fail if validation errors are found.",

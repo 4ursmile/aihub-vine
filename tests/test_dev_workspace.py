@@ -191,3 +191,23 @@ class Monorepo(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WizardAdopt(unittest.TestCase):
+    def test_mono_adopts_existing_subfolders(self):
+        import argparse, tempfile
+        from aihub.cli import main as m
+        with tempfile.TemporaryDirectory() as t:
+            for n in ("alpha", "beta"):
+                os.makedirs(os.path.join(t, n))
+            ns = argparse.Namespace(path=t, name=None, type="skill", description=None, sub=False, mono=True, packages=[],
+                                    adopt=["alpha"], remote=None, branch="main", wizard=False, force=False)
+            m.dev_init(ns)
+            self.assertTrue(os.path.exists(os.path.join(t, "alpha", "aihub.toml")))
+            self.assertFalse(os.path.exists(os.path.join(t, "beta", "aihub.toml")))
+
+    def test_wizard_needs_terminal(self):
+        import argparse
+        from aihub.cli import main as m
+        with self.assertRaises(ValueError):
+            m._init_wizard(argparse.Namespace(path=".", type="skill", description=None, remote=None, branch=None))

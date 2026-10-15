@@ -109,6 +109,7 @@ Developer commands (`aihub dev`, run in a package folder or pass its path):
 aihub dev init ./my-pkg --type skill --name my-pkg --description "..."
 aihub dev init . --mono --packages "a,b:mcp" --remote <url> --branch main   # one repo, one package per sub folder
 aihub dev init . --sub --name new-pkg          # add a package to a workspace folder
+aihub dev init -w .                            # interactive wizard (terminal only): one package / monorepo (pick sub folders to adopt) / add a package
 aihub dev list . / aihub dev tree .            # packages; tree adds repository and [git] status
 aihub dev validate . / aihub dev build PATH    # a folder of packages is handled package by package
 aihub dev publish . [--only NAME] [--bump patch]
