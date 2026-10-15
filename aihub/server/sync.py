@@ -278,6 +278,9 @@ class Sync:
         url, branch, path = self.index_source()
         log.info("sync: usage inbox %s (branch %s, archive %s); package index %s (branch %s, folder %s)",
                  gitx.redact_url(self.inbox()) or "-", self.inbox_branch(), self.archive_branch(), gitx.redact_url(url) or "-", branch, path)
+        loc = self.local_index()
+        if not self.index_dir and os.path.isfile(os.path.join(loc, self.index_source()[2], "root.json")):
+            self.index_dir = loc                                # serve the hub's own index from the first request, no git
         self.t = threading.Thread(target=self._loop, name="aihub-sync", daemon=True)
         self.t.start()
 
@@ -776,12 +779,16 @@ class Sync:
             for k in pubs:
                 if self.pending_pubs.get(k) is pubs[k]:
                     del self.pending_pubs[k]
-            if changed:
+            if changed and self.index_git():                             # only the legacy git index has something to push later
                 self.staged.update(pubs)
                 self.staged_first = self.staged_first or time.time()
         if changed:
             self.repos.set_setting("sync_index_dirty", "1")
             self.invalidate_served()
+            try:
+                self._import_local()                                    # database (web UI, rankings) follows the hub's own index now
+            except Exception as e:                                      # dirty stays set: the next index read imports it
+                log.warning("sync: importing the staged index failed: %s", e)
         return changed
 
     def _flush_index_if_due(self):
@@ -826,7 +833,8 @@ class Sync:
 
     def _update_index(self, pubs, force, results, push=True):
         url, branch, path = self.index_source()
-        if not url or os.path.isfile(url):
+        local_only = not push and not self.index_git()                   # legacy git index sync off: the hub's index is a plain folder
+        if os.path.isfile(url or "") or not (url or local_only):
             return False
         work = os.path.join(self.s.data_dir, "index-repos")
         os.makedirs(work, exist_ok=True)
@@ -834,6 +842,9 @@ class Sync:
         folder_rel = path[:-5] if path.endswith(".json") else path
         if not push and os.path.isfile(os.path.join(local, folder_rel, "root.json")) and os.path.isdir(os.path.join(local, ".git")):
             d = local                                                    # staging needs no network: build on the checkout we already have
+        elif local_only:
+            d = self.local_index()                                       # no git at all: the data dir (and its backup) holds the index
+            os.makedirs(d, exist_ok=True)
         elif gitx.remote_head(url, branch):
             self._heavy()
             d = gitx.fetch(url, branch, base=work)                       # leaves the tree at the remote tip: an earlier unpushed staging is redone from `pubs`
@@ -894,7 +905,11 @@ class Sync:
                 log.warning("cannot index %s %s: %s", name, ver, gitx.redact_url(str(e)))
                 results.append((name, ver, "cannot read the repository: " + gitx.redact_url(str(e))[:200]))
         self.index_dir = d
-        if not changed or not gitx.run(["status", "--porcelain", "--", path], cwd=d):
+        if not changed:
+            return False
+        if not os.path.isdir(os.path.join(d, ".git")):
+            return True                                                  # plain folder: nothing to commit
+        if not gitx.run(["status", "--porcelain", "--", path], cwd=d):
             return False
         if not push:
             return True                                                  # staged in the working tree; the hub serves it, git gets it later
@@ -908,6 +923,10 @@ class Sync:
 
     def _store(self, rows):
         return self.repos.events_insert_ext(rows) if rows else 0
+
+    def local_index(self):
+        """Folder holding the hub's own package index when the legacy git index sync is off (inside the data dir, so the backup covers it)."""
+        return os.path.join(self.s.data_dir, "index-local")
 
     def index_source(self):
         return (self.cfg("index_url", "AIHUB_INDEX_URL"), self.cfg("index_branch", "AIHUB_INDEX_BRANCH", "main"),
@@ -955,7 +974,7 @@ class Sync:
         """(reader, etag) of the index this hub serves, or (None, '') when none is read yet. Built once per change, then cached in memory."""
         url, branch, path = self.index_source()
         d = self.index_dir
-        if not url or not (d or self._file_reader):
+        if not (d or self._file_reader):
             return None, ""
         key = (self.served_version, d)
         hit = self._served
@@ -1001,6 +1020,19 @@ class Sync:
             return
         if rev is not None and str(rev) == self.repos.setting("sync_index_rev") and self.repos.setting("sync_index_dirty") != "1":
             return                                                     # same commit as last time: nothing to read
+        self._import_index(idx, rev)
+
+    def _import_local(self):
+        """Load the local index checkout (staged publishes included) into the database. No git: this is what makes a publish show up in the
+        web UI at once when the legacy git index sync is off."""
+        d = self.index_dir
+        if not d:
+            return
+        with self.index_lock:
+            idx = pkgindex.open_source(d, self.index_source()[2])
+            self._import_index(idx, None)
+
+    def _import_index(self, idx, rev):
         try:
             seen = json.loads(self.repos.setting("sync_index_hashes") or "{}")
         except ValueError:
