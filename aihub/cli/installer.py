@@ -131,7 +131,11 @@ def _activate(rec, m, dest, tools, assume_yes, name):
         rec["shims"].append(write_shim(bindir, cmdname, target, rec.get("venv")))
     rec["reverts"] = []
     rec["tools"] = []
-    comps = (m["skills"], m["agents"], m["mcp_servers"])
+    is_bot = m["package"]["type"] == "bot"
+    if is_bot:
+        rec["bot_home"] = bot_home(name)             # the bot's own MCP servers are never registered into the AI tools
+        write_bot_files(name, m, dest)
+    comps = (m["skills"], m["agents"], [] if is_bot else m["mcp_servers"])
     if any(comps):
         avail = integrations.detected()
         chosen = [integrations.TOOLS[t] for t in tools] if tools else (
@@ -143,7 +147,7 @@ def _activate(rec, m, dest, tools, assume_yes, name):
                     reverts.append(t.add_skill(s["name"], os.path.join(dest, s["path"])))
                 for a in m["agents"]:
                     reverts.append(t.add_agent(a["name"], os.path.join(dest, a["path"])))
-                for s in m["mcp_servers"]:
+                for s in ([] if is_bot else m["mcp_servers"]):
                     spec = {"command": s["command"], "args": [x.replace("${PKG}", dest) for x in s.get("args", [])],
                             "env": s.get("env", {})}
                     reverts.append(t.add_mcp(s["name"], spec))
@@ -156,7 +160,8 @@ def _activate(rec, m, dest, tools, assume_yes, name):
         for label, status in hooks.ensure([t.name for t in chosen]):
             ui.info("usage hook (%s): %s" % (label, status))
     rec["components"] = (["skill:" + x["name"] for x in m["skills"]] + ["agent:" + x["name"] for x in m["agents"]]
-                         + ["mcp:" + x["name"] for x in m["mcp_servers"]])
+                         + ["mcp:" + x["name"] for x in ([] if is_bot else m["mcp_servers"])]
+                         + (["bot:" + name] if is_bot else []))
     rec["reverts"] = [x for x in rec["reverts"] if x]
     steps = (m["setup"] or {}).get("steps", [])
     rec["setup_reverts"] = []
@@ -165,6 +170,143 @@ def _activate(rec, m, dest, tools, assume_yes, name):
         ok = lambda text: assume_yes or ui._ask("  setup: %s\n  apply? [y/N] " % text).lower().startswith("y")
         rec["setup_reverts"] = setupmod.apply(name, steps, ctx, ok)
     rec["enabled"] = True
+
+
+def bot_home(name):
+    """Per-bot folder that survives updates and holds the user's own settings: .env, mcp.json, memory."""
+    return paths.p("bots", name)
+
+
+def write_bot_files(name, m, dest):
+    """Create <bot_home>/.env (never overwritten, so edits survive updates) and mcp.json (rewritten from the manifest)."""
+    home = paths.ensure("bots", name)
+    envf = os.path.join(home, ".env")
+    if not os.path.exists(envf):
+        lines = ["# %s settings. `aihub run %s` loads this file. Lines: NAME=value" % (name, name)]
+        for e in m["bot"]["env"]:
+            lines.append("# %s%s" % (e["hint"] or e["name"], "" if e["required"] else " (optional)"))
+            lines.append("%s=%s" % (e["name"], e["default"]))
+        with open(envf, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        try:
+            os.chmod(envf, 0o600)
+        except OSError:
+            pass
+    servers = {s["name"]: {"command": s["command"], "args": [x.replace("${PKG}", dest) for x in s.get("args", [])], "env": s.get("env", {})}
+               for s in m["mcp_servers"]}
+    import json
+    with open(os.path.join(home, "mcp.json"), "w", encoding="utf-8") as f:
+        json.dump({"mcpServers": servers}, f, indent=2)
+
+
+def read_env(path):
+    """KEY=value lines of a .env file (comments, blank lines and surrounding quotes handled)."""
+    out = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if ln and not ln.startswith("#") and "=" in ln:
+                    k, v = ln.split("=", 1)
+                    out[k.strip()] = v.strip().strip("\"'")
+    except OSError:
+        pass
+    return out
+
+
+def bots():
+    """-> {name: (record, manifest)} for installed, enabled bots."""
+    out = {}
+    for n, r in state()["packages"].items():
+        if enabled(r) and "bot:" + n in r.get("components", []):
+            try:
+                out[n] = (r, _load_manifest(r))
+            except api.ApiError:
+                pass
+    return out
+
+
+def bot_env(name, rec, m):
+    """AIHUB_* variables every bot process (the bot itself and its onboarding script) receives."""
+    home = rec.get("bot_home") or bot_home(name)
+    skill_dirs, pkg_dirs = [], []
+    for n, r in state()["packages"].items():
+        if not enabled(r) or n == name:
+            continue
+        pkg_dirs.append(r["path"])
+        try:
+            skill_dirs += [os.path.join(r["path"], s["path"]) for s in _load_manifest(r)["skills"]]
+        except api.ApiError:
+            pass
+    env = {"AIHUB_BOT": name, "AIHUB_BOT_DIR": rec["path"], "AIHUB_BOT_HOME": home, "AIHUB_BOT_ENV": os.path.join(home, ".env"),
+           "AIHUB_BOT_MCP": os.path.join(home, "mcp.json"), "AIHUB_KNOWLEDGE_DIR": paths.p("knowledge"),
+           "AIHUB_HUB": paths.config()["hub"], "AIHUB_SKILL_DIRS": os.pathsep.join(skill_dirs), "AIHUB_PACKAGE_DIRS": os.pathsep.join(pkg_dirs)}
+    if rec.get("venv"):
+        env["VIRTUAL_ENV"] = rec["venv"]
+    return env
+
+
+def onboard(name, assume_yes=False, force=False):
+    """OPTIONAL guided credential setup: runs the bot's [bot] onboard script. Install only offers it (Y/n, terminal only, never with --yes);
+    `aihub onboard` runs it on request (force). -> True when it ran and finished."""
+    found = bots()
+    if name not in found:
+        raise api.ApiError("%s is not an installed bot" % name)
+    rec, m = found[name]
+    script = m["bot"]["onboard"]
+    if not script:
+        if force:
+            raise api.ApiError("%s has no guided setup ([bot] onboard)" % name)
+        return False
+    home = rec.get("bot_home") or bot_home(name)
+    if not force:
+        if assume_yes or not ui.INTERACTIVE:
+            ui.info("guided setup (optional):  aihub onboard %s" % name)
+            return False
+        if ui._ask("Set up %s credentials now (guided, optional)? [Y/n] " % name).lower() not in ("", "y", "yes"):
+            ui.info("later:  aihub onboard %s   or edit %s" % (name, os.path.join(home, ".env")))
+            return False
+    cmd, shell, _ = script_command(script, rec["path"])
+    if isinstance(cmd, list) and cmd[0] == sys.executable and rec.get("venv"):
+        cmd[0] = os.path.join(rec["venv"], "Scripts" if OS == "windows" else "bin", "python")
+    code = subprocess.call(cmd, shell=shell, cwd=home, env=dict(os.environ, **bot_env(name, rec, m)))
+    if code:
+        ui.note("setup did not finish (exit %d). Run it again: aihub onboard %s  - or edit %s by hand" % (code, name, os.path.join(home, ".env")))
+    return code == 0
+
+
+def run_bot(name, args=()):
+    """Start an installed bot with its .env, knowledge, MCP list and skill folders in the environment. -> exit code."""
+    found = bots()
+    if name not in found:
+        raise api.ApiError("%s is not an installed bot (install one: aihub search --type bot, then aihub install <name>)" % name)
+    rec, m = found[name]
+    home = rec.get("bot_home") or bot_home(name)
+    envf = os.path.join(home, ".env")
+    env = dict(os.environ)
+    env.update({k: v for k, v in read_env(envf).items() if v})
+    missing = [e for e in m["bot"]["env"] if e["required"] and not env.get(e["name"])]
+    if missing:
+        ui.note("%s needs settings before it can run. Edit this file:" % name)
+        ui.out("    " + envf)
+        for e in missing:
+            ui.out("    %s   %s" % (e["name"], ui.dim(e["hint"])))
+        raise api.ApiError("missing: %s" % ", ".join(e["name"] for e in missing))
+    env.update(bot_env(name, rec, m))
+    cmd, shell, _ = script_command(m["bot"]["run"], rec["path"])
+    if isinstance(cmd, list) and cmd[0] == sys.executable and rec.get("venv"):
+        cmd[0] = os.path.join(rec["venv"], "Scripts" if OS == "windows" else "bin", "python")
+    if isinstance(cmd, list):
+        cmd = cmd + list(args)
+    return subprocess.call(cmd, shell=shell, cwd=home, env=env)
+
+
+def source_hints(name, rec):
+    """Where the installed package lives and, for bots, where its settings are. Printed after every install."""
+    ui.info("source:   %s" % rec["path"])
+    if rec.get("bot_home"):
+        ui.info("settings: %s   (credentials go here)" % os.path.join(rec["bot_home"], ".env"))
+        ui.info("run it:   aihub run %s" % name)
 
 
 def _deactivate(rec):
@@ -290,6 +432,9 @@ def install(name, spec="", assume_yes=False, tools=None):
     ui.celebrate("%s %s is ready" % (name, r["version"]))
     if r.get("components"):
         ui.info("adds: " + ", ".join(r["components"]))
+    source_hints(name, r)
+    if "bot:" + name in r.get("components", []):
+        onboard(name, assume_yes)
     if r.get("shims"):
         ui.info("commands: " + ", ".join(os.path.basename(x) for x in r["shims"]))
     ui.info("restart your AI tool to pick it up. Switch off any time with: aihub disable %s  (remove: aihub uninstall %s)" % (name, name))
@@ -532,7 +677,7 @@ def install_builtin(names=None, remove=False, tools=None):
                     out.append((n, "removed"))
                 else:
                     out.append((n, "not installed"))
-            elif n in state()["packages"] and enabled(state()["packages"][n]) and state()["packages"][n].get("tools") \
+            elif n in state()["packages"] and enabled(state()["packages"][n]) and (state()["packages"][n].get("tools") or not state()["packages"][n].get("components")) \
                     and V.compare(registry.resolve(n)["version"], state()["packages"][n]["version"]) <= 0:
                 out.append((n, "already installed"))
             else:

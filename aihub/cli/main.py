@@ -252,6 +252,47 @@ def cmd_list(a):
     ui.info("%d installed%s. update all with: aihub update" % (len(pk), ", %d disabled" % off if off else ""))
 
 
+def cmd_run(a):
+    """Start an installed bot. Without a name: the only installed bot, or a list to choose from."""
+    found = installer.bots()
+    name = a.name
+    if not name:
+        if len(found) == 1:
+            name = next(iter(found))
+        else:
+            ui.out()
+            if not found:
+                ui.note("No bots installed. Try: aihub install aihub-bot")
+            else:
+                ui.table(["BOT", "SETTINGS"], [[ui.bold(n), os.path.join(r.get("bot_home", ""), ".env")] for n, (r, _) in sorted(found.items())])
+                ui.info("run one with: aihub run NAME")
+            return
+    code = installer.run_bot(naming.normalize(name), a.args)
+    if code:
+        sys.exit(code)
+
+
+def cmd_onboard(a):
+    """Optional guided credential setup of an installed bot (runs the bot's own onboarding script)."""
+    found = installer.bots()
+    name = a.name and naming.normalize(a.name)
+    if not name:
+        withs = [n for n, (_, mm) in found.items() if mm["bot"]["onboard"]]
+        if len(withs) != 1:
+            ui.out()
+            ui.info("bots with guided setup: %s" % (", ".join(withs) or "none"))
+            ui.info("run one with: aihub onboard NAME")
+            return
+        name = withs[0]
+    ui.out()
+    installer.onboard(name, force=True)
+
+
+def cmd_knowledge(a):
+    from . import knowledge
+    knowledge.cli(a)
+
+
 def cmd_enable(a):
     ui.out()
     names = sorted(installer.state()["packages"]) if a.all else a.names
@@ -512,6 +553,20 @@ def cmd_hook(a):
     hooks.handle(raw, a.source)
 
 
+def cmd_usage(a):
+    from . import usage
+    tools = tuple(a.tool) if a.tool else usage.TOOLS
+    rep = usage.report(tools, a.days)
+    if a.json:
+        print(json.dumps([dict(p, by_model=[dict(x, name="/".join(x["name"])) for x in p["by_model"]]) for p in rep], default=lambda o: sorted(o)))
+        return 0
+    if not a.plain and not a.by_day and sys.stdin.isatty() and sys.stdout.isatty():
+        usage.interactive(rep, ui)
+    else:
+        usage.show(rep, ui, a.by_day)
+    return 0
+
+
 def cmd_flush(a):
     from . import telemetry
     n = telemetry.flush(force=not getattr(a, "background", False))     # --background: the detached sender, one pass per window
@@ -541,6 +596,12 @@ def cmd_vault(a):
     return vault.run(a)
 
 
+def cmd_policy(a):
+    """The built-in tool-call guard: list / on / off / add / remove / enable / disable / test / log / update."""
+    from . import policy
+    return policy.cli(a)
+
+
 def cmd_hooks(a):
     from . import hooks
     res = hooks.ensure(a.tool, remove=a.action == "remove")
@@ -556,6 +617,7 @@ def cmd_menu():
     while True:
         choice = ui.select("What would you like to do?", [
             ("search", "Search the hub"), ("list", "Installed packages"), ("update", "Update everything"), ("upgrade", "Upgrade aihub itself"),
+            ("usage", "Usage, cost and cache per tool"), ("policy", "Policy guard: on/off and rules"),
             ("doctor", "Check my setup"), ("init", "Start a new package"), ("exit", "Exit")])
         if choice in (None, "exit"):
             return
@@ -569,6 +631,12 @@ def cmd_menu():
                 cmd_update(argparse.Namespace(name=None))
             elif choice == "upgrade":
                 updater.cmd_upgrade(argparse.Namespace(check=False, force=False, rollback=False))
+            elif choice == "usage":
+                from . import usage
+                usage.interactive(usage.report(usage.TOOLS, 30), ui)
+            elif choice == "policy":
+                from . import policy
+                policy.menu()
             elif choice == "doctor":
                 cmd_doctor(None)
             elif choice == "init":
@@ -623,8 +691,8 @@ def _init_mono(a):
     for s in specs:
         n, _, t = s.partition(":")
         t = t or a.type
-        if t not in ("skill", "agent", "mcp", "tool", "setup"):
-            raise ValueError("%r: type must be one of skill, agent, mcp, tool, setup" % s)
+        if t not in M.TYPES:
+            raise ValueError("%r: type must be one of %s" % (s, ", ".join(M.TYPES)))
         plan.append((naming.validate(n), t))
     if len({n for n, _ in plan}) != len(plan):
         raise ValueError("--packages lists the same name twice")
@@ -662,7 +730,7 @@ def _ask_text(label, default=""):
 
 
 def _ask_type(default="skill"):
-    types = ["skill", "agent", "mcp", "tool", "setup"]
+    types = list(M.TYPES)
     return ui.select("Package type?", [(t, t) for t in [default] + [x for x in types if x != default]]) or default
 
 
@@ -1088,7 +1156,7 @@ def build_parser():
         ("Manage", ["enable", "disable", "tree", "lock", "sync"]),
         ("Account", ["config", "login", "logout", "register", "vault"]),
         ("Publish", ["dev"]),
-        ("Setup and maintenance", ["welcome", "doctor", "version", "upgrade", "hook", "flush", "hooks", "skill", "self-uninstall"]),
+        ("Setup and maintenance", ["run", "onboard", "knowledge", "policy", "welcome", "doctor", "version", "upgrade", "hook", "flush", "hooks", "skill", "self-uninstall"]),
     ]
 
     def add(name, fn, help, description, epilog, *args):
@@ -1215,10 +1283,46 @@ def build_parser():
         arg("--user", metavar="NAME", help="Git user name."),
         arg("--token-stdin", action="store_true", help="Read the token/password from standard input."),
         arg("-y", "--yes", action="store_true", help="Do not ask before removing."))
+    add("run", cmd_run, "Run an installed chat bot.",
+        "Start a bot package (type bot). The bot gets its settings from ~/.aihub/bots/NAME/.env and sees your knowledge notes, the skills of installed packages and its own MCP servers. With one bot installed the name can be left out.",
+        "Examples:\n  aihub run\n  aihub run aihub-bot\n  aihub run aihub-bot -- --once 'what changed today?'",
+        arg("name", nargs="?", metavar="BOT", help="Installed bot package."),
+        arg("args", nargs="*", metavar="ARG", help="Passed to the bot (put -- before options)."))
+    add("onboard", cmd_onboard, "Optional guided credential setup for an installed bot.",
+        "Runs the bot's own onboarding script. The Teams bot signs you in with the Teams Developer CLI (`teams login`, a browser popup), creates its app registration (`teams app create`) and writes CLIENT_ID, CLIENT_SECRET and TENANT_ID into the bot's .env; after that the bot runs without you signed in. Install offers it in a terminal; you can always edit .env by hand instead.",
+        "Examples:\n  aihub onboard\n  aihub onboard aihub-teams-bot",
+        arg("name", nargs="?", metavar="BOT", help="Installed bot; optional when only one has guided setup."))
+    add("knowledge", cmd_knowledge, "Your personal notes and bot persona (soul), synced with the hub.",
+        "Notes are markdown files in ~/.aihub/knowledge, also editable on the hub web page (Knowledge). 'soul' is the persona bots load first. Share a note with a user or group: it appears for them under ~/.aihub/knowledge/shared/<owner>/ after `pull`; 'soul' is never shared.",
+        "Examples:\n  aihub knowledge edit soul\n  aihub knowledge pull\n  aihub knowledge push\n  aihub knowledge list\n  aihub knowledge share handbook --group backend\n  aihub knowledge share runbook --user alice --write\n  aihub knowledge shared",
+        arg("action", nargs="?", default="list", choices=["list", "pull", "push", "edit", "rm", "path", "share", "unshare", "shares", "shared", "push-shared"], help="Default: list."),
+        arg("name", nargs="?", metavar="NOTE", help="Note name (edit/push/rm/share/unshare/shares); owner/note for push-shared."),
+        arg("--user", help="share/unshare: hub user name."),
+        arg("--group", help="share/unshare: hub group name (everyone in it)."),
+        arg("--write", action="store_true", help="share: let them edit the note too (default read-only)."))
+    add("policy", cmd_policy, "Built-in guard that blocks agents from destructive tool calls.",
+        "aihub-policy checks every tool call of Claude Code before it runs and denies (or asks about) deleting databases or buckets, overwriting tables or protected paths. Rules are bundled, refreshed automatically from the hub package aihub-policy, and can be switched on or off, added or removed here.",
+        "Examples:\n  aihub policy\n  aihub policy off\n  aihub policy disable sql-update-all\n  aihub policy add no-prod --pattern 'kubectl .* prod' --reason 'prod cluster'\n  aihub policy test 'aws s3 rm s3://b --recursive'\n  aihub policy update",
+        arg("action", nargs="?", default="list", choices=["list", "on", "off", "enable", "disable", "add", "remove", "test", "judge", "log", "update"], help="Default: list."),
+        arg("target", nargs="?", metavar="ID|COMMAND", help="Rule id (enable/disable/add/remove) a command line (test), or on|off|status (judge)."),
+        arg("--pattern", help="add: regular expression to block."),
+        arg("--reason", help="add: why it is blocked."),
+        arg("--mode", choices=["deny", "ask"], default="deny", help="add: deny (default) or ask."),
+        arg("--tool", default="Bash", help="add: tool name regex (default Bash)."),
+        arg("--field", default="command", help="add: input field to match (command, file_path, name, *)."),
+        arg("--force", action="store_true", help="update: reinstall even if current."))
     add("credential", cmd_credential, "Git credential helper used for the hub and index hosts.",
         "Speaks git's credential protocol so a login you type once is remembered: macOS Keychain, Windows DPAPI, Linux Secret Service, else a private 0600 file. 'aihub setup' registers it for your hub and index hosts only; you never call it yourself.",
         "Example:\n  git config --global --get-all credential.https://git.example.com.helper",
         arg("action", choices=["get", "store", "erase"], help="Credential protocol action."))
+    add("usage", cmd_usage, "Local usage report per AI tool: sessions, models, tokens, cache and estimated cost.",
+        "Read the session logs of the AI tools on this machine (Claude Code ~/.claude/projects, Codex ~/.codex/sessions) and show sessions, requests, tokens, cache use and an ESTIMATED price for today, the last N days and all time, by tool and by model. Purely local: nothing is sent to the hub. Prices are list prices per 1M tokens; add or override models in ~/.aihub/prices.json as {\"model-substring\": {\"input\": 3, \"output\": 15, \"cache_write\": 3.75, \"cache_read\": 0.3}}.",
+        "Examples:\n  aihub usage\n  aihub usage --by-day --days 14\n  aihub usage --tool claude --days 7 --plain\n  aihub usage --json",
+        arg("--tool", action="append", choices=["claude", "codex"], help="Only this tool (repeatable)."),
+        arg("--days", type=int, default=30, help="Length of the middle window (default 30)."),
+        arg("--by-day", action="store_true", help="One row per day instead of by tool and model."),
+        arg("--plain", action="store_true", help="Print every period and exit (default in a terminal is an interactive view: 1/2/3 period, d by day, s summary, q quit)."),
+        arg("--json", action="store_true", help="Machine readable output (includes by_day)."))
     add("flush", cmd_flush, "Send queued usage events to the hub.",
         "Push queued usage events to the telemetry inbox (a git repo) now. Events are normally pushed in the background as one batch, a few seconds after the last event (aihub config set telemetry_interval 15).",
         "Examples:\n  aihub flush\n  aihub flush --verbose",
@@ -1249,7 +1353,7 @@ def build_parser():
          "Create an aihub.toml manifest and starter files for the selected package type in PATH. Existing generated files are left alone unless --force is used; --force overwrites generated starter files.",
          "Examples:\n  aihub dev init . --type skill --name my-skill\n  aihub dev init ./server --type mcp --description \"Example MCP server\"\n  aihub dev init builtin --sub --name my-skill   (-> builtin/my-skill, next to the other packages)",
          [arg("--name", metavar="NAME", help="Package name (default: derived from the project directory)."),
-          arg("--type", default="skill", choices=["skill", "agent", "mcp", "tool", "setup"], metavar="TYPE", help="Starter package type (default: skill)."),
+          arg("--type", default="skill", choices=list(M.TYPES), metavar="TYPE", help="Starter package type (default: skill)."),
           arg("--description", metavar="TEXT", help="Starter package description."),
           arg("--sub", action="store_true", help="Create the package in its own folder PATH/NAME, for a folder that holds several packages (needs --name)."),
           arg("--mono", action="store_true", help="PATH becomes one git repository holding several packages (see --packages). Packages already below PATH are kept; only their [git] is refreshed."),
@@ -1318,7 +1422,7 @@ def main(argv=None):
                 return 0
             cmd_menu()
             return 0
-        if ui.INTERACTIVE and a.cmd not in ("hook", "flush", "welcome", "config", "credential", "vault") and not os.path.exists(paths.p(".welcomed")):
+        if ui.INTERACTIVE and a.cmd not in ("hook", "flush", "welcome", "config", "credential", "vault", "policy", "run") and not os.path.exists(paths.p(".welcomed")):
             cmd_welcome(argparse.Namespace(yes=False))
         if a.cmd == "credential":
             return a.fn(a)              # git calls this on every fetch: no welcome, updater or network
@@ -1332,6 +1436,8 @@ def main(argv=None):
             from . import hooks
             hooks.verify()      # install/use/update/...: make sure our usage hooks are still in place
         updater.auto(a.cmd)
+        from . import policy
+        policy.auto(a.cmd)
         remote_config.auto(a.cmd)
     except (api.ApiError, ValueError, KeyError, OSError) as e:
         ui.error(e, ui.hint_for(e))

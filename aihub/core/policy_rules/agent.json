@@ -1,0 +1,21 @@
+{
+  "description": "agent",
+  "rules": [
+    {
+      "id": "mcp-destructive",
+      "pattern": "^mcp__.*(delete|drop|truncate|destroy|purge|wipe)",
+      "reason": "destructive MCP tool",
+      "action": "ask",
+      "tool": ".*",
+      "field": "name"
+    },
+    {
+      "id": "self-protect",
+      "pattern": "\\baihub\\s+policy\\s+(off|disable|remove|add|enable|reset)\\b|\\.aihub/(policy|packages/aihub-policy)|--no-policy|AIHUB_POLICY=",
+      "reason": "an agent may not change its own guard (run it yourself in a terminal)",
+      "action": "deny",
+      "tool": "Bash",
+      "field": "command"
+    }
+  ]
+}

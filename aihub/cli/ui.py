@@ -10,7 +10,7 @@ import time
 
 ACCENT = "38;5;75"      # sky blue, the single accent
 DIM, OK, WARN, ERR = "2", "38;5;41", "38;5;214", "38;5;203"
-TYPE_COLOR = {"skill": "38;5;75", "agent": "38;5;41", "mcp": "38;5;214", "tool": "38;5;250", "setup": "38;5;203"}
+TYPE_COLOR = {"skill": "38;5;75", "agent": "38;5;41", "mcp": "38;5;214", "tool": "38;5;250", "setup": "38;5;203", "bot": "38;5;177"}
 
 
 def _vt():

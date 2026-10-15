@@ -94,9 +94,18 @@ aihub doctor                      # index and telemetry inbox reachable? signed 
 aihub version                     # CLI version and the one the hub offers
 aihub upgrade [--check|--force|--rollback]
 aihub flush                       # send queued usage events now
+# bare `aihub` menu also has Usage and Policy (guard on/off, tick active rules)
+aihub usage [--tool claude|codex] [--days N] [--by-day] [--plain] [--json]   # interactive in a tty; local report from the tools' own logs: sessions, models, tokens, cache, est. cost (no hub)
 aihub hooks install [--tool claude]   # or: aihub hooks remove
 aihub skill install [--tool claude]   # (re)install aihub-guide and aihub-package
 aihub skill remove                    # uninstall both
+aihub run [BOT] [-- ARGS]            # start an installed bot (type=bot); settings in ~/.aihub/bots/NAME/.env, printed after install
+aihub onboard [BOT]                   # optional guided credential setup of a bot that has one ([bot] onboard); install offers it in a terminal
+aihub knowledge list|pull|push|edit NOTE|rm NOTE|path   # personal notes + bot soul (soul.md), also on the hub page Knowledge
+aihub knowledge share NOTE --user U|--group G [--write] | unshare | shares NOTE | shared | push-shared OWNER/NOTE   # shared notes land in ~/.aihub/knowledge/shared/<owner>/
+
+**Build a bot (type = bot).** 1) `aihub dev init ./my-bot --type bot --name my-bot`. 2) In `aihub.toml`, set `[bot] run = "bot/run.py"` and `title`; declare each setting as `[[bot.env]]` (`name`, `hint`, `required`, `secret`, `default`). 3) Write `bot/run.py`: read settings from the environment, `--once`/`--info` from argv after `--`. 4) `aihub dev validate`, then `aihub dev publish --bump patch`. 5) `aihub install my-bot` prints `settings:` (`~/.aihub/bots/my-bot/.env`); fill it in. 6) `aihub run my-bot` (`-- --info` to check). Memory, harnesses and cron: see `docs/bots.md` on the hub; this snapshot has none.
+aihub policy                          # guard that blocks agents from destructive calls (db/s3 delete, overwrite): on|off, enable|disable ID, add ID --pattern RE, test 'CMD', judge on|off (AI second opinion via claude -p; failure = ask), update
 aihub vault                           # menu: add/edit/remove git remotes and logins (aihub vault add URL --user NAME; token via prompt or --token-stdin)
 aihub logout                          # forget the saved token (usage becomes anonymous, still merged by user name)
 aihub self-uninstall [--yes]          # remove aihub: packages, hooks, PATH block, ~/.aihub (not your published packages or git repos)

@@ -1,0 +1,13 @@
+{
+  "description": "paths",
+  "rules": [
+    {
+      "id": "protect-path",
+      "pattern": "(^|/)(\\.ssh|\\.aws|\\.gnupg|\\.aihub)/|^/(etc|usr|bin|boot)/|(^|/)\\.claude/settings|(^|/)\\.codex/config|(^|/)\\.git/(config|hooks)",
+      "reason": "writes to a protected path",
+      "action": "deny",
+      "tool": "Write|Edit|MultiEdit|NotebookEdit",
+      "field": "file_path"
+    }
+  ]
+}

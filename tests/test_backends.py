@@ -175,5 +175,6 @@ class BuiltinPackageTest(unittest.TestCase):
             m = M.parse(open(os.path.join(root, "aihub.toml")).read())
             errs, _ = M.lint(m, root)
             self.assertEqual(errs, [], n)
-            self.assertTrue(os.path.isfile(os.path.join(root, "skills", n, "SKILL.md")))
+            if n != "aihub-policy":
+                self.assertTrue(os.path.isfile(os.path.join(root, "skills", n, "SKILL.md")))
 

@@ -81,7 +81,68 @@ def _skill_comp(name, comps):
     return None
 
 
+def _emit(d):
+    sys.stdout.write(json.dumps(__import__("aihub.cli.policy", fromlist=["x"]).hook_output(d)))
+    sys.stdout.flush()
+
+
+def _call(stdin_text):
+    data = json.loads(stdin_text or "{}")
+    return str(data.get("tool_name") or data.get("tool") or ""), data.get("tool_input") or {}, str(data.get("cwd") or "")
+
+
+def _emit(d):
+    from . import policy
+    sys.stdout.write(json.dumps(policy.hook_output(d)))
+    sys.stdout.flush()
+
+
+def _guard(stdin_text):
+    """aihub-policy rules: answer deny/ask to the agent on stdout (Claude Code PreToolUse JSON). -> True when it answered. Never raises."""
+    try:
+        from . import policy
+        tool, inp, _ = _call(stdin_text)
+        d = policy.decide(tool, inp)
+        if d:
+            policy.log(tool, inp, d)
+            _emit(d)
+        return bool(d)
+    except Exception:
+        return False
+
+
+def _judge(stdin_text):
+    """Slow path (a model call, seconds): only after usage was spooled and only for calls no rule matched."""
+    try:
+        from . import policy
+        tool, inp, cwd = _call(stdin_text)
+        d = policy.judge(tool, inp, cwd)
+        if d:
+            policy.log(tool, inp, d)
+            _emit(d)
+    except Exception:
+        pass
+
+
 def handle(stdin_text, source="claude"):
+    if os.environ.get("AIHUB_JUDGE"):         # inside the judge's own claude session: no guard, no usage event
+        return
+    hit = _guard(stdin_text)
+    _usage(stdin_text, source)
+    if not hit:
+        _judge(stdin_text)
+
+
+def _usage(stdin_text, source="claude"):
+    if os.environ.get("AIHUB_JUDGE"):         # we are inside the judge's own claude session: no guard, no usage event
+        return
+    hit = _guard(stdin_text)
+    _usage(stdin_text, source)
+    if not hit:
+        _judge(stdin_text)
+
+
+def _usage(stdin_text, source="claude"):
     """Hot path: must be fast and must never raise. Maps a tool call to a hub package and spools it."""
     try:
         data = json.loads(stdin_text or "{}")

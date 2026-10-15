@@ -13,3 +13,5 @@ os.environ.setdefault("AIHUB_TELEMETRY_URL", "/nonexistent/aihub-tests-must-not-
 # that happens to run on this machine.
 os.environ.setdefault("AIHUB_TELEMETRY_VIA", "git")
 os.environ.setdefault("AIHUB_INDEX_VIA", "git")
+
+os.environ.setdefault("AIHUB_POLICY_JUDGE", "off")      # no test may start a real `claude -p` judge

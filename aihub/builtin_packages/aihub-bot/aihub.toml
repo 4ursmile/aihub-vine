@@ -1,0 +1,39 @@
+[package]
+name = "aihub-bot"
+version = "1.1.0"
+type = "bot"
+description = "Sample chat bot (run it with `aihub run`): your soul and knowledge notes, the skills of every installed package, MCP servers, scheduled jobs and a drop-in extension folder."
+tags = ["aihub", "bot", "chat", "starter"]
+readme = "README.md"
+license = "MIT"
+
+[requires]
+os = []
+
+[bot]
+run = "bot/run.py"
+title = "AI Hub assistant"
+
+[[bot.env]]
+name = "ANTHROPIC_API_KEY"
+hint = "API key from https://console.anthropic.com (only the builtin harness needs it; claude/codex use their own login)"
+required = false
+secret = true
+
+[[bot.env]]
+name = "BOT_MODEL"
+hint = "model id"
+required = false
+default = "claude-sonnet-5-5"
+
+[[bot.env]]
+name = "BOT_HARNESS"
+hint = "what runs the prompts: builtin (bundled loop, needs ANTHROPIC_API_KEY) | claude (claude -p) | codex (codex exec) | command (BOT_HARNESS_CMD) | a name from an extension"
+required = false
+default = "builtin"
+
+# Optional: servers only this bot uses (they are NOT added to Claude Code / other tools).
+# [[mcp_servers]]
+# name = "files"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "."]

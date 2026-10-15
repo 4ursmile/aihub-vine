@@ -1,0 +1,45 @@
+{
+  "description": "database",
+  "rules": [
+    {
+      "id": "sql-drop",
+      "pattern": "\\b(drop\\s+(table|database|schema|index)|truncate\\s+(table\\s+)?[\\w.\\\"`]+)",
+      "reason": "drops or empties a database object",
+      "action": "deny",
+      "tool": "Bash",
+      "field": "command"
+    },
+    {
+      "id": "sql-delete-all",
+      "pattern": "\\bdelete\\s+from\\s+[\\w.\\\"`]+(?![^;]*\\bwhere\\b)",
+      "reason": "DELETE without WHERE removes every row",
+      "action": "deny",
+      "tool": "Bash",
+      "field": "command"
+    },
+    {
+      "id": "sql-update-all",
+      "pattern": "\\bupdate\\s+[\\w.\\\"`]+\\s+set\\b(?!.*\\bwhere\\b)",
+      "reason": "UPDATE without WHERE overwrites every row",
+      "action": "deny",
+      "tool": "Bash",
+      "field": "command"
+    },
+    {
+      "id": "sql-overwrite",
+      "pattern": "\\binsert\\s+overwrite\\b(?![^;]*\\bpartition\\s*\\()|\\breplace\\s+table\\b|\\bcreate\\s+or\\s+replace\\s+table\\b",
+      "reason": "overwrites a whole table (INSERT OVERWRITE without a PARTITION (...) clause, REPLACE TABLE)",
+      "action": "deny",
+      "tool": "Bash",
+      "field": "command"
+    },
+    {
+      "id": "db-cli-drop",
+      "pattern": "\\b(dropdb|dropuser|mongosh?\\b.*\\bdropDatabase|redis-cli\\b.*\\bflush(all|db)|flushall)\\b",
+      "reason": "deletes a whole database",
+      "action": "deny",
+      "tool": "Bash",
+      "field": "command"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "description": "git",
+  "rules": [
+    {
+      "id": "git-destroy",
+      "pattern": "\\bgit\\s+push\\b.*(--force\\b|\\s-f\\b).*\\b(main|master|prod\\w*)\\b|\\bgit\\s+clean\\s+-\\w*f\\w*d|\\bgit\\s+reset\\s+--hard\\s+origin",
+      "reason": "destroys remote or untracked work",
+      "action": "ask",
+      "tool": "Bash",
+      "field": "command"
+    }
+  ]
+}

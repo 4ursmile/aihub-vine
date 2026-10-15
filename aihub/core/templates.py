@@ -184,7 +184,7 @@ HEAD = """# aihub.toml - the manifest. Docs: /#/docs/publishing
 [package]
 name = "{name}"
 version = "0.1.0"                 # immutable once published; bump it for every release (aihub dev publish --bump patch)
-type = "{type}"                   # skill | agent | mcp | tool | setup
+type = "{type}"                   # skill | agent | mcp | tool | setup | bot
 description = "{description}"
 tags = []                         # lowercase words people search for
 readme = "README.md"
@@ -234,6 +234,24 @@ content = "hub=${{HUB}}\\n"
         "files": {"README.md": README, ".gitignore": GITIGNORE},
     },
 }
+
+
+BOT_RUN = """#!/usr/bin/env python3
+# Started by `aihub run {name}`. Settings come from the environment (the .env file printed at install); see /#/docs/bots.
+import os
+import sys
+
+print("{name} is running. Soul and notes: " + os.environ.get("AIHUB_KNOWLEDGE_DIR", ""))
+print("Args:", sys.argv[1:])
+"""
+
+BOT_IGNORE = GITIGNORE + ".env\n"
+
+TEMPLATES["bot"] = {
+    "manifest": HEAD + '\n[bot]\nrun = "bot/run.py"\ntitle = "{title}"\n\n[[bot.env]]\nname = "API_KEY"\nhint = "where to get it"\nsecret = true\n',
+    "files": {"bot/run.py": BOT_RUN, "README.md": README, ".gitignore": BOT_IGNORE},
+}
+EXEC.add("bot/run.py")
 
 
 def render(typ, name, description="", authors=()):

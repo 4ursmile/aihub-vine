@@ -139,6 +139,73 @@ class Repos:
                                    (username,)).fetchone()
         return (r[0], bytes(r[1])) if r else None
 
+    # personal knowledge: markdown notes per user (name "soul" is the bot persona); `aihub knowledge pull` mirrors them to ~/.aihub/knowledge
+    def knowledge_list(self, uid):
+        return _rows(self.db.conn().execute("SELECT name,updated,LENGTH(body) AS size FROM knowledge WHERE user_id=? ORDER BY name", (uid,)))
+
+    def knowledge_get(self, uid, name):
+        r = self.db.conn().execute("SELECT name,body,updated FROM knowledge WHERE user_id=? AND name=?", (uid, name)).fetchone()
+        return {"name": r[0], "body": r[1], "updated": r[2]} if r else None
+
+    def knowledge_set(self, uid, name, body):
+        with self.lock:
+            c = self.db.conn()
+            c.execute("INSERT OR REPLACE INTO knowledge VALUES(?,?,?,?)", (uid, name, body, time.time()))
+            c.commit()
+
+    def knowledge_delete(self, uid, name):
+        with self.lock:
+            c = self.db.conn()
+            c.execute("DELETE FROM knowledge WHERE user_id=? AND name=?", (uid, name))
+            c.execute("DELETE FROM knowledge_share WHERE owner_id=? AND name=?", (uid, name))
+            c.commit()
+
+    # sharing: a note goes to a user or a group, read or write; the owner keeps it, recipients see it under shared/<owner>/<name>
+    def knowledge_shares(self, uid, name):
+        return _rows(self.db.conn().execute(
+            "SELECT s.principal_type AS type, s.access, CASE WHEN s.principal_type='user' THEN (SELECT username FROM users WHERE id=s.principal_id) "
+            "ELSE (SELECT name FROM groups WHERE id=s.principal_id) END AS name FROM knowledge_share s WHERE s.owner_id=? AND s.name=? ORDER BY 1,3",
+            (uid, name)))
+
+    def knowledge_share_set(self, uid, name, ptype, pid, access):
+        with self.lock:
+            c = self.db.conn()
+            c.execute("DELETE FROM knowledge_share WHERE owner_id=? AND name=? AND principal_type=? AND principal_id=?", (uid, name, ptype, pid))
+            c.execute("INSERT INTO knowledge_share VALUES(?,?,?,?,?)", (uid, name, ptype, pid, access))
+            c.commit()
+
+    def knowledge_share_remove(self, uid, name, ptype, pid):
+        with self.lock:
+            c = self.db.conn()
+            c.execute("DELETE FROM knowledge_share WHERE owner_id=? AND name=? AND principal_type=? AND principal_id=?", (uid, name, ptype, pid))
+            c.commit()
+
+    _SHARED = ("FROM knowledge_share s JOIN knowledge k ON k.user_id=s.owner_id AND k.name=s.name JOIN users o ON o.id=s.owner_id "
+               "WHERE s.owner_id<>? AND ((s.principal_type='user' AND s.principal_id=?) OR (s.principal_type='group' AND s.principal_id IN "
+               "(SELECT group_id FROM group_members WHERE user_id=?)))")
+
+    def knowledge_shared_with(self, uid):
+        """Notes other people shared with `uid` (directly or through a group). Write wins over read when both apply."""
+        rows = _rows(self.db.conn().execute(
+            "SELECT o.username AS owner,k.name AS name,s.access AS access,k.updated AS updated,LENGTH(k.body) AS size " + self._SHARED +
+            " ORDER BY o.username,k.name", (uid, uid, uid)))
+        best = {}
+        for r in rows:
+            key = (r["owner"], r["name"])
+            if key not in best or r["access"] == "write":
+                best[key] = r
+        return list(best.values())
+
+    def knowledge_shared_get(self, uid, owner, name):
+        """-> {owner,name,body,updated,access} or None when `uid` has no share on owner's note."""
+        c = self.db.conn()
+        rows = c.execute("SELECT k.body AS body,k.updated AS updated,s.access AS access " + self._SHARED + " AND o.username=? AND k.name=?",
+                         (uid, uid, uid, owner, name)).fetchall()
+        if not rows:
+            return None
+        acc = "write" if any(r["access"] == "write" for r in rows) else "read"
+        return {"owner": owner, "name": name, "body": rows[0]["body"], "updated": rows[0]["updated"], "access": acc}
+
     def tokens_revoke_others(self, uid, keep_hash):
         with self.lock:
             c = self.db.conn()

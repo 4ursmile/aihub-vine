@@ -1,0 +1,12 @@
+{
+  "description": "judge",
+  "judge": {
+    "enabled": true,
+    "model": "haiku",
+    "timeout": 15,
+    "max_chars": 3000,
+    "criteria": "Deny if the call irreversibly deletes, drops, truncates or overwrites data in a database, object-storage bucket, volume, backup or protected path (system dirs, ~/.ssh, ~/.aws, credentials, git history of a shared branch), in ANY language or tool (python, node, sql clients, cloud CLIs, curl to an API, terraform destroy, kubectl delete pvc...). Ask if the effect is unclear, obfuscated (base64, eval, nested shells) or reaches production or shared systems. Allow ordinary development work: reading, building, testing, editing project files, local temporary files, narrowly scoped deletes (a WHERE clause, one build folder).",
+    "safe": "^\\s*(ls|pwd|cat|head|tail|wc|echo|printf|which|whoami|date|stat|file|du|df|tree|rg|grep|git\\s+(status|log|diff|show|branch|remote|rev-parse)|python3?\\s+-m\\s+unittest|npm\\s+(test|run\\s+(test|lint|build))|pytest)\\b[^;&|`$()<>]*$",
+    "tools": "mcp__.*(delete|drop|remove|write|update|exec|run|put|overwrite|truncate|reset|destroy|purge|wipe|create|set)"
+  }
+}

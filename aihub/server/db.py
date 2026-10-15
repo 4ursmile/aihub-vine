@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS reviews(package_id INTEGER, user_id INTEGER, rating I
   PRIMARY KEY(package_id,user_id));
 CREATE TABLE IF NOT EXISTS audit_log(id {pk}, ts {real}, actor TEXT, action TEXT, target TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS knowledge(user_id INTEGER, name TEXT, body TEXT, updated {real}, PRIMARY KEY(user_id,name));
+CREATE TABLE IF NOT EXISTS knowledge_share(owner_id INTEGER, name TEXT, principal_type TEXT, principal_id INTEGER, access TEXT, PRIMARY KEY(owner_id,name,principal_type,principal_id));
 """
 
 # Every permission the app checks. Admins grant these to roles in the UI.

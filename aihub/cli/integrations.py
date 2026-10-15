@@ -133,6 +133,8 @@ class ClaudeCode(Tool):
     @staticmethod
     def _ours(h): return " hook --source " in h.get("command", "")
 
+    TIMEOUT = {"PreToolUse": 25, "UserPromptSubmit": 5}     # PreToolUse may wait for the aihub-policy AI judge
+    TIMEOUT = {"PreToolUse": 25, "UserPromptSubmit": 5}     # PreToolUse may wait for the aihub-policy AI judge
     EVENTS = ("PreToolUse", "UserPromptSubmit")     # tool calls, and "/skill" typed by the user (no tool call)
 
     def _want(self, cmd): return cmd + " --source claude"
@@ -147,7 +149,7 @@ class ClaudeCode(Tool):
         hk = hk if isinstance(hk, dict) else {}
         for ev in self.EVENTS:
             ours = [h for g in hk.get(ev) or [] if isinstance(g, dict) for h in g.get("hooks") or [] if isinstance(h, dict) and self._ours(h)]
-            if len(ours) != 1 or (cmd and ours[0].get("command") != self._want(cmd)):
+            if len(ours) != 1 or (cmd and (ours[0].get("command") != self._want(cmd) or ours[0].get("timeout") != self.TIMEOUT[ev])):
                 return False
         return True
 
@@ -166,7 +168,7 @@ class ClaudeCode(Tool):
                 if isinstance(g, dict) and isinstance(g.get("hooks"), list):
                     g["hooks"] = [h for h in g["hooks"] if not (isinstance(h, dict) and self._ours(h))]
             groups[:] = [g for g in groups if not (isinstance(g, dict) and "hooks" in g and not g["hooks"])]
-            g = {"hooks": [{"type": "command", "command": self._want(cmd), "timeout": 5}]}
+            g = {"hooks": [{"type": "command", "command": self._want(cmd), "timeout": self.TIMEOUT[ev]}]}
             if ev == "PreToolUse":
                 g["matcher"] = "*"      # every tool call: Skill, Task (agents), mcp__server__tool, ...
             groups.append(g)

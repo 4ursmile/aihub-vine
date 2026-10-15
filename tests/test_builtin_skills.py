@@ -11,6 +11,8 @@ GUIDE = os.path.join(builtin.DIR, "aihub-guide")
 PACKAGE = os.path.join(builtin.DIR, "aihub-package")
 GUIDE_SKILL = os.path.join(GUIDE, "skills", "aihub-guide", "SKILL.md")
 PACKAGE_SKILL = os.path.join(PACKAGE, "skills", "aihub-package", "SKILL.md")
+KNOWLEDGE = os.path.join(builtin.DIR, "aihub-knowledge")
+KNOWLEDGE_SKILL = os.path.join(KNOWLEDGE, "skills", "aihub-knowledge", "SKILL.md")
 
 
 def _read(path):
@@ -32,7 +34,7 @@ def _front_matter(text):
 
 class BuiltinSkillTest(unittest.TestCase):
     def test_bundled_versions(self):
-        self.assertEqual(M.parse(_read(os.path.join(GUIDE, "aihub.toml")))["package"]["version"], "2.3.0")
+        self.assertEqual(M.parse(_read(os.path.join(GUIDE, "aihub.toml")))["package"]["version"], "2.4.0")
         self.assertEqual(M.parse(_read(os.path.join(PACKAGE, "aihub.toml")))["package"]["version"], "2.2.0")
 
     def test_guide_mentions_and_ships_offline_reference(self):
@@ -44,7 +46,7 @@ class BuiltinSkillTest(unittest.TestCase):
         self.assertIn("skills/aihub-guide/offline.md", builtin._files(GUIDE))
 
     def test_skill_front_matter(self):
-        for path, name in ((GUIDE_SKILL, "aihub-guide"), (PACKAGE_SKILL, "aihub-package")):
+        for path, name in ((GUIDE_SKILL, "aihub-guide"), (PACKAGE_SKILL, "aihub-package"), (KNOWLEDGE_SKILL, "aihub-knowledge")):
             fm = _front_matter(_read(path))
             self.assertIsNotNone(fm, path)
             self.assertEqual(fm.get("name"), name, path)

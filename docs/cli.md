@@ -146,6 +146,10 @@ aihub hooks remove
 
 The `--tool` option can be repeated. Package installation can also install hooks for tools where it registered package components.
 
+## Local usage report (`aihub usage`)
+
+`aihub usage [--tool claude|codex] [--days N] [--by-day] [--plain] [--json]` reads the session logs the AI tools keep on this machine (Claude Code `~/.claude/projects/**/*.jsonl`, Codex `~/.codex/sessions/**/*.jsonl`) and prints, for today (local midnight), the last N days (default 30) and all time: sessions, requests, input / output / cache-write / cache-read tokens, the cache hit rate (cache read share of all input context) and an **estimated** cost, by tool and by model. `--by-day` shows one row per local day (newest first, up to 90) instead of by tool and model. In a terminal the command opens an interactive view (type `1`/`2`/`3` for today / last N days / all time, `d` by day, `s` summary, `q` quit, then Enter); `--plain`, `--by-day`, `--json` or a pipe print and exit. The bare `aihub` menu has the same view under "Usage, cost and cache per tool", and "Policy guard: on/off and rules" to turn the guard on or off and tick which rules are active (same as `aihub policy on|off|enable|disable`). It is purely local: nothing is sent to the hub and no hub is needed. Claude messages streamed as several log lines count once (last line wins); Codex totals are cumulative, so each increase is one request. Prices are list prices per 1M tokens built into `aihub/cli/usage.py` (`PRICES`, first match on the model name); a model with no price shows `*` and costs $0. Add or override prices in `~/.aihub/prices.json`: `{"model-substring": {"input": 3, "output": 15, "cache_write": 3.75, "cache_read": 0.3}}`. Subscription or enterprise billing can differ, so treat the cost as a rough guide. OpenCode is not read yet (no stable local session log).
+
 ## Local files
 
 The default CLI home is `~/.aihub`; set `AIHUB_HOME` to override it. The CLI uses these files and directories:
@@ -229,3 +233,32 @@ Certificate checks are on by default. If your hub or git host uses an internal C
 
 They apply to every CLI call: hub, an https index, and git (`GIT_SSL_CAINFO` / `GIT_SSL_NO_VERIFY`). The installers read the same
 variables, e.g. `curl -kfsSL https://hub/install.sh | AIHUB_INSECURE=1 sh` (PowerShell: set `$env:AIHUB_INSECURE="1"` first).
+
+## Policy guard (`aihub policy`)
+
+`aihub-policy` is a built-in guard on the Claude Code `PreToolUse` hook (the same hook that counts usage). Before an agent runs a tool, the rules are checked and a match is answered with `deny` (blocked, the agent sees the reason) or `ask` (the tool asks you). Defaults cover dropping/truncating tables, `DELETE`/`UPDATE` without `WHERE`, `dropdb`/`flushall`, `aws s3 rm/rb/sync --delete` (and gsutil, mc, azcopy), overwriting a bucket (`ask`), `rm -rf /` or `~`, writes to disks, `/etc`, `~/.ssh`, `~/.aws`, `~/.aihub`, force-push to main (`ask`), destructive MCP tools (`ask`), and an agent changing its own guard. Codex has no tool-call hook, so it is not covered.
+
+- `aihub policy` lists rules; `on` / `off` switch the whole guard; `disable|enable ID` switch one rule; `add ID --pattern REGEX [--reason T] [--mode deny|ask] [--tool RE] [--field command|file_path|name|*]` adds your own; `remove ID` deletes your rule (bundled/hub rules are switched off instead); `test 'COMMAND'` shows the verdict; `log` shows recent blocks; `update [--force]` pulls the hub package now.
+- Layers (later wins by id): rules bundled in the CLI (`aihub/core/policy_rules/*.json`, work offline) < hub package `aihub-policy` (`policy.json` with `revision`/`retire`/`rules`, plus `rules/*.json`) < `~/.aihub/policy-user.json`. The package is the one place to maintain rules: edit `aihub/core/policy_rules/*.json` and bump `version` in `aihub/builtin_packages/aihub-policy/aihub.toml`; the server publishes it, and every CLI checks the hub after a command at most every `policy_check_hours` (config, default 6) and installs a newer version by itself. Blocked calls are logged to `~/.aihub/policy.log`.
+- The agent cannot turn the guard off: rules refuse `aihub policy off|disable|...` and edits under `~/.aihub`. This stops accidents, not a determined local user.
+
+**AI judge.** Rules only see text, so a call like `python -c "shutil.rmtree('/var/lib/postgresql')"` passes them. When no rule matched and the call looks risky (any shell command that is not a known read-only one, a file write outside the project, an MCP tool with a mutating verb), the hook asks a model for a second opinion: it runs headless `claude -p --model haiku` with no tools and a fixed system prompt (criteria in the `judge` key of `aihub-policy`, so the hub can edit them), the call is passed as quoted data, and the answer is `allow`/`ask`/`deny` as JSON. About 4 s per judged call; answers are cached 24 h by hash (`policy-judge-cache.json`). A rule `deny` is final and never reaches the model; the judge can only add `ask`/`deny`. **If the judge fails or times out (15 s), the call becomes `ask`**, not allow. It is skipped silently when `claude` is not installed. `aihub policy judge on|off|status`, or `AIHUB_POLICY_JUDGE=on|off`. The nested session runs with `AIHUB_JUDGE=1`, which makes the hook a no-op so it cannot recurse. The PreToolUse hook timeout is 25 s (re-applied automatically). The call text (3000 characters at most, not redacted) goes to Anthropic through your own Claude login; turn the judge off if commands may contain secrets.
+
+## Bots and knowledge
+
+`aihub onboard [BOT]` runs a bot's optional guided credential setup (`[bot] onboard`); `aihub install` offers it in a terminal. The Teams bot uses the Teams Developer CLI (`teams login`, `teams app create`) and writes the credentials into its `.env`.
+
+```sh
+aihub install aihub-bot          # prints: source folder, settings file (.env), how to run
+aihub run [BOT] [-- ARGS]        # start an installed bot (type = "bot"); with one bot the name is optional
+aihub knowledge list|pull|push [NOTE]|edit NOTE|rm NOTE|path
+aihub knowledge share NOTE (--user U | --group G) [--write]   # read-only unless --write; soul is never shared
+aihub knowledge unshare NOTE (--user U | --group G)
+aihub knowledge shares NOTE      # who has it
+aihub knowledge shared           # notes others shared with me
+aihub knowledge push-shared OWNER/NOTE   # save my edit of a write-shared note
+```
+
+`aihub run` loads `~/.aihub/bots/NAME/.env`, refuses to start when a required `[[bot.env]]` value is empty (and prints the file to edit) and gives the bot its knowledge folder, skill folders and own MCP list. Notes live on the hub (web page **Knowledge**, where you can also share a note with a user or group and open notes shared with you; `GET/PUT/DELETE /api/v1/me/knowledge/{name}`) and in `~/.aihub/knowledge`. Shared notes (`GET /knowledge/shared`, `PUT/GET /knowledge/shared/{owner}/{name}`, `PUT/DELETE/GET /me/knowledge/{name}/shares` with `{"user"|"group", "access"}`) are copied by `pull` to `~/.aihub/knowledge/shared/<owner>/`. The built-in skill package `aihub-knowledge` teaches assistants to use them. Every `aihub install` ends with `source:` (package folder) and, for bots, `settings:`.
+
+Bot flags go after `--`: `-- --info` (what the bot sees), `-- --once "question"`, `-- --memory` (what it remembers), `-- --cron` (run scheduled prompts). `BOT_HARNESS` in `.env` picks the engine: `builtin` (default), `claude`, `codex`, `command` or an extension harness. Full guide: `docs/bots.md`.

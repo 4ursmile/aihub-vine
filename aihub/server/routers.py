@@ -697,6 +697,117 @@ def my_packages(request: Request, u=Depends(require_user)):
     return {"packages": R(request).packages_of(u["id"])}
 
 
+# ---------------- personal knowledge (private to the signed-in user; the bot harness and `aihub knowledge` read it)
+KNOWLEDGE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+KNOWLEDGE_MAX = 200_000
+KNOWLEDGE_FILES = 200
+
+
+@r.get("/me/knowledge")
+def knowledge_list(request: Request, u=Depends(require_user)):
+    return {"items": R(request).knowledge_list(u["id"])}
+
+
+@r.get("/me/knowledge/{name}")
+def knowledge_get(name: str, request: Request, u=Depends(require_user)):
+    d = R(request).knowledge_get(u["id"], name)
+    if not d:
+        raise HTTPException(404, "no such note")
+    return d
+
+
+@r.put("/me/knowledge/{name}")
+def knowledge_put(name: str, body: dict, request: Request, u=Depends(require_user)):
+    if not KNOWLEDGE_NAME.match(name):
+        raise HTTPException(400, "note name: lowercase letters, digits, . _ - (max 64)")
+    text = body.get("body")
+    if not isinstance(text, str) or len(text) > KNOWLEDGE_MAX:
+        raise HTTPException(400, "body must be text of at most %d characters" % KNOWLEDGE_MAX)
+    if not R(request).knowledge_get(u["id"], name) and len(R(request).knowledge_list(u["id"])) >= KNOWLEDGE_FILES:
+        raise HTTPException(400, "at most %d notes" % KNOWLEDGE_FILES)
+    R(request).knowledge_set(u["id"], name, text)
+    return {"ok": True}
+
+
+@r.delete("/me/knowledge/{name}")
+def knowledge_delete(name: str, request: Request, u=Depends(require_user)):
+    R(request).knowledge_delete(u["id"], name)
+    return {"ok": True}
+
+
+def _share_target(request, body):
+    """-> (type, id, label) for {"user": name} or {"group": name}; 404 when it does not exist."""
+    if body.get("user"):
+        t = R(request).user_by_name(str(body["user"]).strip())
+        if not t or t["role"] == "anonymous":
+            raise HTTPException(404, "no such user")
+        return "user", t["id"], t["username"]
+    if body.get("group"):
+        g = R(request).group_by_name(str(body["group"]).strip())
+        if not g:
+            raise HTTPException(404, "no such group")
+        return "group", g["id"], g["name"]
+    raise HTTPException(400, 'give "user" or "group"')
+
+
+@r.get("/me/knowledge/{name}/shares")
+def knowledge_shares(name: str, request: Request, u=Depends(require_user)):
+    if not R(request).knowledge_get(u["id"], name):
+        raise HTTPException(404, "no such note")
+    return {"items": R(request).knowledge_shares(u["id"], name)}
+
+
+@r.put("/me/knowledge/{name}/shares")
+def knowledge_share(name: str, body: dict, request: Request, u=Depends(require_user)):
+    if name == "soul":
+        raise HTTPException(400, "soul is your persona and stays private")
+    if not R(request).knowledge_get(u["id"], name):
+        raise HTTPException(404, "no such note")
+    access = body.get("access", "read")
+    if access not in ("read", "write"):
+        raise HTTPException(400, "access: read or write")
+    t, pid, label = _share_target(request, body)
+    if t == "user" and pid == u["id"]:
+        raise HTTPException(400, "that is you")
+    R(request).knowledge_share_set(u["id"], name, t, pid, access)
+    return {"ok": True, "shared_with": label, "access": access}
+
+
+@r.delete("/me/knowledge/{name}/shares")
+def knowledge_unshare(name: str, body: dict, request: Request, u=Depends(require_user)):
+    t, pid, _ = _share_target(request, body)
+    R(request).knowledge_share_remove(u["id"], name, t, pid)
+    return {"ok": True}
+
+
+@r.get("/knowledge/shared")
+def knowledge_shared(request: Request, u=Depends(require_user)):
+    return {"items": R(request).knowledge_shared_with(u["id"])}
+
+
+@r.get("/knowledge/shared/{owner}/{name}")
+def knowledge_shared_get(owner: str, name: str, request: Request, u=Depends(require_user)):
+    d = R(request).knowledge_shared_get(u["id"], owner, name)
+    if not d:
+        raise HTTPException(404, "no such shared note")
+    return d
+
+
+@r.put("/knowledge/shared/{owner}/{name}")
+def knowledge_shared_put(owner: str, name: str, body: dict, request: Request, u=Depends(require_user)):
+    d = R(request).knowledge_shared_get(u["id"], owner, name)
+    if not d:
+        raise HTTPException(404, "no such shared note")
+    if d["access"] != "write":
+        raise HTTPException(403, "read-only share")
+    text = body.get("body")
+    if not isinstance(text, str) or len(text) > KNOWLEDGE_MAX:
+        raise HTTPException(400, "body must be text of at most %d characters" % KNOWLEDGE_MAX)
+    o = R(request).user_by_name(owner)
+    R(request).knowledge_set(o["id"], name, text)
+    return {"ok": True}
+
+
 # ---------------- reviews
 @r.get("/packages/{name}/reviews")
 def reviews(name: str, request: Request, u=Depends(current_user)):

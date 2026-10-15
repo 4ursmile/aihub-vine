@@ -1,0 +1,29 @@
+{
+  "description": "filesystem",
+  "rules": [
+    {
+      "id": "rm-root",
+      "pattern": "\\brm\\s+(-\\w+\\s+)*(/|~|\\$HOME|/\\*|~/\\*)\\s*($|[;&|])",
+      "reason": "recursive delete of / or home",
+      "action": "deny",
+      "tool": "Bash",
+      "field": "command"
+    },
+    {
+      "id": "disk-write",
+      "pattern": "\\b(mkfs(\\.\\w+)?|dd\\s+.*\\bof=/dev/|shred)\\b|>\\s*/dev/(sd|nvme|disk)",
+      "reason": "writes straight to a disk device",
+      "action": "deny",
+      "tool": "Bash",
+      "field": "command"
+    },
+    {
+      "id": "overwrite-system",
+      "pattern": ">>?\\s*(/etc/|/usr/|/bin/|~?/?\\.ssh/|~/\\.aws/)",
+      "reason": "redirects output over a system or credential path",
+      "action": "deny",
+      "tool": "Bash",
+      "field": "command"
+    }
+  ]
+}

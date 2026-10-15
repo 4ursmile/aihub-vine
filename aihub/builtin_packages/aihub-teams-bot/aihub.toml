@@ -1,0 +1,82 @@
+[package]
+name = "aihub-teams-bot"
+version = "1.2.0"
+type = "bot"
+description = "Microsoft Teams bot built on aihub-bot (Teams SDK): per-chat memory, a task file to retarget it, allow-list, slash commands and a customisation guide."
+tags = ["aihub", "bot", "teams", "microsoft", "starter"]
+readme = "README.md"
+license = "MIT"
+
+[requires]
+packages = ["aihub-bot>=1.1.0"]        # the base bot: its harness (memory, executors, skills, MCP, cron, extensions) is reused as is
+
+[python]
+requires = ["microsoft-teams-apps"]    # the Teams SDK, installed into this bot's own environment
+
+[bot]
+run = "bot/run.py"
+onboard = "bot/onboard.py"     # OPTIONAL guided setup: Teams CLI login + app registration, fills .env
+title = "AI Hub Teams assistant"
+
+# Teams credentials (leave empty to try the bot locally with `-- --try "hello"`; serving needs them, or TEAMS_LOCAL=1 for the playground)
+[[bot.env]]
+name = "CLIENT_ID"
+hint = "Application (client) ID of the bot registration (Teams Developer Portal / Azure)"
+required = false
+
+[[bot.env]]
+name = "CLIENT_SECRET"
+hint = "Client secret VALUE of that registration"
+required = false
+secret = true
+
+[[bot.env]]
+name = "TENANT_ID"
+hint = "Directory (tenant) ID where the bot is registered"
+required = false
+
+[[bot.env]]
+name = "TEAMS_TASK"
+hint = "what this bot is for: general | helpdesk | standup | meeting-notes, or your own file bot/tasks/NAME.md. A task.md in the bot home beats it"
+required = false
+default = "general"
+
+[[bot.env]]
+name = "TEAMS_TASK_HARNESS"
+hint = "harness for /task background jobs: claude (claude -p, default) | codex | builtin | command | extension name. Falls back to BOT_HARNESS when that CLI is missing"
+required = false
+default = "claude"
+
+[[bot.env]]
+name = "TEAMS_TASK_MAX"
+hint = "background tasks running at once"
+required = false
+default = "2"
+
+[[bot.env]]
+name = "TEAMS_ALLOWED"
+hint = "optional allow-list: comma separated names, ids, AAD object ids or e-mails; empty = everyone who can reach the bot"
+required = false
+
+[[bot.env]]
+name = "TEAMS_LOCAL"
+hint = "1 = accept unauthenticated requests, for the local Teams playground ONLY, never in production"
+required = false
+
+[[bot.env]]
+name = "BOT_HARNESS"
+hint = "what runs the prompts: builtin | claude | codex | command | a name registered by an extension (see aihub-bot)"
+required = false
+default = "builtin"
+
+[[bot.env]]
+name = "ANTHROPIC_API_KEY"
+hint = "only the builtin harness needs it"
+required = false
+secret = true
+
+[[bot.env]]
+name = "BOT_MODEL"
+hint = "model id for the builtin harness"
+required = false
+default = "claude-sonnet-5-5"

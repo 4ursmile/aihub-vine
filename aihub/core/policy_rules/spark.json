@@ -1,0 +1,133 @@
+{
+  "description": "spark",
+  "rules": [
+    {
+      "id": "spark-overwrite-no-partition",
+      "pattern": "^(?!.*(replaceWhere|partitionOverwriteMode|insertInto|overwritePartitions|/[A-Za-z_]+=[^/\\s\\\"'),]+)).*(\\.mode\\(\\s*[\\\"']overwrite[\\\"']\\s*\\)|\\bSaveMode\\.Overwrite\\b|\\.overwrite\\(\\s*\\)|\\.option\\(\\s*[\\\"']mode[\\\"']\\s*,\\s*[\\\"']overwrite[\\\"']|\\boverwrite\\s*=\\s*True)",
+      "reason": "Spark/DataFrame write in overwrite mode that is not scoped to a partition (no replaceWhere, partitionOverwriteMode=dynamic, insertInto or dt=... path): replaces the whole table/path",
+      "action": "deny",
+      "tool": "Bash",
+      "field": "command"
+    },
+    {
+      "id": "spark-overwrite-no-partition-code",
+      "pattern": "^(?!.*(replaceWhere|partitionOverwriteMode|insertInto|overwritePartitions|/[A-Za-z_]+=[^/\\s\\\"'),]+)).*(\\.mode\\(\\s*[\\\"']overwrite[\\\"']\\s*\\)|\\bSaveMode\\.Overwrite\\b|\\.overwrite\\(\\s*\\)|\\.option\\(\\s*[\\\"']mode[\\\"']\\s*,\\s*[\\\"']overwrite[\\\"']|\\boverwrite\\s*=\\s*True)",
+      "reason": "Spark/DataFrame write in overwrite mode that is not scoped to a partition (no replaceWhere, partitionOverwriteMode=dynamic, insertInto or dt=... path): replaces the whole table/path (in code being written)",
+      "action": "ask",
+      "tool": "Write",
+      "field": "content"
+    },
+    {
+      "id": "spark-overwrite-no-partition-edit",
+      "pattern": "^(?!.*(replaceWhere|partitionOverwriteMode|insertInto|overwritePartitions|/[A-Za-z_]+=[^/\\s\\\"'),]+)).*(\\.mode\\(\\s*[\\\"']overwrite[\\\"']\\s*\\)|\\bSaveMode\\.Overwrite\\b|\\.overwrite\\(\\s*\\)|\\.option\\(\\s*[\\\"']mode[\\\"']\\s*,\\s*[\\\"']overwrite[\\\"']|\\boverwrite\\s*=\\s*True)",
+      "reason": "Spark/DataFrame write in overwrite mode that is not scoped to a partition (no replaceWhere, partitionOverwriteMode=dynamic, insertInto or dt=... path): replaces the whole table/path (in code being written)",
+      "action": "ask",
+      "tool": "Edit|MultiEdit",
+      "field": "new_string"
+    },
+    {
+      "id": "spark-overwrite-no-partition-nb",
+      "pattern": "^(?!.*(replaceWhere|partitionOverwriteMode|insertInto|overwritePartitions|/[A-Za-z_]+=[^/\\s\\\"'),]+)).*(\\.mode\\(\\s*[\\\"']overwrite[\\\"']\\s*\\)|\\bSaveMode\\.Overwrite\\b|\\.overwrite\\(\\s*\\)|\\.option\\(\\s*[\\\"']mode[\\\"']\\s*,\\s*[\\\"']overwrite[\\\"']|\\boverwrite\\s*=\\s*True)",
+      "reason": "Spark/DataFrame write in overwrite mode that is not scoped to a partition (no replaceWhere, partitionOverwriteMode=dynamic, insertInto or dt=... path): replaces the whole table/path (in code being written)",
+      "action": "ask",
+      "tool": "NotebookEdit",
+      "field": "new_source"
+    },
+    {
+      "id": "spark-drop",
+      "pattern": "\\balter\\s+table\\s+\\S+\\s+drop\\s+(if\\s+exists\\s+)?partition|\\bdrop\\s+(view|function|temporary)|\\bvacuum\\b[^;]*retain\\s+0|\\bspark\\.catalog\\.(dropTempView|dropGlobalTempView)|\\.dropTable\\(|\\bDeltaTable\\b[^\\n]*\\.delete\\(\\s*\\)|\\.drop(Duplicates)?\\(\\s*\\)\\s*\\.write",
+      "reason": "drops a Spark partition/view/function, vacuums with 0 retention or deletes a whole Delta table",
+      "action": "deny",
+      "tool": "Bash",
+      "field": "command"
+    },
+    {
+      "id": "spark-drop-code",
+      "pattern": "\\balter\\s+table\\s+\\S+\\s+drop\\s+(if\\s+exists\\s+)?partition|\\bdrop\\s+(view|function|temporary)|\\bvacuum\\b[^;]*retain\\s+0|\\bspark\\.catalog\\.(dropTempView|dropGlobalTempView)|\\.dropTable\\(|\\bDeltaTable\\b[^\\n]*\\.delete\\(\\s*\\)|\\.drop(Duplicates)?\\(\\s*\\)\\s*\\.write",
+      "reason": "drops a Spark partition/view/function, vacuums with 0 retention or deletes a whole Delta table (in code being written)",
+      "action": "ask",
+      "tool": "Write",
+      "field": "content"
+    },
+    {
+      "id": "spark-drop-edit",
+      "pattern": "\\balter\\s+table\\s+\\S+\\s+drop\\s+(if\\s+exists\\s+)?partition|\\bdrop\\s+(view|function|temporary)|\\bvacuum\\b[^;]*retain\\s+0|\\bspark\\.catalog\\.(dropTempView|dropGlobalTempView)|\\.dropTable\\(|\\bDeltaTable\\b[^\\n]*\\.delete\\(\\s*\\)|\\.drop(Duplicates)?\\(\\s*\\)\\s*\\.write",
+      "reason": "drops a Spark partition/view/function, vacuums with 0 retention or deletes a whole Delta table (in code being written)",
+      "action": "ask",
+      "tool": "Edit|MultiEdit",
+      "field": "new_string"
+    },
+    {
+      "id": "spark-drop-nb",
+      "pattern": "\\balter\\s+table\\s+\\S+\\s+drop\\s+(if\\s+exists\\s+)?partition|\\bdrop\\s+(view|function|temporary)|\\bvacuum\\b[^;]*retain\\s+0|\\bspark\\.catalog\\.(dropTempView|dropGlobalTempView)|\\.dropTable\\(|\\bDeltaTable\\b[^\\n]*\\.delete\\(\\s*\\)|\\.drop(Duplicates)?\\(\\s*\\)\\s*\\.write",
+      "reason": "drops a Spark partition/view/function, vacuums with 0 retention or deletes a whole Delta table (in code being written)",
+      "action": "ask",
+      "tool": "NotebookEdit",
+      "field": "new_source"
+    },
+    {
+      "id": "spark-delete-path",
+      "pattern": "\\bhdfs\\s+dfs\\s+-rm|\\bhadoop\\s+fs\\s+-rm|\\bdbutils\\.fs\\.rm\\b|\\.fs\\.delete\\(|\\bfs\\.delete\\(|\\.deleteOnExit\\(|\\bFileUtil\\.fullyDelete",
+      "reason": "deletes files straight from HDFS/DBFS/the Hadoop filesystem",
+      "action": "deny",
+      "tool": "Bash",
+      "field": "command"
+    },
+    {
+      "id": "spark-delete-path-code",
+      "pattern": "\\bhdfs\\s+dfs\\s+-rm|\\bhadoop\\s+fs\\s+-rm|\\bdbutils\\.fs\\.rm\\b|\\.fs\\.delete\\(|\\bfs\\.delete\\(|\\.deleteOnExit\\(|\\bFileUtil\\.fullyDelete",
+      "reason": "deletes files straight from HDFS/DBFS/the Hadoop filesystem (in code being written)",
+      "action": "ask",
+      "tool": "Write",
+      "field": "content"
+    },
+    {
+      "id": "spark-delete-path-edit",
+      "pattern": "\\bhdfs\\s+dfs\\s+-rm|\\bhadoop\\s+fs\\s+-rm|\\bdbutils\\.fs\\.rm\\b|\\.fs\\.delete\\(|\\bfs\\.delete\\(|\\.deleteOnExit\\(|\\bFileUtil\\.fullyDelete",
+      "reason": "deletes files straight from HDFS/DBFS/the Hadoop filesystem (in code being written)",
+      "action": "ask",
+      "tool": "Edit|MultiEdit",
+      "field": "new_string"
+    },
+    {
+      "id": "spark-delete-path-nb",
+      "pattern": "\\bhdfs\\s+dfs\\s+-rm|\\bhadoop\\s+fs\\s+-rm|\\bdbutils\\.fs\\.rm\\b|\\.fs\\.delete\\(|\\bfs\\.delete\\(|\\.deleteOnExit\\(|\\bFileUtil\\.fullyDelete",
+      "reason": "deletes files straight from HDFS/DBFS/the Hadoop filesystem (in code being written)",
+      "action": "ask",
+      "tool": "NotebookEdit",
+      "field": "new_source"
+    },
+    {
+      "id": "s3-delete-code",
+      "pattern": "\\.delete_objects?\\(|\\.objects\\.(all\\(\\)\\.)?delete\\(|\\.delete_bucket\\(|\\bs3fs\\.\\w*\\brm\\(|\\bfs\\.rm\\(",
+      "reason": "deletes S3 objects or buckets from code",
+      "action": "deny",
+      "tool": "Bash",
+      "field": "command"
+    },
+    {
+      "id": "s3-delete-code-code",
+      "pattern": "\\.delete_objects?\\(|\\.objects\\.(all\\(\\)\\.)?delete\\(|\\.delete_bucket\\(|\\bs3fs\\.\\w*\\brm\\(|\\bfs\\.rm\\(",
+      "reason": "deletes S3 objects or buckets from code (in code being written)",
+      "action": "ask",
+      "tool": "Write",
+      "field": "content"
+    },
+    {
+      "id": "s3-delete-code-edit",
+      "pattern": "\\.delete_objects?\\(|\\.objects\\.(all\\(\\)\\.)?delete\\(|\\.delete_bucket\\(|\\bs3fs\\.\\w*\\brm\\(|\\bfs\\.rm\\(",
+      "reason": "deletes S3 objects or buckets from code (in code being written)",
+      "action": "ask",
+      "tool": "Edit|MultiEdit",
+      "field": "new_string"
+    },
+    {
+      "id": "s3-delete-code-nb",
+      "pattern": "\\.delete_objects?\\(|\\.objects\\.(all\\(\\)\\.)?delete\\(|\\.delete_bucket\\(|\\bs3fs\\.\\w*\\brm\\(|\\bfs\\.rm\\(",
+      "reason": "deletes S3 objects or buckets from code (in code being written)",
+      "action": "ask",
+      "tool": "NotebookEdit",
+      "field": "new_source"
+    }
+  ]
+}

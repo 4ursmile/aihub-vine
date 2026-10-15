@@ -210,6 +210,21 @@ aihub.toml
 - `agents/my-agent.md` is the agent prompt; it starts with YAML front matter.
 - `.gitignore` excludes build output and common local files.
 
+### Bot
+
+```text
+.gitignore
+README.md
+aihub.toml
+bot/run.py
+```
+
+- `aihub.toml` declares package metadata, `[bot] run = "bot/run.py"`, and `[[bot.env]]` settings.
+- `bot/run.py` is the entry point started by `aihub run`.
+- `README.md` is the catalogue overview and usage guide.
+- `.gitignore` excludes build output and common local files; add `.env` if you keep one in the project.
+- Full guide: `docs/bots.md`.
+
 ### MCP server
 
 ```text

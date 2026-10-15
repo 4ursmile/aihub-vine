@@ -4,7 +4,7 @@ from . import naming, version
 import os
 import re
 
-TYPES = ("skill", "agent", "mcp", "tool", "setup")
+TYPES = ("skill", "agent", "mcp", "tool", "setup", "bot")
 OSES = ("macos", "linux", "windows")
 SCRIPT_EXT = (".sh", ".ps1", ".cmd", ".bat", ".py")
 
@@ -45,6 +45,14 @@ def lint(m: dict, root: str):
         missing = [o for o in (m["requires"]["os"] or OSES) if ("install_" + o) not in m["scripts"]]
         if missing:
             warns.append("type=%s but no install script for: %s" % (typ, ", ".join(missing)))
+    if typ == "bot":
+        run = m["bot"]["run"]
+        if not run:
+            errs.append('type="bot" needs [bot] run = "path/to/start.py" (what `aihub run` starts)')
+        elif run.lower().endswith(SCRIPT_EXT) and " " not in run:
+            need(run, "[bot] run")
+    if typ == "bot" and m["bot"]["onboard"]:
+        need(m["bot"]["onboard"], "[bot] onboard")
     if typ == "mcp" and not m["mcp_servers"]:
         errs.append('type="mcp" needs at least one [[mcp_servers]] entry')
     if typ == "skill" and not m["skills"]:
@@ -87,6 +95,20 @@ def _authors(raw) -> list:
     return out
 
 
+def _bot(b) -> dict:
+    """[bot] run = "bot.py", title, env = [{name, hint, required, secret}]. Display fields never raise: a bad entry is dropped."""
+    if not isinstance(b, dict):
+        b = {}
+    env = []
+    for e in b.get("env", []) if isinstance(b.get("env"), list) else []:
+        if isinstance(e, str):
+            e = {"name": e}
+        if isinstance(e, dict) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(e.get("name", ""))):
+            env.append({"name": str(e["name"]), "hint": str(e.get("hint", "")), "required": bool(e.get("required", True)),
+                        "secret": bool(e.get("secret", False)), "default": str(e.get("default", ""))})
+    return {"run": str(b.get("run", "")).strip(), "title": str(b.get("title", "")), "onboard": str(b.get("onboard", "")).strip(), "env": env}
+
+
 def normalize(d: dict) -> dict:
     p = d.get("package") or {}
     if not p:
@@ -119,6 +141,7 @@ def normalize(d: dict) -> dict:
     if req.get("os") and any(o not in OSES for o in req["os"]):
         raise ValueError("requires.os values must be among %s" % (OSES,))
     py = d.get("python") or {}
+    bot = d.get("bot") or {}
     return {
         "package": {
             "name": name, "version": ver, "type": typ,
@@ -140,5 +163,6 @@ def normalize(d: dict) -> dict:
         "bin": d.get("bin", {}),                 # {cmd: relative/path}
         "scripts": d.get("scripts", {}),         # {install_<os>: "...", uninstall_<os>: "..."}
         "setup": setup,
+        "bot": _bot(bot),
         "git": {k: str(g.get(k, "")) for k in ("url", "branch", "subdir")} if (g := d.get("git") or {}) is not None else {},
     }

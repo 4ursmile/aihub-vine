@@ -54,7 +54,7 @@ const Empty = ({ t, d }) => html`<div class="empty"><h3>${t}</h3><p>${d}</p></di
 const Err = ({ e }) => html`<${Empty} t="Something went wrong" d=${e} />`;
 const Skels = ({ n = 6 }) => html`<div class="grid">${Array.from({ length: n }, (_, i) => html`<div class="skel" key=${i}></div>`)}</div>`;
 const Stars = ({ r }) => r ? html`<span>★ ${r}</span>` : null;
-const TYPE = { skill: "blue", agent: "green", mcp: "orange", tool: "", setup: "red" };
+const TYPE = { skill: "blue", agent: "green", mcp: "orange", tool: "", setup: "red", bot: "blue" };
 const Pkg = ({ p, i = 0 }) => html`<a class="card pkg spot" style=${"--i:" + Math.min(i, 12)} href=${"#/package/" + p.name}>
   <div class="row"><h3>${p.name}</h3><span class="sp"></span>${p.visibility === "private" && html`<span class="badge orange" title="Only people you share it with can see this">private</span>`}<span class=${"badge " + (TYPE[p.type] || "")}>${p.type}</span></div>
   <p>${p.description || "No description"}</p>
@@ -634,6 +634,46 @@ function Docs({ slug }) {
 }
 
 
+// ---------- personal knowledge (private notes + the bot soul; `aihub knowledge pull` mirrors them). Notes can be shared with a user or group.
+function Knowledge() {
+  const { me } = useStore(); const [tick, setTick] = useState(0); const [cur, setCur] = useState("soul"); const [owner, setOwner] = useState(null); const [text, setText] = useState(""); const [nn, setNn] = useState("");
+  const [access, setAccess] = useState("read"); const [kind, setKind] = useState("user"); const [who, setWho] = useState("");
+  const list = useLoad(() => me ? api("/me/knowledge") : Promise.resolve({ items: [] }), [me && me.username, tick]);
+  const shared = useLoad(() => me ? api("/knowledge/shared") : Promise.resolve({ items: [] }), [me && me.username, tick]);
+  const shares = useLoad(() => me && !owner && cur !== "soul" ? api("/me/knowledge/" + cur + "/shares").catch(() => ({ items: [] })) : Promise.resolve({ items: [] }), [me && me.username, cur, owner, tick]);
+  const url = owner ? "/knowledge/shared/" + owner + "/" + cur : "/me/knowledge/" + cur;
+  const sharedItem = owner && shared.d ? shared.d.items.find((i) => i.owner === owner && i.name === cur) : null;
+  const readOnly = !!owner && !(sharedItem && sharedItem.access === "write");
+  useEffect(() => { if (!me) return; let on = 1; api(url).then((d) => on && setText(d.body), () => on && setText(!owner && cur === "soul" ? "# Soul\n\nWho the assistant is for me: tone, language, what to always / never do.\n" : "")); return () => { on = 0; }; }, [cur, owner, me && me.username]);
+  if (!me) return html`<${Empty} t="Sign in required" d="Your notes are private to your account." />`;
+  const names = [...new Set(["soul", ...(list.d ? list.d.items.map((i) => i.name) : [])])];
+  const open = (n, o) => { setCur(n); setOwner(o || null); };
+  const save = async () => { try { await api(url, { method: "PUT", body: { body: text } }); toast("Saved"); setTick(tick + 1); } catch (e) { toast(e.message, 1); } };
+  const del = async () => { if (!confirm("Delete " + cur + "? Everyone it is shared with loses it.")) return; try { await api("/me/knowledge/" + cur, { method: "DELETE" }); open("soul"); setTick(tick + 1); } catch (e) { toast(e.message, 1); } };
+  const add = () => { const n = nn.trim().toLowerCase(); if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(n)) return toast("Use lowercase letters, digits, . _ -", 1); setNn(""); open(n); };
+  const share = async () => { const w = who.trim(); if (!w) return toast("Enter a " + kind + " name", 1);
+    try { await api("/me/knowledge/" + cur + "/shares", { method: "PUT", body: { [kind]: w, access } }); toast("Shared with " + w); setWho(""); setTick(tick + 1); } catch (e) { toast(e.message, 1); } };
+  const unshare = async (sh) => { try { await api("/me/knowledge/" + cur + "/shares", { method: "DELETE", body: { [sh.type]: sh.name } }); setTick(tick + 1); } catch (e) { toast(e.message, 1); } };
+  const mine = list.d && list.d.items.some((i) => i.name === cur);
+  const sharedItems = shared.d ? shared.d.items : [];
+  return html`<div class="stack"><h1>Knowledge</h1>
+    <p class="mut">Notes your bots and assistants use. <b>soul</b> is the persona a bot loads first and is always private. Other notes can be shared with a person or a group. Local copy: <code>aihub knowledge pull</code> (folder <code>~/.aihub/knowledge</code>, shared notes under <code>shared/</code>), edit there and <code>aihub knowledge push</code>. <a href="#/docs/bots">How to build a bot</a>.</p>
+    <div class="row" style="align-items:flex-start;gap:24px"><nav class="list" style="min-width:200px;flex:0 0 220px" aria-label="Notes">
+      ${names.map((n) => html`<a class="li" key=${n} href="javascript:void 0" onClick=${() => open(n)} style=${!owner && n === cur ? "font-weight:600" : ""}>${n}</a>`)}
+      <div class="row" style="margin-top:8px"><input class="field" style="flex:1;min-width:0" placeholder="new note" value=${nn} onInput=${(e) => setNn(e.target.value)} /><button class="btn sec sm" onClick=${add}>Add</button></div>
+      ${sharedItems.length ? html`<h4 class="mut" style="margin:16px 0 4px">Shared with me</h4>${sharedItems.map((i) => html`<a class="li" key=${i.owner + "/" + i.name} href="javascript:void 0" onClick=${() => open(i.name, i.owner)} style=${owner === i.owner && cur === i.name ? "font-weight:600" : ""}>${i.owner}/${i.name} <span class="xs mut3">${i.access}</span></a>`)}` : ""}</nav>
+      <div class="stack" style="flex:1;min-width:280px"><div class="row"><h3 style="margin:0">${owner ? owner + "/" : ""}${cur}.md</h3>${owner ? html`<span class="badge">${readOnly ? "read-only" : "you can edit"}</span>` : ""}<span class="sp"></span>${!owner && cur !== "soul" && html`<button class="btn sec sm" onClick=${del}>Delete</button>`}${!readOnly && html`<button class="btn sm" onClick=${save}>Save</button>`}</div>
+        <textarea class="field mono" style="min-height:360px;width:100%" aria-label="Note text" readOnly=${readOnly} value=${text} onInput=${(e) => setText(e.target.value)}></textarea>
+        ${!owner && cur !== "soul" && mine ? html`<div class="card stack"><h3 style="margin:0">Sharing</h3>
+          ${shares.d && shares.d.items.length ? shares.d.items.map((sh) => html`<div class="row" key=${sh.type + sh.name}><span>${sh.type === "group" ? "group " : ""}<b>${sh.name}</b></span><span class="badge">${sh.access}</span><span class="sp"></span><button class="btn sec sm" onClick=${() => unshare(sh)}>Remove</button></div>`) : html`<p class="mut" style="margin:0">Private. Only you can see this note.</p>`}
+          <div class="row"><select class="field" aria-label="Share with" value=${kind} onChange=${(e) => setKind(e.target.value)}><option value="user">User</option><option value="group">Group</option></select>
+            <input class="field" style="flex:1;min-width:0" aria-label="Name" placeholder=${kind === "group" ? "group name" : "username"} value=${who} onInput=${(e) => setWho(e.target.value)} />
+            <select class="field" aria-label="Access" value=${access} onChange=${(e) => setAccess(e.target.value)}><option value="read">Can read</option><option value="write">Can edit</option></select>
+            <button class="btn sm" onClick=${share}>Share</button></div>
+          <p class="xs mut3" style="margin:0">Do not put secrets in a shared note. Editors overwrite the whole note.</p></div>` : ""}
+        ${!owner && cur === "soul" ? html`<p class="xs mut3">soul is your persona and cannot be shared.</p>` : ""}</div></div></div>`;
+}
+
 // ---------- dashboard (charts are plain SVG: no library, theme-aware)
 const KC = { use: "var(--blue)", install: "var(--green)", update: "var(--orange)", error: "var(--red)", uninstall: "var(--fg-3)", publish: "var(--fg-2)" };
 const delta = (a, b) => { if (!b) return a ? { t: "new", c: "green" } : null; const p = Math.round((a - b) / b * 100); return { t: (p >= 0 ? "▲ " : "▼ ") + Math.abs(p) + "%", c: p >= 0 ? "green" : "red" }; };
@@ -742,10 +782,10 @@ function App() {
   const on = (k) => (seg[0] === k ? "on" : "");
   const br = s.brand || {}, ct = br.contact || {};
   const page = { "": html`<${Home} />`, browse: html`<${Browse} key=${s.route} />`, package: html`<${Package} name=${seg[1]} key=${seg[1]} />`, rankings: html`<${Rankings} />`, docs: html`<${Docs} slug=${seg[1]} key=${seg[1]} />`, start: html`<${Start} />`,
-    login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, dashboard: html`<${Dashboard} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
+    login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, knowledge: html`<${Knowledge} />`, dashboard: html`<${Dashboard} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
   return html`<div>${br.announcement && html`<div class="announce" role="status" dangerouslySetInnerHTML=${{ __html: br.announcement }}></div>`}<header class="nav"><div class="nav-in"><a class="brand glow" href="#/">${br.logo_url && html`<img class="logo" src=${br.logo_url} alt="" />`}<span>${br.name || "AI Hub"}</span></a>
     <nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
-    <div class="r">${s.me ? html`<a href="#/account" class="me-link"><${Avatar} p=${s.me} size=${24} /><span>${shown(s.me)}</span></a>${s.showGroups ? html`<a class=${on("groups")} href="#/groups">Groups</a>` : ""}${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}${can("audit") ? html`<a class=${on("audit")} href="#/audit">Audit</a>` : ""}${can("admin") || can("reset_password") ? html`<a href="#/admin">Admin</a>` : ""}<a href="#/" onClick=${logout}>Sign out</a>` :
+    <div class="r">${s.me ? html`<a href="#/account" class="me-link"><${Avatar} p=${s.me} size=${24} /><span>${shown(s.me)}</span></a><a class=${on("knowledge")} href="#/knowledge">Knowledge</a>${s.showGroups ? html`<a class=${on("groups")} href="#/groups">Groups</a>` : ""}${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}${can("audit") ? html`<a class=${on("audit")} href="#/audit">Audit</a>` : ""}${can("admin") || can("reset_password") ? html`<a href="#/admin">Admin</a>` : ""}<a href="#/" onClick=${logout}>Sign out</a>` :
       html`${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}<a href="#/login">Sign in</a>`}</div></div></header>
     <main><div class="page" key=${path}>${page}</div></main>
     <footer class="foot"><b class="glow">${br.logo_url && html`<img class="logo sm" src=${br.logo_url} alt="" />`}${br.name || "AI Hub"}</b><span>Skills, agents and MCP servers for your team.</span>

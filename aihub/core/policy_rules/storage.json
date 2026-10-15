@@ -1,0 +1,21 @@
+{
+  "description": "storage",
+  "rules": [
+    {
+      "id": "s3-delete",
+      "pattern": "\\baws\\s+s3\\s+(rm|rb)\\b|\\baws\\s+s3api\\s+delete-|\\baws\\s+s3\\s+sync\\b.*--delete|\\b(gsutil|gcloud\\s+storage)\\s+(-m\\s+)?(rm|rb)\\b|\\bmc\\s+(rm|rb)\\b|\\bazcopy\\s+(rm|remove)\\b|\\bs3cmd\\s+(del|rm)\\b|\\brclone\\s+(delete|purge|deletefile)\\b|\\baws\\s+s3\\s+mv\\b.*\\bs3://.*\\bs3://|\\bdelete_objects?\\s*\\(|\\.objects\\.(all\\(\\)\\.)?delete\\(|\\.delete_bucket\\(",
+      "reason": "deletes object storage data",
+      "action": "deny",
+      "tool": "Bash",
+      "field": "command"
+    },
+    {
+      "id": "s3-overwrite",
+      "pattern": "\\baws\\s+s3\\s+(cp|mv|sync)\\b.*\\bs3://|\\bgsutil\\s+(-m\\s+)?(cp|mv|rsync)\\b.*\\bgs://",
+      "reason": "may overwrite objects in a bucket",
+      "action": "ask",
+      "tool": "Bash",
+      "field": "command"
+    }
+  ]
+}
