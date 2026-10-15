@@ -13,9 +13,22 @@ CHECK_EVERY = 24 * 3600
 
 
 def target():
-    """Path of the running zipapp, or None when run from source (nothing to replace)."""
-    p = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
-    return p if p and os.path.isfile(p) and zipfile.is_zipfile(p) else None
+    """Path of the installed zipapp, or None when run from source (nothing to replace). Tries the running
+    file, the zip this module was imported from, then the install script's ~/.aihub/bin/aihub.pyz."""
+    cands = []
+    if sys.argv and sys.argv[0]:
+        cands.append(os.path.abspath(sys.argv[0]))
+    here = os.path.abspath(__file__)
+    while here and os.path.dirname(here) != here:
+        if os.path.isfile(here):
+            cands.append(here)
+            break
+        here = os.path.dirname(here)
+    cands.append(os.path.join(os.path.expanduser("~"), ".aihub", "bin", "aihub.pyz"))
+    for p in cands:
+        if os.path.isfile(p) and zipfile.is_zipfile(p):
+            return p
+    return None
 
 
 def remote(timeout=5):

@@ -403,11 +403,33 @@ def cmd_doctor(a):
     ui.good("%d package(s) installed" % len(installer.state()["packages"]))
 
 
+def _hub_status(tries=3):
+    """Hub first: retry /healthz a few times. Returns True when reachable."""
+    import time
+    for i in range(tries):
+        try:
+            api.call("GET", "/healthz", timeout=4)
+            return True
+        except Exception:
+            if i < tries - 1:
+                time.sleep(1 + i)
+    return False
+
+
 def _check_backends(detail=False):
-    """The package index and the telemetry inbox (both git) are what the CLI depends on; the hub is optional."""
+    """The hub is the default route (checked with retries). Git (package index + telemetry inbox) is checked only when the hub cannot be reached."""
     from . import telemetry, gitx
+    hub = paths.config()["hub"]
+    with ui.Spinner("Checking the hub") as sp:
+        ok = _hub_status()
+        if ok:
+            sp.text("Hub connection OK - %s" % hub)
+        else:
+            sp.problem("hub unreachable (%s); falling back to git" % hub)
+    if ok:
+        return
     idx = registry.source()
-    with ui.Spinner("Checking the package index") as sp:
+    with ui.Spinner("Checking the package index (git)") as sp:
         if not idx["url"]:
             sp.problem("no package index configured. run: aihub setup   (or: aihub config set index_url <git url>)")
         else:
@@ -417,7 +439,7 @@ def _check_backends(detail=False):
             except Exception as e:
                 sp.problem("package index unreachable [%s, branch %s]: %s" % (gitx.redact_url(idx["url"]), idx["branch"], gitx.redact_url(str(e))))
     url = telemetry.target()
-    with ui.Spinner("Checking the telemetry inbox") as sp:
+    with ui.Spinner("Checking the telemetry inbox (git)") as sp:
         if not url:
             sp.problem("no telemetry inbox configured, so usage reporting is paused. run: aihub setup")
         elif gitx.reachable(url):
@@ -427,13 +449,6 @@ def _check_backends(detail=False):
                 ui.note("the last usage push FAILED: %s (events are kept and retried; try: aihub flush -v)" % (st.get("error") or "unknown error"))
         else:
             sp.problem("telemetry inbox unreachable or not writable: %s" % gitx.redact_url(url))
-    if detail:
-        hub = paths.config()["hub"]
-        try:
-            api.call("GET", "/healthz", timeout=4)
-            ui.good("hub (optional, for the web dashboard): %s" % hub)
-        except Exception:
-            ui.info("hub not reachable (optional): %s" % hub)
 
 
 def cmd_welcome(a):
@@ -977,6 +992,8 @@ def build_parser():
                 "Config and credentials: ~/.aihub/config.json and ~/.aihub/credentials.json "
                 "(or $AIHUB_HOME); hub URL key: hub (default from AIHUB_URL). "
                 "Docs: <hub URL>/#/docs/publishing."))
+    from ..core.release import VERSION as _V
+    ap.add_argument("-v", "--version", action="version", version="aihub %s" % _V)
     ap.register("action", "parsers", _GroupedSubParsersAction)
     sp = ap.add_subparsers(dest="cmd", metavar="command")
     sp.command_groups = [
