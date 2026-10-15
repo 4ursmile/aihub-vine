@@ -535,6 +535,12 @@ def cmd_credential(a):
     return credhelper.run(a.action)
 
 
+def cmd_vault(a):
+    """Manage git remotes and their stored logins (interactive on a terminal)."""
+    from . import vault
+    return vault.run(a)
+
+
 def cmd_hooks(a):
     from . import hooks
     res = hooks.ensure(a.tool, remove=a.action == "remove")
@@ -1080,7 +1086,7 @@ def build_parser():
         ("Discover", ["search", "info"]),
         ("Install", ["install", "uninstall", "update", "list", "download"]),
         ("Manage", ["enable", "disable", "tree", "lock", "sync"]),
-        ("Account", ["config", "login", "logout", "register"]),
+        ("Account", ["config", "login", "logout", "register", "vault"]),
         ("Publish", ["dev"]),
         ("Setup and maintenance", ["welcome", "doctor", "version", "upgrade", "hook", "flush", "hooks", "skill", "self-uninstall"]),
     ]
@@ -1201,6 +1207,14 @@ def build_parser():
         "Read a tool-call event as JSON from standard input, match it to an installed package component, and queue usage telemetry. Intended for integration hooks: it spools one event and exits without blocking the AI tool.",
         "Example:\n  printf '{}' | aihub hook --source claude",
         arg("--source", default="claude", metavar="TOOL", help="Source label recorded with the event (default: claude)."))
+    add("vault", cmd_vault, "Add, edit or remove git remotes and their logins.",
+        "Manage the git hosts the CLI fetches the index and packages from. Logins go to the git credential helper (Keychain, DPAPI, Secret Service or a 0600 file); vault.json keeps only host and user name. On a terminal, bare 'aihub vault' opens a menu and missing values are prompted for (token hidden). In scripts give the token on standard input.",
+        "Examples:\n  aihub vault\n  aihub vault add https://git.example.com --user sam\n  printf %s \"$TOKEN\" | aihub vault edit git.example.com --token-stdin\n  aihub vault remove git.example.com --yes",
+        arg("action", nargs="?", choices=["list", "add", "edit", "remove"], help="Default: menu on a terminal, else list."),
+        arg("remote", nargs="?", metavar="REMOTE", help="Git URL or host (add: URL; edit/remove: host)."),
+        arg("--user", metavar="NAME", help="Git user name."),
+        arg("--token-stdin", action="store_true", help="Read the token/password from standard input."),
+        arg("-y", "--yes", action="store_true", help="Do not ask before removing."))
     add("credential", cmd_credential, "Git credential helper used for the hub and index hosts.",
         "Speaks git's credential protocol so a login you type once is remembered: macOS Keychain, Windows DPAPI, Linux Secret Service, else a private 0600 file. 'aihub setup' registers it for your hub and index hosts only; you never call it yourself.",
         "Example:\n  git config --global --get-all credential.https://git.example.com.helper",
@@ -1304,7 +1318,7 @@ def main(argv=None):
                 return 0
             cmd_menu()
             return 0
-        if ui.INTERACTIVE and a.cmd not in ("hook", "flush", "welcome", "config", "credential") and not os.path.exists(paths.p(".welcomed")):
+        if ui.INTERACTIVE and a.cmd not in ("hook", "flush", "welcome", "config", "credential", "vault") and not os.path.exists(paths.p(".welcomed")):
             cmd_welcome(argparse.Namespace(yes=False))
         if a.cmd == "credential":
             return a.fn(a)              # git calls this on every fetch: no welcome, updater or network
