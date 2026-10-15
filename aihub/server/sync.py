@@ -192,6 +192,18 @@ class Sync:
     def forget(self):
         self.num_cache.clear()
 
+    def _flag(self, key, env):
+        v = self.s.env_get(env) or self.repos.setting(key, "")
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    def telemetry_git(self):
+        """Legacy git telemetry inbox + archive: admin setting `git_telemetry_sync` (env AIHUB_GIT_TELEMETRY_SYNC), OFF unless an admin turns it on."""
+        return self._flag("git_telemetry_sync", "AIHUB_GIT_TELEMETRY_SYNC")
+
+    def index_git(self):
+        """Legacy git package index sync (read + push): admin setting `git_index_sync` (env AIHUB_GIT_INDEX_SYNC), OFF by default."""
+        return self._flag("git_index_sync", "AIHUB_GIT_INDEX_SYNC")
+
     def inbox(self):
         """Git URL holding refs/telemetry/*: AIHUB_TELEMETRY_URL > admin setting > defaults.json > the package index repo."""
         from ..core import defaults
@@ -237,6 +249,8 @@ class Sync:
     # ----- intake from HTTP (Ingest)
     def accept(self, lines, pubs):
         """Events the hub already stored in the database. Their raw lines wait for the next archive push; publish events for the index."""
+        if not self.telemetry_git():
+            lines = []                                               # legacy git sync off: no git archive backlog, the database is the copy
         with self.hold:
             if lines:
                 if self.held and self.held[-1][0].startswith("srv-") and self.held_first and self.held[-1][0] == self._srv_key:
@@ -274,14 +288,14 @@ class Sync:
     def _loop(self):
         while not self.stop.is_set():
             try:
-                self.run_once(scheduled=True)
+                self.run_once(scheduled=True)                # each half is gated inside _pass; with both off only local staging happens
             except Exception as e:                       # never die; report on the admin page
                 self.status["last_error"] = str(e)[:300]
                 log.warning("sync failed: %s", e)
             finally:
                 self.repos.db.release()
                 self.first_pass.set()
-            self.wake.wait(self.next_wait())
+            self.wake.wait(self.next_wait() if self.telemetry_git() or self.index_git() else 30)
             self.wake.clear()
 
     # ----- one pass
@@ -319,7 +333,8 @@ class Sync:
             except Deferred as d:
                 deferred.append(d.left)
 
-        if self.inbox() and not os.path.isfile(self.inbox()):
+        tel, idx = now_all or self.telemetry_git(), now_all or self.index_git()     # "Sync now" runs both halves
+        if tel and self.inbox() and not os.path.isfile(self.inbox()):
             try:
                 if self._needs_replay():
                     guarded(self.replay_archive)
@@ -334,13 +349,15 @@ class Sync:
         try:
             if not now_all:
                 guarded(self._stage_pending)
-                guarded(self._flush_held_if_due)
-                guarded(self._flush_index_if_due)
+                if tel:
+                    guarded(self._flush_held_if_due)
+                if idx:
+                    guarded(self._flush_index_if_due)
             else:
                 self._stage_pending()
                 self._flush_held(force=True)
                 self._flush_index(force=True)
-            if first or new_publish or self.repos.setting("sync_index_dirty") == "1" or self._index_moved():
+            if idx and (first or new_publish or self.repos.setting("sync_index_dirty") == "1" or self._index_moved()):
                 guarded(self.pull_index)
         except Exception as e:
             msg = gitx.redact_url(str(e))[:250]

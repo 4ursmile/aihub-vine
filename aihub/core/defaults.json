@@ -11,6 +11,9 @@
     "inbox_branch": "telemetry-inbox",
     "interval": 60
   },
+  "tls": {
+    "insecure_tls": true
+  },
   "cli": {
     "git_url": "",
     "branch": "",

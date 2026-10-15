@@ -58,6 +58,9 @@ python -m unittest discover -s tests          # ~2 min, 150 tests; or name modul
 
 - **Anonymous permissions in the SPA**: `/meta` returns `anonymous_perms`; `app.js` `can()` falls back to them when signed out, so a `view_dashboard` grant on the `anonymous` role shows the Dashboard link/page without login.
 
+- **Legacy git sync is OFF by default, as two independent switches**: `git_telemetry_sync` (inbox read + archive + `accept()` archive backlog) and `git_index_sync` (`pull_index`, `_flush_index`), Admin > Sync or env `AIHUB_GIT_TELEMETRY_SYNC` / `AIHUB_GIT_INDEX_SYNC` (`Sync.telemetry_git()` / `index_git()`). The loop always runs `_pass` but each half is gated inside it; with both off only local `_stage_pending` happens (hub still serves publishes), no git at start. "Sync now" (`now_all`) runs both halves. Tests of git paths set both settings first.
+- **Insecure TLS default**: `core/defaults.json` `tls.insecure_tls` (true) is the fallback for `tls.insecure()` (env `AIHUB_INSECURE` > config.json `insecure_tls` > defaults). When on, every CLI command prints a warning to stderr (`tls.warn_if_insecure`); `aihub config set insecure_tls false` turns it off.
+
 ## Doc/ownership habits
 
 - After code changes, update the docs above in the same change; for large doc passes a Haiku agent is used (give it exact behavior and the file list; it edits markdown only).

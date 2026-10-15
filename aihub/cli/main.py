@@ -1210,6 +1210,9 @@ def main(argv=None):
             cmd_welcome(argparse.Namespace(yes=False))
         if a.cmd == "credential":
             return a.fn(a)              # git calls this on every fetch: no welcome, updater or network
+        if a.cmd not in ("hook", "flush", "credential"):
+            from . import tls
+            tls.warn_if_insecure()
         a.fn(a)
         if a.cmd not in ("hook", "flush", "credential", "self-uninstall"):
             record_cli_install()

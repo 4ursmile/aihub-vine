@@ -221,7 +221,7 @@ Certificate checks are on by default. If your hub or git host uses an internal C
 | setting | environment | effect |
 | --- | --- | --- |
 | `aihub config set ca_bundle /path/ca.pem` | `AIHUB_CA_BUNDLE` | trust this CA file (preferred; verification stays on) |
-| `aihub config set insecure_tls true` | `AIHUB_INSECURE=1` | skip certificate checks (self-signed / test hubs only) |
+| `aihub config set insecure_tls false` | `AIHUB_INSECURE=1` | certificate checks are skipped by default (`defaults.json` `tls.insecure_tls`), with a warning on every command; set `false` to verify again, or use `ca_bundle` to keep verification with a private CA |
 
 They apply to every CLI call: hub, an https index, and git (`GIT_SSL_CAINFO` / `GIT_SSL_NO_VERIFY`). The installers read the same
 variables, e.g. `curl -kfsSL https://hub/install.sh | AIHUB_INSECURE=1 sh` (PowerShell: set `$env:AIHUB_INSECURE="1"` first).

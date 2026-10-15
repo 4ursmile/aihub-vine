@@ -306,6 +306,7 @@ class Inbox(unittest.TestCase):
         self.c = app()
         self.h = admin(self.c)
         self.sy, self.ing, self.r = self.c.app.state.sync, self.c.app.state.ingest, self.c.app.state.repos
+        self.r.set_setting("git_telemetry_sync", "1"); self.r.set_setting("git_index_sync", "1")                       # legacy git sync is off by default
 
     def tearDown(self):
         self.ing.close()
@@ -428,6 +429,7 @@ class StagedPublish(unittest.TestCase):
         self.c = app()
         self.h = admin(self.c)
         self.sy, self.ing = self.c.app.state.sync, self.c.app.state.ingest
+        self.c.app.state.repos.set_setting("git_index_sync", "1")   # legacy git index sync is off by default
         self.allow = unittest.mock.patch.object(S, "SCHEMES", S.SCHEMES + ("file://",))
         self.allow.start()
 

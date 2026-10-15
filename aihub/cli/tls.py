@@ -15,7 +15,13 @@ TRUE = ("1", "true", "yes", "on")
 def insecure():
     v = os.environ.get("AIHUB_INSECURE")
     if v is None:
-        v = paths.load("config.json", {}).get("insecure_tls", "")
+        v = paths.load("config.json", {}).get("insecure_tls")
+    if v is None or v == "":
+        try:
+            from ..core import defaults
+            v = defaults.load().get("tls", {}).get("insecure_tls", "")
+        except Exception:
+            v = ""
     return str(v).strip().lower() in TRUE
 
 
@@ -57,3 +63,16 @@ def hint(err):
     if "CERTIFICATE_VERIFY_FAILED" in t or "certificate" in t.lower() and "verify" in t.lower() or "SSL" in t and "self" in t:
         return " (certificate not trusted: set AIHUB_CA_BUNDLE=<ca.pem> or `aihub config set ca_bundle <ca.pem>`; as a last resort `aihub config set insecure_tls true`)"
     return ""
+
+
+_warned = False
+
+
+def warn_if_insecure():
+    """Called once per CLI command: certificate checks are off, so say so (stderr, never blocks)."""
+    global _warned
+    if _warned or not insecure():
+        return
+    _warned = True
+    import sys
+    sys.stderr.write("warning: insecure TLS is ON (certificates are not verified). Turn off: aihub config set insecure_tls false\n")
