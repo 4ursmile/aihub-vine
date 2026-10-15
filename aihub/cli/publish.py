@@ -73,8 +73,19 @@ def _verify(root, git):
                          % (branch, git["branch"]))
 
 
+def _lfs_tracked(top, files):
+    """Subset of `files` that .gitattributes already sends to LFS."""
+    out = gitx.run(["check-attr", "filter", "--"] + files, cwd=top, check=False)
+    return {ln.rsplit(": filter:", 1)[0] for ln in out.splitlines() if ln.rstrip().endswith(": lfs")}
+
+
 def _lfs(top):
+    """Track this package's own large files with git-lfs. `top` is the PACKAGE folder: in a monorepo a package never sees
+    (or reports) another package's files, and files already in LFS are left alone, so a later publish says nothing."""
     big = gitx.large_files(top, LFS_MB)
+    if big:
+        done = _lfs_tracked(top, big)
+        big = [f for f in big if f not in done]
     if not big:
         return []
     if gitx.run(["lfs", "version"], cwd=top, check=False) == "":
@@ -157,7 +168,7 @@ def publish(root, m, bump=None, push_now=True):
     _verify(root, git)
     m = M.parse(open(os.path.join(root, "aihub.toml"), encoding="utf-8").read())
     ensure_gitignore(root)
-    lfs = _lfs(top)
+    lfs = _lfs(root)
     if lfs:
         ui.note("tracking %d large file(s) with git-lfs" % len(lfs))
     gitx.run(["add", "-A", "--", "."], cwd=root)

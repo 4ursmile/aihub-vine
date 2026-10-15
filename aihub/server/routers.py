@@ -1689,10 +1689,10 @@ def index_transfer(name: str, version: str, request: Request, u=Depends(require_
         repo["ref"] = v["ref"]
     tr = request.app.state.transfer
     try:
-        path, rev = tr.get(repo)
+        path, rev, how = tr.lookup(repo)
     except TransferError as e:
         raise HTTPException(502, "cannot fetch %s: %s" % (name, e), headers={"Retry-After": "30"})
-    return FileResponse(path, media_type="application/gzip", filename="%s-%s.tar.gz" % (name, version), headers={"X-Aihub-Rev": rev, "ETag": '"%s"' % rev})
+    return FileResponse(path, media_type="application/gzip", filename="%s-%s.tar.gz" % (name, version), headers={"X-Aihub-Rev": rev, "X-Aihub-Cache": how, "ETag": '"%s"' % rev})
 
 
 # ---------------- client config (what the CLI pulls to get set up)

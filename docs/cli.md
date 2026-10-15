@@ -64,7 +64,7 @@ aihub install package-name
 aihub install package-name --yes
 aihub install pkg-a pkg-b "pkg-c>=1.0"
 aihub install -r requirements.txt
-aihub install package-name -i        # --indirect: the hub fetches from git and sends it (needs the install_indirect permission; falls back to git)
+aihub install package-name -i        # --indirect: the hub fetches from git and sends it (needs the install_indirect permission; falls back to git). Git LFS files are downloaded in both modes (needs git-lfs on the machine that runs git: the hub for -i, else you); the CLI says whether it used a cache or fetched
 aihub install package-name --tool claude --tool opencode
 aihub list
 aihub update

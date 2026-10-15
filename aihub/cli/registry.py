@@ -346,12 +346,14 @@ def _from_hub(r, dest):
         part = os.path.join(tmp, "pkg.tar.gz")
         with api._req("GET", "/index/packages/%s/transfer/%s" % (r["name"], r["version"]), timeout=300) as resp, open(part, "wb") as f:
             rev = resp.headers.get("X-Aihub-Rev") or ""
+            how = resp.headers.get("X-Aihub-Cache") or ""
             shutil.copyfileobj(resp, f)
         src = archive.safe_extract(part, os.path.join(tmp, "x"))
         if not os.path.isfile(os.path.join(src, "aihub.toml")):
             raise api.ApiError("%s: the hub sent no aihub.toml" % r["name"])
         shutil.rmtree(dest, ignore_errors=True)
         shutil.copytree(src, dest)
+        ui.info("%s: from the hub (%s)" % (r["name"], {"tar-cache": "hub cache", "repo-cache": "hub cache of the same repo"}.get(how, "fetched by the hub from git")))
         return rev
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -369,12 +371,19 @@ def checkout(r, dest):
         except (OSError, ValueError, tarfile.TarError) as e:
             ui.note("hub transfer failed for %s (%s); using git" % (r["name"], e))
     repo = r["repo"]
+    url, branch, ref, sub = repo["url"], repo.get("branch") or "main", repo.get("ref"), repo.get("subdir") or ""
     try:
-        src = remote_config.with_access(repo["url"], lambda: gitx.fetch(repo["url"], repo.get("branch") or "main", repo.get("ref")))
+        src = gitx.current(url, branch, ref)            # same repo already fetched (e.g. a sibling in a monorepo) and unchanged: no download
+        if src:
+            gitx.lfs_pull(src, sub)
+            ui.info("%s: %s is up to date locally, no download" % (r["name"], gitx.redact_url(url)))
+        else:
+            src = remote_config.with_access(url, lambda: gitx.fetch(url, branch, ref, lfs=True, subdir=sub))
+            ui.info("%s: fetched from %s" % (r["name"], gitx.redact_url(url)))
     except gitx.GitError as e:
         raise api.ApiError("%s: %s" % (r["name"], e))
     rev = gitx.run(["rev-parse", "HEAD"], cwd=src)
-    src = os.path.join(src, repo.get("subdir") or "")
+    src = os.path.join(src, sub)
     if not os.path.isfile(os.path.join(src, "aihub.toml")):
         raise api.ApiError("%s: no aihub.toml in %s" % (r["name"], gitx.redact_url(repo["url"])))
     shutil.rmtree(dest, ignore_errors=True)

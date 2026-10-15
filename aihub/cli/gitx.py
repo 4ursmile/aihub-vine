@@ -142,9 +142,58 @@ def _sound(d):
         and run(["rev-parse", "--git-dir"], cwd=d, check=False) == ".git"
 
 
-def fetch(url, branch="main", ref=None, base=None):
+def fetch(url, branch="main", ref=None, base=None, lfs=False, subdir=""):
     """Clone or update a cached checkout and leave it at `ref` (tag, branch or commit) or the branch tip.
-    A ref that cannot be resolved is an error: a pinned install must never fall back to something else."""
+    A ref that cannot be resolved is an error: a pinned install must never fall back to something else.
+    lfs=True also downloads the Git LFS files of `subdir`, so the tree holds real files, not pointers."""
+    d = _fetch(url, branch, ref, base)
+    if lfs:
+        lfs_pull(d, subdir)
+    return d
+
+
+def current(url, branch="main", ref=None, base=None):
+    """The cached checkout of url when it is already at the wanted commit (one cheap `ls-remote`, no download), else None.
+    A pinned ref counts only when it is a full commit id (tags and branches can move)."""
+    d = cache_dir(url, base)
+    if not (os.path.isdir(os.path.join(d, ".git")) and _sound(d)):
+        return None
+    head = run(["rev-parse", "-q", "--verify", "HEAD^{commit}"], cwd=d, check=False)
+    if not head:
+        return None
+    if ref:
+        return d if re.fullmatch(r"[0-9a-f]{40}", ref) and head == ref else None
+    return d if remote_head(url, branch, timeout=15) == head else None
+
+
+LFS_TIMEOUT = 3600
+
+
+def lfs_used(d):
+    """True when a .gitattributes in the checkout sends files to Git LFS."""
+    return bool(run(["grep", "-l", "-e", "filter=lfs", "--", ":(glob)**/.gitattributes"], cwd=d, check=False))
+
+
+def lfs_pull(d, subdir=""):
+    """Replace LFS pointer files with the real content (only under `subdir`). -> True when LFS is used here.
+    Raises GitError when the package needs LFS and it cannot be had: a pointer file must never be installed as if it were the file."""
+    if not lfs_used(d):
+        return False
+    if run(["lfs", "version"], cwd=d, check=False) == "":
+        raise GitError("this package stores files in Git LFS but git-lfs is not installed; install it (https://git-lfs.com) and retry")
+    run(["lfs", "install", "--local", "--force"], cwd=d)
+    args = ["lfs", "pull", "origin"]
+    sub = (subdir or "").strip("/")
+    if sub:
+        args += ["--include", sub + "/**"]
+    try:
+        run(args, cwd=d, timeout=LFS_TIMEOUT)
+    except GitError as e:
+        raise GitError("git-lfs could not download the package files: %s" % redact_url(str(e)))
+    return True
+
+
+def _fetch(url, branch, ref, base):
     d = cache_dir(url, base)
     if os.path.isdir(os.path.join(d, ".git")) and not _sound(d):
         rmtree(d)                                   # broken leftover (e.g. after self-uninstall): start clean

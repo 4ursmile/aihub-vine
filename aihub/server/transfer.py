@@ -43,11 +43,16 @@ class Transfer:
         return sub
 
     def _tar_path(self, url, sub, rev):
-        key = hashlib.sha256((url + "\0" + sub).encode()).hexdigest()[:24]
+        key = hashlib.sha256(("v2\0" + url + "\0" + sub).encode()).hexdigest()[:24]
         return os.path.join(self.tars, "%s-%s.tar.gz" % (key, rev)), key
 
     def get(self, repo):
         """-> (path of the tar.gz, commit). Raises TransferError."""
+        return self.lookup(repo)[:2]
+
+    def lookup(self, repo):
+        """-> (path of the tar.gz, commit, how). how = "tar-cache" (nothing to do), "repo-cache" (cut from a checkout another
+        package of the repo already fetched) or "git" (fetched now). Git LFS files are downloaded into the archive. Raises TransferError."""
         url, branch, ref = repo.get("url"), repo.get("branch") or "main", repo.get("ref") or None
         if not url:
             raise TransferError("package has no git location")
@@ -58,18 +63,20 @@ class Transfer:
         if hit and time.time() - hit[0] < limit:
             p, _ = self._tar_path(url, sub, hit[1])
             if os.path.isfile(p):
-                return p, hit[1]
+                return p, hit[1], "tar-cache"
         with self._lock(url):
             hit = self.fresh.get(fk)
             fresh = bool(hit and time.time() - hit[0] < limit)
             p = self._tar_path(url, sub, hit[1])[0] if hit else None
             if fresh and os.path.isfile(p):
-                return p, hit[1]
+                return p, hit[1], "tar-cache"
+            how = "git"
             try:
                 if fresh and self._head(url) == hit[1]:      # sibling of a package already fetched: same checkout, no network
-                    d = self._dir(url)
+                    d, how = self._dir(url), "repo-cache"
                 else:
                     d = gitx.fetch(url, branch, ref, base=self.repos)
+                gitx.lfs_pull(d, sub)
                 rev = gitx.run(["rev-parse", "HEAD"], cwd=d)
             except gitx.GitError as e:
                 raise TransferError("git: %s" % e)
@@ -77,7 +84,7 @@ class Transfer:
             p, key = self._tar_path(url, sub, rev)
             if not os.path.isfile(p):
                 self._build(os.path.join(d, sub), p, key)
-            return p, rev
+            return p, rev, how
 
     def _dir(self, url):
         return gitx.cache_dir(url, self.repos)

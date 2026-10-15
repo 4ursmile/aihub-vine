@@ -199,7 +199,7 @@ def _install_one(r, assume_yes, tools, requested, archive_path=None):
     name = r["name"].lower()
     td = tempfile.mkdtemp()
     try:
-        with ui.Spinner("Fetching %s from git" % name):
+        with ui.Spinner("Fetching %s %s" % (name, "through the hub" if registry.INDIRECT else "from git")):
             src = archive_path or _fetch(r, td)
         toml = os.path.join(src, "aihub.toml")          # the repo's aihub.toml is authoritative
         m = M.normalize(M.parse(open(toml, encoding="utf-8").read()))
