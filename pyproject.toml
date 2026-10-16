@@ -23,7 +23,7 @@ include = ["aihub", "aihub.cli", "aihub.core"]
 exclude = ["aihub.server*", "aihub.builtin_packages*"]
 
 [tool.setuptools.package-data]
-"aihub.core" = ["defaults.json", "policy_rules/*.json"]
+"aihub.core" = ["defaults.json"]
 
 [tool.setuptools.dynamic]
 version = { attr = "aihub.core.release.VERSION" }

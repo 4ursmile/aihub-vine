@@ -1,7 +1,7 @@
 """Built-in tool-call guard ("aihub-policy"): the PreToolUse hook asks `decide()` before an agent (Claude Code) runs a tool.
 
 Rules come from three layers, later wins by rule id:
-  1. aihub/core/policy_rules/*.json (bundled) (always present, work offline)
+  1. aihub/builtin_packages/aihub-policy/rules/*.json (copied into the CLI at build) (always present, work offline)
   2. the hub package `aihub-policy` (~/.aihub/packages/aihub-policy: policy.json + rules/*.json), refreshed automatically by `auto()`
   3. the user's own file ~/.aihub/policy-user.json: on/off switch, extra rules, ids switched off
 A rule: {id, action: deny|ask, reason, pattern (regex, case-insensitive), tool (regex on tool name, default Bash), field (input key, default
@@ -23,14 +23,28 @@ LOG = "policy.log"
 CHECK_HOURS = 6
 
 
-def _bundled():
-    """Rules shipped inside the CLI (aihub/core/policy_rules/*.json; the same files are the source of the hub package aihub-policy)."""
+def _rule_files():
+    """Bundled rule files, sorted: the source folder aihub-policy/rules (checkout, server) else the copy the zipapp/wheel build puts in aihub/core/policy_rules."""
+    src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "builtin_packages", NAME, "rules")
+    if os.path.isdir(src):
+        return [os.path.join(src, x) for x in sorted(os.listdir(src)) if x.endswith(".json")]
     from importlib import resources
+    return [f for f in sorted(resources.files("aihub.core").joinpath("policy_rules").iterdir(), key=lambda x: x.name) if f.name.endswith(".json")]
+
+
+def _load(f):
+    if isinstance(f, str):
+        with open(f, encoding="utf-8") as h:
+            return json.load(h)
+    return json.loads(f.read_text(encoding="utf-8"))
+
+
+def _bundled():
+    """Rules shipped with the CLI (the same files are the hub package aihub-policy)."""
     out = []
     try:
-        for f in sorted(resources.files("aihub.core").joinpath("policy_rules").iterdir(), key=lambda x: x.name):
-            if f.name.endswith(".json"):
-                out += json.loads(f.read_text(encoding="utf-8")).get("rules") or []
+        for f in _rule_files():
+            out += _load(f).get("rules") or []
     except Exception:
         pass
     return out
@@ -182,10 +196,8 @@ def judge_cfg():
     """Bundled judge.json < hub package (policy.json and rules/*.json, key "judge")."""
     cfg = {}
     try:
-        from importlib import resources
-        for f in sorted(resources.files("aihub.core").joinpath("policy_rules").iterdir(), key=lambda x: x.name):
-            if f.name.endswith(".json"):
-                cfg.update(json.loads(f.read_text(encoding="utf-8")).get("judge") or {})
+        for f in _rule_files():
+            cfg.update(_load(f).get("judge") or {})
     except Exception:
         pass
     d = os.path.dirname(_hub_file())
@@ -287,10 +299,8 @@ def judge_cfg():
     """Bundled judge.json < hub package (policy.json and rules/*.json, key "judge")."""
     cfg = {}
     try:
-        from importlib import resources
-        for f in sorted(resources.files("aihub.core").joinpath("policy_rules").iterdir(), key=lambda x: x.name):
-            if f.name.endswith(".json"):
-                cfg.update(json.loads(f.read_text(encoding="utf-8")).get("judge") or {})
+        for f in _rule_files():
+            cfg.update(_load(f).get("judge") or {})
     except Exception:
         pass
     rd = os.path.join(os.path.dirname(_hub_file()), "rules")

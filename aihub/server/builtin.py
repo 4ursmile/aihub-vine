@@ -28,19 +28,6 @@ def _files(root):
     return sorted(out)
 
 
-RULES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "core", "policy_rules")
-
-
-def _stage(root, folder):
-    """aihub-policy keeps its rules in core/policy_rules (the CLI bundles them too); the published package gets a copy in rules/."""
-    if folder != "aihub-policy":
-        return root
-    tmp = os.path.join(tempfile.mkdtemp(), folder)
-    shutil.copytree(root, tmp, ignore=shutil.ignore_patterns("__pycache__"))
-    shutil.copytree(RULES, os.path.join(tmp, "rules"), ignore=shutil.ignore_patterns("__pycache__"))
-    return tmp
-
-
 def is_builtin(name):
     return name in names()
 
@@ -49,9 +36,8 @@ def seed(repos, storage, data_dir):
     """Publish missing built-in package versions. Never raises: a broken bundle must not stop the server."""
     for folder in names():
         root = os.path.join(DIR, folder)
-        tmp = stage = None
+        tmp = None
         try:
-            root = stage = _stage(root, folder)
             with open(os.path.join(root, "aihub.toml"), encoding="utf-8") as f:
                 m = M.parse(f.read())
             pk = m["package"]
@@ -79,5 +65,3 @@ def seed(repos, storage, data_dir):
         finally:
             if tmp and os.path.exists(tmp):
                 os.remove(tmp)
-            if stage and stage != os.path.join(DIR, folder):
-                shutil.rmtree(stage, ignore_errors=True)
