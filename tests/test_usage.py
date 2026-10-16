@@ -33,7 +33,7 @@ class UsageTest(unittest.TestCase):
                 "message": {"id": mid, "model": model, "usage": dict({"input_tokens": 0, "output_tokens": 0}, **u)}}
 
     def test_claude_dedupes_streamed_message_and_prices_cache(self):
-        m = "claude-sonnet-5"
+        m = "claude-sonnet-4"
         self.claude([self.msg("a", m, self.ts, input_tokens=1000, output_tokens=10),
                      self.msg("a", m, self.ts, input_tokens=1000, output_tokens=2000, cache_creation_input_tokens=1_000_000,
                               cache_read_input_tokens=2_000_000)])
@@ -67,9 +67,21 @@ class UsageTest(unittest.TestCase):
         self.assertEqual([x["output"] for x in days], [5, 7])
         self.assertGreater(days[0]["name"], days[1]["name"])
         out, keys = [], iter(["2", "d", "q"])
-        ui = mock.Mock(out=out.append, heading=out.append, dim=str, info=out.append, table=lambda h, r: out.append((h[0], r)))
+        ui = mock.Mock(heading=out.append, dim=str, bold=str, accent=str, ok=str, warn=str, err=str, COLOR=False, info=out.append, out=out.append, table=lambda h, r: out.append((h[0], r)))
         usage.interactive(rep, ui, read=lambda _: next(keys))
         self.assertIn("Day", [o[0] for o in out if isinstance(o, tuple)])
+
+    def test_regex_is_case_insensitive_and_filters(self):
+        self.claude([self.msg("a", "claude-opus-5", self.ts, output_tokens=5), self.msg("b", "claude-sonnet-5", self.ts, output_tokens=7)])
+        self.assertEqual(usage.price_for("CLAUDE-OPUS-5"), usage.price_for("claude-opus-5"))
+        t = usage.report(("claude",), 30, self.now, model="OPUS")[0]["total"]
+        self.assertEqual((t["requests"], t["output"]), (1, 5))
+
+    def test_cache_reuses_parsed_files(self):
+        self.claude([self.msg("a", "claude-opus-5", self.ts, output_tokens=5)])
+        usage.collect(("claude",))
+        with mock.patch.object(usage, "parse_claude", side_effect=AssertionError("reparsed")):
+            self.assertEqual(len(usage.collect(("claude",))), 1)
 
     def test_user_price_override(self):
         self.claude([self.msg("a", "mystery-1", self.ts, output_tokens=1_000_000)])

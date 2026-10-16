@@ -587,12 +587,18 @@ def cmd_hook(a):
 def cmd_usage(a):
     from . import usage
     tools = tuple(a.tool) if a.tool else usage.TOOLS
-    rep = usage.report(tools, a.days)
+    recs = []
+    with ui.Spinner("Reading session logs") as sp:
+        def prog(i, n, tool):
+            sp.text("Reading %s session logs (%d/%d)" % (tool, i, n) if n else "Reading session logs")
+        recs = usage.collect(tools, 0.0, prog)
+        sp.text("Read %d requests" % len(recs))
+    rep = usage.report(tools, a.days, model=a.model, recs=recs)
     if a.json:
         print(json.dumps([dict(p, by_model=[dict(x, name="/".join(x["name"])) for x in p["by_model"]]) for p in rep], default=lambda o: sorted(o)))
         return 0
     if not a.plain and not a.by_day and sys.stdin.isatty() and sys.stdout.isatty():
-        usage.interactive(rep, ui)
+        usage.interactive(rep, ui, refilter=lambda m: usage.report(tools, a.days, model=m, recs=recs))
     else:
         usage.show(rep, ui, a.by_day)
     return 0
@@ -664,7 +670,9 @@ def cmd_menu():
                 updater.cmd_upgrade(argparse.Namespace(check=False, force=False, rollback=False))
             elif choice == "usage":
                 from . import usage
-                usage.interactive(usage.report(usage.TOOLS, 30), ui)
+                with ui.Spinner("Reading session logs") as sp:
+                    recs = usage.collect(usage.TOOLS, 0.0, lambda i, n, t: sp.text("Reading %s session logs (%d/%d)" % (t, i, n) if n else "Reading session logs"))
+                usage.interactive(usage.report(usage.TOOLS, 30, recs=recs), ui, refilter=lambda m: usage.report(usage.TOOLS, 30, model=m, recs=recs))
             elif choice == "policy":
                 from . import policy
                 policy.menu()
@@ -1053,8 +1061,11 @@ def dev_publish(a):
             return ui.note("nothing selected")
     with_path = lambda d: argparse.Namespace(**dict(vars(a), path=d))
     failed, ready = [], []
-    for d in roots:                                  # phase 1: prepare. Nothing is pushed yet
+    for n, d in enumerate(roots, 1):                 # phase 1: prepare. Nothing is pushed yet
         label = _label(a, d)
+        tag = "[%d/%d] " % (n, len(roots)) if len(roots) > 1 else ""
+        sp = ui.Spinner("%sPreparing %s" % (tag, label))
+        sp.__enter__()
         try:
             ws.fix_git(d, top_root)                  # [git] follows the repository's real remote / branch / folder
             block = ws.blocking(ws.inspect_package(d, top_root))
@@ -1069,9 +1080,13 @@ def dev_publish(a):
             for f, got, v in pysync.sync(d, pysync.want(_load(with_path(d)))):    # pyproject.toml follows aihub.toml (also after --bump)
                 ui.good("%s: pyproject.toml %s %r -> %r" % (label, f, got, v))
             m = dev_validate(with_path(d), quiet=True)
+            sp.text("%sCommitting %s" % (tag, label))
             ready.append((d, pub.publish(d, m, push_now=False)))      # one commit per package: history says which was released
+            sp.text("%sPrepared %s" % (tag, label))
+            sp.__exit__(None, None, None)
         except (api.ApiError, ValueError, KeyError, OSError, gitx.GitError) as e:
-            ui.bad("%s: %s" % (label, e))
+            sp.text("%s: %s" % (label, e))
+            sp.__exit__(ValueError, e, None)
             failed.append(label)
     pushed = []
     repos = {}
@@ -1086,7 +1101,10 @@ def dev_publish(a):
             failed += [_label(a, d) for d, _ in items]
     queued = False
     for d, info in pushed:
-        queued = not pub.report(info) or queued
+        with ui.Spinner("Telling the hub about %s %s" % (info["package"], info["version"])) as sp:
+            sent = pub.report(info)
+            sp.text("Told the hub about %s %s" % (info["package"], info["version"])) if sent else sp.problem("Hub not reached for %s (queued)" % info["package"])
+        queued = not sent or queued
         ui.celebrate("Published %s %s" % (info["package"], info["version"]))
         ui.info("repo:    %s @ %s (%s)" % (info["git_url"], info["git_branch"], info["commit"][:8]))
         ui.info("install: aihub install %s" % info["package"])
@@ -1358,8 +1376,9 @@ def build_parser():
         "Examples:\n  aihub usage\n  aihub usage --by-day --days 14\n  aihub usage --tool claude --days 7 --plain\n  aihub usage --json",
         arg("--tool", action="append", choices=["claude", "codex"], help="Only this tool (repeatable)."),
         arg("--days", type=int, default=30, help="Length of the middle window (default 30)."),
+        arg("--model", help="Case-insensitive regex on 'tool model', e.g. 'opus|gpt' (in the interactive view type /regex)."),
         arg("--by-day", action="store_true", help="One row per day instead of by tool and model."),
-        arg("--plain", action="store_true", help="Print every period and exit (default in a terminal is an interactive view: 1/2/3 period, d by day, s summary, q quit)."),
+        arg("--plain", action="store_true", help="Print every period and exit (default in a terminal is an interactive view: 1/2/3 period, d by day, s summary, /regex filter, q quit)."),
         arg("--json", action="store_true", help="Machine readable output (includes by_day)."))
     add("flush", cmd_flush, "Send queued usage events to the hub.",
         "Push queued usage events to the telemetry inbox (a git repo) now. Events are normally pushed in the background as one batch, a few seconds after the last event (aihub config set telemetry_interval 15).",

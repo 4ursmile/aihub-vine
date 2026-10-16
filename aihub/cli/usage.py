@@ -27,6 +27,14 @@ PRICES = [
 TOOLS = ("claude", "codex")
 
 
+def _rx(pat):
+    """Case-insensitive regex; a pattern that is not valid regex is matched as plain text."""
+    try:
+        return re.compile(pat, re.I)
+    except re.error:
+        return re.compile(re.escape(pat), re.I)
+
+
 def price_for(model):
     """-> (input, output, cache_write, cache_read) per 1M tokens, or None when the model is unknown."""
     try:
@@ -37,7 +45,7 @@ def price_for(model):
     except (TypeError, ValueError, KeyError, AttributeError):
         pass
     for pat, p in _table():
-        if re.search(pat, model.lower()):
+        if _rx(pat).search(model):
             return p
     return None
 
@@ -81,10 +89,14 @@ def _ts(s):
         return None
 
 
-def _lines(path):
+def _lines(path, need=()):
+    """JSON objects of a .jsonl file. A line is parsed only if it contains one of the `need` substrings (cheap prefilter:
+    most lines of a session log are tool output that never carries usage)."""
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             for ln in f:
+                if need and not any(n in ln for n in need):
+                    continue
                 try:
                     j = json.loads(ln)
                 except ValueError:
@@ -99,71 +111,129 @@ def _n(v):
     return v if isinstance(v, int) and v > 0 else 0
 
 
+def _files_of(tool):
+    root = os.path.join(os.path.expanduser("~"), "." + tool, "projects" if tool == "claude" else "sessions")
+    return glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True)
+
+
 def read_claude(since=0.0):
     """Yield one record per assistant message. A message streams as several lines with one id: the last line wins."""
-    root = os.path.join(os.path.expanduser("~"), ".claude", "projects")
-    for fp in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True):
+    for fp in _files_of("claude"):
         try:
             if os.path.getmtime(fp) < since:
                 continue
         except OSError:
             continue
-        msgs = {}
-        for j in _lines(fp):
-            m = j.get("message")
-            if j.get("type") != "assistant" or not isinstance(m, dict) or not isinstance(m.get("usage"), dict):
-                continue
-            model = m.get("model") or ""
-            if not model or model.startswith("<"):
-                continue
-            ts = _ts(j.get("timestamp"))
-            if ts is None:
-                continue
-            u = m["usage"]
-            cc = u.get("cache_creation") if isinstance(u.get("cache_creation"), dict) else {}
-            cw = _n(u.get("cache_creation_input_tokens")) or _n(cc.get("ephemeral_5m_input_tokens")) + _n(cc.get("ephemeral_1h_input_tokens"))
-            msgs[m.get("id") or j.get("uuid") or len(msgs)] = {
-                "ts": ts, "tool": "claude", "session": str(j.get("sessionId") or os.path.basename(fp)), "model": model,
-                "input": _n(u.get("input_tokens")), "output": _n(u.get("output_tokens")), "cache_write": cw,
-                "cache_read": _n(u.get("cache_read_input_tokens"))}
-        for r in msgs.values():
+        for r in parse_claude(fp):
             yield r
+
+
+def parse_claude(fp):
+    msgs = {}
+    for j in _lines(fp, ('"usage"',)):
+        m = j.get("message")
+        if j.get("type") != "assistant" or not isinstance(m, dict) or not isinstance(m.get("usage"), dict):
+            continue
+        model = m.get("model") or ""
+        if not model or model.startswith("<"):
+            continue
+        ts = _ts(j.get("timestamp"))
+        if ts is None:
+            continue
+        u = m["usage"]
+        cc = u.get("cache_creation") if isinstance(u.get("cache_creation"), dict) else {}
+        cw = _n(u.get("cache_creation_input_tokens")) or _n(cc.get("ephemeral_5m_input_tokens")) + _n(cc.get("ephemeral_1h_input_tokens"))
+        msgs[m.get("id") or j.get("uuid") or len(msgs)] = {
+            "ts": ts, "tool": "claude", "session": str(j.get("sessionId") or os.path.basename(fp)), "model": model,
+            "input": _n(u.get("input_tokens")), "output": _n(u.get("output_tokens")), "cache_write": cw,
+            "cache_read": _n(u.get("cache_read_input_tokens"))}
+    return list(msgs.values())
 
 
 def read_codex(since=0.0):
     """Codex logs cumulative totals: each increase is one request, attributed to the model of the latest turn."""
-    root = os.path.join(os.path.expanduser("~"), ".codex", "sessions")
-    for fp in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True):
+    for fp in _files_of("codex"):
         try:
             if os.path.getmtime(fp) < since:
                 continue
         except OSError:
             continue
-        sid, model, prev = os.path.basename(fp), "unknown", {}
-        for j in _lines(fp):
-            p = j.get("payload") if isinstance(j.get("payload"), dict) else {}
-            if j.get("type") == "session_meta":
-                sid = str(p.get("id") or sid)
-            elif j.get("type") == "turn_context":
-                model = str(p.get("model") or model)
-            elif j.get("type") == "event_msg" and p.get("type") == "token_count" and isinstance(p.get("info"), dict):
-                tot = p["info"].get("total_token_usage")
-                ts = _ts(j.get("timestamp"))
-                if not isinstance(tot, dict) or ts is None:
-                    continue
-                cur = {k: _n(tot.get(k)) for k in ("input_tokens", "cached_input_tokens", "output_tokens")}
-                if sum(cur.values()) == sum(prev.values()) and cur == prev:
-                    continue
-                d = {k: (cur[k] - prev.get(k, 0)) if cur[k] >= prev.get(k, 0) else cur[k] for k in cur}     # a drop = counter reset
-                prev = cur
-                yield {"ts": ts, "tool": "codex", "session": sid, "model": model, "input": max(0, d["input_tokens"] - d["cached_input_tokens"]),
-                       "output": d["output_tokens"], "cache_write": 0, "cache_read": d["cached_input_tokens"]}
+        for r in parse_codex(fp):
+            yield r
 
 
-def collect(tools=TOOLS, since=0.0):
+def parse_codex(fp):
     out = []
-    for t in tools:
-        out += list({"claude": read_claude, "codex": read_codex}[t](since))
+    sid, model, prev = os.path.basename(fp), "unknown", {}
+    for j in _lines(fp, ('"session_meta"', '"turn_context"', '"token_count"')):
+        p = j.get("payload") if isinstance(j.get("payload"), dict) else {}
+        if j.get("type") == "session_meta":
+            sid = str(p.get("id") or sid)
+        elif j.get("type") == "turn_context":
+            model = str(p.get("model") or model)
+        elif j.get("type") == "event_msg" and p.get("type") == "token_count" and isinstance(p.get("info"), dict):
+            tot = p["info"].get("total_token_usage")
+            ts = _ts(j.get("timestamp"))
+            if not isinstance(tot, dict) or ts is None:
+                continue
+            cur = {k: _n(tot.get(k)) for k in ("input_tokens", "cached_input_tokens", "output_tokens")}
+            if sum(cur.values()) == sum(prev.values()) and cur == prev:
+                continue
+            d = {k: (cur[k] - prev.get(k, 0)) if cur[k] >= prev.get(k, 0) else cur[k] for k in cur}     # a drop = counter reset
+            prev = cur
+            out.append({"ts": ts, "tool": "codex", "session": sid, "model": model, "input": max(0, d["input_tokens"] - d["cached_input_tokens"]),
+                        "output": d["output_tokens"], "cache_write": 0, "cache_read": d["cached_input_tokens"]})
+    return out
+
+
+CACHE = "usage-cache.json"
+CACHE_V = 1
+
+
+def _cache_load():
+    try:
+        with open(paths.p(CACHE), encoding="utf-8") as f:
+            d = json.load(f)
+        return d["files"] if d.get("v") == CACHE_V and isinstance(d.get("files"), dict) else {}
+    except Exception:
+        return {}
+
+
+def _cache_save(files):
+    try:
+        paths.ensure()
+        tmp = paths.p(CACHE) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"v": CACHE_V, "files": files}, f, separators=(",", ":"))
+        os.replace(tmp, paths.p(CACHE))
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def collect(tools=TOOLS, since=0.0, progress=None):
+    """All records. A log file is parsed once: its records are cached by (mtime, size), so later runs only read new or
+    changed files. progress(done, total, tool) is called per file (for a spinner)."""
+    cache, fresh, out = _cache_load(), {}, []
+    jobs = [(t, fp) for t in tools for fp in _files_of(t)]
+    for i, (t, fp) in enumerate(jobs):
+        if progress:
+            progress(i, len(jobs), t)
+        try:
+            st = os.stat(fp)
+        except OSError:
+            continue
+        key = "%s|%s" % (t, fp)
+        hit = cache.get(key)
+        if hit and hit.get("m") == st.st_mtime and hit.get("s") == st.st_size:
+            recs = hit["r"]
+        else:
+            recs = (parse_claude if t == "claude" else parse_codex)(fp)
+        fresh[key] = {"m": st.st_mtime, "s": st.st_size, "r": recs}
+        out += recs
+    if progress:
+        progress(len(jobs), len(jobs), "")
+    if fresh != cache:
+        _cache_save(fresh)
     return out
 
 
@@ -203,8 +273,12 @@ def periods(now=None, days=30):
     return [("Today", mid), ("Last %d days" % days, now.timestamp() - days * 86400), ("All time", 0.0)]
 
 
-def report(tools=TOOLS, days=30, now=None):
-    recs = collect(tools)
+def report(tools=TOOLS, days=30, now=None, model=None, recs=None, progress=None):
+    """model = case-insensitive regex on "tool model" (e.g. "OPUS|gpt"); recs = records from collect() to re-filter without re-reading."""
+    recs = collect(tools, 0.0, progress) if recs is None else recs
+    if model:
+        rx = _rx(model)
+        recs = [r for r in recs if rx.search("%s %s" % (r["tool"], r["model"]))]
     out = []
     for label, lo in periods(now, days):
         rs = [r for r in recs if r["ts"] >= lo]
@@ -226,25 +300,48 @@ def usd(v, unpriced=0):
     return ("$%.2f" % v if v >= 0.01 or not v else "$%.3f" % v) + ("*" if unpriced else "")
 
 
-def _row(name, a):
+def _bar(frac, n=10):
+    k = max(0, min(n, int(round(frac * n))))
+    return ("█" * k).ljust(n, "░")
+
+
+def _row(name, a, ui=None, top=0.0):
+    """Table row. With a ui: cost is coloured by its share of the biggest row, the cache hit rate by quality."""
+    hit = round(a["cache_hit"] * 100)
+    cost_s, hit_s = usd(a["cost"], a["unpriced"]), "%d%%" % hit
+    if ui:
+        share = a["cost"] / top if top else 0.0
+        cost_s = (ui.err if share > 0.66 else ui.warn if share > 0.25 else ui.ok)(cost_s)
+        hit_s = (ui.ok if hit >= 70 else ui.warn if hit >= 40 else ui.err)(hit_s) if a["cache_read"] + a["input"] + a["cache_write"] else ui.dim(hit_s)
+        name = ui.accent(name)
     return [name, str(a["sessions"]), str(a["requests"]), tok(a["input"]), tok(a["output"]), tok(a["cache_write"]),
-            tok(a["cache_read"]), "%d%%" % round(a["cache_hit"] * 100), usd(a["cost"], a["unpriced"])]
+            tok(a["cache_read"]), hit_s, cost_s]
 
 
 HEADS = ["Sessions", "Requests", "Input", "Output", "Cache write", "Cache read", "Hit", "Est. cost"]
 
 
+def _rows(items, ui, label=lambda x: x["name"]):
+    top = max([x["cost"] for x in items] or [0.0])
+    return [_row(label(x), x, ui, top) for x in items]
+
+
 def show_period(p, ui, view="summary"):
     """One period. view: summary (by tool + by model) or day (one row per local day, newest first)."""
     t = p["total"]
-    ui.heading("%s  %s" % (p["period"], ui.dim("%d sessions, est. %s" % (t["sessions"], usd(t["cost"], t["unpriced"])) if t else "no usage")))
+    ui.heading("%s  %s" % (p["period"], ui.dim("%d sessions, est. " % t["sessions"]) + ui.bold(usd(t["cost"], t["unpriced"])) if t else ui.dim("no usage")))
     if not t:
         return False
     if view == "day":
-        ui.table(["Day"] + HEADS, [_row(x["name"], x) for x in p["by_day"][:90]])
+        ui.table(["Day"] + HEADS, _rows(p["by_day"][:90], ui))
     else:
-        ui.table(["Tool"] + HEADS, [_row(x["name"], x) for x in p["by_tool"]])
-        ui.table(["Model"] + HEADS, [_row("%s: %s" % (x["name"][0], x["name"][1].split("/")[-1]), x) for x in p["by_model"][:12]])
+        ui.table(["Tool"] + HEADS, _rows(p["by_tool"], ui))
+        ui.table(["Model"] + HEADS, _rows(p["by_model"][:12], ui, lambda x: "%s: %s" % (x["name"][0], x["name"][1].split("/")[-1])))
+        top = max([x["cost"] for x in p["by_model"]] or [0.0])
+        if top and len(p["by_model"]) > 1:
+            ui.out("")
+            for x in p["by_model"][:5]:
+                ui.out("  %s %s %s" % (ui.accent(_bar(x["cost"] / top)), usd(x["cost"], x["unpriced"]).rjust(9), ui.dim(x["name"][1].split("/")[-1])))
     return any(x["unpriced"] for x in p["by_tool"])
 
 
@@ -262,19 +359,32 @@ def show(rep, ui, by_day=False):
     footer(ui, unpriced)
 
 
-def interactive(rep, ui, read=input):
-    """Keys: 1/2/3 period, d = by day, s = summary, r = reload, q = quit. Line based (Enter after the key): works in every terminal."""
-    idx, view = 1, "summary"
+def interactive(rep, ui, read=input, refilter=None):
+    """Keys (then Enter): 1/2/3 period, d = by day, s = summary, /regex = filter tool+model (case-insensitive, `/` alone clears),
+    q = quit. refilter(regex or None) -> a new report (records already loaded: instant)."""
+    idx, view, flt = 1, "summary", None
     while True:
         ui.out("")
         un = show_period(rep[idx], ui, view)
         ui.out("")
         footer(ui, un)
+        if flt:
+            ui.info("filter: /%s" % flt)
+        names = [p["period"] for p in rep]
+        prompt = "  %s  %s  %s   %s  %s  %s > " % tuple(
+            [ui.accent("[%d]" % (i + 1)) + " " + (ui.bold(n) if i == idx else n) for i, n in enumerate(names)] +
+             [ui.accent("[s]") + "ummary", ui.accent("[d]") + "ay", ui.accent("[/]") + "filter  " + ui.accent("[q]") + "uit"])
         try:
-            k = read("  [1] %s  [2] %s  [3] %s   [s]ummary  [d]ay  [q]uit > " % tuple(p["period"] for p in rep)).strip().lower()
+            k = read(prompt).strip()
         except (EOFError, KeyboardInterrupt):
             ui.out("")
             return
+        if k.startswith("/"):
+            flt = k[1:].strip() or None
+            if refilter:
+                rep = refilter(flt)
+            continue
+        k = k.lower()
         if k in ("q", "quit", "exit"):
             return
         if k in ("1", "2", "3"):
