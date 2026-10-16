@@ -3,10 +3,11 @@ import os
 import re
 import shutil
 
-from ..core import manifest as M
+from ..core import manifest as M, pkgindex
 from . import api, gitx, identity, paths, telemetry, ui
 
 LFS_MB = 50
+BUNDLE_TOML_MAX = 64 * 1024      # a manifest larger than this is not sent inline (the hub reads git instead)
 
 
 def _norm_url(u):
@@ -186,7 +187,29 @@ def publish(root, m, bump=None, push_now=True):
             "host": who["host"], "cwd": who["cwd"], "local_user": who["local_user"]}
     from . import hooks
     info["client_id"] = hooks.client_id()
+    info["bundle"] = bundle(root)
     return info
+
+
+def bundle(root):
+    """aihub.toml and the README as base64 bytes, sent inside the publish event: the hub builds the index entry from them and does not
+    have to fetch this repository (git rate limits). Missing/oversized files are left out; the hub then falls back to git."""
+    import base64
+    out = {}
+    for key, names in (("toml", ("aihub.toml",)), ("readme", pkgindex.README_NAMES)):
+        for n in names:
+            try:
+                with open(os.path.join(root, n), "rb") as f:
+                    raw = f.read(pkgindex.README_MAX * 4 + 1 if key == "readme" else BUNDLE_TOML_MAX + 1)
+            except OSError:
+                continue
+            if key == "toml" and len(raw) > BUNDLE_TOML_MAX:
+                return {}
+            out[key] = base64.b64encode(raw[:pkgindex.README_MAX * 4]).decode()
+            if key == "readme":
+                out["readme_name"] = n
+            break
+    return out if "toml" in out else {}
 
 
 def report(info):

@@ -27,25 +27,47 @@ PRICES = [
 TOOLS = ("claude", "codex")
 
 
+_RX = {}
+
+
 def _rx(pat):
-    """Case-insensitive regex; a pattern that is not valid regex is matched as plain text."""
+    """Case-insensitive regex (compiled once); a pattern that is not valid regex is matched as plain text."""
+    if pat in _RX:
+        return _RX[pat]
+    _RX[pat] = _rx_new(pat)
+    return _RX[pat]
+
+
+def _rx_new(pat):
     try:
         return re.compile(pat, re.I)
     except re.error:
         return re.compile(re.escape(pat), re.I)
 
 
+def _norm(s):
+    """Lower case, every run of non-alphanumerics (space _ . / :) becomes one '-': DeepSeek_V4.Flash == deepseek-v4-flash."""
+    return re.sub(r"[^a-z0-9]+", "-", str(s).lower()).strip("-")
+
+
 def price_for(model):
-    """-> (input, output, cache_write, cache_read) per 1M tokens, or None when the model is unknown."""
+    """-> (input, output, cache_write, cache_read) per 1M tokens, or None when the model is unknown.
+    ~/.aihub/prices.json keys match as a substring of the model name, ignoring case and separators; the longest (most specific)
+    key wins, so "deepseek-v4-flash" prices DeepSeek-V4-Flash-Vision-Exp unless a "deepseek-v4-flash-vision" key exists."""
+    nm = _norm(model)
+    best = None
     try:
         for k, v in (paths.load("prices.json", {}) or {}).items():
-            if k.lower() in model.lower():
-                return (float(v["input"]), float(v["output"]), float(v.get("cache_write", v["input"] * 1.25)),
-                        float(v.get("cache_read", v["input"] * 0.1)))
+            nk = _norm(k)
+            if nk and nk in nm and (best is None or len(nk) > best[0]):
+                best = (len(nk), (float(v["input"]), float(v["output"]), float(v.get("cache_write", v["input"] * 1.25)),
+                                  float(v.get("cache_read", v["input"] * 0.1))))
     except (TypeError, ValueError, KeyError, AttributeError):
-        pass
+        best = None
+    if best:
+        return best[1]
     for pat, p in _table():
-        if _rx(pat).search(model):
+        if _rx(pat).search(model) or _rx(pat).search(nm):
             return p
     return None
 
@@ -213,7 +235,7 @@ def _cache_save(files):
 def collect(tools=TOOLS, since=0.0, progress=None):
     """All records. A log file is parsed once: its records are cached by (mtime, size), so later runs only read new or
     changed files. progress(done, total, tool) is called per file (for a spinner)."""
-    cache, fresh, out = _cache_load(), {}, []
+    cache, fresh, out, dirty = _cache_load(), {}, [], False
     jobs = [(t, fp) for t in tools for fp in _files_of(t)]
     for i, (t, fp) in enumerate(jobs):
         if progress:
@@ -228,25 +250,35 @@ def collect(tools=TOOLS, since=0.0, progress=None):
             recs = hit["r"]
         else:
             recs = (parse_claude if t == "claude" else parse_codex)(fp)
+            dirty = True
         fresh[key] = {"m": st.st_mtime, "s": st.st_size, "r": recs}
         out += recs
     if progress:
         progress(len(jobs), len(jobs), "")
-    if fresh != cache:
+    if dirty or len(fresh) != len(cache):                        # files added, changed or removed (no deep compare of the whole cache)
         _cache_save(fresh)
     return out
 
 
-def cost(r):
-    p = price_for(r["model"])
+def cost(r, rates=None):
+    """Estimated USD of one record. `rates` (model -> price tuple or None) memoizes price_for for a whole report: the price files are
+    read and the patterns matched once per model, not once per record."""
+    if rates is None:
+        p = price_for(r["model"])
+    else:
+        m = r["model"]
+        if m not in rates:
+            rates[m] = price_for(m)
+        p = rates[m]
     if not p:
         return None
     return (r["input"] * p[0] + r["output"] * p[1] + r["cache_write"] * p[2] + r["cache_read"] * p[3]) / 1e6
 
 
-def summarize(records, key):
+def summarize(records, key, rates=None):
     """Group records by key(r) -> rows with sessions, requests, tokens, cache hit rate and estimated cost."""
     g = {}
+    rates = {} if rates is None else rates
     for r in records:
         a = g.setdefault(key(r), {"sessions": set(), "requests": 0, "input": 0, "output": 0, "cache_write": 0, "cache_read": 0,
                                   "cost": 0.0, "unpriced": 0})
@@ -254,7 +286,7 @@ def summarize(records, key):
         a["requests"] += 1
         for k in ("input", "output", "cache_write", "cache_read"):
             a[k] += r[k]
-        c = cost(r)
+        c = cost(r, rates)
         if c is None:
             a["unpriced"] += 1
         else:
@@ -279,12 +311,19 @@ def report(tools=TOOLS, days=30, now=None, model=None, recs=None, progress=None)
     if model:
         rx = _rx(model)
         recs = [r for r in recs if rx.search("%s %s" % (r["tool"], r["model"]))]
-    out = []
+    out, rates, dayname = [], {}, {}
+
+    def day(r):
+        k = int(r["ts"]) // 3600                                  # strftime once per hour bucket, not once per record
+        if k not in dayname:
+            dayname[k] = datetime.datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d")
+        return dayname[k]
+
     for label, lo in periods(now, days):
         rs = [r for r in recs if r["ts"] >= lo]
-        out.append({"period": label, "since": lo, "total": (summarize(rs, lambda r: "all") or [None])[0],
-                    "by_day": sorted(summarize(rs, lambda r: datetime.datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d")), key=lambda x: x["name"], reverse=True),
-                    "by_tool": summarize(rs, lambda r: r["tool"]), "by_model": summarize(rs, lambda r: (r["tool"], r["model"]))})
+        out.append({"period": label, "since": lo, "total": (summarize(rs, lambda r: "all", rates) or [None])[0],
+                    "by_day": sorted(summarize(rs, day, rates), key=lambda x: x["name"], reverse=True),
+                    "by_tool": summarize(rs, lambda r: r["tool"], rates), "by_model": summarize(rs, lambda r: (r["tool"], r["model"]), rates)})
     return out
 
 

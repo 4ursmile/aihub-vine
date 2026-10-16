@@ -55,6 +55,8 @@ def lint(m: dict, root: str):
         need(m["bot"]["onboard"], "[bot] onboard")
     if typ == "mcp" and not m["mcp_servers"]:
         errs.append('type="mcp" needs at least one [[mcp_servers]] entry')
+    if (m.get("python") or {}).get("install") and not os.path.isfile(os.path.join(base, "pyproject.toml")):
+        errs.append("[python] install = true needs a pyproject.toml in the package folder")
     if typ == "skill" and not m["skills"]:
         warns.append('type="skill" but there is no [[skills]] entry, so nothing will be registered')
     if typ == "agent" and not m["agents"]:
@@ -156,7 +158,8 @@ def normalize(d: dict) -> dict:
             "packages": req.get("packages", []),  # ["dep", "dep>=1"]
             "os": req.get("os", []),
         },
-        "python": {"requires": py.get("requires", []), "requirements_file": py.get("requirements_file", "")},
+        "python": {"requires": py.get("requires", []), "requirements_file": py.get("requirements_file", ""),
+                   "install": bool(py.get("install", False))},   # true: pip install the package folder itself (its pyproject.toml)
         "skills": d.get("skills", []),           # [{name, path}]
         "agents": d.get("agents", []),           # [{name, path}]
         "mcp_servers": d.get("mcp_servers", []), # [{name, command, args, env}]

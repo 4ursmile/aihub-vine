@@ -4,7 +4,7 @@ This is a bundled snapshot, condensed from the hub docs (cli, manifest, publishi
 
 ## 1. Core model
 
-- **Git** holds package files and the package index. The index is a folder in a git repo (default branch `main`, path `index`) with `root.json`, `catalog/` and `packages/<xx>/<name>.json`. An older single `index.json` is still read.
+- **Git** holds package files. The package index is a folder in a git repo (default branch `main`, path `index`) with `root.json`, `catalog/` and `packages/<xx>/<name>.json`; the hub serves it from its database, and git keeps a backup copy. An older single `index.json` is still read.
 - **Only the hub server writes the index.** The CLI only reads it. Nobody edits the index by hand.
 - **The telemetry inbox** (a git repo, often the index repo) holds usage and lifecycle events as files on one branch, `telemetry-inbox`. Git is the fallback: the CLI sends usage to the hub first (`POST /api/v1/telemetry`, a busy hub is waited for) and adds a file to this branch only when the hub cannot be reached; the server ingests the files, archives them to the `telemetry-archive` branch and removes them from the inbox. The CLI also reads the package index from the hub first (with ETag/304) and from git as the fallback.
 - **The hub server** caches the index and events, and serves accounts, reviews and the web UI. It stores no package files and has no upload routes.
@@ -132,12 +132,14 @@ aihub dev index / aihub dev stats PATH
 Constraints: `name>=1.2`, `name==1.2.0`, `name>=1.0,<2`, `~=1.4`. An omitted operator means `==`. Empty or `*` matches any version.
 
 - `install` walks the dependency graph (dependencies first). Constraints from every dependent are combined; a conflict names the package and who requires it.
+- With `[python] install = true` the package is pip-installed into its venv from its folder (its `pyproject.toml`), and its console scripts are linked into PATH. `uninstall` removes those shims and the venv.
 - The index checkout is refreshed at most every 5 minutes. If the fetch fails, the last checkout is used.
 - `install` on a disabled package enables it, unless the index has a newer version (then it updates).
 - `disable` refuses while an enabled package depends on it. `--force` overrides; `--all` disables everything.
 - `update` skips disabled packages and never moves a package outside the range its enabled dependents allow.
 - `lock` records, per package: exact version, git commit, dependencies, `requested`, `enabled`. On another machine, `sync` installs those commits. It stops if the index can no longer provide a locked version.
 - Enable, disable and tree are local only and send no telemetry.
+- `usage` prices: keys in `~/.aihub/prices.json` match a model name as a substring, ignoring case and the separators space, `_`, `.`, `/`, `:` (all treated as `-`); the longest matching key wins (`deepseek-v4-flash` prices `DeepSeek-V4-Flash-Vision-Exp` unless `deepseek-v4-flash-vision` exists). Bundled `aihub-prices` patterns are regexes tried against the raw and normalized name. `--model` is a case-insensitive regex.
 - `self-uninstall` removes every installed package, the usage hooks, the PATH block the installer added and `~/.aihub` (or `$AIHUB_HOME`). It asks first unless `--yes`. For a pip install, also run `pip uninstall aihub-cli`.
 
 Install prompts: the CLI asks before running a platform install script and before registering components with tools. `--yes` skips these. When stdin is closed (non-interactive), prompts count as "no", so use `--yes` in scripts and CI.
@@ -190,7 +192,7 @@ Entry shape (written by the server, not by hand):
 - The index entry's `requires` is used for planning. The `aihub.toml` in the package repo is authoritative at install time.
 - The entry's README text is the first README found in the package root (`README.md`, `readme.md`, `Readme.md`, `README.markdown`, or `README`), capped at 20000 characters.
 - Each version has a Source link on the package page that points to the exact commit.
-- The server writes the index only from publish events, committing and pushing to the index branch. It needs git push access to the index repo.
+- The server writes the index only from publish events. It stores the entries in its database and serves them there; git push access to the index repo is needed only for the backup copy.
 
 ## 8. Publishing a package, step by step
 
@@ -251,9 +253,9 @@ aihub uninstall <name>
 1. Reads `[git]` (`url`, `branch`, `subdir`) from `aihub.toml`. `dev init` fills it from `origin` and the current branch.
 2. Checks that the repo's remote and branch still match `[git]`, and stops if they do not.
 3. Runs `git init` and adds `origin` if needed, tracks files over 50 MB with git-lfs (stops if git-lfs is missing), commits, and pushes (setting upstream the first time).
-4. Sends a public `aihub.publish` event (package, version, commit, repo, branch) to the telemetry inbox right away. It is queued if the inbox is unreachable.
+4. Sends a public `aihub.publish` event (package, version, commit, repo, branch, and a `bundle` with the `aihub.toml` and README) to the telemetry inbox right away. It is queued if the inbox is unreachable.
 
-It does not edit any index and never needs to. Afterwards the hub reads the event on its next sync (about 60 s, so 1 to 2 minutes), fetches the repo at that commit, checks `aihub.toml`, writes the index entry with its README, and pushes an `index: ...` commit. The package then appears in search, and its version shows a Source link to the commit. Do not edit the index by hand.
+It does not edit any index and never needs to. The hub reads the event and builds the index entry from the bundled `aihub.toml` and README, without fetching the repository (an event with no bundle, from an older CLI, is built from the repo at that commit). The package then appears in search and in the "Happening now" feed, and its version shows a Source link to the commit. If indexing fails, the hub retries up to 8 times and Admin > Sync shows the reason. Do not edit the index by hand.
 
 Published versions cannot be reused, so bump the version for every release.
 
@@ -285,6 +287,7 @@ packages = ["shared-helper>=1.2,<2"]   # other AI Hub packages, with constraints
 os = ["macos", "linux", "windows"]     # empty = all
 
 [python]                      # optional: creates a per-package venv
+install = false               # true: also pip-install the package folder (needs pyproject.toml; its [project.scripts] become commands)
 requires = ["requests>=2"]
 requirements_file = "requirements.txt"
 
@@ -337,6 +340,7 @@ Rules:
 
 - Every step asks for confirmation unless `--yes`. Recorded changes are reverted on uninstall; if a step fails, earlier steps roll back. Prefer `file`, `json_merge` and `block` over `command`.
 - Do not put credentials in setup steps.
+- `[python] install = true` needs a `pyproject.toml` in the package folder (lint error otherwise). Use `requires` alone for plain dependencies.
 
 Versions: an optional `v`, dotted numbers, and an optional `a`, `b`, `rc` or `dev` suffix (`1.2`, `v1.2.0`, `1.2.0rc1`, `2.0dev`). Constraints are comma-separated: `==`, `!=`, `>=`, `<=`, `>`, `<`, `~=`.
 
@@ -459,7 +463,8 @@ The CLI reads the index from git and clones each package repo at the entry's ref
 | `[[mcp_servers]] '<name>' needs a command` | Set `command` |
 | `package.description is empty` (warning) | Add a description |
 | `README '<path>' not found` (warning) | Add the README or fix `package.readme` |
-| Package missing from search after publish | Wait 1 to 2 minutes for the hub sync, then retry |
+| Package missing from search after publish | The hub indexes a publish from the event's bundle, normally at once. If indexing fails it retries (up to 8 tries) and Admin > Sync shows the reason. Fix the cause, or bump the version and publish again |
+| `[python] install = true needs a pyproject.toml in the package folder` | Add a `pyproject.toml` with the console scripts, or set `install = false` |
 | Usage events missing from the dashboard | Events are queued locally. After a failed push the CLI retries automatically after 30 s, growing to 15 min; run `aihub flush` to retry now, then wait for the hub sync |
 | Prompt in CI hangs or install skipped | stdin is closed and counts as "no"; use `--yes` |
 | `codex` MCP name already defined | `~/.codex/config.toml` already has `[mcp_servers.<name>]`; the CLI will not overwrite it |

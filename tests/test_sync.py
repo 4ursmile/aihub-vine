@@ -586,6 +586,31 @@ class Inbox(unittest.TestCase):
         self.assertIsNone(self.sy.status["last_error"])
         self.assertEqual(self.refs(), [])
 
+    def test_publish_bundle_indexes_without_touching_git(self):
+        """A publish event carries aihub.toml + README as base64: the entry is built from them and the package repo is never fetched."""
+        import base64
+        from unittest import mock
+        from aihub.server import sync as S
+        toml = b'[package]\nname = "bundled"\nversion = "1.2.3"\ntype = "skill"\ndescription = "d"\n'
+        ev = {"package": "bundled", "version": "1.2.3", "git_url": "https://example.invalid/x.git", "git_branch": "main", "commit": "abc",
+              "bundle": {"toml": base64.b64encode(toml).decode(), "readme": base64.b64encode(b"# Hello").decode(), "readme_name": "README.md"}}
+        import tempfile
+        out = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, out, True)
+        with mock.patch.object(S.gitx, "fetch", side_effect=AssertionError("git must not be used")):
+            results = []
+            folder = os.path.join(out, "index")
+            self.sy.index_dir = None
+            d = self.sy._bundle_dir(ev["bundle"])
+            self.assertTrue(os.path.isfile(os.path.join(d, "aihub.toml")))
+            from aihub.core import pkgindex
+            pkgindex.add(folder, d, "https://example.invalid/x.git", "main", "", "abc", readme=True)
+        e = json.load(open(os.path.join(folder, pkgindex.entry_rel("bundled"))))
+        self.assertEqual(e["latest_version"], "1.2.3")
+        self.assertEqual(e["readme"], "# Hello")
+        self.assertIsNone(self.sy._bundle_dir({"toml": "!!notbase64"}))
+        self.assertNotIn("bundle", json.loads(self.sy._unbundle(json.dumps(ev))))
+
     def test_archive_failure_is_visible_not_silent(self):
         from aihub.cli import telemetry
         self.sy.pull_index = lambda: None

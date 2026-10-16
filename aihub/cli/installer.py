@@ -1,5 +1,6 @@
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -70,6 +71,34 @@ def write_shim(bindir, cmdname, target, venv=None):
     os.chmod(shim, os.stat(shim).st_mode | stat.S_IEXEC)
     os.chmod(target, os.stat(target).st_mode | stat.S_IEXEC)
     return shim
+
+
+def _pip_shims(venv, dest, name):
+    """Console scripts the package's pyproject.toml defines ([project.scripts]) are linked into ~/.aihub/bin, so they run directly from the venv."""
+    bindir = paths.ensure("bin")
+    scripts = os.path.join(venv, "Scripts" if OS == "windows" else "bin")
+    try:
+        with open(os.path.join(dest, "pyproject.toml"), encoding="utf-8") as f:
+            text = f.read()
+        from ..core import toml_lite
+        d = toml_lite.loads(text)
+    except Exception:
+        return []
+    names = list(((d.get("project") or {}).get("scripts") or {}).keys()) + list((((d.get("tool") or {}).get("poetry") or {}).get("scripts") or {}).keys())
+    out = []
+    for cmdname in names:
+        exe = os.path.join(scripts, cmdname + (".exe" if OS == "windows" else ""))
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", str(cmdname)) or not os.path.isfile(exe):
+            continue
+        shim = os.path.join(bindir, cmdname + (".cmd" if OS == "windows" else ""))
+        if OS == "windows":
+            open(shim, "w", newline="").write('@echo off\r\n"%s" %%*\r\n' % exe)
+        else:
+            with open(shim, "w") as f:
+                f.write('#!/bin/sh\nexec "%s" "$@"\n' % exe)
+            os.chmod(shim, os.stat(shim).st_mode | stat.S_IEXEC)
+        out.append(shim)
+    return out
 
 
 def state():
@@ -364,7 +393,9 @@ def _install_one(r, assume_yes, tools, requested, archive_path=None):
     rec = {"version": r["version"], "path": dest, "reverts": [], "shims": [], "venv": None, "rev": r.get("rev"), "repo": r.get("repo"),
            "deps": list(req["packages"]), "requested": bool(requested or (old or {}).get("requested"))}
     py = m["python"]
-    if py["requires"] or py["requirements_file"]:
+    if py["install"] and not os.path.isfile(os.path.join(dest, "pyproject.toml")):
+        raise api.ApiError("%s sets [python] install = true but has no pyproject.toml" % name)
+    if py["requires"] or py["requirements_file"] or py["install"]:
         venv = paths.ensure("venvs", name)
         with ui.Spinner("Setting up Python environment"):
             subprocess.check_call([sys.executable, "-m", "venv", venv])
@@ -372,8 +403,17 @@ def _install_one(r, assume_yes, tools, requested, archive_path=None):
             cmd = [pip, "install", "-q"] + py["requires"]
             if py["requirements_file"]:
                 cmd += ["-r", os.path.join(dest, py["requirements_file"])]
-            subprocess.check_call(cmd, stdout=subprocess.DEVNULL)
+            if len(cmd) > 3:
+                subprocess.check_call(cmd, stdout=subprocess.DEVNULL)
         rec["venv"] = venv
+        if py["install"]:                                      # the package itself, from its pyproject.toml (not editable: the venv owns a copy)
+            with ui.Spinner("Installing %s with pip" % name):
+                try:
+                    subprocess.check_call([pip, "install", "-q", dest], stdout=subprocess.DEVNULL)
+                except subprocess.CalledProcessError:
+                    shutil.rmtree(venv, ignore_errors=True)
+                    raise api.ApiError("pip could not install %s from its pyproject.toml" % name)
+            rec["pip_shims"] = _pip_shims(venv, dest, name)
     script = m["scripts"].get("install_" + OS)
     if script:
         _, _, shown = script_command(script, dest)             # validates the path before asking the user to approve it
@@ -522,6 +562,11 @@ def uninstall(name, quiet=False):
             ui.note("uninstall script skipped: %s" % e)
     _deactivate(rec)
     shutil.rmtree(rec["path"], ignore_errors=True)
+    for sh in rec.get("pip_shims") or []:
+        try:
+            os.remove(sh)
+        except OSError:
+            pass
     if rec.get("venv"):
         shutil.rmtree(rec["venv"], ignore_errors=True)
     del st["packages"][name.lower()]

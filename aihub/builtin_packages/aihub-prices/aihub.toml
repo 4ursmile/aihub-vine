@@ -1,6 +1,6 @@
 [package]
 name = "aihub-prices"
-version = "1.0.1"
+version = "1.0.3"
 type = "setup"
 description = "Model price table (USD per 1M tokens) used by `aihub usage` to estimate cost; update it on the hub and every CLI picks it up."
 tags = ["aihub", "usage", "prices"]

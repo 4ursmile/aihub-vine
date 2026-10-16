@@ -267,3 +267,5 @@ body::after{background-image:radial-gradient(circle,var(--dot-hi) 1.6px,transpar
 @media(prefers-reduced-motion:reduce){.heat i{transition:none}}
 .announce{background:var(--accent,#0a84ff);color:#fff;text-align:center;padding:9px 22px;font-size:14px;line-height:1.4}
 .announce a{color:#fff;text-decoration:underline}
+
+.chip.on{background:var(--blue);color:#fff}

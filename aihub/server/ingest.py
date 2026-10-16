@@ -172,7 +172,9 @@ class Ingest:
             self.pubs.update(pubs)
             self.stats["received"] += len(rows)
             self.stats["duplicates"] += valid - len(rows)
-            big = len(self.rows) >= MAX_ROWS
+            if pubs:
+                self.first = min(self.first, time.time() - self.window())   # a publish closes the window now: it shows in the feed at once
+            big = len(self.rows) >= MAX_ROWS or bool(pubs)
         self.start()                                     # lazy: works the same under a bare TestClient (no lifespan)
         if big or opened:
             self.wake.set()                              # a new window to plan, or a full buffer to write now

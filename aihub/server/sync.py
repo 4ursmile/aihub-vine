@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import random
+import shutil
 import threading
 import time
 import uuid
@@ -159,6 +160,8 @@ class Sync:
         self._trim = []                                     # (kind, where) inbox entries the next _archive push also removes
         self.held, self.held_done, self.held_seen, self.held_bytes, self.held_first = [], [], set(), 0, None
         self.pending_pubs = {}                              # publish events from HTTP waiting for the sync thread
+        self.pub_tries = {}                                 # (package, version) -> failed index attempts
+        self.retry_at = 0.0                                 # earliest time the next attempt for failed publishes may run
         self.staged, self.staged_first = {}, None           # publishes already served by the hub, not yet pushed to the index repo
         self.defer_until = 0.0                              # a pass that had to wait for the backup's git gap resumes then
         self.index_dir = self.index_folder = None
@@ -227,7 +230,7 @@ class Sync:
         now, waits = time.time(), [self.delay()]
         with self.hold:
             if self.pending_pubs:
-                waits.append(0)
+                waits.append(max(0, self.retry_at - now))
             if self.held_first:
                 waits.append(self.held_first + self.num("telemetry_git_interval") - now)
             if self.staged_first:
@@ -251,6 +254,7 @@ class Sync:
         """Events the hub already stored in the database. Their raw lines wait for the next archive push; publish events for the index."""
         if not self.telemetry_git():
             lines = []                                               # legacy git sync off: no git archive backlog, the database is the copy
+        lines = [self._unbundle(x) for x in lines]
         with self.hold:
             if lines:
                 if self.held and self.held[-1][0].startswith("srv-") and self.held_first and self.held[-1][0] == self._srv_key:
@@ -265,6 +269,18 @@ class Sync:
                 self.pending_pubs[(naming.normalize(str(m["package"])), str(m["version"]))] = m
         if pubs:
             self.wake.set()                                  # a publish should show up on the hub now, not at the next poll
+
+    @staticmethod
+    def _unbundle(line):
+        """The archive keeps the event, not the inline manifest/README bytes (those live in the index)."""
+        if '"bundle"' not in line:
+            return line
+        try:
+            e = json.loads(line)
+            e.pop("bundle", None)
+            return json.dumps(e, separators=(",", ":"))
+        except ValueError:
+            return line
 
     def _cap_held(self):
         """Held batches live in memory. Past the cap the oldest are dropped: they are already in the database (and its backup)."""
@@ -354,6 +370,7 @@ class Sync:
                 if idx:
                     guarded(self._flush_index_if_due)
             else:
+                self.retry_at = 0.0
                 self._stage_pending()
                 self._flush_held(force=True)
                 self._flush_index(force=True)
@@ -761,22 +778,47 @@ class Sync:
                     time.sleep(random.uniform(0.2, 1.0) * (attempt + 1))
                     del results[mark:]
 
+    def _pubs_failed(self, pubs, msg):
+        with self.hold:
+            for k in pubs:
+                if k in self.pending_pubs:
+                    self.pub_tries[k] = self.pub_tries.get(k, 0) + 1
+            self.retry_at = time.time() + min(300, 5 * 2 ** max(self.pub_tries.values() or [0]))
+        self.status["publish_error"] = msg
+
     # ----- publishes: served by the hub at once, pushed to git in one batch
     def _stage_pending(self):
         """Apply publish events to the local index checkout (no push). The hub serves the result immediately."""
         with self.hold:
             pubs = dict(self.pending_pubs)
-        if not pubs:
+        if not pubs or time.time() < self.retry_at:
             return False
         results = []
-        changed = self.update_index(list(pubs.values()), results=results, push=False)
+        try:
+            changed = self.update_index(list(pubs.values()), results=results, push=False)
+        except Exception as e:                                          # e.g. index repo unreachable: keep every publish and try again
+            self._pubs_failed(pubs, "%s" % gitx.redact_url(str(e))[:200])
+            raise
+        done = {(n, v) for n, v, st in results if st in ("indexed", "already indexed")}
+        bad = [r for r in results if r[2] not in ("indexed", "already indexed")]
         with self.hold:
             for k in pubs:
-                if self.pending_pubs.get(k) is pubs[k]:
+                if self.pending_pubs.get(k) is not pubs[k]:
+                    continue
+                key = (naming.normalize(str(k[0])), str(k[1]))
+                if key in done or self.pub_tries.get(k, 0) >= 8:        # indexed, or given up after 8 tries (the error stays visible)
                     del self.pending_pubs[k]
+                    self.pub_tries.pop(k, None)
+                else:
+                    self.pub_tries[k] = self.pub_tries.get(k, 0) + 1
+            if self.pending_pubs:
+                self.retry_at = time.time() + min(300, 5 * 2 ** max(self.pub_tries.values() or [0]))
             if changed and self.index_git():                             # only the legacy git index has something to push later
-                self.staged.update(pubs)
+                self.staged.update({k: m for k, m in pubs.items() if (naming.normalize(str(k[0])), str(k[1])) in done})
                 self.staged_first = self.staged_first or time.time()
+        self.status["publish_error"] = "; ".join("%s %s: %s" % r for r in bad)[:300] or None
+        if bad:
+            log.warning("publish not indexed: %s", self.status["publish_error"])
         if changed:
             self.repos.set_setting("sync_index_dirty", "1")
             self.invalidate_served()
@@ -868,7 +910,7 @@ class Sync:
             if not gurl.startswith(SCHEMES):
                 results.append((name, ver, "git address not allowed"))
                 continue                                                # no file:// or other odd transports from event data
-            if not gurl.startswith("file://") and not nethost.allowed(gurl, url):
+            if not m.get("bundle") and not gurl.startswith("file://") and not nethost.allowed(gurl, url):   # a bundle means no fetch from that host
                 log.warning("publish event for %s names a non-public host; ignored", name)
                 results.append((name, ver, "host is not public and not the index host"))
                 continue
@@ -881,12 +923,17 @@ class Sync:
             if ver in have and have[ver] == ref and not force:
                 results.append((name, ver, "already indexed"))
                 continue
+            tmp = None
             try:
-                src = gitx.fetch(gurl, str(m.get("git_branch") or "main"), ref or None, base=os.path.join(self.s.data_dir, "repos"))
-                proj = os.path.join(src, str(m.get("git_subdir") or "").strip("/"))
-                if not os.path.realpath(proj).startswith(os.path.realpath(src)):
-                    results.append((name, ver, "subdir outside the repository"))
-                    continue
+                tmp = self._bundle_dir(m.get("bundle"))                  # aihub.toml + README sent by the CLI: no git contact at all
+                if tmp:
+                    proj = tmp
+                else:                                                    # old CLI / no bundle: read the package repo at the published commit
+                    src = gitx.fetch(gurl, str(m.get("git_branch") or "main"), ref or None, base=os.path.join(self.s.data_dir, "repos"))
+                    proj = os.path.join(src, str(m.get("git_subdir") or "").strip("/"))
+                    if not os.path.realpath(proj).startswith(os.path.realpath(src)):
+                        results.append((name, ver, "subdir outside the repository"))
+                        continue
                 from ..core import manifest as M
                 with open(os.path.join(proj, "aihub.toml"), encoding="utf-8") as f:
                     pk = M.parse(f.read())["package"]
@@ -900,6 +947,9 @@ class Sync:
             except Exception as e:
                 log.warning("cannot index %s %s: %s", name, ver, gitx.redact_url(str(e)))
                 results.append((name, ver, "cannot read the repository: " + gitx.redact_url(str(e))[:200]))
+            finally:
+                if tmp:
+                    shutil.rmtree(tmp, ignore_errors=True)
         self.index_dir = d
         if not changed:
             return False
@@ -916,6 +966,28 @@ class Sync:
         if hasattr(self.repos, "set_setting"):
             self.repos.set_setting("sync_index_rev", gitx.run(["rev-parse", "HEAD"], cwd=d))     # we just wrote it: no need to fetch it back
         return True
+
+    @staticmethod
+    def _bundle_dir(b):
+        """Publish event `bundle` ({toml, readme, readme_name}, base64) -> temp folder with those files, or None when absent/unusable."""
+        if not isinstance(b, dict) or not b.get("toml"):
+            return None
+        import base64, tempfile
+        try:
+            toml = base64.b64decode(str(b["toml"]), validate=True)
+            readme = base64.b64decode(str(b["readme"]), validate=True) if b.get("readme") else b""
+        except ValueError:
+            return None
+        if len(toml) > 64 * 1024 or len(readme) > pkgindex.README_MAX * 4:
+            return None
+        d = tempfile.mkdtemp(prefix="aihub-pub-")
+        with open(os.path.join(d, "aihub.toml"), "wb") as f:
+            f.write(toml)
+        if readme:
+            name = str(b.get("readme_name") or "README.md")
+            with open(os.path.join(d, name if name in pkgindex.README_NAMES else "README.md"), "wb") as f:
+                f.write(readme)
+        return d
 
     def _store(self, rows):
         return self.repos.events_insert_ext(rows) if rows else 0

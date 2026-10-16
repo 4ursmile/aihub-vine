@@ -77,6 +77,19 @@ class UsageTest(unittest.TestCase):
         t = usage.report(("claude",), 30, self.now, model="OPUS")[0]["total"]
         self.assertEqual((t["requests"], t["output"]), (1, 5))
 
+    def test_user_price_matches_variants_and_prefers_the_longest_key(self):
+        import json
+        from aihub.cli import paths
+        paths.ensure()
+        with open(paths.p("prices.json"), "w") as f:
+            json.dump({"deepseek-v4-flash": {"input": 0.14, "output": 0.28}, "deepseek-v4-flash-vision": {"input": 0.5, "output": 1.0}}, f)
+        base = usage.price_for("deepseek-v4-flash")
+        self.assertEqual(base[:2], (0.14, 0.28))
+        self.assertEqual(usage.price_for("DeepSeek-V4-Flash-Exp")[:2], (0.14, 0.28))          # a longer name falls back to the shorter key
+        self.assertEqual(usage.price_for("DeepSeek_V4.Flash")[:2], (0.14, 0.28))              # separators and case do not matter
+        self.assertEqual(usage.price_for("DeepSeek-V4-Flash-Vision-Exp")[:2], (0.5, 1.0))     # the most specific key wins
+        self.assertIsNone(usage.price_for("deepseek-v3"))
+
     def test_cache_reuses_parsed_files(self):
         self.claude([self.msg("a", "claude-opus-5", self.ts, output_tokens=5)])
         usage.collect(("claude",))

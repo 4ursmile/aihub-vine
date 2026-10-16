@@ -78,9 +78,11 @@ What it does, in order:
 1. Reads `[git]` (`url`, `branch`, `subdir`) from `aihub.toml`. `aihub dev init` fills this in from the repo's `origin` and current branch; it asks only for what is still missing.
 2. Checks that the repo's remote and branch still match, and stops if they do not.
 3. Runs `git init` and adds `origin` if the project is not a repo yet, tracks files over 50 MB with git-lfs (it stops if git-lfs is missing), commits, and pushes, setting the upstream the first time.
-4. Pushes an `aihub.publish` event to the telemetry inbox with the package, version and commit.
+4. Pushes an `aihub.publish` event to the telemetry inbox with the package, version and commit, and a `bundle`: the `aihub.toml` (up to 64 KB) and the README (up to 20 KB of text), base64-encoded.
 
-Git credentials are yours alone: they come from your git credential helper, and the hub never sends or stores them. If none are stored, git (or the CLI, in a terminal) asks you once. `aihub dev publish` pushes your code, then pushes a publish event to the telemetry inbox ("publish event sent; the hub will add it to the package index shortly"). The hub batches events, fetches the latest index branch, adds the versions and pushes once (retrying from a fresh fetch if the push is rejected), creating the index if the repo has none. The package appears in the catalogue after that pass.
+Git credentials are yours alone: they come from your git credential helper, and the hub never sends or stores them. If none are stored, git (or the CLI, in a terminal) asks you once. `aihub dev publish` pushes your code, then pushes a publish event to the telemetry inbox ("publish event sent; the hub will add it to the package index shortly"). The hub builds the index entry from that bundle, so it does not fetch the package repository (this avoids git host rate limits). Older CLIs send no bundle, and a manifest over 64 KB has none; then the hub fetches the repository at the published commit, as before. The package appears in the home page's "Happening now" feed and the dashboard as soon as the event is stored (feed type `new`), before its catalogue row exists.
+
+A publish stays queued until it is really indexed: the hub retries with backoff, up to 8 tries. If indexing fails, the reason is shown in Admin > Sync ("A published package is not in the index yet (retrying): ..."). The index is served from the hub database; the index repo is only written as a backup.
 
 ## Let your assistant package it for you
 
@@ -150,6 +152,7 @@ Quality rules:
 - Agent .md: front matter `name`, `description`, optional `tools`.
 - Scripts: idempotent, no `sudo`, no admin rights, POSIX `sh` + PowerShell twin; print what they do. `chmod +x` shell scripts and executables.
 - Every `path` in the manifest must exist and stay inside the project. Declare every external command under `[requires]`.
+- Python: `[python] requires` is for pip dependencies only. Set `install = true` only when the package ships a `pyproject.toml` with `[project.scripts]` console scripts; the folder must contain that file.
 - README: install line (`aihub install <name>`), what it does, a usage example, uninstall line.
 - No secrets, tokens, or machine-specific paths anywhere in the package.
 - Setup steps (`env`, `json_merge`, `file`, `block`, `command`) are shown to the user and reversible; prefer `file`/`json_merge`/`block` over `command`.
@@ -301,7 +304,7 @@ Field summary:
 
 - `[package]` is required. `name` and `version` are required; `type` must be one of `skill`, `agent`, `mcp`, `tool`, or `setup`. `description`, tags, README path, and license are package metadata.
 - `[requires]` lists required commands (optional install hints), other AI Hub packages, and supported operating systems. Empty `os` means unrestricted.
-- `[python]` optionally lists pip requirements and a package-local requirements file. When either is set, the installer creates a package-specific virtual environment.
+- `[python]` optionally lists pip requirements and a package-local requirements file. When either is set, the installer creates a package-specific virtual environment. With `install = true` the package also installs itself from its `pyproject.toml` and links its console scripts.
 - `[[skills]]`, `[[agents]]`, and `[[mcp_servers]]` declare components to register into supported tools.
 - `[bin]` maps command names to files in the package.
 - `[scripts]` selects install and uninstall scripts by OS.
@@ -417,12 +420,13 @@ os = ["macos", "linux", "windows"]
 
 The installer reports missing commands and hints but does not install those system commands. AI Hub package dependencies are resolved and installed recursively. OS labels are `macos`, `linux`, and `windows`; an empty list permits all OSes.
 
-Python dependencies create a per-package environment:
+Python dependencies create a per-package environment. `install` (default `false`) also installs the package itself: the installer runs `pip install` of the package folder after the dependencies, so the package's `pyproject.toml` is installed and its `[project.scripts]` commands are linked into the CLI `bin/` folder to run from PATH. Set it only when the package ships a `pyproject.toml` with console scripts; `requires` alone is for plain dependencies. The folder must contain `pyproject.toml`, and `aihub dev validate` reports an error when it does not.
 
 ```toml
 [python]
 requires = ["requests>=2"]
 requirements_file = "requirements.txt"
+install = false
 ```
 
 ## Setup profiles
@@ -538,6 +542,8 @@ The dashboard aggregates usage events by package, event kind, actor/client, comp
 | `[[mcp_servers]] '<name>' needs a command` | Set a command for the named MCP server. |
 | `package.description is empty; it is what people search and read first` (warning) | Add a useful description. |
 | `README '<path>' not found; the package page will have no Overview` (warning) | Add the README or correct `package.readme`. |
+| `[python] install = true needs a pyproject.toml in the package folder` | The package has no `pyproject.toml`. Add one with `[project.scripts]`, or set `install = false` and keep `requires` for dependencies only. |
+| `A published package is not in the index yet (retrying): <reason>` (Admin > Sync) | The hub could not index the publish. It retries with backoff, up to 8 tries, and the reason says why. Fix the cause; if the version must change, bump it (`aihub dev publish --bump patch`). |
 | `1 problem(s) in the project; fix them and run \`aihub dev validate\` again` | Validation found one or more file-level errors. Fix the `error:` lines printed immediately above it. |
 
 TOML parsing and manifest normalization errors also stop `validate`; their exact text identifies the missing or invalid field. The validator has two stages. Manifest parsing and normalization errors stop immediately: missing `[package]`, invalid package name/version/type, unknown setup-step kind, invalid `[scripts]` key, missing or duplicate component name, missing MCP command, or unsupported `requires.os` value. File-level lint errors include missing/out-of-project component and `[bin]` paths, a skill directory without `SKILL.md`, missing in-package script files, and an MCP package without `[[mcp_servers]]`. Warnings include an empty description, missing README, skill/agent types without their component entries, and agent/MCP/tool packages with no self-installing component or binary and no install script for a claimed OS. Warnings do not prevent `dev validate` from succeeding.

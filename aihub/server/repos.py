@@ -625,12 +625,28 @@ class Repos:
         scored.sort()
         return [n for _, n in scored[:limit]]
 
+    LIVE_KINDS = ("install", "use", "update", "publish")
+
+    def live_kinds(self):
+        """Event kinds the home page "Happening now" feed shows (admin setting `live_kinds`, comma list; blank = default)."""
+        got = [k for k in (self.setting("live_kinds", "") or "").split(",") if k in ("install", "use", "update", "uninstall", "error", "publish")]
+        return got or list(self.LIVE_KINDS)
+
+    def _unindexed_ok(self):
+        """A just published package has events before the index import creates its row; show those when new packages start public."""
+        return self.initial_visibility() == "public"
+
     def recent_activity(self, viewer=None, limit=15):
-        """Latest publish/install/use/update events on packages the viewer may see. Deliberately carries no user or client identifiers."""
+        """Latest events on packages the viewer may see. Deliberately carries no user or client identifiers.
+        A publish of a package that is not in the table yet is listed too, so a new package appears at once."""
         vsql, va = self.visible_sql(viewer, "p")
+        kinds = self.live_kinds()
+        mark = ",".join("?" * len(kinds))
+        new = " OR (p.name IS NULL AND e.kind='publish')" if self._unindexed_ok() else ""
         return _rows(self.db.conn().execute(
-            "SELECT e.package AS package, e.kind AS kind, e.ts AS ts, p.type AS type, e.version AS version FROM events e JOIN packages p ON p.name=e.package "
-            "WHERE e.kind IN ('install','use','update','publish') AND p.hidden=0 AND " + vsql + " ORDER BY e.id DESC LIMIT ?", va + [limit]))
+            "SELECT e.package AS package, e.kind AS kind, e.ts AS ts, COALESCE(p.type,'new') AS type, e.version AS version FROM events e "
+            "LEFT JOIN packages p ON p.name=e.package WHERE e.kind IN (" + mark + ") AND ((p.hidden=0 AND " + vsql + ")" + new + ") "
+            "ORDER BY e.id DESC LIMIT ?", kinds + va + [limit]))
 
     def facets(self, viewer=None):
         from .categories import BY_ID
@@ -964,6 +980,8 @@ class Repos:
         vsql, va = self.visible_sql(viewer, "vp")
         pf = " AND e.package IN (SELECT vp.name FROM packages vp WHERE %s%s)" % (vsql, " AND vp.type=?" if type else "")
         pa = list(va) + ([type] if type else [])
+        if not type and self._unindexed_ok():                # publishes of packages the index import has not created yet still count
+            pf = " AND (e.package IN (" + pf[len(" AND e.package IN ("):] + " OR (e.kind='publish' AND e.package NOT IN (SELECT np.name FROM packages np)))"
         if with_cli and not type:                           # the CLI's own install/uninstall events: listed in the event log only, never counted
             pf = " AND (e.package='aihub-cli' OR" + pf[4:] + ")"
         if package:
@@ -972,8 +990,9 @@ class Repos:
             pf += " AND " + self.actor_sql() + "=?"; pa.append(user)
         if source:
             pf += " AND COALESCE(e.source,'cli')=?"; pa.append(source)
-        if kind:
-            pf += " AND e.kind=?"; pa.append(kind)
+        kinds = [k for k in (kind or "").split(",") if k]       # one kind or several joined with commas (combined)
+        if kinds:
+            pf += " AND e.kind IN (%s)" % ",".join("?" * len(kinds)); pa += kinds
         if identity == "anonymous":
             pf += " AND e.username IS NULL"
         elif identity == "signed-in":

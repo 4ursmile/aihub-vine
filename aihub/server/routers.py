@@ -1462,7 +1462,7 @@ _DASH_KINDS = ("install", "update", "uninstall", "use", "error", "publish")
 def _dash_args(days, kind, identity, date_from, date_to):
     if days not in (7, 14, 30, 90, 180, 365):
         raise HTTPException(400, "days must be one of 7, 14, 30, 90, 180, 365")
-    if kind and kind not in _DASH_KINDS:
+    if kind and any(k not in _DASH_KINDS for k in kind.split(",")):
         raise HTTPException(400, "unknown event kind")
     if identity and identity not in ("anonymous", "signed-in"):
         raise HTTPException(400, "identity must be anonymous or signed-in")
@@ -1506,7 +1506,7 @@ def dashboard_events(request: Request, days: int = 30, page: int = 1, per_page: 
 
 
 # ---------------- sync (git telemetry inbox + git index -> SQLite)
-SYNC_KEYS = ("telemetry_url", "telemetry_inbox_branch", "telemetry_branch", "telemetry_archive", "localize_users", "git_telemetry_sync", "git_index_sync", "index_url", "index_branch", "index_path", "sync_interval",
+SYNC_KEYS = ("telemetry_url", "telemetry_inbox_branch", "telemetry_branch", "telemetry_archive", "localize_users", "live_kinds", "git_telemetry_sync", "git_index_sync", "index_url", "index_branch", "index_path", "sync_interval",
              "cli_git_url", "cli_git_branch", "cli_git_subdir", "client_refresh_hours") + tuple(LIMITS)
 SECRET_KEYS = ()
 
@@ -1561,6 +1561,8 @@ def sync_update(body: dict, request: Request, u=admin):
                 continue                                 # blank/echo = keep the stored secret
             if k in ("telemetry_archive", "localize_users", "git_telemetry_sync", "git_index_sync") and v not in ("0", "1"):
                 raise HTTPException(400, "%s must be 0 or 1" % k)
+            if k == "live_kinds" and (any(x not in _DASH_KINDS for x in v.split(",") if x)):
+                raise HTTPException(400, "live_kinds must be a comma list of: " + ", ".join(_DASH_KINDS))
             if k in ("cli_git_branch", "cli_git_subdir"):
                 _check_cli_git(k, v)
             if k == "sync_interval":

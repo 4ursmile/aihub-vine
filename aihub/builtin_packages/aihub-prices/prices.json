@@ -13,33 +13,8 @@
     {"match": "sonnet-?5[.-]?5", "input": 2.0, "output": 10.0, "cache_write": 2.5, "cache_read": 0.1},
     {"match": "sonnet-?5", "input": 2.0, "output": 10.0, "cache_write": 2.5, "cache_read": 0.2},
     {"match": "sonnet-?4", "input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.3},
-    {"match": "sonnet", "input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.3},
+    {"match": "sonnet", "input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.3}
 
-    {"match": "haiku-?5[.-]?5", "input": 0.1, "output": 0.5, "cache_write": 0.125, "cache_read": 0.01},
-    {"match": "haiku-?4[.-]?5", "input": 1.0, "output": 5.0, "cache_write": 1.25, "cache_read": 0.1},
-    {"match": "haiku-?3[.-]?5", "input": 0.8, "output": 4.0, "cache_write": 1.0, "cache_read": 0.08},
-    {"match": "haiku", "input": 1.0, "output": 5.0, "cache_write": 1.25, "cache_read": 0.1},
-
-    {"match": "gpt-6-astra", "input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.5},
-    {"match": "gpt-6-sol", "input": 1.0, "output": 5.0, "cache_write": 1.25, "cache_read": 0.1},
-    {"match": "gpt-6-luna", "input": 0.05, "output": 0.25, "cache_write": 0.0625, "cache_read": 0.005},
-
-    {"match": "gpt-5[.-]?6-sol", "input": 2.0, "output": 10.0, "cache_write": 2.5, "cache_read": 0.2},
-    {"match": "gpt-5[.-]?6-terra", "input": 1.0, "output": 6.0, "cache_write": 1.25, "cache_read": 0.1},
-    {"match": "gpt-5[.-]?6-luna", "input": 0.1, "output": 0.6, "cache_write": 0.125, "cache_read": 0.01},
-
-    {"match": "gpt-5.*mini", "input": 0.25, "output": 2.0, "cache_write": 0.25, "cache_read": 0.025},
-    {"match": "gpt-5.*nano", "input": 0.05, "output": 0.4, "cache_write": 0.05, "cache_read": 0.005},
-    {"match": "gpt-5|codex", "input": 1.25, "output": 10.0, "cache_write": 1.25, "cache_read": 0.125},
-    {"match": "o3|o4-mini", "input": 2.0, "output": 8.0, "cache_write": 2.0, "cache_read": 0.5},
-
-    {"match": "deepseek-v4[.-]?1?-flash|deepseek-flash", "input": 0.3, "output": 1.2, "cache_write": null, "cache_read": 0.006},
-    {"match": "deepseek-v4-pro", "input": 1.32, "output": 3.96, "cache_write": null, "cache_read": 0.044},
-
-    {"match": "qwen3[.-]?8-max", "input": 2.0, "output": 6.0, "cache_write": 2.5, "cache_read": 0.17},
-    {"match": "qwen3[.-]?8-2[.-]?4t-a95b", "input": 2.0, "output": 6.0, "cache_write": null, "cache_read": null},
-    {"match": "qwen3[.-]?8-27b", "input": 0.5, "output": 3.0, "cache_write": null, "cache_read": null},
-    {"match": "qwen3[.-]?8-flash", "input": 0.15, "output": 0.47, "cache_write": null, "cache_read": null}
   ]
 }
  

@@ -4,7 +4,7 @@ Each package archive contains an `aihub.toml` manifest. The CLI's `aihub dev ini
 
 ## Package metadata
 
-`[package]` is required. `name` and `version` must be present and valid; other metadata fields have defaults. The package index entry is built by the server from this file at the published commit, so the entry's name and version come from here.
+`[package]` is required. `name` and `version` must be present and valid; other metadata fields have defaults. The package index entry is built by the server from this file, as sent in the publish event (the bundle), or for older CLIs from the file at the published commit, so the entry's name and version come from here.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -60,15 +60,34 @@ os = ["macos", "linux"]
 - `packages`: package names, optionally followed by version constraints.
 - `os`: zero or more of `macos`, `linux`, and `windows`. An empty list means no OS restriction.
 
-Python dependencies are installed into a package-specific virtual environment if either field is set:
+Python dependencies are installed into a package-specific virtual environment (`~/.aihub/venvs/<name>`) if any of these fields is set:
 
 ```toml
 [python]
 requires = ["requests>=2"]
 requirements_file = "requirements.txt"
+install = false
 ```
 
-`requires` is a list passed to pip. `requirements_file` names a file inside the extracted package. This section is not deeply validated during manifest parsing; errors can surface during installation.
+`requires` is a list passed to pip, installed first. `requirements_file` names a file inside the extracted package. `install` (bool, default `false`) makes the package install itself: after the requirements, the installer runs `pip install` of the package folder (non-editable), so the package's own `pyproject.toml` is installed.
+
+- Use `requires` when the package only needs other libraries.
+- Use `install = true` when the package ships a `pyproject.toml` with console scripts (`[project.scripts]`, or `[tool.poetry.scripts]`). Each script is linked as a shim in `~/.aihub/bin`, so it runs directly from PATH using the venv. `aihub uninstall` removes the shims and the venv.
+- The package folder must contain `pyproject.toml`. Lint reports "[python] install = true needs a pyproject.toml in the package folder", and an install without one fails with a clear error. If pip fails, the venv is removed and the install fails.
+- `aihub.toml` stays the source of truth for name, version and description; `aihub dev doctor` keeps `pyproject.toml` in step with it.
+
+```toml
+[package]
+name = "my-tool"
+version = "0.1.0"
+type = "tool"
+description = "..."
+
+[python]
+install = true
+requires = ["requests"]   # optional extras installed first
+```
+
 
 ## Skills, agents, and MCP servers
 
@@ -179,6 +198,7 @@ os = ["macos", "linux"]
 [python]
 requires = []
 requirements_file = ""
+install = false
 
 [[skills]]
 name = "git-helper"
