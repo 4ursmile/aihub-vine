@@ -283,7 +283,10 @@ class Sync:
             self.index_dir = loc                                # serve the hub's own index from the first request, no git
         elif not self.index_dir and not self.index_git():
             try:                                                # fresh hub, no git index: start with an empty local index so /index/* answers (not 503)
-                pkgindex.rebuild(os.path.join(loc, self.index_source()[2]))
+                folder = os.path.join(loc, self.index_source()[2])
+                for e in self.repos.index_entries():            # an existing hub: serve what the web UI shows, not an empty catalog
+                    pkgindex.write_entry(folder, e)
+                pkgindex.rebuild(folder)
                 self.index_dir = loc
             except OSError as e:
                 log.warning("sync: cannot create the local index: %s", e)

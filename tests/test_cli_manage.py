@@ -86,6 +86,9 @@ class CliManage(unittest.TestCase):
         self.assertFalse(self.skill("top")); self.assertTrue(os.path.isdir(self.st()["top"]["path"]))
         self.assertFalse(self.st()["top"]["enabled"])
         rc, o = run("list"); self.assertIn("disabled", o)
+        rc, o = run("list", "--plain"); self.assertEqual(rc, 0)
+        self.assertTrue(all(len(x.split()) == 2 for x in o.splitlines()) and o.splitlines(), o)      # "name version", nothing else
+        rc, o = run("list", "--name-only"); self.assertIn("top", o.splitlines()); self.assertTrue(all(len(x.split()) == 1 for x in o.splitlines()))
         # hook ignores disabled
         self.assertNotIn("skill:top", hooks._components()); self.assertIn("skill:base", hooks._components())
         # install again == enable (offline files, no re-download)

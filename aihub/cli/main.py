@@ -48,7 +48,20 @@ def cmd_register(a):
     ui.info("next: aihub login   (new accounts may need admin approval first)")
 
 
+def _plain(a):
+    """--plain / --name-only: bare lines on stdout for scripts and assistants (no spinner, colors, table or hints)."""
+    return bool(getattr(a, "plain", False) or getattr(a, "name_only", False))
+
+
+def _plain_line(a, name, version):
+    return name if getattr(a, "name_only", False) else "%s %s" % (name, version or "-")
+
+
 def cmd_search(a):
+    if _plain(a):
+        for p in registry.search(a.term):
+            print(_plain_line(a, p["name"], p.get("latest_version")))
+        return
     with ui.Spinner("Searching for '%s'" % a.term if a.term else "Loading packages") as sp:
         items = registry.search(a.term)[:30]
         sp.text("%d result%s" % (len(items), "" if len(items) == 1 else "s"))
@@ -239,6 +252,10 @@ def cmd_self_uninstall(a):
 
 def cmd_list(a):
     pk = installer.state()["packages"]
+    if _plain(a):
+        for n, r in sorted(pk.items()):
+            print(_plain_line(a, n, r["version"]))
+        return
     if not pk:
         ui.note("Nothing installed yet.")
         ui.info("find something with: aihub search")
@@ -1182,6 +1199,8 @@ def build_parser():
         return p
 
     arg = lambda *n, **k: (n, k)
+    PLAIN = (arg("--plain", action="store_true", help="One 'name version' line per package, nothing else (for scripts)."),
+             arg("--name-only", action="store_true", help="One package name per line, nothing else (implies --plain)."))
     add("config", cmd_config, "Show or change CLI configuration.",
         "Print the current CLI configuration, or set a configuration value. The hub URL is stored under the key 'hub'.",
         "Examples:\n  aihub config\n  aihub config set hub https://hub.example.com",
@@ -1200,8 +1219,9 @@ def build_parser():
         "Example:\n  aihub register")
     add("search", cmd_search, "Search the hub for packages.",
         "Search package names and descriptions on the configured hub. Omitting TERM lists the available packages; at most 30 results are shown.",
-        "Examples:\n  aihub search sql\n  aihub search",
-        arg("term", nargs="?", default="", metavar="TERM", help="Words to search for; omit to browse packages."))
+        "Examples:\n  aihub search sql\n  aihub search --plain\n  aihub search sql --name-only",
+        arg("term", nargs="?", default="", metavar="TERM", help="Words to search for; omit to browse packages."),
+        *PLAIN)
     add("info", cmd_info, "Show package details and available versions.",
         "Fetch package metadata, including its description, type, latest version, tags, requirements, and recent versions. Non-interactive output is JSON.",
         "Examples:\n  aihub info my-skill\n  aihub info my-mcp-server",
@@ -1258,7 +1278,8 @@ def build_parser():
         arg("--force", action="store_true", help="Do not ask when other packages depend on it."))
     add("list", cmd_list, "List packages installed by this CLI.",
         "Show each locally installed package, its installed version, and the components it adds to supported tools.",
-        "Example:\n  aihub list")
+        "Examples:\n  aihub list\n  aihub list --plain\n  aihub list --name-only",
+        *PLAIN)
     add("update", cmd_update, "Update installed packages to newer versions.",
         "Check for newer releases and install them. With no name, checks every installed package; with a name, checks only that installed package.",
         "Examples:\n  aihub update\n  aihub update my-skill",
@@ -1429,6 +1450,8 @@ def build_parser():
 def main(argv=None):
     ap = build_parser()
     a = ap.parse_args(argv)
+    from . import hooks, integrations, policy, telemetry, tls
+    from ..core import release                  # `aihub upgrade` swaps aihub.pyz under this process: load every module the tail of main needs BEFORE it
     try:
         if not getattr(a, "cmd", None):
             if not ui.INTERACTIVE:
@@ -1444,16 +1467,13 @@ def main(argv=None):
         if a.cmd == "credential":
             return a.fn(a)              # git calls this on every fetch: no welcome, updater or network
         if a.cmd not in ("hook", "flush", "credential"):
-            from . import tls
             tls.warn_if_insecure()
         a.fn(a)
         if a.cmd not in ("hook", "flush", "credential", "self-uninstall"):
             record_cli_install()
         if a.cmd not in ("hook", "flush", "credential", "hooks", "self-uninstall", "uninstall"):
-            from . import hooks
             hooks.verify()      # install/use/update/...: make sure our usage hooks are still in place
         updater.auto(a.cmd)
-        from . import policy
         policy.auto(a.cmd)
         remote_config.auto(a.cmd)
     except (api.ApiError, ValueError, KeyError, OSError) as e:

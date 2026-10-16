@@ -70,6 +70,7 @@ queue/            usage event spool and flusher state
 
 ```sh
 aihub search "code review"        # up to 30 matches
+aihub search [TERM] --plain|--name-only  # bare lines: "name version" or just the name
 aihub info <name>                 # metadata and versions (JSON when output is not a terminal)
 aihub install <name>              # resolve from the index, clone at the version ref, install
 aihub install <name> --yes        # skip confirmations

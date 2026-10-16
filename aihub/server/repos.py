@@ -730,6 +730,28 @@ class Repos:
         rows.sort(key=lambda r: V.parse(r["version"]), reverse=True)
         return rows
 
+    def index_entries(self):
+        """Every package the database knows as a folder-index entry (what `pkgindex.write_entry` takes). Used once to seed the hub's own
+        index when it has none yet, so the CLI sees the same packages as the web UI."""
+        out = []
+        for p in _rows(self.db.conn().execute("SELECT id,name,type,description,tags,latest_version,readme FROM packages WHERE hidden=0")):
+            vs = self.versions(p["id"])
+            if not vs:
+                continue
+            man = next((v["manifest"] for v in vs if v["version"] == p["latest_version"]), vs[0]["manifest"])
+            meta = man.get("package") or {}
+            e = {"name": p["name"], "type": p["type"] or "tool", "description": p["description"] or "",
+                 "tags": [t for t in (p["tags"] or "").split(",") if t], "readme": p["readme"] or "",
+                 "latest_version": p["latest_version"] or vs[0]["version"],
+                 "repo": {k: v for k, v in (man.get("repo") or {}).items() if k != "ref"},
+                 "versions": [{"version": v["version"], "ref": (v["manifest"].get("repo") or {}).get("ref") or "",
+                               "requires": v["manifest"].get("requires") or {}} for v in reversed(vs)]}
+            for k in ("authors", "license"):
+                if meta.get(k):
+                    e[k] = meta[k]
+            out.append(e)
+        return out
+
     def version_add(self, pid, version, file, sha, size, manifest, signature=None):
         with self.lock:
             c = self.db.conn()

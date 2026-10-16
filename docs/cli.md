@@ -61,6 +61,8 @@ To remove aihub from a machine, run `aihub self-uninstall` (add `--yes` to skip 
 
 ```sh
 aihub search "code review"
+aihub search "code review" --plain      # "name version" per line, no table (for scripts)
+aihub search --name-only                # names only
 aihub info package-name
 aihub install package-name
 aihub install package-name --yes
@@ -69,6 +71,7 @@ aihub install -r requirements.txt
 aihub install package-name -i        # --indirect: the hub fetches from git and sends it (needs the install_indirect permission; no git fallback: a hub failure is an error). Git LFS files are downloaded in both modes (needs git-lfs on the machine that runs git: the hub for -i, else you); the CLI says whether it used a cache or fetched
 aihub install package-name --tool claude --tool opencode
 aihub list
+aihub list --plain                      # "name version" per line; --name-only for names only
 aihub update
 aihub update package-name
 aihub uninstall package-name
