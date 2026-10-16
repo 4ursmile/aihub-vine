@@ -1,4 +1,5 @@
 """Repository layer: the only module that writes SQL."""
+import hashlib
 import json
 import re
 import sqlite3
@@ -6,7 +7,7 @@ import threading
 import time
 import zlib
 
-from ..core import version as V
+from ..core import pkgindex, version as V
 from .db import ALL_PERMS, ANON_LOCKED
 
 
@@ -730,27 +731,36 @@ class Repos:
         rows.sort(key=lambda r: V.parse(r["version"]), reverse=True)
         return rows
 
-    def index_entries(self):
-        """Every package the database knows as a folder-index entry (what `pkgindex.write_entry` takes). Used once to seed the hub's own
-        index when it has none yet, so the CLI sees the same packages as the web UI."""
-        out = []
-        for p in _rows(self.db.conn().execute("SELECT id,name,type,description,tags,latest_version,readme FROM packages WHERE hidden=0")):
-            vs = self.versions(p["id"])
+    def index_view(self, viewer):
+        """The package index as THIS viewer may see it, straight from the database: {"rows": light catalog rows, "entries": {name: entry}}.
+        Two queries however many packages there are. The caller caches it until something changes; nothing here touches git."""
+        sql, a = self.visible_sql(viewer)
+        c = self.db.conn()
+        pk = _rows(c.execute("SELECT id,name,type,description,tags,latest_version,readme FROM packages WHERE hidden=0 AND " + sql + " ORDER BY name", a))
+        vers = {}
+        for r in c.execute("SELECT v.package_id,v.version,v.manifest FROM versions v JOIN packages ON packages.id=v.package_id WHERE packages.hidden=0 AND " + sql, a).fetchall():
+            vers.setdefault(r[0], []).append((r[1], json.loads(r[2] or "{}")))
+        rows, entries = [], {}
+        for p in pk:
+            vs = sorted(vers.get(p["id"], []), key=lambda x: V.parse(x[0]))          # oldest first, like the folder index
             if not vs:
                 continue
-            man = next((v["manifest"] for v in vs if v["version"] == p["latest_version"]), vs[0]["manifest"])
+            latest = p["latest_version"] or vs[-1][0]
+            man = next((m for v, m in vs if v == latest), vs[-1][1])
             meta = man.get("package") or {}
             e = {"name": p["name"], "type": p["type"] or "tool", "description": p["description"] or "",
-                 "tags": [t for t in (p["tags"] or "").split(",") if t], "readme": p["readme"] or "",
-                 "latest_version": p["latest_version"] or vs[0]["version"],
+                 "tags": [t for t in (p["tags"] or "").split(",") if t], "readme": p["readme"] or "", "latest_version": latest,
                  "repo": {k: v for k, v in (man.get("repo") or {}).items() if k != "ref"},
-                 "versions": [{"version": v["version"], "ref": (v["manifest"].get("repo") or {}).get("ref") or "",
-                               "requires": v["manifest"].get("requires") or {}} for v in reversed(vs)]}
+                 "versions": [{"version": v, "ref": (m.get("repo") or {}).get("ref") or "", "requires": m.get("requires") or {}} for v, m in vs]}
             for k in ("authors", "license"):
                 if meta.get(k):
                     e[k] = meta[k]
-            out.append(e)
-        return out
+            e = pkgindex.normalize_entry(e)
+            h = hashlib.sha256(pkgindex.dumps(e).encode()).hexdigest()[:12]
+            entries[e["name"]] = e
+            rows.append({"name": e["name"], "type": e.get("type", ""), "latest_version": latest,
+                         "description": (e.get("description") or "")[:pkgindex.DESC_MAX], "tags": e.get("tags", []), "h": h})
+        return {"rows": rows, "entries": entries}
 
     def version_add(self, pid, version, file, sha, size, manifest, signature=None):
         with self.lock:

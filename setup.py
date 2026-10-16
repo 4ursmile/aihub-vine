@@ -15,6 +15,8 @@ class Build(build_py):
         shutil.rmtree(dst, ignore_errors=True)
         shutil.copytree(os.path.join(HERE, "aihub", "builtin_packages", "aihub-policy", "rules"), dst,
                         ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copy(os.path.join(HERE, "aihub", "builtin_packages", "aihub-prices", "prices.json"),
+                    os.path.join(self.build_lib, "aihub", "core", "prices.json"))
 
 
 setup(cmdclass={"build_py": Build})

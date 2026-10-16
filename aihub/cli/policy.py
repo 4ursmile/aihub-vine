@@ -392,13 +392,17 @@ def judge(tool, inp, cwd=""):
 # ---- remote updates --------------------------------------------------------------------------------------------------------------
 def update(force=False):
     """Install the hub's `aihub-policy` when it is newer than the installed one. -> new version, or None when already current."""
+    return _install_newer(NAME, force)
+
+
+def _install_newer(name, force=False):
     from ..core import version as V
     from . import installer, registry
-    rec = installer.state()["packages"].get(NAME)
-    latest = registry.resolve(NAME)["version"]
+    rec = installer.state()["packages"].get(name)
+    latest = registry.resolve(name)["version"]
     if rec and not force and V.compare(latest, rec["version"]) <= 0:
         return None
-    installer.install(NAME, "", True, None)
+    installer.install(name, "", True, None)
     return latest
 
 
@@ -415,6 +419,10 @@ def auto(cmd):
         v = update()
         if v:
             ui.info("policy updated to %s (aihub policy list)" % v)
+        try:
+            _install_newer("aihub-prices")                       # model prices for `aihub usage`
+        except Exception:
+            pass
     except Exception:
         pass
 

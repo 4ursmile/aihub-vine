@@ -11,7 +11,8 @@ import re
 from . import paths
 
 # USD per 1M tokens: (input, output, cache write 5m, cache read). First matching pattern wins. These are list prices as an
-# ESTIMATE (bedrock/enterprise/subscription billing differs); override or add entries in ~/.aihub/prices.json:
+# ESTIMATE (bedrock/enterprise/subscription billing differs). PRICES is only the last-resort fallback: the real table is
+# aihub-prices/prices.json (bundled, refreshed from the hub package aihub-prices), and ~/.aihub/prices.json overrides both:
 #   {"my-model": {"input": 3, "output": 15, "cache_write": 3.75, "cache_read": 0.3}}
 PRICES = [
     (r"opus", (5.0, 25.0, 6.25, 0.5)),
@@ -35,10 +36,42 @@ def price_for(model):
                         float(v.get("cache_read", v["input"] * 0.1)))
     except (TypeError, ValueError, KeyError, AttributeError):
         pass
-    for pat, p in PRICES:
+    for pat, p in _table():
         if re.search(pat, model.lower()):
             return p
     return None
+
+
+def _files():
+    """prices.json candidates, best first: installed hub package, then the bundled one (source folder, else the build copy)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = [paths.p("packages", "aihub-prices", "prices.json"),
+           os.path.join(os.path.dirname(here), "builtin_packages", "aihub-prices", "prices.json")]
+    try:
+        from importlib import resources
+        out.append(resources.files("aihub.core").joinpath("prices.json"))
+    except Exception:
+        pass
+    return out
+
+
+def _table():
+    """[(regex, (in, out, cache_write, cache_read))]: hub package, then bundled file, then the PRICES fallback."""
+    out = []
+    for f in _files():
+        try:
+            d = json.loads(f.read_text(encoding="utf-8")) if hasattr(f, "read_text") else json.load(open(f, encoding="utf-8"))
+            rows = d.get("prices") or []
+        except Exception:
+            continue
+        for e in rows:
+            try:
+                i = float(e["input"])
+                out.append((str(e["match"]), (i, float(e["output"]), float(e.get("cache_write", i * 1.25)),
+                                              float(e.get("cache_read", i * 0.1)))))
+            except (TypeError, ValueError, KeyError, AttributeError):
+                continue
+    return out + PRICES
 
 
 def _ts(s):

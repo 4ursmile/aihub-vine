@@ -166,7 +166,7 @@ class HttpIngest(unittest.TestCase):
         self.assertEqual(self.c.post("/api/v1/telemetry", content=b"{}", headers={"Content-Encoding": "br"}).status_code, 415)
 
     def test_answer_carries_index_etag_once_the_index_is_ready(self):
-        self.assertNotIn("index_etag", self.c.post("/api/v1/telemetry", json={"events": []}).json())   # no index yet: field absent
+        self.assertTrue(self.c.post("/api/v1/telemetry", json={"events": []}).json()["index_etag"])   # built from the database: always there
         with unittest.mock.patch("aihub.server.routers._index_view", return_value={"etag": '"abc"'}):
             self.assertEqual(self.c.post("/api/v1/telemetry", json={"events": []}).json()["index_etag"], '"abc"')
 
@@ -506,23 +506,14 @@ class IndexRoutes(unittest.TestCase):
         self.c = app()
         self.h = admin(self.c)
         self.r, self.sy = self.c.app.state.repos, self.c.app.state.sync
-        self.dir = tempfile.mkdtemp()
-        from aihub.core import pkgindex
-        out = os.path.join(self.dir, "index")
-        for n in ("pub-one", "secret-one"):
-            pkgindex.write_entry(out, {"name": n, "type": "skill", "description": n, "latest_version": "1.0.0",
-                                       "versions": [{"version": "1.0.0"}], "repo": {"url": "https://example.com/x.git"}})
-        pkgindex.rebuild(out)
-        self.sy.index_dir = self.dir
-        with unittest.mock.patch.object(self.sy, "index_source", return_value=("https://example.com/i.git", "main", "index")):
-            self.sy.invalidate_served()
-        self.src = unittest.mock.patch.object(self.sy, "index_source", return_value=("https://example.com/i.git", "main", "index"))
-        self.src.start()
-        self.r.package_upsert("pub-one", "skill", "d", [], "")
-        self.r.package_upsert("secret-one", "skill", "d", [], "", visibility="private")
+        self.add("pub-one")
+        self.add("secret-one", visibility="private")
 
-    def tearDown(self):
-        self.src.stop()
+    def add(self, name, **kw):
+        pid = self.r.package_upsert(name, "skill", "d", [], "", **kw)
+        self.r.version_sync(pid, "1.0.0", {"package": {"name": name, "version": "1.0.0", "type": "skill"}, "requires": {},
+                                           "repo": {"url": "https://example.com/x.git", "ref": "abc"}})
+        self.c.app.state.cache.invalidate("pkg")
 
     def test_etag_and_304_and_visibility(self):
         a = self.c.get("/api/v1/index/catalog")
@@ -545,20 +536,15 @@ class IndexRoutes(unittest.TestCase):
     def test_new_publish_changes_the_etag_only_then(self):
         t1 = self.c.get("/api/v1/index/catalog").headers["ETag"]
         self.assertEqual(self.c.get("/api/v1/index/catalog").headers["ETag"], t1)
-        from aihub.core import pkgindex
-        out = os.path.join(self.dir, "index")
-        pkgindex.write_entry(out, {"name": "pub-two", "type": "skill", "description": "n", "latest_version": "1.0.0", "versions": [{"version": "1.0.0"}]})
-        pkgindex.rebuild(out)
-        self.r.package_upsert("pub-two", "skill", "d", [], "")
-        self.sy.invalidate_served()
+        self.add("pub-two")
         self.assertNotEqual(self.c.get("/api/v1/index/catalog").headers["ETag"], t1)
 
-    def test_not_ready_answers_503_so_the_cli_uses_git(self):
-        self.sy.index_dir = None
-        self.sy.invalidate_served()
-        r = self.c.get("/api/v1/index/catalog")
-        self.assertEqual(r.status_code, 503)
-        self.assertIn("Retry-After", r.headers)
+    def test_unchanged_index_does_not_query_the_database(self):
+        self.c.get("/api/v1/index/catalog")
+        with unittest.mock.patch.object(type(self.r), "index_view", side_effect=AssertionError("db queried")):
+            a = self.c.get("/api/v1/index/catalog")
+            self.assertEqual(a.status_code, 200)
+            self.assertEqual(self.c.get("/api/v1/index/catalog", headers={"If-None-Match": a.headers["ETag"]}).status_code, 304)
 
     def test_client_config_tells_the_cli_about_the_hub_route(self):
         j = self.c.get("/api/v1/client-config").json()

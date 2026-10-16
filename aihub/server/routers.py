@@ -1730,22 +1730,15 @@ async def telemetry_in(request: Request, u=Depends(current_user)):
 
 # ---------------- the package index, served by the hub (CLI asks here first; git is the fallback). ETag + 304.
 def _index_view(request, u):
-    """(rows, etag, names->h) of the index as THIS viewer may see it. Cached per viewer scope; any change drops it ('pkg' prefix)."""
+    """{"etag","rows","h","entries"} of the index as THIS viewer may see it, built from the database. Cached per viewer scope; every package
+    change drops it ('pkg' prefix), so the database is only queried after a change and an unchanged index answers 304 from the cache."""
     v = viewer(request, u)
-    sy = request.app.state.sync
-    rows, tag = sy.served_catalog()
-    if not tag:
-        raise HTTPException(503, "index not ready; use git", headers={"Retry-After": "30"})
-    key = "pkg:idx:%s:%s" % (_cache_scope(v), tag)
-    hit = C(request).get(key)
-    if hit:
-        return hit
-    seen = R(request).package_names_visible(v)
-    pub = [x for x in rows if x["name"] in seen]                       # a package the database does not know yet is hidden until the next sync
-    etag = '"%s"' % hashlib.sha256((tag + "|" + ",".join(x["name"] for x in pub)).encode()).hexdigest()[:20]
-    out = {"etag": etag, "rows": pub, "h": {x["name"]: x["h"] for x in pub}}
-    C(request).set(key, out, ttl=3600)
-    return out
+    def build():
+        view = R(request).index_view(v)
+        rows = view["rows"]
+        etag = '"%s"' % hashlib.sha256(",".join(x["name"] + x["h"] for x in rows).encode()).hexdigest()[:20]
+        return {"etag": etag, "rows": rows, "h": {x["name"]: x["h"] for x in rows}, "entries": view["entries"]}
+    return C(request).get_or_set("pkg:idx:%s" % _cache_scope(v), 3600, build)
 
 
 def _not_modified(request, etag):
@@ -1775,21 +1768,14 @@ def index_entry(name: str, request: Request, u=Depends(current_user)):
     hdr = {"ETag": etag, "Cache-Control": "private, max-age=0, must-revalidate"}
     if _not_modified(request, etag):
         return Response(status_code=304, headers=hdr)
-    rd, _ = request.app.state.sync.served()
-    entry = rd.entry(name) if rd is not None else None
-    if not entry:
-        raise HTTPException(404, "package not found")
-    return JSONResponse(entry, headers=hdr)
+    return JSONResponse(view["entries"][name], headers=hdr)
 
 
 @r.get("/index/packages/{name}/transfer/{version}")
 def index_transfer(name: str, version: str, request: Request, u=Depends(require_perm("install_indirect"))):
     """`aihub install -i`: the hub fetches the package from git (cached; a monorepo once for all its packages) and sends a tar.gz."""
     name = naming.normalize(name)
-    if name not in _index_view(request, u)["h"]:
-        raise HTTPException(404, "package not found")
-    rd, _ = request.app.state.sync.served()
-    entry = rd.entry(name) if rd is not None else None
+    entry = _index_view(request, u)["entries"].get(name)
     if not entry:
         raise HTTPException(404, "package not found")
     if version not in [v["version"] for v in entry.get("versions") or []] + [entry.get("latest_version")]:

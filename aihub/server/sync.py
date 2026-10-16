@@ -278,18 +278,6 @@ class Sync:
         url, branch, path = self.index_source()
         log.info("sync: usage inbox %s (branch %s, archive %s); package index %s (branch %s, folder %s)",
                  gitx.redact_url(self.inbox()) or "-", self.inbox_branch(), self.archive_branch(), gitx.redact_url(url) or "-", branch, path)
-        loc = self.local_index()
-        if not self.index_dir and os.path.isfile(os.path.join(loc, self.index_source()[2], "root.json")):
-            self.index_dir = loc                                # serve the hub's own index from the first request, no git
-        elif not self.index_dir and not self.index_git():
-            try:                                                # fresh hub, no git index: start with an empty local index so /index/* answers (not 503)
-                folder = os.path.join(loc, self.index_source()[2])
-                for e in self.repos.index_entries():            # an existing hub: serve what the web UI shows, not an empty catalog
-                    pkgindex.write_entry(folder, e)
-                pkgindex.rebuild(folder)
-                self.index_dir = loc
-            except OSError as e:
-                log.warning("sync: cannot create the local index: %s", e)
         self.t = threading.Thread(target=self._loop, name="aihub-sync", daemon=True)
         self.t.start()
 
@@ -369,8 +357,6 @@ class Sync:
                 self._stage_pending()
                 self._flush_held(force=True)
                 self._flush_index(force=True)
-            if idx and (first or new_publish or self.repos.setting("sync_index_dirty") == "1" or self._index_moved()):
-                guarded(self.pull_index)
         except Exception as e:
             msg = gitx.redact_url(str(e))[:250]
             self.status["index_error"] = msg
@@ -796,6 +782,7 @@ class Sync:
             self.invalidate_served()
             try:
                 self._import_local()                                    # database (web UI, rankings) follows the hub's own index now
+                self.invalidate_served()                                # the cached index answers are built from the database
             except Exception as e:                                      # dirty stays set: the next index read imports it
                 log.warning("sync: importing the staged index failed: %s", e)
         return changed

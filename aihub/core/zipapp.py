@@ -16,6 +16,7 @@ def build(out_path):
         # the policy rules live in the aihub-policy package; the CLI carries a copy (a symlink would break on Windows)
         rules = os.path.join(pkg, "builtin_packages", "aihub-policy", "rules")
         shutil.copytree(rules, os.path.join(dst, "core", "policy_rules"), ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copy(os.path.join(pkg, "builtin_packages", "aihub-prices", "prices.json"), os.path.join(dst, "core", "prices.json"))
         # core/defaults.json is read through importlib.resources (zip-safe), and it must be inside the archive
         assert os.path.isfile(os.path.join(dst, "core", "defaults.json")), "defaults.json missing from the CLI build"
         assert os.path.isdir(os.path.join(dst, "core", "policy_rules")), "policy_rules missing from the CLI build"

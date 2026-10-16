@@ -122,47 +122,18 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class SeedIndex(unittest.TestCase):
-    """A hub with packages in its database but no hub index yet must serve those packages to the CLI, not an empty catalog or a 503."""
+class DbIndex(unittest.TestCase):
+    """The CLI index comes from the database, so it is never empty while the web UI lists packages, with git sync on or off."""
 
-    def test_local_index_is_seeded_from_the_database(self):
-        d = tempfile.mkdtemp()
-        c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=d)))
-        r, sy = c.app.state.repos, c.app.state.sync
+    def test_index_is_served_from_the_database(self):
+        c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=tempfile.mkdtemp())))
+        r = c.app.state.repos
         pid = r.package_upsert("demo", "skill", "a demo", ["x", "y"], "readme")
         r.version_sync(pid, "1.0.0", {"package": {"name": "demo", "version": "1.0.0", "type": "skill"}, "requires": {},
                                        "repo": {"url": "https://example.com/r.git", "branch": "main", "subdir": "demo", "ref": "abc"}})
-        sy.index_git = lambda: False
-        sy.start()
-        sy.stop.set(); sy.wake.set()
-        rows, tag = sy.served_catalog()
-        self.assertTrue(tag)
-        self.assertEqual([x["name"] for x in rows], ["demo"])
-        self.assertEqual(sy.served()[0].entry("demo")["repo"]["subdir"], "demo")
-
-
-    def test_turning_git_index_sync_on_still_works(self):
-        d, src = tempfile.mkdtemp(), tempfile.mkdtemp()
-        from aihub.core import pkgindex
-        pkgindex.write_entry(os.path.join(src, "index"), {"name": "fromgit", "type": "skill", "description": "g", "latest_version": "1.0.0",
-                                                          "versions": [{"version": "1.0.0", "ref": "", "requires": {}}], "repo": {"url": "https://example.com/g.git"}})
-        pkgindex.rebuild(os.path.join(src, "index"))
-        env = unittest.mock.patch.dict(os.environ, {"AIHUB_INDEX_URL": src})
-        env.start()
-        self.addCleanup(env.stop)
-        c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=d)))
-        r, sy = c.app.state.repos, c.app.state.sync
-        pid = r.package_upsert("demo", "skill", "a demo", [], "")
-        r.version_sync(pid, "1.0.0", {"package": {"name": "demo", "version": "1.0.0", "type": "skill"}, "requires": {}, "repo": {"url": "https://example.com/r.git"}})
-        sy.start()                                                      # git index sync off: seeded local index
-        self.assertEqual([x["name"] for x in sy.served_catalog()[0]], ["demo"])
-        r.set_setting("git_index_sync", "1")                            # admin turns it on later
-        sy.forget()
-        self.assertTrue(sy.index_git())
-        sy.pull_index()
-        sy.invalidate_served()
-        self.assertEqual([x["name"] for x in sy.served_catalog()[0]], ["fromgit"])
-        sy.stop.set(); sy.wake.set()
+        j = c.get("/api/v1/index/catalog").json()
+        self.assertEqual([x["name"] for x in j["packages"]], ["demo"])
+        self.assertEqual(c.get("/api/v1/index/packages/demo").json()["repo"]["subdir"], "demo")
 
 
 class ClientConfig(unittest.TestCase):
@@ -555,7 +526,7 @@ class Inbox(unittest.TestCase):
         """Repo down / no access: the admin page must say so (not 'OK'), the cursor must not claim success, and the package index still syncs."""
         self.sy.cfg = lambda key, env, default="": {"telemetry_url": "/nonexistent/inbox.git"}.get(key, default)
         indexed = []
-        self.sy.pull_index = lambda: indexed.append(1)
+        self.sy._flush_index = lambda force=False: indexed.append(1)                 # the index half is the push to git now
         with self.assertRaises(RuntimeError):
             self.sy.run_once()
         self.assertEqual(indexed, [1])                                              # the other half still ran
@@ -569,9 +540,9 @@ class Inbox(unittest.TestCase):
         from aihub.cli import telemetry
         self.spool(3)
         telemetry.flush(force=True)
-        def broken():
+        def broken(force=False):
             raise RuntimeError("index: cannot reach git")
-        self.sy.pull_index = broken
+        self.sy._flush_index = broken
         with self.assertRaises(RuntimeError):
             self.sy.run_once()
         self.assertEqual(self.count(), 3)                                           # usage was still stored
