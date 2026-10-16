@@ -73,7 +73,7 @@ aihub search "code review"        # up to 30 matches
 aihub info <name>                 # metadata and versions (JSON when output is not a terminal)
 aihub install <name>              # resolve from the index, clone at the version ref, install
 aihub install <name> --yes        # skip confirmations
-aihub install <name> -i           # --indirect: get it through the hub instead of git (needs install_indirect; falls back to git). Git LFS files come down too (needs git-lfs where git runs); the CLI says if it was cached
+aihub install <name> -i           # --indirect: get it through the hub instead of git (needs install_indirect; no git fallback, fails with a message). Git LFS files come down too (needs git-lfs where git runs); the CLI says if it was cached
 aihub install a b "c>=1.0"        # several packages at once; one failing never stops the rest
 aihub install -r requirements.txt # pip-style file: one name[<spec>] per line, # comments, nested -r
 aihub install <name> --tool claude --tool opencode   # only these tools
@@ -101,7 +101,7 @@ aihub skill install [--tool claude]   # (re)install aihub-guide and aihub-packag
 aihub skill remove                    # uninstall both
 aihub run [BOT] [-- ARGS]            # start an installed bot (type=bot); settings in ~/.aihub/bots/NAME/.env, printed after install
 aihub onboard [BOT]                   # optional guided credential setup of a bot that has one ([bot] onboard); install offers it in a terminal
-aihub knowledge list|pull|push|edit NOTE|rm NOTE|path   # personal notes + bot soul (soul.md), also on the hub page Knowledge
+aihub knowledge list|get NOTE|pull|push|edit NOTE|rm NOTE|path   # personal notes + bot soul (soul.md), also on the hub page Knowledge
 aihub knowledge share NOTE --user U|--group G [--write] | unshare | shares NOTE | shared | push-shared OWNER/NOTE   # shared notes land in ~/.aihub/knowledge/shared/<owner>/
 
 **Build a bot (type = bot).** 1) `aihub dev init ./my-bot --type bot --name my-bot`. 2) In `aihub.toml`, set `[bot] run = "bot/run.py"` and `title`; declare each setting as `[[bot.env]]` (`name`, `hint`, `required`, `secret`, `default`). 3) Write `bot/run.py`: read settings from the environment, `--once`/`--info` from argv after `--`. 4) `aihub dev validate`, then `aihub dev publish --bump patch`. 5) `aihub install my-bot` prints `settings:` (`~/.aihub/bots/my-bot/.env`); fill it in. 6) `aihub run my-bot` (`-- --info` to check). Memory, harnesses and cron: see `docs/bots.md` on the hub; this snapshot has none.

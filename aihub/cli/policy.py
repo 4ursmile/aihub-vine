@@ -439,7 +439,7 @@ def menu():
             allr = sorted(rules(True), key=lambda x: x[0]["id"])
             labels = [(r["id"], "%-26s %-4s %s" % (r["id"], r["action"], ui.clip(r.get("reason", ""), 50))) for r, _ in allr]
             on = [r["id"] for r, _ in allr if not r["disabled"]]
-            chosen = ui.select("Active rules (space toggles, enter saves)", labels, multi=True, preset=on)
+            chosen = ui.select("Active rules (space toggles, a all, n none, enter saves)", labels, multi=True, preset=on)
             if chosen is None:
                 continue
             u["disabled"] = sorted(set(x for x, _ in labels) - set(chosen))

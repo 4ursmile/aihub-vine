@@ -1,6 +1,6 @@
 [package]
 name = "aihub-knowledge"
-version = "1.0.0"
+version = "1.0.1"
 type = "skill"
 description = "Teaches Claude Code and Codex to use AI Hub knowledge notes: read your own and notes shared with you, write new ones, and share them with users or groups."
 tags = ["aihub", "knowledge", "notes"]

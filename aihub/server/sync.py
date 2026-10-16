@@ -281,6 +281,12 @@ class Sync:
         loc = self.local_index()
         if not self.index_dir and os.path.isfile(os.path.join(loc, self.index_source()[2], "root.json")):
             self.index_dir = loc                                # serve the hub's own index from the first request, no git
+        elif not self.index_dir and not self.index_git():
+            try:                                                # fresh hub, no git index: start with an empty local index so /index/* answers (not 503)
+                pkgindex.rebuild(os.path.join(loc, self.index_source()[2]))
+                self.index_dir = loc
+            except OSError as e:
+                log.warning("sync: cannot create the local index: %s", e)
         self.t = threading.Thread(target=self._loop, name="aihub-sync", daemon=True)
         self.t.start()
 

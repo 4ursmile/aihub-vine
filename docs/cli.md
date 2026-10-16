@@ -66,7 +66,7 @@ aihub install package-name
 aihub install package-name --yes
 aihub install pkg-a pkg-b "pkg-c>=1.0"
 aihub install -r requirements.txt
-aihub install package-name -i        # --indirect: the hub fetches from git and sends it (needs the install_indirect permission; falls back to git). Git LFS files are downloaded in both modes (needs git-lfs on the machine that runs git: the hub for -i, else you); the CLI says whether it used a cache or fetched
+aihub install package-name -i        # --indirect: the hub fetches from git and sends it (needs the install_indirect permission; no git fallback: a hub failure is an error). Git LFS files are downloaded in both modes (needs git-lfs on the machine that runs git: the hub for -i, else you); the CLI says whether it used a cache or fetched
 aihub install package-name --tool claude --tool opencode
 aihub list
 aihub update
@@ -95,7 +95,7 @@ aihub upgrade
 - `disable <name>...` switches a package off without deleting it: its skills, agents and MCP servers are removed from your AI tools, setup steps are reverted, and its commands leave PATH. `enable <name>...` (or `aihub install <name>` on a disabled package) puts it back from the files already on disk, so it works offline. See [Enable, disable, tree, lock and sync](#enable-disable-tree-lock-and-sync).
 - `tree [name]` prints the dependency tree. `lock` and `sync` write and apply a lock file.
 - `doctor` checks that the package index and the telemetry inbox are reachable (`git ls-remote`), whether you are signed in, which detected tools have usage hooks, and whether `python3` is available. The hub is optional and only reported.
-- `welcome` runs first-time setup for detected tools and prints a one-line note that an account is optional (`aihub login`); `setup` pulls index and telemetry settings (see [Install and configure](#install-and-configure)).
+- `welcome` runs first-time setup for detected tools and prints a one-line note that an account is optional (`aihub login`); `setup` pulls index and telemetry settings (see [Install and configure](#install-and-configure)). The policy guard is ticked by default in the welcome menu (and ON unless `aihub policy off`). In every multi-choice prompt `a` selects all and `n` deselects all (numbered fallback: `a`/`n`).
 - `version` shows the CLI version and the one the hub offers; `upgrade` installs it (see [Versions and self-update](#versions-and-self-update)).
 
 During installation, missing required commands are reported with any manifest hint. Package dependencies are recursively installed. Python dependencies in `[python]` are installed into a package-specific virtual environment. Installation asks before running the platform install script and before registering components; `--yes` skips these prompts. When stdin is closed (non-interactive), those prompts count as "no".
@@ -252,6 +252,8 @@ variables, e.g. `curl -kfsSL https://hub/install.sh | AIHUB_INSECURE=1 sh` (Powe
 aihub install aihub-bot          # prints: source folder, settings file (.env), how to run
 aihub run [BOT] [-- ARGS]        # start an installed bot (type = "bot"); with one bot the name is optional
 aihub knowledge list|pull|push [NOTE]|edit NOTE|rm NOTE|path
+aihub knowledge get NOTE         # print the note body to stdout (hub first, local copy as fallback); OWNER/NOTE for a shared one
+aihub soul                       # shortcut for: aihub knowledge get soul
 aihub knowledge share NOTE (--user U | --group G) [--write]   # read-only unless --write; soul is never shared
 aihub knowledge unshare NOTE (--user U | --group G)
 aihub knowledge shares NOTE      # who has it

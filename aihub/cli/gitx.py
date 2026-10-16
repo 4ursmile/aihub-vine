@@ -190,7 +190,28 @@ def lfs_pull(d, subdir=""):
         run(args, cwd=d, timeout=LFS_TIMEOUT)
     except GitError as e:
         raise GitError("git-lfs could not download the package files: %s" % redact_url(str(e)))
+    left = lfs_pointers(os.path.join(d, sub))
+    if left:
+        raise GitError("git-lfs left %d file(s) as pointers (%s); check that the LFS objects were uploaded and that `git lfs pull` works in %s"
+                       % (len(left), ", ".join(left[:3]), d))
     return True
+
+
+def lfs_pointers(root):
+    """Relative paths under `root` that are still Git LFS pointer files (small text starting with the LFS spec line)."""
+    out = []
+    for base, dirs, files in os.walk(root):
+        dirs[:] = [x for x in dirs if x != ".git"]
+        for n in files:
+            f = os.path.join(base, n)
+            try:
+                if os.path.getsize(f) < 1024:
+                    with open(f, "rb") as fh:
+                        if fh.read(40).startswith(b"version https://git-lfs.github.com/spec"):
+                            out.append(os.path.relpath(f, root))
+            except OSError:
+                pass
+    return out
 
 
 def _fetch(url, branch, ref, base):

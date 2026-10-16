@@ -75,8 +75,35 @@ def push(name):
     return n
 
 
+def get(name):
+    """Body of a note, printed as is. `owner/note` = a note shared with me. The hub is asked first (always current), the local copy is the fallback."""
+    if "/" in name:
+        o, n = name.split("/", 1)
+        n = _file(n)[0]
+        try:
+            return api.call("GET", "/knowledge/shared/%s/%s" % (o, n))["body"]
+        except api.ApiError:
+            p = os.path.join(shared_dir(o), n + ".md")
+    else:
+        n, p = _file(name)
+        try:
+            return api.call("GET", "/me/knowledge/" + n)["body"]
+        except api.ApiError:
+            pass
+    if not os.path.isfile(p):
+        raise ValueError("no note '%s' (aihub knowledge list)" % name)
+    with open(p, encoding="utf-8") as f:
+        return f.read()
+
+
 def cli(a):
     act = a.action
+    if act == "get":
+        if not a.name:
+            raise ValueError("name the note: aihub knowledge get soul")
+        body = get(a.name)
+        print(body, end="" if body.endswith("\n") else "\n")          # plain stdout: pipe it into a prompt or a file
+        return
     ui.out()
     if act == "path":
         ui.out(folder())

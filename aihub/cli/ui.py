@@ -353,9 +353,13 @@ def _fallback_select(title, options, multi, preset):
     out("  %s %s" % (accent("?"), title))
     for i, (_, label) in enumerate(options, 1):
         out("    %s %s" % (dim("%d)" % i), label))
-    ans = _ask("  %s " % dim("numbers (comma separated)" if multi else "number")).strip()
+    ans = _ask("  %s " % dim("numbers (comma separated, a = all, n = none)" if multi else "number")).strip()
     if not ans:
         return list(preset) if multi else (options[0][0] if preset is None and options else None)
+    if multi and ans.lower() in ("a", "all"):
+        return [v for v, _ in options]
+    if multi and ans.lower() in ("n", "none"):
+        return []
     try:
         picks = [options[int(x) - 1][0] for x in re.split(r"[,\s]+", ans) if x]
     except (ValueError, IndexError):
@@ -372,7 +376,7 @@ def select(title, options, multi=False, preset=()):
         return list(preset) if multi else options[0][0]
     try:
         pos, on = 0, set(v for v, _ in options if v in preset)
-        hint = "arrows move, space toggles, enter confirms" if multi else "arrows move, enter selects, esc cancels"
+        hint = "arrows move, space toggles, a all, n none, enter confirms" if multi else "arrows move, enter selects, esc cancels"
         out("  %s %s %s" % (accent("?"), bold(title), dim("(" + hint + ")")))
         n = len(options)
 
@@ -402,6 +406,10 @@ def select(title, options, multi=False, preset=()):
                     pos = (pos + 1) % n
                 elif k == "space" and multi:
                     on.symmetric_difference_update({options[pos][0]})
+                elif k in ("a", "A") and multi:
+                    on.update(v for v, _ in options)
+                elif k in ("n", "N") and multi:
+                    on.clear()
                 elif k == "enter":
                     return [v for v, _ in options if v in on] if multi else options[pos][0]
                 draw(False)

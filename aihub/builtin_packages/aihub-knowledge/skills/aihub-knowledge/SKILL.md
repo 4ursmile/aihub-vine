@@ -15,6 +15,7 @@ Find the CLI first: `aihub version` (if not found, try `~/.aihub/bin/aihub`).
 
 1. `aihub knowledge pull` (refreshes own and shared notes; revoked shares disappear).
 2. `aihub knowledge list` (own) and `aihub knowledge shared` (owner, note, access).
+   To read one note straight away: `aihub knowledge get NOTE` (or `get OWNER/NOTE` for a shared one); it prints the body.
 3. Read the relevant files directly from `~/.aihub/knowledge/` and `~/.aihub/knowledge/shared/*/`. Prefer a shared note over
    guessing a team convention; name the owner when you rely on it ("per alice/handbook ...").
 4. If a note and the code disagree, say so; do not silently pick one.

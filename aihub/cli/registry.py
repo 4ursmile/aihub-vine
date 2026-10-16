@@ -364,12 +364,8 @@ def checkout(r, dest):
     if INDIRECT:
         try:
             return _from_hub(r, dest)
-        except api.ApiError as e:
-            if str(e).startswith(("401", "403")):
-                raise
-            ui.note("hub transfer failed for %s (%s); using git" % (r["name"], e))
-        except (OSError, ValueError, tarfile.TarError) as e:
-            ui.note("hub transfer failed for %s (%s); using git" % (r["name"], e))
+        except (OSError, ValueError, tarfile.TarError) as e:       # the hub is the way now; git is legacy and `-i` never falls back to it
+            raise api.ApiError("hub transfer failed for %s (%s); retry, or install without -i to use git" % (r["name"], e))
     repo = r["repo"]
     url, branch, ref, sub = repo["url"], repo.get("branch") or "main", repo.get("ref"), repo.get("subdir") or ""
     try:

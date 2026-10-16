@@ -293,6 +293,12 @@ def cmd_knowledge(a):
     knowledge.cli(a)
 
 
+def cmd_soul(a):
+    """Shortcut for `aihub knowledge get soul`: print the persona note."""
+    from . import knowledge
+    print(knowledge.get("soul"), end="")
+
+
 def cmd_enable(a):
     ui.out()
     names = sorted(installer.state()["packages"]) if a.all else a.names
@@ -508,16 +514,24 @@ def cmd_welcome(a):
         ui.good("Found: " + ", ".join(t.label for t in tools))
     else:
         ui.note("No AI tools detected yet. Install Claude Code, Codex or OpenCode and run: aihub welcome")
-    do_hooks, do_skill = bool(tools), bool(tools)
+    do_hooks, do_skill, do_policy = bool(tools), bool(tools), True       # the policy guard is ON unless the user unticks it
     if tools and ask:
         ui.out()
         picks = ui.select("What should I connect?", [
             ("hooks", "Usage hooks - show what your team really uses"),
-            ("skill", "Recommend the packaging skills (not installed automatically)")], multi=True, preset=("hooks", "skill"))
+            ("policy", "Policy guard - block destructive tool calls (recommended)"),
+            ("skill", "Recommend the packaging skills (not installed automatically)")], multi=True, preset=("hooks", "policy", "skill"))
         do_hooks, do_skill = "hooks" in picks, "skill" in picks
+        do_policy = "policy" in picks
     if do_hooks:
         for label, status in hooks.ensure():
             ui.good("%s hook: %s" % (label, status))
+    from . import policy
+    u = policy.user()
+    if u["enabled"] != do_policy:
+        u["enabled"] = do_policy
+        policy.save_user(u)
+    ui.good("policy guard: %s" % ("ON" if do_policy else "OFF (aihub policy on)"))
     if do_skill:
         from ..core.release import BUILTIN_PACKAGES
         ui.out()
@@ -1156,7 +1170,7 @@ def build_parser():
         ("Manage", ["enable", "disable", "tree", "lock", "sync"]),
         ("Account", ["config", "login", "logout", "register", "vault"]),
         ("Publish", ["dev"]),
-        ("Setup and maintenance", ["run", "onboard", "knowledge", "policy", "welcome", "doctor", "version", "upgrade", "hook", "flush", "hooks", "skill", "self-uninstall"]),
+        ("Setup and maintenance", ["run", "onboard", "knowledge", "soul", "policy", "welcome", "doctor", "version", "upgrade", "hook", "flush", "hooks", "skill", "self-uninstall"]),
     ]
 
     def add(name, fn, help, description, epilog, *args):
@@ -1294,12 +1308,15 @@ def build_parser():
         arg("name", nargs="?", metavar="BOT", help="Installed bot; optional when only one has guided setup."))
     add("knowledge", cmd_knowledge, "Your personal notes and bot persona (soul), synced with the hub.",
         "Notes are markdown files in ~/.aihub/knowledge, also editable on the hub web page (Knowledge). 'soul' is the persona bots load first. Share a note with a user or group: it appears for them under ~/.aihub/knowledge/shared/<owner>/ after `pull`; 'soul' is never shared.",
-        "Examples:\n  aihub knowledge edit soul\n  aihub knowledge pull\n  aihub knowledge push\n  aihub knowledge list\n  aihub knowledge share handbook --group backend\n  aihub knowledge share runbook --user alice --write\n  aihub knowledge shared",
-        arg("action", nargs="?", default="list", choices=["list", "pull", "push", "edit", "rm", "path", "share", "unshare", "shares", "shared", "push-shared"], help="Default: list."),
-        arg("name", nargs="?", metavar="NOTE", help="Note name (edit/push/rm/share/unshare/shares); owner/note for push-shared."),
+        "Examples:\n  aihub knowledge get soul\n  aihub knowledge get alice/handbook\n  aihub knowledge edit soul\n  aihub knowledge pull\n  aihub knowledge push\n  aihub knowledge list\n  aihub knowledge share handbook --group backend\n  aihub knowledge share runbook --user alice --write\n  aihub knowledge shared",
+        arg("action", nargs="?", default="list", choices=["list", "get", "pull", "push", "edit", "rm", "path", "share", "unshare", "shares", "shared", "push-shared"], help="Default: list."),
+        arg("name", nargs="?", metavar="NOTE", help="Note name (get/edit/push/rm/share/unshare/shares); owner/note for get (shared with you) and push-shared."),
         arg("--user", help="share/unshare: hub user name."),
         arg("--group", help="share/unshare: hub group name (everyone in it)."),
         arg("--write", action="store_true", help="share: let them edit the note too (default read-only)."))
+    add("soul", cmd_soul, "Print your soul (persona) note.",
+        "Shortcut for 'aihub knowledge get soul': the persona note from the hub (local copy if the hub is unreachable), written to stdout so an assistant or script can read it.",
+        "Examples:\n  aihub soul\n  aihub soul > soul.md")
     add("policy", cmd_policy, "Built-in guard that blocks agents from destructive tool calls.",
         "aihub-policy checks every tool call of Claude Code before it runs and denies (or asks about) deleting databases or buckets, overwriting tables or protected paths. Rules are bundled, refreshed automatically from the hub package aihub-policy, and can be switched on or off, added or removed here.",
         "Examples:\n  aihub policy\n  aihub policy off\n  aihub policy disable sql-update-all\n  aihub policy add no-prod --pattern 'kubectl .* prod' --reason 'prod cluster'\n  aihub policy test 'aws s3 rm s3://b --recursive'\n  aihub policy update",
