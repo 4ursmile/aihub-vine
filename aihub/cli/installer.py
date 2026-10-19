@@ -395,8 +395,11 @@ def _install_one(r, assume_yes, tools, requested, archive_path=None):
     name = r["name"].lower()
     td = tempfile.mkdtemp()
     try:
-        with ui.Spinner("Fetching %s %s" % (name, "through the hub" if registry.INDIRECT else "from git")):
-            src = archive_path or _fetch(r, td)
+        if archive_path:
+            src = archive_path
+        else:
+            with ui.Spinner("Fetching %s %s" % (name, "through the hub" if registry.INDIRECT else "from git")):
+                src = _fetch(r, td)
         toml = os.path.join(src, "aihub.toml")          # the repo's aihub.toml is authoritative
         m = M.normalize(M.parse(open(toml, encoding="utf-8").read()))
         req = m["requires"]
@@ -457,16 +460,28 @@ def _install_one(r, assume_yes, tools, requested, archive_path=None):
 
 
 def install_plan(pkgs, assume_yes=False, tools=None, roots=()):
-    """Install resolved packages in order. Several archives are downloaded in parallel first."""
+    """Install resolved packages in order. The plan is resolved first, then every package is downloaded in parallel
+    (packages of one monorepo share one clone); installing itself stays sequential, dependencies first."""
     if not pkgs:
         return []
     roots = {naming.normalize(x) for x in roots}
-    done = []
-    for r in pkgs:
-        if len(pkgs) > 1:
-            ui.step("%s %s" % (ui.accent(r["name"]), r["version"]) + ("" if r["name"] in roots else ui.dim("  (dependency)")))
-        _install_one(r, assume_yes, tools, r["name"] in roots)
-        done.append(r)
+    done, pre, td = [], {}, None
+    if len(pkgs) > 1:
+        td = tempfile.mkdtemp()
+        ui.step("downloading %d packages in parallel" % len(pkgs))
+        pre = registry.prefetch(pkgs, td)
+    try:
+        for r in pkgs:
+            if len(pkgs) > 1:
+                ui.step("%s %s" % (ui.accent(r["name"]), r["version"]) + ("" if r["name"] in roots else ui.dim("  (dependency)")))
+            folder, err = pre.get(r["name"], (None, None))
+            if err:
+                raise err
+            _install_one(r, assume_yes, tools, r["name"] in roots, archive_path=folder)
+            done.append(r)
+    finally:
+        if td:
+            shutil.rmtree(td, ignore_errors=True)
     return done
 
 
@@ -491,7 +506,11 @@ def install(name, spec="", assume_yes=False, tools=None):
     if deps:
         ui.step("dependencies: %s" % ", ".join(ui.accent(d) for d in deps))
     done = install_plan(pkgs, assume_yes, tools, roots=[name])
-    for rec_name in [p["name"] for p in done] or [name]:
+    _finish(name, [p["name"] for p in done], assume_yes, tools)
+
+
+def _finish(name, done_names, assume_yes, tools):
+    for rec_name in done_names or [name]:
         _enable_deps(rec_name, assume_yes, tools)
     r = state()["packages"][name]
     ui.celebrate("%s %s is ready" % (name, r["version"]))
@@ -503,6 +522,57 @@ def install(name, spec="", assume_yes=False, tools=None):
     if r.get("shims"):
         ui.info("commands: " + ", ".join(dict.fromkeys(os.path.splitext(os.path.basename(x))[0] if x.lower().endswith(".cmd") else os.path.basename(x) for x in r["shims"])))
     ui.info("restart your AI tool to pick it up. Switch off any time with: aihub disable %s  (remove: aihub uninstall %s)" % (name, name))
+
+
+
+def install_many(specs, assume_yes=False, tools=None):
+    """specs = [(name, spec)]. ONE combined plan (shared dependencies and monorepo clones are fetched once, all downloads run in
+    parallel). A name that cannot be resolved is reported and skipped; the rest still install. -> [(name, error)] for the failures."""
+    st = state()
+    failed, ok = [], []
+    for n, sp in specs:
+        n = naming.normalize(n)
+        cur = st["packages"].get(n)
+        if cur and not enabled(cur):                  # a disabled copy may only need switching on: the single-package path knows how
+            try:
+                install(n, sp, assume_yes, tools)
+                ok.append(n)
+            except (api.ApiError, ValueError, OSError) as e:
+                failed.append((n, e))
+        else:
+            ok.append((n, sp))
+    todo = [x for x in ok if isinstance(x, tuple)]
+    if not todo:
+        return failed
+    have = installed_versions(st)
+    with ui.Spinner("Resolving %d packages" % len(todo)) as spn:
+        try:
+            pkgs = plan([{"name": n, "spec": sp} for n, sp in todo], have)
+        except api.ApiError:                          # find the culprits one by one, then plan the rest together
+            good = []
+            for n, sp in todo:
+                try:
+                    plan([{"name": n, "spec": sp}], have)
+                    good.append((n, sp))
+                except api.ApiError as e:
+                    failed.append((n, e))
+            todo = good
+            pkgs = plan([{"name": n, "spec": sp} for n, sp in todo], have) if todo else []
+        spn.text("Resolved %d packages" % len(pkgs))
+    if not pkgs:
+        return failed
+    roots = [n for n, _ in todo]
+    ui.step("installing: %s" % ", ".join(ui.accent(p["name"]) for p in pkgs))
+    try:
+        done = install_plan(pkgs, assume_yes, tools, roots=roots)
+    except (api.ApiError, ValueError, OSError) as e:      # a package of the plan failed; the ones before it are installed
+        failed.append(("plan", e))
+        done = [p for p in pkgs if p["name"] in state()["packages"]]
+    names = [p["name"] for p in done]
+    for n in roots:
+        if n in state()["packages"]:
+            _finish(n, names, assume_yes, tools)
+    return failed
 
 
 # ---------- enable / disable

@@ -366,16 +366,25 @@ def checkout(r, dest):
             return _from_hub(r, dest)
         except (OSError, ValueError, tarfile.TarError) as e:       # the hub is the way now; git is legacy and `-i` never falls back to it
             raise api.ApiError("hub transfer failed for %s (%s); retry, or install without -i to use git" % (r["name"], e))
+    return _checkout_git(r, dest)
+
+
+def _checkout_git(r, dest, src=None):
+    """Git route of checkout. `src` = repo root already fetched by the caller (prefetch of a monorepo): no network at all."""
     repo = r["repo"]
     url, branch, ref, sub = repo["url"], repo.get("branch") or "main", repo.get("ref"), repo.get("subdir") or ""
     try:
-        src = gitx.current(url, branch, ref)            # same repo already fetched (e.g. a sibling in a monorepo) and unchanged: no download
-        if src:
-            gitx.lfs_pull(src, sub)
-            ui.info("%s: %s is up to date locally, no download" % (r["name"], gitx.redact_url(url)))
+        if src is None:
+            src = gitx.current(url, branch, ref)        # same repo already fetched (e.g. a sibling in a monorepo) and unchanged: no download
+            if src:
+                gitx.lfs_pull(src, sub)
+                ui.info("%s: %s is up to date locally, no download" % (r["name"], gitx.redact_url(url)))
+            else:
+                src = remote_config.with_access(url, lambda: gitx.fetch(url, branch, ref, lfs=True, subdir=sub))
+                ui.info("%s: fetched from %s" % (r["name"], gitx.redact_url(url)))
         else:
-            src = remote_config.with_access(url, lambda: gitx.fetch(url, branch, ref, lfs=True, subdir=sub))
-            ui.info("%s: fetched from %s" % (r["name"], gitx.redact_url(url)))
+            gitx.lfs_pull(src, sub)
+            ui.info("%s: from the %s clone shared with its siblings" % (r["name"], gitx.redact_url(url)))
     except gitx.GitError as e:
         raise api.ApiError("%s: %s" % (r["name"], e))
     rev = gitx.run(["rev-parse", "HEAD"], cwd=src)
@@ -385,3 +394,56 @@ def checkout(r, dest):
     shutil.rmtree(dest, ignore_errors=True)
     shutil.copytree(src, dest, ignore=shutil.ignore_patterns(".git"))
     return rev
+
+
+WORKERS = 8
+
+
+def prefetch(pkgs, base, workers=None):
+    """Download every package of an already resolved plan in parallel (like uv: resolve first, then fetch).
+    -> {name: (folder, None) | (None, error)}; r["rev"] is set on success. Packages of one git repo (a monorepo) share ONE clone:
+    the repo is fetched once, then each package's subdir is copied out. Repos on the same url never run at the same time
+    (they share the cache folder). With `-i` the hub does the git work, so every package is a plain parallel download."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    out, locks, lk = {}, {}, threading.Lock()
+
+    def one(r, src=None):
+        dest = os.path.join(base, r["name"])
+        try:
+            r["rev"] = _checkout_git(r, dest, src) if src is not None else checkout(r, dest)
+            out[r["name"]] = (dest, None)
+        except Exception as e:             # reported when that package's turn comes; the others carry on
+            out[r["name"]] = (None, e)
+
+    def group(rs):
+        repo = rs[0]["repo"]
+        url, branch, ref = repo["url"], repo.get("branch") or "main", repo.get("ref")
+        with lk:
+            lock = locks.setdefault(url, threading.Lock())
+        with lock:
+            try:
+                subs = ",".join(sorted({x["repo"].get("subdir") or "" for x in rs}))
+                src = gitx.current(url, branch, ref)
+                if not src:
+                    src = remote_config.with_access(url, lambda: gitx.fetch(url, branch, ref, lfs=False, subdir=subs))
+                    ui.info("%s: fetched once for %d package(s)" % (gitx.redact_url(url), len(rs)) if len(rs) > 1 else "%s: fetched" % gitx.redact_url(url))
+            except Exception as e:
+                for r in rs:
+                    out[r["name"]] = (None, api.ApiError("%s: %s" % (r["name"], e)) if not isinstance(e, api.ApiError) else e)
+                return
+            for r in rs:
+                one(r, src)
+
+    jobs = []
+    if INDIRECT:
+        jobs = [lambda r=r: one(r) for r in pkgs]
+    else:
+        groups = {}
+        for r in pkgs:
+            repo = r["repo"]
+            groups.setdefault((repo["url"], repo.get("branch") or "main", repo.get("ref")), []).append(r)
+        jobs = [lambda rs=rs: group(rs) for rs in groups.values()]
+    with ThreadPoolExecutor(max_workers=max(1, min(workers or WORKERS, len(jobs)))) as ex:
+        list(ex.map(lambda j: j(), jobs))
+    return out

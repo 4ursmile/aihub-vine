@@ -136,18 +136,15 @@ def cmd_install(a):
     specs = list(dict.fromkeys(specs))               # same line twice installs once
     registry.INDIRECT = bool(getattr(a, "indirect", False))
     ui.out()
-    failed = []
-    for s in specs:
-        n, sp = _spec(s)
-        try:
-            installer.install(n, sp, a.yes, a.tool)
-        except (api.ApiError, ValueError, OSError, gitx.GitError) as e:
-            if len(specs) == 1:
-                raise
-            ui.bad("%s: %s" % (s, e))
-            failed.append(s)
+    if len(specs) == 1:
+        n, sp = _spec(specs[0])
+        installer.install(n, sp, a.yes, a.tool)
+        return
+    failed = installer.install_many([_spec(s) for s in specs], a.yes, a.tool)    # one plan, parallel downloads
+    for n, e in failed:
+        ui.bad("%s: %s" % (n, e))
     if failed:
-        raise ValueError("%d of %d package(s) not installed: %s" % (len(failed), len(specs), ", ".join(failed)))
+        raise ValueError("%d of %d package(s) not installed: %s" % (len(failed), len(specs), ", ".join(n for n, _ in failed)))
 
 
 def cmd_download(a):
