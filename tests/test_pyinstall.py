@@ -45,3 +45,19 @@ class PythonInstall(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WindowsShimTest(unittest.TestCase):
+    def test_windows_writes_cmd_and_git_bash_twin(self):
+        import tempfile
+        from unittest import mock
+        from aihub.cli import installer
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(installer, "OS", "windows"):
+            tgt = os.path.join(d, "tool.py")
+            open(tgt, "w").write("print(1)")
+            out = installer.write_shim(d, "tool", tgt, os.path.join(d, "venv"))
+            self.assertEqual([os.path.basename(x) for x in out], ["tool.cmd", "tool"])
+            twin = open(out[1], newline="").read()
+            self.assertTrue(twin.startswith("#!/bin/sh\n"))
+            self.assertNotIn("\r", twin)
+            self.assertNotIn("\\", twin)

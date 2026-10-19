@@ -51,26 +51,48 @@ def run_script(entry, pkg_dir, check=True):
         subprocess.call(cmd, shell=shell, cwd=pkg_dir, env=env)
 
 
+def _fwd(path):
+    """Forward slashes: Git Bash / MSYS / WSL-style shells read `C:/x/y`, not `C:\\x\\y`."""
+    return str(path).replace("\\", "/")
+
+
+def _sh_twin(shim, body):
+    """Windows: the extensionless sh script next to a .cmd. Git Bash (what Claude Code and Codex use on Windows) ignores .cmd files, so without it the command is 'not found'. LF endings."""
+    with open(shim, "w", newline="\n") as f:
+        f.write("#!/bin/sh\n" + body + "\n")
+    return shim
+
+
 def write_shim(bindir, cmdname, target, venv=None):
-    """Create a launcher for a [bin] command. POSIX: an sh script. Windows: a .cmd file."""
+    """Create a launcher for a [bin] command. POSIX: an sh script. Windows: a .cmd (cmd/PowerShell) AND an extensionless sh script (Git Bash); both are returned."""
+    low = target.lower()
     if OS == "windows":
         shim = os.path.join(bindir, cmdname + ".cmd")
-        if target.endswith(".py"):
-            py = os.path.join(venv, "Scripts", "python.exe") if venv else "python"
+        py = os.path.join(venv, "Scripts", "python.exe") if venv else "python"
+        if low.endswith(".py"):
             body = '@echo off\r\n"%s" "%s" %%*\r\n' % (py, target)
-        elif target.lower().endswith(".ps1"):
+            sh = 'exec "%s" "%s" "$@"' % (_fwd(py) if venv else "python", _fwd(target))
+        elif low.endswith(".ps1"):
             body = '@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File "%s" %%*\r\n' % target
+            sh = 'exec powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "%s" 2>/dev/null || echo "%s")" "$@"' % (_fwd(target), target)
+        elif low.endswith((".cmd", ".bat")):
+            body = '@echo off\r\ncall "%s" %%*\r\n' % target
+            sh = 'exec cmd //c "$(cygpath -w "%s" 2>/dev/null || echo "%s")" "$@"' % (_fwd(target), target)
+        elif low.endswith(".sh"):
+            body = '@echo off\r\nsh "%s" %%*\r\n' % _fwd(target)
+            sh = 'exec sh "%s" "$@"' % _fwd(target)
         else:
             body = '@echo off\r\n"%s" %%*\r\n' % target
+            sh = 'exec "%s" "$@"' % _fwd(target)
         open(shim, "w", newline="").write(body)
-        return shim
+        return [shim, _sh_twin(os.path.join(bindir, cmdname), sh)]
     shim = os.path.join(bindir, cmdname)
     interp = os.path.join(venv, "bin", "python") if venv else "/usr/bin/env python3"
     with open(shim, "w") as f:
-        f.write('#!/bin/sh\nexec %s "%s" "$@"\n' % (interp, target) if target.endswith(".py") else '#!/bin/sh\nexec "%s" "$@"\n' % target)
+        f.write('#!/bin/sh\nexec %s "%s" "$@"\n' % (interp, target) if low.endswith(".py") else '#!/bin/sh\nexec "%s" "$@"\n' % target)
     os.chmod(shim, os.stat(shim).st_mode | stat.S_IEXEC)
     os.chmod(target, os.stat(target).st_mode | stat.S_IEXEC)
-    return shim
+    return [shim]
 
 
 def _pip_shims(venv, dest, name):
@@ -90,14 +112,17 @@ def _pip_shims(venv, dest, name):
         exe = os.path.join(scripts, cmdname + (".exe" if OS == "windows" else ""))
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", str(cmdname)) or not os.path.isfile(exe):
             continue
-        shim = os.path.join(bindir, cmdname + (".cmd" if OS == "windows" else ""))
         if OS == "windows":
+            shim = os.path.join(bindir, cmdname + ".cmd")
             open(shim, "w", newline="").write('@echo off\r\n"%s" %%*\r\n' % exe)
+            out.append(shim)
+            out.append(_sh_twin(os.path.join(bindir, cmdname), 'exec "%s" "$@"' % _fwd(exe)))
         else:
+            shim = os.path.join(bindir, cmdname)
             with open(shim, "w") as f:
                 f.write('#!/bin/sh\nexec "%s" "$@"\n' % exe)
             os.chmod(shim, os.stat(shim).st_mode | stat.S_IEXEC)
-        out.append(shim)
+            out.append(shim)
     return out
 
 
@@ -157,7 +182,7 @@ def _activate(rec, m, dest, tools, assume_yes, name):
         target = os.path.realpath(os.path.join(dest, rel))
         if not target.startswith(os.path.realpath(dest) + os.sep) or not os.path.isfile(target):
             raise api.ApiError("[bin] %s points outside the package or to a missing file: %s" % (cmdname, rel))
-        rec["shims"].append(write_shim(bindir, cmdname, target, rec.get("venv")))
+        rec["shims"].extend(write_shim(bindir, cmdname, target, rec.get("venv")))
     rec["reverts"] = []
     rec["tools"] = []
     is_bot = m["package"]["type"] == "bot"
@@ -476,7 +501,7 @@ def install(name, spec="", assume_yes=False, tools=None):
     if "bot:" + name in r.get("components", []):
         onboard(name, assume_yes)
     if r.get("shims"):
-        ui.info("commands: " + ", ".join(os.path.basename(x) for x in r["shims"]))
+        ui.info("commands: " + ", ".join(dict.fromkeys(os.path.splitext(os.path.basename(x))[0] if x.lower().endswith(".cmd") else os.path.basename(x) for x in r["shims"])))
     ui.info("restart your AI tool to pick it up. Switch off any time with: aihub disable %s  (remove: aihub uninstall %s)" % (name, name))
 
 
