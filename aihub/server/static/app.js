@@ -22,7 +22,7 @@ async function loadMe() { try { const me = tok() ? await api("/auth/me") : null;
 const initials = (n) => (String(n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("") || "?").toUpperCase();
 const hue = (n) => { let h = 0; for (const c of String(n)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
 const shown = (p) => (p && (p.display_name || p.username)) || "";
-const Avatar = ({ p, size = 32 }) => p && p.avatar_url ? html`<img class="av" src=${p.avatar_url} alt="" width=${size} height=${size} style=${`width:${size}px;height:${size}px`} loading="lazy" />`
+const Avatar = ({ p, size = 32 }) => p && p.avatar_url ? html`<img decoding="async" class="av" src=${p.avatar_url} alt="" width=${size} height=${size} style=${`width:${size}px;height:${size}px`} loading="lazy" />`
   : html`<span class="av" aria-hidden="true" style=${`width:${size}px;height:${size}px;font-size:${Math.round(size * .4)}px;background:hsl(${hue(p && p.username)} 55% 45%)`}>${initials(shown(p))}</span>`;
 const can = (perm) => !!(store.me ? store.me.permissions.includes(perm) : store.brand && (store.brand.anonymous_perms || []).includes(perm));
 function saveBlob(blob, name) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }
@@ -36,7 +36,7 @@ const writeClip = async (t) => {
   document.body.appendChild(a); a.select(); a.setSelectionRange(0, t.length);
   let ok = false; try { ok = document.execCommand("copy"); } catch {} a.remove(); return ok;
 };
-const copy = async (t) => { (await writeClip(t)) ? toast("Copied") : toast("Copy failed", 1); };
+const copy = async (t) => { const ok = await writeClip(t); ok ? toast("Copied") : toast("Copy failed", 1); return ok; };
 function useLoad(fn, deps) {
   const [s, setS] = useState({ loading: true });
   // keep the previous data visible while a new request is in flight (no flash, controls keep their options)
@@ -48,14 +48,14 @@ const debounced = (v, ms = 250) => { const [x, setX] = useState(v); useEffect(()
 // ---------- small components
 const Search = ({ value, onInput, ph = "Search skills, agents, MCP servers…" }) => html`<div class="search">
   <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="9" r="6"/><path d="M14 14l4 4"/></svg>
-  <input class="field" type="search" value=${value} placeholder=${ph} aria-label="Search" onInput=${(e) => onInput(e.target.value)} /></div>`;
-const Cmd = ({ text }) => html`<div class="cmd"><code>${text}</code><button class="btn sec sm" onClick=${() => copy(text)}>Copy</button></div>`;
+  <input class="field" type="search" value=${value} placeholder=${ph} aria-label="Search" aria-keyshortcuts="/" onInput=${(e) => onInput(e.target.value)} /></div>`;
+const Cmd = ({ text }) => { const [ok, setOk] = useState(false); const go = async () => { if (await copy(text)) { setOk(true); setTimeout(() => setOk(false), 1600); } }; return html`<div class="cmd"><code>${text}</code><button class="btn sec sm" aria-live="polite" onClick=${go}>${ok ? "Copied ✓" : "Copy"}</button></div>`; };
 const Empty = ({ t, d }) => html`<div class="empty"><h3>${t}</h3><p>${d}</p></div>`;
 const Err = ({ e }) => html`<${Empty} t="Something went wrong" d=${e} />`;
 const Skels = ({ n = 6 }) => html`<div class="grid">${Array.from({ length: n }, (_, i) => html`<div class="skel" key=${i}></div>`)}</div>`;
 const Stars = ({ r }) => r ? html`<span>★ ${r}</span>` : null;
 const TYPE = { skill: "blue", agent: "green", mcp: "orange", tool: "", setup: "red", bot: "blue" };
-const Pkg = ({ p, i = 0 }) => html`<a class="card pkg spot" style=${"--i:" + Math.min(i, 12)} href=${"#/package/" + p.name}>
+const Pkg = ({ p, i = 0 }) => html`<a class="card pkg" style=${"--i:" + Math.min(i, 12)} href=${"#/package/" + p.name}>
   <div class="row"><h3>${p.name}</h3><span class="sp"></span>${p.visibility === "private" && html`<span class="badge orange" title="Only people you share it with can see this">private</span>`}<span class=${"badge " + (TYPE[p.type] || "")}>${p.type}</span></div>
   <p>${p.description || "No description"}</p>
   <div class="meta"><span>v${p.latest_version || "–"}</span><span>↓ ${fmt(p.downloads)}</span><${Stars} r=${p.rating && p.rating.avg} /></div></a>`;
@@ -66,8 +66,6 @@ const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const revealIO = "IntersectionObserver" in window && !reduced ? new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add("in"); revealIO.unobserve(e.target); } }), { rootMargin: "0px 0px -8% 0px", threshold: 0.08 }) : null;
 // call once per page component: marks every .rv element visible as it scrolls into view
 const useReveal = () => useEffect(() => { document.querySelectorAll(".rv:not(.in)").forEach((el) => (revealIO ? revealIO.observe(el) : el.classList.add("in"))); });
-// spotlight cards follow the pointer through CSS variables, no component state involved
-addEventListener("pointermove", (e) => { const c = e.target.closest && e.target.closest(".spot"); if (!c) return; const r = c.getBoundingClientRect(); c.style.setProperty("--mx", e.clientX - r.left + "px"); c.style.setProperty("--my", e.clientY - r.top + "px"); }, { passive: true });
 
 function Count({ to }) {
   const ref = useRef();
@@ -88,9 +86,12 @@ function Typer({ words }) {
     const el = ref.current; if (!el || !words.length) return;
     el.dataset.full = words[0]; if (reduced) { el.textContent = words[0]; return; }
     let i = 0, j = 0, dir = 1, t;
-    const tick = () => { const w = words[i]; el.dataset.full = w; j += dir; el.textContent = w.slice(0, j); let d = dir > 0 ? 70 : 32;
+    let tick = () => { const w = words[i]; el.dataset.full = w; j += dir; el.textContent = w.slice(0, j); let d = dir > 0 ? 70 : 32;
       if (dir > 0 && j >= w.length) { dir = -1; d = 2000; } else if (dir < 0 && j <= 0) { dir = 1; i = (i + 1) % words.length; d = 380; } t = setTimeout(tick, d); };
-    tick(); return () => clearTimeout(t);
+    let vis = true; const io = "IntersectionObserver" in window ? new IntersectionObserver(([e]) => { const was = vis; vis = e.isIntersecting; if (vis && !was) { clearTimeout(t); tick(); } }) : null; if (io) io.observe(el);
+    const run = tick; tick = () => { if (!vis || document.hidden) return; run(); };
+    const wake = () => { if (!document.hidden && vis) { clearTimeout(t); tick(); } }; document.addEventListener("visibilitychange", wake);
+    tick(); return () => { clearTimeout(t); document.removeEventListener("visibilitychange", wake); if (io) io.disconnect(); };
   }, [key]);
   return html`<span class="typed" ref=${ref}>${words[0] || "package-name"}</span>`;
 }
@@ -138,14 +139,14 @@ function Home() {
     <div class="stats3 rv"><div class="stat"><b><${Count} to=${o.packages} /></b><span>Packages</span></div><div class="stat"><b><${Count} to=${o.versions} /></b><span>Releases</span></div>
       <div class="stat"><b><${Count} to=${o.downloads} /></b><span>Downloads</span></div><div class="stat"><b><${Count} to=${o.users} /></b><span>People</span></div></div>
     <div class="gap rv"><h2>Browse by category</h2></div>
-    ${f.loading && !f.d ? html`<div class="bento"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>` : html`<div class="bento">${cats.map((c, n) => html`<a key=${c.id} href=${"#/browse?category=" + c.id} class=${"tile spot rv t-" + catClass(n)} style=${"--d:" + n * 70 + "ms"}>
+    ${f.loading && !f.d ? html`<div class="bento"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>` : html`<div class="bento">${cats.map((c, n) => html`<a key=${c.id} href=${"#/browse?category=" + c.id} class=${"tile rv t-" + catClass(n)} style=${"--d:" + n * 70 + "ms"}>
       <div class="tile-in"><h3>${c.label}</h3><p>${c.desc}</p></div><span class="tile-n"><b>${c.count}</b> ${c.count === 1 ? "package" : "packages"}</span></a>`)}</div>`}
     <div class="gap row rv"><h2>Popular</h2><span class="sp"></span><a href="#/browse?sort=downloads">See all</a></div>
     <div style="margin-top:20px">${top.loading && !top.d ? html`<${Skels} n=3 />` : top.e ? html`<${Err} e=${top.e} />` :
       top.d.items.length ? html`<div class="grid">${top.d.items.map((p, i) => html`<${Pkg} p=${p} i=${i} key=${p.name} />`)}</div>` :
       html`<${Empty} t="Nothing here yet" d="Publish the first package with aihub dev publish." />`}</div>
     ${recent.d && recent.d.items.length ? html`<div class="gap rv"><h2>Recently updated</h2></div>
-      <div class="strip rv">${recent.d.items.map((p) => html`<a class="chip-pkg spot" key=${p.name} href=${"#/package/" + p.name}><b>${p.name}</b><span>v${p.latest_version || "-"} / ${ago(p.updated)}</span></a>`)}</div>` : null}</div>`;
+      <div class="strip rv">${recent.d.items.map((p) => html`<a class="chip-pkg" key=${p.name} href=${"#/package/" + p.name}><b>${p.name}</b><span>v${p.latest_version || "-"} / ${ago(p.updated)}</span></a>`)}</div>` : null}</div>`;
 }
 
 function Browse() {
@@ -161,10 +162,10 @@ function Browse() {
   const clear = () => { setQ(""); setType(""); setCat(""); setTag(""); };
   useReveal();
   return html`<div class="stack"><h1>Browse</h1><${Search} value=${q} onInput=${setQ} />
-    <div class="chips" role="group" aria-label="Categories"><button class=${"chip " + (cat === "" ? "on" : "")} onClick=${() => setCat("")}>All</button>
-      ${cats.map((c) => html`<button key=${c.id} class=${"chip " + (cat === c.id ? "on" : "")} onClick=${() => setCat(c.id)}>${c.label} <i>${c.count}</i></button>`)}
+    <div class="chips" role="group" aria-label="Categories"><button class=${"chip " + (cat === "" ? "on" : "")} aria-pressed=${cat === ""} onClick=${() => setCat("")}>All</button>
+      ${cats.map((c) => html`<button key=${c.id} class=${"chip " + (cat === c.id ? "on" : "")} aria-pressed=${cat === c.id} onClick=${() => setCat(c.id)}>${c.label} <i>${c.count}</i></button>`)}
       ${tag && html`<button class="chip on" onClick=${() => setTag("")} title="Remove tag filter">#${tag} x</button>`}</div>
-    <div class="row"><div class="seg" role="tablist">${types.map((t) => html`<button key=${t} class=${type === t ? "on" : ""} onClick=${() => setType(t)}>${t || "All types"}</button>`)}</div>
+    <div class="row"><div class="seg" role="group" aria-label="Package type">${types.map((t) => html`<button key=${t} class=${type === t ? "on" : ""} aria-pressed=${type === t} onClick=${() => setType(t)}>${t || "All types"}</button>`)}</div>
       <span class="sp"></span><select class="field" aria-label="Sort" value=${sort} onChange=${(e) => setSort(e.target.value)}>
       <option value="">${dq ? "Relevance" : "Recently updated"}</option><option value="downloads">Most downloaded</option><option value="rating">Best reviewed</option><option value="reviews">Most reviewed</option><option value="name">Name</option><option value="created">Newest</option></select></div>
     ${r.e ? html`<${Err} e=${r.e} />` : !r.d ? html`<${Skels} />` : !r.d.items.length ? html`<div class="empty"><h3>No results</h3><p>${dq ? `Nothing matches “${dq}”.` : "No packages match these filters."}</p><button class="btn sec sm" style="margin-top:14px" onClick=${clear}>Clear filters</button></div>` :
@@ -180,32 +181,63 @@ function Related({ name }) {
   return html`<section class="rv related"><h2 class="gap">Related</h2><div class="grid" style="margin-top:20px">${r.d.items.map((p, i) => html`<${Pkg} p=${p} i=${i} key=${p.name} />`)}</div></section>`;
 }
 
+const PKT = { skill: "var(--blue)", agent: "var(--green)", mcp: "var(--orange)", tool: "var(--fg-2)", setup: "var(--red)", bot: "var(--tint-d)" };
+const PKG_GLYPH = {
+  skill: '<path d="M12 3l1.9 5.6L19.5 10.5l-5.6 1.9L12 18l-1.9-5.6L4.5 10.5l5.6-1.9z"/><path d="M19 3v4M17 5h4"/>',
+  agent: '<circle cx="12" cy="8" r="3.5"/><path d="M5 20c0-3.9 3.1-6.5 7-6.5s7 2.6 7 6.5"/>',
+  mcp: '<path d="M9 3v5M15 3v5"/><path d="M6 8h12v4a6 6 0 0 1-12 0z"/><path d="M12 18v3"/>',
+  tool: '<path d="M14.5 6.5a4 4 0 0 0 5 5L13 18l-3-3 6.5-6.5"/><path d="M10 15l-5 5"/>',
+  setup: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>',
+  bot: '<rect x="4.5" y="8" width="15" height="11" rx="3"/><path d="M12 4v4"/><circle cx="9" cy="13.5" r="1"/><circle cx="15" cy="13.5" r="1"/>',
+};
+const PkgTile = ({ type, size = 72 }) => html`<span class="pk-tile" aria-hidden="true" style=${`--gt:${PKT[type] || "var(--blue)"};width:${size}px;height:${size}px`}><svg viewBox="0 0 24 24" width=${Math.round(size * 0.54)} height=${Math.round(size * 0.54)} fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" dangerouslySetInnerHTML=${{ __html: PKG_GLYPH[type] || PKG_GLYPH.skill }}></svg></span>`;
+const Authors = ({ list }) => list.map((a, i) => html`<span key=${i}>${i ? ", " : ""}${a.url && /^https?:\/\//i.test(a.url) ? html`<a href=${a.url} target="_blank" rel="noopener noreferrer">${a.name || a.email}</a>` : a.email ? html`<a href=${"mailto:" + a.email}>${a.name || a.email}</a>` : a.name}</span>`);
+const Req = ({ req, dl }) => {
+  const cmds = req.commands || [], pk = req.packages || [], os = req.os || [];
+  const Row = ({ k, children }) => html`<div class="pk-req"><dt>${k}</dt><dd>${children}</dd></div>`;
+  const body = html`<${Row} k="Required commands">${cmds.length ? cmds.map((c, i) => html`<span key=${i} class="pk-pill"><code>${c.name || c}</code>${c.hint ? html` <span class="mut">${c.hint}</span>` : ""}</span>`) : html`<span class="mut">None</span>`}<//>
+    <${Row} k="Depends on">${pk.length ? pk.map((x) => html`<a key=${x} class="pk-pill" href=${"#/package/" + x.split(/[<>=!~]/)[0]}>${x}</a>`) : html`<span class="mut">No other packages</span>`}<//>
+    <${Row} k="Supported systems">${os.length ? os.map((o) => html`<span key=${o} class="pk-pill">${o}</span>`) : html`<span class="mut">All</span>`}<//>`;
+  return dl ? html`<dl class="pk-reqs">${body}</dl>` : body;
+};
 function Package({ name }) {
   const { me } = useStore(); const [tab, setTab] = useState("Overview"); const [tick, setTick] = useState(0);
   const p = useLoad(() => api("/packages/" + name), [name, tick]);
   const mt = useLoad(() => api("/meta"), []); const meta = mt.d || {};
   if (p.loading) return html`<div class="skel" style="min-height:300px"></div>`;
   if (p.e) return html`<${Err} e=${p.e} />`;
-  const d = p.d, req = d.requires || {};
-  return html`<div class="stack">
-    <div class="row"><h1>${d.name}</h1><span class=${"badge " + (TYPE[d.type] || "")}>${d.type}</span></div>
-    <p class="lead">${d.description}</p>
-    <div class="row mut sm">${d.visibility === "private" && html`<span class="badge orange">private</span>`}<span>v${d.latest_version}</span><span>·</span><span>↓ ${fmt(d.downloads)}</span><${Stars} r=${d.rating.avg} /><span>· updated ${ago(d.updated)}</span>
-      ${d.tags.map((t) => html`<a class="badge tag" key=${t} href=${"#/browse?tag=" + encodeURIComponent(t)}>${t}</a>`)}</div>
-    ${((d.authors || []).length || d.license) && html`<div class="row mut sm">${(d.authors || []).length ? html`<span>By ${d.authors.map((a, i) => html`<span key=${i}>${i ? ", " : ""}${a.url && /^https?:\/\//i.test(a.url) ? html`<a href=${a.url} target="_blank" rel="noopener noreferrer">${a.name || a.email}</a>` : a.email ? html`<a href=${"mailto:" + a.email}>${a.name || a.email}</a>` : a.name}</span>`)}</span>` : null}${d.license ? html`<span>${(d.authors || []).length ? "· " : ""}License: ${d.license}</span>` : null}</div>`}
-    <${Cmd} text=${"aihub install " + d.name} />
-    <div class="seg">${["Overview", "Install", "Versions", "Usage", "Reviews", ...(d.access === "admin" ? ["Sharing"] : [])].map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} onClick=${() => setTab(t)}>${t}</button>`)}</div>
-    ${tab === "Overview" && html`<${Readme} name=${name} />`}
-    ${tab === "Install" && html`<div class="list">
-      <div class="li"><div class="t"><b>Command</b><span class="mono">aihub install ${d.name}</span></div></div>
-      <div class="li"><div class="t"><b>Required commands</b><span>${(req.commands || []).length ? (req.commands || []).map((c) => (c.name || c) + (c.hint ? ` - ${c.hint}` : "")).join(" · ") : "None"}</span></div></div>
-      <div class="li"><div class="t"><b>Depends on</b><span>${(req.packages || []).length ? (req.packages || []).map((x) => html`<a href=${"#/package/" + x.split(/[<>=!~]/)[0]} style="margin-right:10px">${x}</a>`) : "No other packages"}</span></div></div>
-      <div class="li"><div class="t"><b>Supported systems</b><span>${(req.os || []).length ? req.os.join(", ") : "All"}</span></div></div></div>`}
-    ${tab === "Versions" && html`<div class="list tscroll"><table><thead><tr><th>Version</th><th>Released</th><th>Size</th><th>Downloads</th><th>SHA-256</th>${meta.allow_source_download ? html`<th></th>` : null}</tr></thead><tbody>
-      ${d.versions.map((v) => html`<tr key=${v.version}><td>${v.version} ${v.yanked ? html`<span class="badge red">yanked</span>` : ""}</td><td>${ago(v.created)}</td><td>${(v.size / 1024).toFixed(1)} KB</td><td>${fmt(v.downloads)}</td><td class="mono">${v.sha256.slice(0, 12)}</td>${meta.allow_source_download ? html`<td>${v.source ? html`<a class="btn sec sm" href=${v.source} target="_blank" rel="noopener noreferrer">Source ↗</a>` : null}</td>` : null}</tr>`)}</tbody></table></div>`}
-    ${tab === "Usage" && html`<${Usage} name=${name} />`}
-    ${tab === "Sharing" && html`<${Sharing} name=${name} pkg=${d} onChange=${() => setTick(tick + 1)} />`}
-    ${tab === "Reviews" && html`<${Reviews} name=${name} me=${me} onDone=${() => setTick(tick + 1)} />`}
+  const d = p.d, req = d.requires || {}, tabs = ["Overview", "Install", "Versions", "Usage", "Reviews", ...(d.access === "admin" ? ["Sharing"] : [])];
+  const latest = (d.versions || []).find((v) => v.version === d.latest_version) || (d.versions || [])[0];
+  const rating = d.rating && d.rating.avg, nrev = (d.rating && d.rating.count) || 0;
+  const facts = [["Version", "v" + d.latest_version], ["Downloads", fmt(d.downloads)], [nrev ? "Rating · " + nrev + (nrev === 1 ? " review" : " reviews") : "Rating", rating ? "★ " + rating : "No ratings yet"], ["Updated", ago(d.updated)]];
+  return html`<div class="pk">
+    <header class="pk-hero"><${PkgTile} type=${d.type} name=${d.name} size=${120} />
+      <div class="pk-id"><div class="pk-title"><h1>${d.name}</h1></div>
+        <p class="lead">${d.description}</p>
+        <div class="pk-tags"><span class=${"badge " + (TYPE[d.type] || "")}>${d.type}</span>${d.visibility === "private" && html`<span class="badge orange">private</span>`}${d.license ? html`<span class="badge blue pk-lic" title="License"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4M10 12h5M10 16h5"/></svg>${d.license}</span>` : ""}${(d.tags || []).map((t) => html`<a class="badge tag" key=${t} href=${"#/browse?tag=" + encodeURIComponent(t)}>${t}</a>`)}</div>
+        ${(d.authors || []).length ? html`<p class="pk-by sm mut">By <${Authors} list=${d.authors} /></p>` : ""}</div></header>
+    <div class="pk-install"><div class="pk-install-h"><b>Install</b><span class="sm mut">Run this in a terminal</span></div><${Cmd} text=${"aihub install " + d.name} /></div>
+    <dl class="pk-facts">${facts.map(([k, v]) => html`<div key=${k}><dd>${v}</dd><dt>${k}</dt></div>`)}</dl>
+    <div class="pk-body">
+      <div class="pk-main stack">
+        <div class="seg" role="group" aria-label="Package sections">${tabs.map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} aria-pressed=${tab === t} onClick=${() => setTab(t)}>${t}</button>`)}</div>
+        ${tab === "Overview" && html`<${Readme} name=${name} />`}
+        ${tab === "Install" && html`<div class="list">
+          <div class="li"><div class="t"><b>Command</b><span class="mono">aihub install ${d.name}</span></div></div>
+          <div class="li"><div class="t"><b>Required commands</b><span>${(req.commands || []).length ? (req.commands || []).map((c) => (c.name || c) + (c.hint ? ` - ${c.hint}` : "")).join(" · ") : "None"}</span></div></div>
+          <div class="li"><div class="t"><b>Depends on</b><span>${(req.packages || []).length ? (req.packages || []).map((x) => html`<a href=${"#/package/" + x.split(/[<>=!~]/)[0]} style="margin-right:10px">${x}</a>`) : "No other packages"}</span></div></div>
+          <div class="li"><div class="t"><b>Supported systems</b><span>${(req.os || []).length ? req.os.join(", ") : "All"}</span></div></div></div>`}
+        ${tab === "Versions" && html`<div class="list tscroll"><table><thead><tr><th>Version</th><th>Released</th><th>Size</th><th>Downloads</th><th>SHA-256</th>${meta.allow_source_download ? html`<th></th>` : null}</tr></thead><tbody>
+          ${d.versions.map((v) => html`<tr key=${v.version}><td>${v.version} ${v.yanked ? html`<span class="badge red">yanked</span>` : ""}</td><td>${ago(v.created)}</td><td>${(v.size / 1024).toFixed(1)} KB</td><td>${fmt(v.downloads)}</td><td class="mono">${v.sha256.slice(0, 12)}</td>${meta.allow_source_download ? html`<td>${v.source ? html`<a class="btn sec sm" href=${v.source} target="_blank" rel="noopener noreferrer">Source ↗</a>` : null}</td>` : null}</tr>`)}</tbody></table></div>`}
+        ${tab === "Usage" && html`<${Usage} name=${name} />`}
+        ${tab === "Sharing" && html`<${Sharing} name=${name} pkg=${d} onChange=${() => setTick(tick + 1)} />`}
+        ${tab === "Reviews" && html`<${Reviews} name=${name} me=${me} onDone=${() => setTick(tick + 1)} />`}
+      </div>
+      <aside class="pk-side" aria-label="Package details"><section class="pk-card"><h3>Requirements</h3><${Req} req=${req} dl=${true} /></section>
+        <section class="pk-card"><h3>Latest release</h3><dl class="pk-reqs"><div class="pk-req"><dt>Version</dt><dd><span class="pk-pill">v${d.latest_version}</span></dd></div>
+          ${latest && latest.created ? html`<div class="pk-req"><dt>Released</dt><dd>${ago(latest.created)}</dd></div>` : ""}
+          ${latest && latest.size ? html`<div class="pk-req"><dt>Size</dt><dd>${(latest.size / 1024).toFixed(1)} KB</dd></div>` : ""}
+          <div class="pk-req"><dt>All versions</dt><dd>${(d.versions || []).length} <button type="button" class="pk-link" onClick=${() => setTab("Versions")}>view</button></dd></div></dl></section></aside></div>
     <${Related} name=${name} /></div>`;
 }
 
@@ -238,7 +270,7 @@ function Sharing({ name, pkg, onChange }) {
     ${!allowPrivate && html`<p class="xs mut3">Private repositories are turned off by the administrator.</p>`}
     <h3>Share with people and groups</h3>
     <div class="row"><${PrincipalPicker} exclude=${taken} onPick=${(t, n) => grant(t, n, lvl)} />
-      <div class="seg" role="group" aria-label="Access level"><button class=${lvl === "view" ? "on" : ""} onClick=${() => setLvl("view")}>Can view</button><button class=${lvl === "develop" ? "on" : ""} onClick=${() => setLvl("develop")}>Can develop</button></div></div>
+      <div class="seg" role="group" aria-label="Access level"><button class=${lvl === "view" ? "on" : ""} aria-pressed=${lvl === "view"} onClick=${() => setLvl("view")}>Can view</button><button class=${lvl === "develop" ? "on" : ""} aria-pressed=${lvl === "develop"} onClick=${() => setLvl("develop")}>Can develop</button></div></div>
     <p class="xs mut3"><b>View</b>: find, read and install. <b>Develop</b>: also publish new versions. Repo admins can change visibility and sharing.</p>
     ${D.access.length ? html`<div class="list">${D.access.map((x) => html`<div class="li" key=${x.type + x.name}>
       ${x.type === "group" ? html`<span class="av" style="width:36px;height:36px;background:var(--fg-3)">👥</span>` : html`<${Avatar} p=${{ username: x.name, display_name: x.display_name, avatar_url: x.avatar_v ? `/api/v1/users/${x.name}/avatar?v=${x.avatar_v}` : null }} size=${36} />`}
@@ -270,7 +302,7 @@ function Reviews({ name, me, onDone }) {
   const mt = useLoad(() => api("/meta"), []); const anonOk = !me && !!(mt.d && mt.d.anonymous_review);
   const post = async () => { if (anonOk && who.trim().length < 2) return toast("Please enter your name", 1);
     try { await api(`/packages/${name}/reviews`, { method: "POST", body: { rating, body, name: who.trim() } }); toast("Thanks for your review"); setBody(""); setTick(tick + 1); onDone(); } catch (e) { toast(e.message, 1); } };
-  return html`<div class="stack">${me || anonOk ? html`<div class="card stack">${anonOk && html`<input class="field" required maxlength="40" placeholder="Your name (required)" aria-label="Your name" value=${who} onInput=${(e) => setWho(e.target.value)} />`}<div class="row"><b>Your rating</b><div class="seg">${[1, 2, 3, 4, 5].map((n) => html`<button key=${n} class=${rating === n ? "on" : ""} onClick=${() => setRating(n)}>${"★".repeat(n)}</button>`)}</div></div>
+  return html`<div class="stack">${me || anonOk ? html`<div class="card stack">${anonOk && html`<input class="field" required maxlength="40" placeholder="Your name (required)" aria-label="Your name" value=${who} onInput=${(e) => setWho(e.target.value)} />`}<div class="row"><b>Your rating</b><div class="seg" role="group" aria-label="Rating">${[1, 2, 3, 4, 5].map((n) => html`<button key=${n} class=${rating === n ? "on" : ""} aria-pressed=${rating === n} aria-label=${n + (n === 1 ? " star" : " stars")} onClick=${() => setRating(n)}>${"★".repeat(n)}</button>`)}</div></div>
       <textarea class="field" rows="3" style="padding:12px;resize:vertical" placeholder="Share your experience (optional)" value=${body} onInput=${(e) => setBody(e.target.value)}></textarea>
       <button class="btn" disabled=${anonOk && who.trim().length < 2} onClick=${post}>Submit review</button></div>` : html`<p class="mut"><a href="#/login">Sign in</a> to leave a review.</p>`}
     ${r.d && (r.d.reviews.length ? html`<div class="list">${r.d.reviews.map((x) => html`<div class="li" key=${x.username || "anon:" + x.display_name}><${Avatar} p=${x.anonymous ? { username: x.display_name } : x} size=${36} /><div class="t"><b>${shown(x)} <span class="mut3">${"★".repeat(x.rating)}</span></b>${x.title && html`<span class="xs mut3" style="display:block">${x.title}</span>`}<span>${x.body}</span></div><span class="xs mut3">${ago(x.created)}</span></div>`)}</div>` : html`<p class="mut">No reviews yet.</p>`)}</div>`;
@@ -281,7 +313,7 @@ function Rankings() {
   const label = { packages: "Most used", reviews: "Top rated", reviewed: "Most reviewed", developers: "Top developers", users: "Most active users" };
   const items = (r.d && r.d.items) || [], mx = Math.max(1, ...items.map((i) => (tab === "reviews" ? i.score : i.count)));
   return html`<div class="stack"><h1>Rankings</h1><p class="lead">${tab === "reviews" || tab === "reviewed" ? "Based on all reviews, ever." : "Based on the last 30 days of real usage."}</p>
-    <div class="seg">${Object.keys(label).map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} onClick=${() => setTab(t)}>${label[t]}</button>`)}</div>
+    <div class="seg">${Object.keys(label).map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} aria-pressed=${tab === t} onClick=${() => setTab(t)}>${label[t]}</button>`)}</div>
     ${r.loading ? html`<div class="skel"></div>` : !items.length ? html`<${Empty} t="No data yet" d="Rankings appear once usage events arrive." />` :
       html`<div class="list">${items.map((i, n) => html`<div class="li" key=${i.name}><span class=${"rank " + (n < 3 ? "top" : "")}>${n + 1}</span>
         <div class="t"><b>${tab === "packages" || tab === "reviews" || tab === "reviewed" ? html`<a href=${"#/package/" + i.name}>${i.name}</a>` : i.name}</b><div class="bar"><i style=${"width:" + ((tab === "reviews" ? i.score : i.count) / mx * 100) + "%"}></i></div></div>
@@ -307,7 +339,7 @@ function Start() {
   const idx = cfg.d && cfg.d.index && cfg.d.index.url;
   return html`<div class="stack"><h1>Get started</h1><p class="lead">Up and running in under a minute. Python 3.9 or later, and git.</p>
     <div class="card stack"><div class="row"><span class="rank top">1</span><h3>Install the CLI</h3><span class="sp"></span>
-      <div class="seg" role="tablist">${Object.keys(OS).map((k) => html`<button key=${k} class=${os === k ? "on" : ""} onClick=${() => setOs(k)}>${OS[k]}${k === auto ? " (detected)" : ""}</button>`)}</div></div>
+      <div class="seg" role="group" aria-label="Operating system">${Object.keys(OS).map((k) => html`<button key=${k} class=${os === k ? "on" : ""} aria-pressed=${os === k} onClick=${() => setOs(k)}>${OS[k]}${k === auto ? " (detected)" : ""}</button>`)}</div></div>
       <p class="mut">Installs aihub and sets up usage reporting for Claude Code and OpenCode. ${note}</p>
       <${Cmd} text=${cmd} />${path && html`<${Cmd} text=${path} />`}
       <button class="btn sec sm" style="align-self:flex-start" onClick=${() => setAlt(!alt)} aria-expanded=${alt}>${alt ? "Hide" : "Can’t reach this server from your machine?"}</button>
@@ -398,7 +430,7 @@ function Admin() {
   const { me } = useStore(); const [tab, setTab] = useState("People"); const [tick, setTick] = useState(0); const bump = () => setTick((x) => x + 1);
   if (!can("admin") && !can("reset_password")) return html`<${Empty} t="Admins only" d="You don’t have access to this page." />`;
   const tabs = can("admin") ? ["People", "Roles", "Sync", "Backup", "Settings"] : ["People"];
-  return html`<div class="stack"><h1>Admin</h1>${tabs.length > 1 && html`<div class="seg">${tabs.map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} onClick=${() => setTab(t)}>${t}</button>`)}</div>`}
+  return html`<div class="stack"><h1>Admin</h1>${tabs.length > 1 && html`<div class="seg">${tabs.map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} aria-pressed=${tab === t} onClick=${() => setTab(t)}>${t}</button>`)}</div>`}
     ${tab === "People" && html`<${People} me=${me} tick=${tick} bump=${bump} />`}${tab === "Roles" && can("admin") && html`<${Roles} tick=${tick} bump=${bump} />`}
     ${tab === "Sync" && can("admin") && html`<${AdminSync} />`}${tab === "Backup" && can("admin") && html`<${AdminBackup} />`}${tab === "Settings" && can("admin") && html`<${AdminSettings} />`}</div>`;
 }
@@ -480,7 +512,7 @@ function LogoSetting({ url, bump }) {
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "Upload failed"); toast("Logo updated"); await loadBrand(); bump(); } catch (x) { toast(x.message, 1); } finally { setBusy(false); } };
   const rm = async () => { try { await api("/admin/logo", { method: "DELETE" }); toast("Logo removed"); await loadBrand(); bump(); } catch (x) { toast(x.message, 1); } };
   return html`<div class="li"><div class="t"><b>Logo</b><span>PNG, JPEG or WebP, up to 256 KB and 1024 px. Shown beside the site name.</span></div>
-    <div class="row">${url && html`<img class="logo" src=${url} alt="Current logo" />`}<button class="btn sec sm" disabled=${busy} onClick=${() => f.current.click()}>${url ? "Change" : "Upload"}</button>
+    <div class="row">${url && html`<img decoding="async" class="logo" src=${url} alt="Current logo" />`}<button class="btn sec sm" disabled=${busy} onClick=${() => f.current.click()}>${url ? "Change" : "Upload"}</button>
     ${url && html`<button class="btn danger sm" onClick=${rm}>Remove</button>`}<input ref=${f} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange=${pick} /></div></div>`;
 }
 function AdminSettings() {
@@ -560,38 +592,57 @@ function AdminBackup() {
       <${TextSetting} x=${{ label: "Spread limit (seconds)", help: "...but never by more than this (0-3600, default 600).", kind: "text", max: 5 }} v=${c.backup_jitter_max} busy=${busy === "backup_jitter_max"} save=${(n) => save("backup_jitter_max", n)} />
       <div class="li"><div class="t"><b>Gap between sync and backup</b><span>The backup and the event sync never use git within the set time of each other (Sync > Throughput and git load, “Minimum seconds between git work”). A job that has to wait just waits.${st.waiting ? " A backup is waiting for it right now." : ""}</span></div></div></div></div></div>`;
 }
+const GTINT = ["var(--blue)", "var(--tint-b)", "var(--tint-c)", "var(--tint-d)"];
+const gTint = (n) => { let h = 0; for (const ch of String(n)) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return GTINT[h % GTINT.length]; };
+const GroupMark = ({ name, size = 44 }) => html`<span class="gr-mark" aria-hidden="true" style=${`--gt:${gTint(name)};width:${size}px;height:${size}px;font-size:${Math.round(size * 0.42)}px`}>${(String(name)[0] || "?").toUpperCase()}</span>`;
+const plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
 function Groups() {
   const { me } = useStore(); const [tick, setTick] = useState(0); const bump = () => setTick((x) => x + 1);
   const caps = useLoad(() => me ? api("/groups/capabilities") : Promise.resolve(null), [me && me.username, tick]);
   const d = useLoad(() => me ? api("/groups") : Promise.resolve({ groups: [] }), [me && me.username, tick]);
-  const [sel, setSel] = useState(null); const [nn, setNn] = useState(""); const [nd, setNd] = useState("");
+  const [sel, setSel] = useState(null); const [nn, setNn] = useState(""); const [nd, setNd] = useState(""); const [q, setQ] = useState(""); const [pane, setPane] = useState("list"); const [mk, setMk] = useState(false);
   if (!me) return html`<${Empty} t="Sign in required" d="Sign in to see your groups." />`;
   if (!d.d) return d.e ? html`<${Err} e=${d.e} />` : html`<div class="skel"></div>`;
-  const c = caps.d || {};
-  const create = async () => { try { await api("/groups", { method: "POST", body: { name: nn, description: nd } }); setSel(nn.trim().toLowerCase()); setNn(""); setNd(""); toast("Group created"); bump(); } catch (e) { toast(e.message, 1); } };
-  const manageable = (g) => g.can_manage;
-  return html`<div class="stack"><h1>Groups</h1><p class="lead">${c.is_admin ? "All groups on this hub." : "Groups you own or belong to."} Share repositories with a group and every member gets access.</p>
-    <div class="two" style="align-items:start"><div class="stack"><div class="list">${d.d.groups.length ? d.d.groups.map((g) => html`<button class="li pick" key=${g.name} onClick=${() => setSel(g.name)} style=${sel === g.name ? "background:var(--fill)" : ""}><span class="av" style="width:36px;height:36px;background:var(--fg-3)">👥</span><div class="t"><b>${g.name}</b><span>${g.members} ${g.members === 1 ? "member" : "members"} · ${g.packages} shared ${g.packages === 1 ? "repo" : "repos"}${manageable(g) ? "" : " · member"}</span></div></button>`)
-        : html`<div class="li mut">${c.can_create ? "No groups yet - create your first one." : "You’re not in any groups."}</div>`}</div>
-      ${c.can_create && html`<div class="card stack"><h3>New group</h3><input class="field" placeholder="name, e.g. data-team" value=${nn} onInput=${(e) => setNn(e.target.value)} /><input class="field" placeholder="Description (optional)" value=${nd} onInput=${(e) => setNd(e.target.value)} />
-        <button class="btn" disabled=${!nn.trim()} onClick=${create}>Create group</button></div>`}</div>
-      ${sel ? html`<${GroupDetail} name=${sel} key=${sel} bump=${bump} onGone=${() => setSel(null)} />` : html`<${Empty} t="Select a group" d="Pick a group to see its members." />`}</div></div>`;
+  const c = caps.d || {}; const all = d.d.groups;
+  const create = async () => { try { await api("/groups", { method: "POST", body: { name: nn, description: nd } }); setSel(nn.trim().toLowerCase()); setPane("edit"); setNn(""); setNd(""); setMk(false); toast("Group created"); bump(); } catch (e) { toast(e.message, 1); } };
+  const f = q.trim().toLowerCase(), list = all.filter((g) => !f || g.name.toLowerCase().includes(f));
+  const pick = (n) => { setSel(n); setPane("edit"); };
+  return html`<div class="stack"><div class="kn-head"><div><h1>Groups</h1><p class="lead">${c.is_admin ? "Every group on this hub." : "Groups you own or belong to."} Share a repository with a group and every member gets access.</p></div>
+      ${c.can_create && html`<button class="btn" aria-expanded=${mk} onClick=${() => { setMk(!mk); setPane("list"); }}>${mk ? "Close" : "New group"}</button>`}</div>
+    <div class=${"kn gr pane-" + pane}>
+      <aside class="kn-list" aria-label="Groups">
+        ${mk && c.can_create && html`<form class="gr-new" onSubmit=${(e) => { e.preventDefault(); if (nn.trim()) create(); }}><input class="field" aria-label="Group name" placeholder="Name, e.g. data-team" value=${nn} onInput=${(e) => setNn(e.target.value)} /><input class="field" aria-label="Description" placeholder="Description (optional)" value=${nd} onInput=${(e) => setNd(e.target.value)} />
+          <div class="row"><button class="btn sm" type="submit" disabled=${!nn.trim()}>Create group</button><button class="btn sec sm" type="button" onClick=${() => setMk(false)}>Cancel</button></div></form>`}
+        ${all.length > 5 && html`<${Search} value=${q} onInput=${setQ} ph="Filter groups" />`}
+        <div class="kn-sec"><span>${c.is_admin ? "All groups" : "Your groups"}</span><span>${all.length}</span></div>
+        ${list.length ? list.map((g) => html`<button type="button" key=${g.name} class=${"kn-row gr-row" + (sel === g.name ? " on" : "")} aria-current=${sel === g.name ? "true" : "false"} onClick=${() => pick(g.name)}><${GroupMark} name=${g.name} size=${36} />
+            <span class="gr-t"><b>${g.name}</b><span>${plural(g.members, "member")} · ${plural(g.packages, "repo")}</span></span>${g.can_manage ? "" : html`<span class="badge">member</span>`}</button>`)
+          : html`<p class="kn-none">${all.length ? "No group matches." : c.can_create ? "No groups yet. Use New group to make the first one." : "You are not in any groups."}</p>`}
+      </aside>
+      <section class="kn-ed gr-ed" aria-label="Group">${sel ? html`<${GroupDetail} name=${sel} repos=${(all.find((x) => x.name === sel) || {}).packages || 0} key=${sel} bump=${bump} onBack=${() => setPane("list")} onGone=${() => { setSel(null); setPane("list"); }} />` : html`<div class="gr-empty"><${GroupMark} name="G" size=${56} /><h3>Select a group</h3><p class="mut">Pick one on the left to see and manage its members.</p></div>`}</section></div></div>`;
 }
-function GroupDetail({ name, bump, onGone }) {
-  const [tick, setTick] = useState(0); const g = useLoad(() => api("/groups/" + name), [name, tick]); const [confirm, setConfirm] = useState(false);
-  const [paste, setPaste] = useState("");
-  if (g.loading && !g.d) return html`<div class="skel"></div>`;
-  if (g.e) return html`<${Empty} t="Members only see their own membership" d="Only the group’s owner or an admin can view and edit its member list." />`;
-  const re = () => { setTick(tick + 1); bump(); };
+function GroupDetail({ name, repos, bump, onGone, onBack }) {
+  const [tick, setTick] = useState(0); const g = useLoad(() => api("/groups/" + name), [name, tick]); const [asking, setAsking] = useState(false); const [typed, setTyped] = useState("");
+  const [paste, setPaste] = useState(""); const [mf, setMf] = useState("");
+  if (g.loading && !g.d) return html`<div class="gr-pad"><div class="skel line"></div><div class="skel line"></div></div>`;
+  if (g.e) return html`<div class="gr-empty"><h3>Members only see their own membership</h3><p class="mut">Only the group’s owner or an admin can view and edit its member list.</p><button class="btn sec sm kn-back" onClick=${onBack}>All groups</button></div>`;
+  const re = () => { setTick((n) => n + 1); bump(); };
   const add = async (names) => { try { const r = await api(`/groups/${name}/members`, { method: "POST", body: { usernames: names } }); toast(r.missing.length ? `Added; not found: ${r.missing.join(", ")}` : "Members added", r.missing.length ? 1 : 0); setPaste(""); re(); } catch (e) { toast(e.message, 1); } };
   const rm = async (u) => { try { await api(`/groups/${name}/members/${encodeURIComponent(u)}`, { method: "DELETE" }); re(); } catch (e) { toast(e.message, 1); } };
   const del = async () => { try { await api("/groups/" + name, { method: "DELETE" }); toast("Group deleted"); bump(); onGone(); } catch (e) { toast(e.message, 1); } };
-  return html`<div class="stack"><div class="row"><h2>${name}</h2><span class="sp"></span>${confirm ? html`<span class="sm mut">Delete this group and its sharing?</span><button class="btn danger sm" onClick=${del}>Yes, delete</button><button class="btn sec sm" onClick=${() => setConfirm(false)}>Cancel</button>` : html`<button class="btn danger sm" onClick=${() => setConfirm(true)}>Delete</button>`}</div>
-    ${g.d.description && html`<p class="mut">${g.d.description}</p>`}
-    <div class="row"><${PrincipalPicker} ph="Add a person…" exclude=${g.d.members.map((m) => "user:" + m.username).concat(["group:*"])} onPick=${(t, n) => t === "user" ? add([n]) : toast("Pick a person", 1)} /></div>
-    <details><summary class="sm mut" style="cursor:pointer">Add many at once</summary><div class="stack" style="margin-top:8px"><textarea class="field" rows="3" style="padding:12px" placeholder="Usernames separated by commas, spaces or new lines" value=${paste} onInput=${(e) => setPaste(e.target.value)}></textarea>
-      <button class="btn sec sm" style="width:fit-content" disabled=${!paste.trim()} onClick=${() => add(paste.split(/[\s,;]+/).filter(Boolean))}>Add usernames</button></div></details>
-    <div class="list">${g.d.members.length ? g.d.members.map((m) => html`<div class="li" key=${m.username}><${Avatar} p=${m} size=${36} /><div class="t"><b>${shown(m)}</b><span>${m.title || "@" + m.username}</span></div><button class="btn danger sm" onClick=${() => rm(m.username)}>Remove</button></div>`) : html`<div class="li mut">No members yet.</div>`}</div></div>`;
+  const members = g.d.members, mfl = mf.trim().toLowerCase(), mshown = members.filter((m) => !mfl || (shown(m) + " " + m.username).toLowerCase().includes(mfl));
+  return html`<div class="gr-detail">
+    <div class="kn-bar gr-bar"><button type="button" class="btn sec sm kn-back" onClick=${onBack}>All groups</button><${GroupMark} name=${name} size=${52} />
+      <div class="kn-title" style="display:block"><h2>${name}</h2>${g.d.description ? html`<p class="sm mut" style="margin-top:2px">${g.d.description}</p>` : ""}</div></div>
+    <div class="gr-stats"><div><b>${members.length}</b><span>${members.length === 1 ? "member" : "members"}</span></div><div><b>${fmt(repos)}</b><span>shared ${repos === 1 ? "repo" : "repos"}</span></div></div>
+    <div class="kn-share"><h3>Add people</h3>
+      <div class="row"><${PrincipalPicker} ph="Search for a person…" exclude=${members.map((m) => "user:" + m.username).concat(["group:*"])} onPick=${(t, n) => t === "user" ? add([n]) : toast("Pick a person", 1)} /></div>
+      <details class="kn-help"><summary>Add many at once</summary><div class="stack" style="margin-top:8px"><textarea class="field" rows="3" style="padding:12px;height:auto" aria-label="Usernames" placeholder="Usernames separated by commas, spaces or new lines" value=${paste} onInput=${(e) => setPaste(e.target.value)}></textarea>
+        <button class="btn sec sm" style="width:fit-content" disabled=${!paste.trim()} onClick=${() => add(paste.split(/[\s,;]+/).filter(Boolean))}>Add usernames</button></div></details></div>
+    <div class="kn-share"><div class="row"><h3>Members</h3><span class="badge">${members.length}</span><span class="sp"></span>${members.length > 6 && html`<input class="field gr-find" aria-label="Filter members" placeholder="Filter" value=${mf} onInput=${(e) => setMf(e.target.value)} />`}</div>
+      ${members.length ? html`<div class="gr-members">${mshown.map((m) => html`<div class="gr-mem" key=${m.username}><${Avatar} p=${m} size=${40} /><div class="t"><b>${shown(m)}</b><span>${m.title || "@" + m.username}</span></div><button type="button" class="kn-x" aria-label=${"Remove " + shown(m)} onClick=${() => rm(m.username)}><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8"/></svg></button></div>`)}${!mshown.length && html`<p class="kn-none">No member matches.</p>`}</div>` : html`<p class="mut sm">No members yet. Search above to add the first person.</p>`}</div>
+    <div class="kn-share gr-danger"><h3>Delete group</h3><p class="sm mut">Removes the group and every repository share that points to it. Members keep their accounts.</p>
+      ${asking ? html`<div class="kn-add"><input class="field" style="flex:1;min-width:160px" aria-label=${"Type " + name + " to confirm"} placeholder=${"Type " + name + " to confirm"} value=${typed} onInput=${(e) => setTyped(e.target.value)} /><button class="btn danger sm" disabled=${typed.trim() !== name} onClick=${del}>Delete group</button><button class="btn sec sm" onClick=${() => { setAsking(false); setTyped(""); }}>Cancel</button></div>` : html`<button class="btn danger sm" style="width:fit-content" onClick=${() => setAsking(true)}>Delete this group…</button>`}</div></div>`;
 }
 const KINDS = ["install", "update", "uninstall", "use", "error"];
 const DAYS = [["1", "Last 24 hours"], ["7", "Last 7 days"], ["30", "Last 30 days"], ["90", "Last 90 days"], ["0", "All time"]];
@@ -637,8 +688,12 @@ function Docs({ slug }) {
 
 
 // ---------- personal knowledge (private notes + the bot soul; `aihub knowledge pull` mirrors them). Notes can be shared with a user or group.
+const SOUL0 = "# Soul\n\nWho the assistant is for me: tone, language, what to always / never do.\n";
+const knSize = (t) => { const w = (t.trim().match(/\S+/g) || []).length; return w + (w === 1 ? " word" : " words") + " · " + t.length + " characters"; };
+const KnRow = ({ on, onClick, title, sub, badge, pin }) => html`<button type="button" class=${"kn-row" + (pin ? " pin" : "") + (on ? " on" : "")} aria-current=${on ? "true" : "false"} onClick=${onClick}><span class="kn-t">${title}</span>${sub ? html`<span class="kn-s">${sub}</span>` : ""}${badge ? html`<span class="badge">${badge}</span>` : ""}</button>`;
 function Knowledge() {
-  const { me } = useStore(); const [tick, setTick] = useState(0); const [cur, setCur] = useState("soul"); const [owner, setOwner] = useState(null); const [text, setText] = useState(""); const [nn, setNn] = useState("");
+  const { me } = useStore(); const [tick, setTick] = useState(0); const [cur, setCur] = useState("soul"); const [owner, setOwner] = useState(null);
+  const [text, setText] = useState(""); const [orig, setOrig] = useState(""); const [nn, setNn] = useState(""); const [q, setQ] = useState(""); const [pane, setPane] = useState("list");
   const [access, setAccess] = useState("read"); const [kind, setKind] = useState("user"); const [who, setWho] = useState("");
   const list = useLoad(() => me ? api("/me/knowledge") : Promise.resolve({ items: [] }), [me && me.username, tick]);
   const shared = useLoad(() => me ? api("/knowledge/shared") : Promise.resolve({ items: [] }), [me && me.username, tick]);
@@ -646,34 +701,52 @@ function Knowledge() {
   const url = owner ? "/knowledge/shared/" + owner + "/" + cur : "/me/knowledge/" + cur;
   const sharedItem = owner && shared.d ? shared.d.items.find((i) => i.owner === owner && i.name === cur) : null;
   const readOnly = !!owner && !(sharedItem && sharedItem.access === "write");
-  useEffect(() => { if (!me) return; let on = 1; api(url).then((d) => on && setText(d.body), () => on && setText(!owner && cur === "soul" ? "# Soul\n\nWho the assistant is for me: tone, language, what to always / never do.\n" : "")); return () => { on = 0; }; }, [cur, owner, me && me.username]);
+  useEffect(() => { if (!me) return; let on = 1; api(url).then((d) => { if (on) { setText(d.body); setOrig(d.body); } }, () => { if (on) { setText(!owner && cur === "soul" ? SOUL0 : ""); setOrig(""); } }); return () => { on = 0; }; }, [cur, owner, me && me.username]);
+  const dirty = !readOnly && text !== orig;
+  const save = async () => { if (readOnly || !dirty) return; try { await api(url, { method: "PUT", body: { body: text } }); setOrig(text); toast("Saved"); setTick((n) => n + 1); } catch (e) { toast(e.message, 1); } };
+  const saveRef = useRef(); saveRef.current = save;
+  useEffect(() => { const k = (e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); if (saveRef.current) saveRef.current(); } }; addEventListener("keydown", k); return () => removeEventListener("keydown", k); }, []);
+  useEffect(() => { if (!dirty) return; const b = (e) => { e.preventDefault(); e.returnValue = ""; }; addEventListener("beforeunload", b); return () => removeEventListener("beforeunload", b); }, [dirty]);
   if (!me) return html`<${Empty} t="Sign in required" d="Your notes are private to your account." />`;
-  const names = [...new Set(["soul", ...(list.d ? list.d.items.map((i) => i.name) : [])])];
-  const open = (n, o) => { setCur(n); setOwner(o || null); };
-  const save = async () => { try { await api(url, { method: "PUT", body: { body: text } }); toast("Saved"); setTick(tick + 1); } catch (e) { toast(e.message, 1); } };
-  const del = async () => { if (!confirm("Delete " + cur + "? Everyone it is shared with loses it.")) return; try { await api("/me/knowledge/" + cur, { method: "DELETE" }); open("soul"); setTick(tick + 1); } catch (e) { toast(e.message, 1); } };
+  const open = (n, o) => { if (dirty && !confirm("Discard unsaved changes to " + cur + "?")) return; setCur(n); setOwner(o || null); setPane("edit"); };
+  const del = async () => { if (!confirm("Delete " + cur + "? Everyone it is shared with loses it.")) return; try { await api("/me/knowledge/" + cur, { method: "DELETE" }); setCur("soul"); setOwner(null); setPane("list"); setTick((n) => n + 1); } catch (e) { toast(e.message, 1); } };
   const add = () => { const n = nn.trim().toLowerCase(); if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(n)) return toast("Use lowercase letters, digits, . _ -", 1); setNn(""); open(n); };
   const share = async () => { const w = who.trim(); if (!w) return toast("Enter a " + kind + " name", 1);
-    try { await api("/me/knowledge/" + cur + "/shares", { method: "PUT", body: { [kind]: w, access } }); toast("Shared with " + w); setWho(""); setTick(tick + 1); } catch (e) { toast(e.message, 1); } };
-  const unshare = async (sh) => { try { await api("/me/knowledge/" + cur + "/shares", { method: "DELETE", body: { [sh.type]: sh.name } }); setTick(tick + 1); } catch (e) { toast(e.message, 1); } };
+    try { await api("/me/knowledge/" + cur + "/shares", { method: "PUT", body: { [kind]: w, access } }); toast("Shared with " + w); setWho(""); setTick((n) => n + 1); } catch (e) { toast(e.message, 1); } };
+  const unshare = async (sh) => { try { await api("/me/knowledge/" + cur + "/shares", { method: "DELETE", body: { [sh.type]: sh.name } }); setTick((n) => n + 1); } catch (e) { toast(e.message, 1); } };
   const mine = list.d && list.d.items.some((i) => i.name === cur);
-  const sharedItems = shared.d ? shared.d.items : [];
-  return html`<div class="stack"><h1>Knowledge</h1>
-    <p class="mut">Notes your bots and assistants use. <b>soul</b> is the persona a bot loads first and is always private. Other notes can be shared with a person or a group. Local copy: <code>aihub knowledge pull</code> (folder <code>~/.aihub/knowledge</code>, shared notes under <code>shared/</code>), edit there and <code>aihub knowledge push</code>. <a href="#/docs/bots">How to build a bot</a>.</p>
-    <div class="row" style="align-items:flex-start;gap:24px"><nav class="list" style="min-width:200px;flex:0 0 220px" aria-label="Notes">
-      ${names.map((n) => html`<a class="li" key=${n} href="javascript:void 0" onClick=${() => open(n)} style=${!owner && n === cur ? "font-weight:600" : ""}>${n}</a>`)}
-      <div class="row" style="margin-top:8px"><input class="field" style="flex:1;min-width:0" placeholder="new note" value=${nn} onInput=${(e) => setNn(e.target.value)} /><button class="btn sec sm" onClick=${add}>Add</button></div>
-      ${sharedItems.length ? html`<h4 class="mut" style="margin:16px 0 4px">Shared with me</h4>${sharedItems.map((i) => html`<a class="li" key=${i.owner + "/" + i.name} href="javascript:void 0" onClick=${() => open(i.name, i.owner)} style=${owner === i.owner && cur === i.name ? "font-weight:600" : ""}>${i.owner}/${i.name} <span class="xs mut3">${i.access}</span></a>`)}` : ""}</nav>
-      <div class="stack" style="flex:1;min-width:280px"><div class="row"><h3 style="margin:0">${owner ? owner + "/" : ""}${cur}.md</h3>${owner ? html`<span class="badge">${readOnly ? "read-only" : "you can edit"}</span>` : ""}<span class="sp"></span>${!owner && cur !== "soul" && html`<button class="btn sec sm" onClick=${del}>Delete</button>`}${!readOnly && html`<button class="btn sm" onClick=${save}>Save</button>`}</div>
-        <textarea class="field mono" style="min-height:360px;width:100%" aria-label="Note text" readOnly=${readOnly} value=${text} onInput=${(e) => setText(e.target.value)}></textarea>
-        ${!owner && cur !== "soul" && mine ? html`<div class="card stack"><h3 style="margin:0">Sharing</h3>
-          ${shares.d && shares.d.items.length ? shares.d.items.map((sh) => html`<div class="row" key=${sh.type + sh.name}><span>${sh.type === "group" ? "group " : ""}<b>${sh.name}</b></span><span class="badge">${sh.access}</span><span class="sp"></span><button class="btn sec sm" onClick=${() => unshare(sh)}>Remove</button></div>`) : html`<p class="mut" style="margin:0">Private. Only you can see this note.</p>`}
-          <div class="row"><select class="field" aria-label="Share with" value=${kind} onChange=${(e) => setKind(e.target.value)}><option value="user">User</option><option value="group">Group</option></select>
-            <input class="field" style="flex:1;min-width:0" aria-label="Name" placeholder=${kind === "group" ? "group name" : "username"} value=${who} onInput=${(e) => setWho(e.target.value)} />
+  const f = q.trim().toLowerCase(), hit = (s) => !f || s.toLowerCase().includes(f);
+  const names = (list.d ? list.d.items.map((i) => i.name) : []).filter((n) => n !== "soul");
+  const shown = names.filter(hit), sharedItems = (shared.d ? shared.d.items : []).filter((i) => hit(i.owner + "/" + i.name));
+  const X = html`<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8"/></svg>`;
+  return html`<div class="stack"><div class="kn-head"><div><h1>Knowledge</h1><p class="lead">Notes your bots and assistants read.</p></div>
+      <details class="kn-help"><summary>How notes reach your tools</summary><p><b>soul</b> is the persona a bot loads first and is always private. Other notes can be shared with a person or a group. <code>aihub knowledge pull</code> mirrors them to <code>~/.aihub/knowledge</code> (shared notes under <code>shared/</code>); edit there and run <code>aihub knowledge push</code>. <a href="#/docs/bots">How to build a bot</a>.</p></details></div>
+    <div class=${"kn pane-" + pane}>
+      <aside class="kn-list" aria-label="Notes">
+        <form class="kn-new" onSubmit=${(e) => { e.preventDefault(); add(); }}><input class="field" aria-label="New note name" placeholder="New note name" value=${nn} onInput=${(e) => setNn(e.target.value)} /><button class="btn sm" type="submit">Add</button></form>
+        <${Search} value=${q} onInput=${setQ} ph="Filter notes" />
+        ${hit("soul") && html`<div class="kn-sec"><span>Persona</span></div><${KnRow} pin=${true} on=${!owner && cur === "soul"} onClick=${() => open("soul")} title="soul" badge="private" />`}
+        <div class="kn-sec"><span>Your notes</span><span>${names.length}</span></div>
+        ${shown.length ? shown.map((n) => html`<${KnRow} key=${n} on=${!owner && n === cur} onClick=${() => open(n)} title=${n} />`) : html`<p class="kn-none">${names.length ? "No note matches." : "No notes yet. Name one above to start."}</p>`}
+        ${sharedItems.length ? html`<div class="kn-sec"><span>Shared with me</span><span>${sharedItems.length}</span></div>${sharedItems.map((i) => html`<${KnRow} key=${i.owner + "/" + i.name} on=${owner === i.owner && cur === i.name} onClick=${() => open(i.name, i.owner)} title=${i.name} sub=${i.owner} badge=${i.access === "write" ? "can edit" : "read"} />`)}` : ""}
+      </aside>
+      <section class="kn-ed" aria-label="Editor">
+        <div class="kn-bar"><button type="button" class="btn sec sm kn-back" onClick=${() => setPane("list")}>All notes</button>
+          <div class="kn-title"><h2>${owner ? owner + " / " : ""}${cur}.md</h2>${owner ? html`<span class="badge">${readOnly ? "read-only" : "you can edit"}</span>` : cur === "soul" ? html`<span class="badge blue">persona</span>` : ""}</div>
+          <span class=${"kn-state" + (dirty ? " dirty" : "")} aria-live="polite">${readOnly ? "" : dirty ? "Unsaved changes" : "Saved"}</span>
+          ${!owner && cur !== "soul" && mine && html`<button class="btn sec sm danger" onClick=${del}>Delete</button>`}${!readOnly && html`<button class="btn sm" disabled=${!dirty} onClick=${save}>Save</button>`}</div>
+        <textarea class="field mono kn-text" aria-label="Note text" readOnly=${readOnly} value=${text} onInput=${(e) => setText(e.target.value)}></textarea>
+        <div class="kn-foot"><span>${knSize(text)}</span><span>${readOnly ? "Read-only" : "Ctrl+S or ⌘S saves"}</span></div>
+        ${!owner && cur !== "soul" ? html`<div class="kn-share"><h3>Sharing</h3>
+          ${!mine ? html`<p class="mut sm">Save this note first, then you can share it.</p>` : html`
+          ${shares.d && shares.d.items.length ? html`<div class="kn-chips">${shares.d.items.map((sh) => html`<span class="kn-chip" key=${sh.type + sh.name}><span class="kn-av" aria-hidden="true">${(sh.name[0] || "?").toUpperCase()}</span><span>${sh.type === "group" ? "group " : ""}<b>${sh.name}</b></span><span class="badge">${sh.access}</span><button type="button" class="kn-x" aria-label=${"Stop sharing with " + sh.name} onClick=${() => unshare(sh)}>${X}</button></span>`)}</div>` : html`<p class="mut sm">Private. Only you can see this note.</p>`}
+          <div class="kn-add"><select class="field" aria-label="Share with" value=${kind} onChange=${(e) => setKind(e.target.value)}><option value="user">User</option><option value="group">Group</option></select>
+            <input class="field" style="flex:1;min-width:140px" aria-label="Name" placeholder=${kind === "group" ? "group name" : "username"} value=${who} onInput=${(e) => setWho(e.target.value)} />
             <select class="field" aria-label="Access" value=${access} onChange=${(e) => setAccess(e.target.value)}><option value="read">Can read</option><option value="write">Can edit</option></select>
             <button class="btn sm" onClick=${share}>Share</button></div>
-          <p class="xs mut3" style="margin:0">Do not put secrets in a shared note. Editors overwrite the whole note.</p></div>` : ""}
-        ${!owner && cur === "soul" ? html`<p class="xs mut3">soul is your persona and cannot be shared.</p>` : ""}</div></div></div>`;
+          <p class="xs mut">Do not put secrets in a shared note. Editors overwrite the whole note.</p>`}</div>` : ""}
+        ${!owner && cur === "soul" ? html`<p class="kn-share xs mut">soul is your persona and cannot be shared.</p>` : ""}
+      </section></div></div>`;
 }
 
 // ---------- dashboard (charts are plain SVG: no library, theme-aware)
@@ -780,30 +853,41 @@ function App() {
   const lk = useRef(), ind = useRef();
   const place = () => { const n = lk.current, i = ind.current; if (!n || !i) return; const a = n.querySelector("a.on"); if (!a) { i.style.opacity = 0; return; } i.style.opacity = 1; i.style.transform = `translateX(${a.offsetLeft}px) scaleX(${a.offsetWidth})`; };
   useEffect(() => { place(); }, [path]);
+  const first = useRef(true);
+  const [menu, setMenu] = useState(false);
+  useEffect(() => { setMenu(false); }, [s.route]);
+  useEffect(() => { if (!menu) return; const k = (e) => { if (e.key === "Escape") setMenu(false); }; addEventListener("keydown", k); return () => removeEventListener("keydown", k); }, [menu]);
+  useEffect(() => {
+    const k = (e) => { const t = e.target, typing = t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable);
+      const slash = e.key === "/" && !typing && !e.metaKey && !e.ctrlKey, cmdk = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k";
+      if (slash || cmdk) { const f = document.querySelector(".search input"); if (f) { e.preventDefault(); f.focus(); f.select(); } else if (!typing || cmdk) { e.preventDefault(); nav("/browse"); } }
+      else if (e.key === "Escape" && typing && t.type === "search") t.blur(); };
+    addEventListener("keydown", k); return () => removeEventListener("keydown", k);
+  }, []);
+  useEffect(() => {
+    const top = document.getElementById("top"); if (!top || !window.IntersectionObserver) return;
+    const io = new IntersectionObserver(([e]) => document.body.classList.toggle("scrolled", !e.isIntersecting));
+    io.observe(top); return () => io.disconnect();
+  }, []);
+  useEffect(() => {
+    const moved = !first.current; first.current = false;
+    const t = requestAnimationFrame(() => { const h1 = document.querySelector("main h1"); document.title = (h1 && h1.textContent ? h1.textContent.trim() + " · " : "") + ((s.brand && s.brand.name) || "AI Hub"); const h = h1 || document.getElementById("main"); if (h && moved) { if (!h.hasAttribute("tabindex")) h.setAttribute("tabindex", "-1"); h.focus({ preventScroll: true }); } });
+    return () => cancelAnimationFrame(t);
+  }, [path]);
   useEffect(() => { addEventListener("resize", place); return () => removeEventListener("resize", place); }, []);
   const logout = async () => { try { await api("/auth/logout", { method: "POST" }); } catch {} try { localStorage.removeItem("aihub_token"); } catch {} set({ me: null }); nav("/"); };
   const on = (k) => (seg[0] === k ? "on" : "");
   const br = s.brand || {}, ct = br.contact || {};
   const page = { "": html`<${Home} />`, browse: html`<${Browse} key=${s.route} />`, package: html`<${Package} name=${seg[1]} key=${seg[1]} />`, rankings: html`<${Rankings} />`, docs: html`<${Docs} slug=${seg[1]} key=${seg[1]} />`, start: html`<${Start} />`,
     login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, knowledge: html`<${Knowledge} />`, dashboard: html`<${Dashboard} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
-  return html`<div>${br.announcement && html`<div class="announce" role="status" dangerouslySetInnerHTML=${{ __html: br.announcement }}></div>`}<header class="nav"><div class="nav-in"><a class="brand glow" href="#/">${br.logo_url && html`<img class="logo" src=${br.logo_url} alt="" />`}<span>${br.name || "AI Hub"}</span></a>
-    <nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
+  return html`<div><a class="skip" href="#/" onClick=${(e) => { e.preventDefault(); const m = document.getElementById("main"); if (m) m.focus(); }}>Skip to content</a>${br.announcement && html`<div class="announce" role="status" dangerouslySetInnerHTML=${{ __html: br.announcement }}></div>`}<header class="nav"><div class="nav-in"><a class="brand glow" href="#/">${br.logo_url && html`<img decoding="async" class="logo" src=${br.logo_url} alt="" />`}<span>${br.name || "AI Hub"}</span></a>
+    <button type="button" class="burger" aria-label="Menu" aria-expanded=${menu} aria-controls="menu" onClick=${() => setMenu(!menu)}><i></i><i></i><i></i></button>
+    <div id="menu" class=${"menu" + (menu ? " open" : "")} onClick=${(e) => { if (e.target.closest && e.target.closest("a")) setMenu(false); }}><nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
     <div class="r">${s.me ? html`<a href="#/account" class="me-link"><${Avatar} p=${s.me} size=${24} /><span>${shown(s.me)}</span></a><a class=${on("knowledge")} href="#/knowledge">Knowledge</a>${s.showGroups ? html`<a class=${on("groups")} href="#/groups">Groups</a>` : ""}${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}${can("audit") ? html`<a class=${on("audit")} href="#/audit">Audit</a>` : ""}${can("admin") || can("reset_password") ? html`<a href="#/admin">Admin</a>` : ""}<a href="#/" onClick=${logout}>Sign out</a>` :
-      html`${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}<a href="#/login">Sign in</a>`}</div></div></header>
-    <main><div class="page" key=${path}>${page}</div></main>
-    <footer class="foot"><b class="glow">${br.logo_url && html`<img class="logo sm" src=${br.logo_url} alt="" />`}${br.name || "AI Hub"}</b><span>Skills, agents and MCP servers for your team.</span>
+      html`${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}<a href="#/login">Sign in</a>`}</div></div></div></header>
+    <main id="main" tabindex="-1"><div class="page" key=${path}>${page}</div></main>
+    <footer class="foot"><b class="glow">${br.logo_url && html`<img decoding="async" class="logo sm" src=${br.logo_url} alt="" />`}${br.name || "AI Hub"}</b><span>Skills, agents and MCP servers for your team.</span>
       ${(ct.name || ct.email || ct.url || ct.phone) && html`<span class="contact" aria-label="Contact">${ct.name && html`<span>${ct.name}</span>`}${ct.email && html`<a href=${"mailto:" + ct.email}>${ct.email}</a>`}${ct.phone && html`<span>${ct.phone}</span>`}${ct.url && /^https?:\/\//i.test(ct.url) && html`<a href=${ct.url} target="_blank" rel="noopener noreferrer">Support</a>`}</span>`}<nav aria-label="Footer"><a href="#/browse">Browse</a><a href="#/rankings">Rankings</a><a href="#/start">Get started</a><a href="#/docs">Docs</a></nav>${br.server_version && html`<span class="ver xs">v${br.server_version}</span>`}</footer>
     ${s.toast && html`<div class=${"toast " + (s.toast.err ? "err" : "")} role="status">${s.toast.m}</div>`}</div>`;
 }
 render(html`<${App} />`, document.getElementById("app"));
-
-// ambient dot field: ease the highlight toward the pointer; the loop stops itself once it has caught up
-(() => {
-  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-  const root = document.documentElement.style; let tx = innerWidth / 2, ty = innerHeight * 0.3, x = tx, y = ty, raf = 0;
-  const step = () => { x += (tx - x) * 0.14; y += (ty - y) * 0.14;
-    root.setProperty("--bx", x.toFixed(1) + "px"); root.setProperty("--by", y.toFixed(1) + "px");
-    root.setProperty("--px", ((x - innerWidth / 2) * -0.02).toFixed(1) + "px"); root.setProperty("--py", ((y - innerHeight / 2) * -0.02).toFixed(1) + "px");
-    raf = Math.abs(tx - x) + Math.abs(ty - y) > 0.5 ? requestAnimationFrame(step) : 0; };
-  addEventListener("pointermove", (e) => { tx = e.clientX; ty = e.clientY; if (!raf) raf = requestAnimationFrame(step); }, { passive: true });
-})();

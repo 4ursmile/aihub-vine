@@ -223,3 +223,7 @@ aihub-data/
 *.zip
 skills-lock.json
 
+.codex
+.gemini
+.cusor
+
