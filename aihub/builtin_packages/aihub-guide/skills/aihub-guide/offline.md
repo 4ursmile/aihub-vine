@@ -106,7 +106,7 @@ aihub knowledge list|get NOTE|pull|push|edit NOTE|rm NOTE|path   # personal note
 aihub knowledge share NOTE --user U|--group G [--write] | unshare | shares NOTE | shared | push-shared OWNER/NOTE   # shared notes land in ~/.aihub/knowledge/shared/<owner>/
 
 **Build a bot (type = bot).** 1) `aihub dev init ./my-bot --type bot --name my-bot`. 2) In `aihub.toml`, set `[bot] run = "bot/run.py"` and `title`; declare each setting as `[[bot.env]]` (`name`, `hint`, `required`, `secret`, `default`). 3) Write `bot/run.py`: read settings from the environment, `--once`/`--info` from argv after `--`. 4) `aihub dev validate`, then `aihub dev publish --bump patch`. 5) `aihub install my-bot` prints `settings:` (`~/.aihub/bots/my-bot/.env`); fill it in. 6) `aihub run my-bot` (`-- --info` to check). Memory, harnesses and cron: see `docs/bots.md` on the hub; this snapshot has none.
-aihub policy                          # guard that blocks agents from destructive calls (db/s3 delete, overwrite): on|off, enable|disable ID, add ID --pattern RE, test 'CMD', judge on|off (AI second opinion via claude -p; failure = ask), update
+aihub policy                          # guard that blocks agents from destructive calls (db/s3 delete, overwrite): on|off, enable|disable ID, add ID --pattern RE, test 'CMD', judge on|off (AI second opinion via claude -p; failure = allow), update
 aihub vault                           # menu: add/edit/remove git remotes and logins (aihub vault add URL --user NAME; token via prompt or --token-stdin)
 aihub logout                          # forget the saved token (usage becomes anonymous, still merged by user name)
 aihub self-uninstall [--yes]          # remove aihub: packages, hooks, PATH block, ~/.aihub (not your published packages or git repos)

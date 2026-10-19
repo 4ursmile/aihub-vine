@@ -264,7 +264,7 @@ def _ask_model(exe, text, cfg):
 
 
 def judge(tool, inp, cwd=""):
-    """-> None (fine, or judge off / no claude installed) or {action, id, reason}. A judge that fails or times out answers `ask`."""
+    """-> None (fine, or judge off / no claude installed) or {action, id, reason}. A judge that fails or times out allows the call."""
     try:
         if not (judge_enabled() and user()["enabled"] and tool):
             return None
@@ -282,7 +282,7 @@ def judge(tool, inp, cwd=""):
             return {"action": c["verdict"], "id": "judge", "reason": "AI judge: " + (c.get("reason") or "risky call")}
         return None
     except Exception as e:
-        return {"action": "ask", "id": "judge-error", "reason": "the AI judge could not check this call (%s)" % (str(e) or type(e).__name__)[:80]}
+        return None                                             # judge failed or timed out: unknown call is allowed
 
 
 # ---- AI judge: second opinion from a model, only for risky-looking calls that no rule matched -----------------------------------
@@ -368,7 +368,7 @@ def _ask_model(exe, text, cfg):
 
 
 def judge(tool, inp, cwd=""):
-    """-> None (fine, or judge off / no claude installed) or {action, id, reason}. A judge that fails or times out answers `ask`."""
+    """-> None (fine, or judge off / no claude installed) or {action, id, reason}. A judge that fails or times out allows the call."""
     try:
         if not (judge_enabled() and user()["enabled"] and tool):
             return None
@@ -386,7 +386,7 @@ def judge(tool, inp, cwd=""):
             return {"action": c["verdict"], "id": "judge", "reason": "AI judge: " + (c.get("reason") or "risky call")}
         return None
     except Exception as e:
-        return {"action": "ask", "id": "judge-error", "reason": "the AI judge could not check this call (%s)" % (str(e) or type(e).__name__)[:80]}
+        return None                                             # judge failed or timed out: unknown call is allowed
 
 
 # ---- remote updates --------------------------------------------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 [package]
 name = "aihub-policy"
-version = "1.2.0"
+version = "1.2.1"
 type = "setup"
 description = "Remote rules for the built-in aihub tool-call guard: blocks agents from deleting databases or buckets and overwriting tables or protected paths."
 tags = ["aihub", "policy", "security"]

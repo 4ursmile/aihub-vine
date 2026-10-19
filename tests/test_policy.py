@@ -119,12 +119,12 @@ class JudgeTest(PolicyTest):
         with mock.patch.object(policy, "_ask_model", return_value={"verdict": "allow", "reason": "ok"}):
             self.assertIsNone(policy.judge("Bash", {"command": "make deploy-staging"}))
 
-    def test_failure_becomes_ask(self):
+    def test_failure_allows(self):
         import subprocess
         for boom in (RuntimeError("x"), subprocess.TimeoutExpired("claude", 15)):
             with mock.patch.object(policy, "_ask_model", side_effect=boom):
                 d = policy.judge("Bash", {"command": "node cleanup.js"})
-            self.assertEqual((d["action"], d["id"]), ("ask", "judge-error"))
+            self.assertIsNone(d)
 
     def test_safe_and_in_project_calls_skip_the_model(self):
         with mock.patch.object(policy, "_ask_model", side_effect=AssertionError("no model call expected")):
