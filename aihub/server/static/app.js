@@ -17,7 +17,9 @@ const set = (p) => { Object.assign(store, p); subs.forEach((f) => f({})); };
 const useStore = () => { const [, f] = useState({}); useEffect(() => { subs.add(f); return () => subs.delete(f); }, []); return store; };
 addEventListener("hashchange", () => { set({ route: location.hash.slice(1) || "/" }); scrollTo(0, 0); });
 let tt; const toast = (m, err) => { set({ toast: { m, err } }); clearTimeout(tt); tt = setTimeout(() => set({ toast: null }), 3200); };
-async function loadBrand() { try { const m = await api("/meta"); set({ brand: m }); document.title = m.name; document.documentElement.dataset.accent = m.theme || "blue"; } catch {} }
+const FAVICON0 = (document.getElementById("favicon") || {}).href;
+function setFavicon(url) { const l = document.getElementById("favicon"); if (l) { l.removeAttribute("type"); l.href = url || FAVICON0; } }
+async function loadBrand() { try { const m = await api("/meta"); set({ brand: m }); document.title = m.name; setFavicon(m.logo_url); document.documentElement.dataset.accent = m.theme || "blue"; } catch {} }
 async function loadMe() { try { const me = tok() ? await api("/auth/me") : null; let showGroups = false; if (me) { try { showGroups = (await api("/groups/capabilities")).show_page; } catch {} } set({ me, showGroups }); } catch { try { localStorage.removeItem("aihub_token"); } catch {} set({ me: null }); } }
 const initials = (n) => (String(n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("") || "?").toUpperCase();
 const hue = (n) => { let h = 0; for (const c of String(n)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
@@ -136,8 +138,8 @@ function Home() {
       <form class="search" onSubmit=${(e) => { e.preventDefault(); nav("/browse?q=" + encodeURIComponent(q)); }}><${Search} value=${q} onInput=${setQ} /></form>
       <div class="cmd hero-cmd"><code>aihub install <${Typer} words=${names} /></code><button class="btn sec sm" onClick=${() => { const t = document.querySelector(".typed"); copy("aihub install " + ((t && t.dataset.full) || "<package>")); }}>Copy</button></div></div>
       <${Activity} /></section>
-    <div class="stats3 rv"><div class="stat"><b><${Count} to=${o.packages} /></b><span>Packages</span></div><div class="stat"><b><${Count} to=${o.versions} /></b><span>Releases</span></div>
-      <div class="stat"><b><${Count} to=${o.downloads} /></b><span>Downloads</span></div><div class="stat"><b><${Count} to=${o.users} /></b><span>People</span></div></div>
+    <div class="stats3 rv"><div class="stat" style=${"--n:"+Math.max(3,fmt(Number(o.packages)||0).length)}><b><${Count} to=${o.packages} /></b><span>Packages</span></div><div class="stat" style=${"--n:"+Math.max(3,fmt(Number(o.versions)||0).length)}><b><${Count} to=${o.versions} /></b><span>Releases</span></div>
+      <div class="stat" style=${"--n:"+Math.max(3,fmt(Number(o.downloads)||0).length)}><b><${Count} to=${o.downloads} /></b><span>Downloads</span></div><div class="stat" style=${"--n:"+Math.max(3,fmt(Number(o.users)||0).length)}><b><${Count} to=${o.users} /></b><span>People</span></div></div>
     <div class="gap rv"><h2>Browse by category</h2></div>
     ${f.loading && !f.d ? html`<div class="bento"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>` : html`<div class="bento">${cats.map((c, n) => html`<a key=${c.id} href=${"#/browse?category=" + c.id} class=${"tile rv t-" + catClass(n)} style=${"--d:" + n * 70 + "ms"}>
       <div class="tile-in"><h3>${c.label}</h3><p>${c.desc}</p></div><span class="tile-n"><b>${c.count}</b> ${c.count === 1 ? "package" : "packages"}</span></a>`)}</div>`}

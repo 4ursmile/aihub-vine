@@ -250,7 +250,7 @@ def create_app(settings: Settings = None) -> FastAPI:
 
     app.add_middleware(DbUnitOfWork)
 
-    CSP = ("default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; "
+    CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
            "img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 
     log = logging.getLogger("aihub")

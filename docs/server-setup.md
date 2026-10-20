@@ -137,7 +137,7 @@ Compose does not configure a TLS reverse proxy; put one in front of the containe
 
 ## Air-gapped networks
 
-The web interface loads the pinned Preact/htm bundle from `cdn.jsdelivr.net` in `aihub/server/static/index.html`, with a Subresource Integrity hash. The Content Security Policy in `aihub/server/main.py` permits scripts only from `'self'` and `https://cdn.jsdelivr.net`. An offline deployment must serve a local copy of the bundle by changing its script URL in `index.html` and updating the CSP in `main.py` to allow the local source instead.
+The web interface serves its Preact/htm bundle locally from `aihub/server/static/vendor/preact-htm-standalone.umd.js` (htm 3.1.1), so it works offline and no external host is contacted. The Content Security Policy in `aihub/server/main.py` allows scripts from `'self'` only. The tab icon follows the logo set in Admin > Settings (falls back to the built-in icon).
 
 ## Security checklist
 
