@@ -18,7 +18,20 @@ const useStore = () => { const [, f] = useState({}); useEffect(() => { subs.add(
 addEventListener("hashchange", () => { set({ route: location.hash.slice(1) || "/" }); scrollTo(0, 0); });
 let tt; const toast = (m, err) => { set({ toast: { m, err } }); clearTimeout(tt); tt = setTimeout(() => set({ toast: null }), 3200); };
 const FAVICON0 = (document.getElementById("favicon") || {}).href;
-function setFavicon(url) { const l = document.getElementById("favicon"); if (l) { l.removeAttribute("type"); l.href = url || FAVICON0; } }
+function setFavicon(url) {
+  const l = document.getElementById("favicon"); if (!l) return;
+  const put = (h, t) => { l.removeAttribute("type"); if (t) l.type = t; l.href = h; };
+  if (!url) return put(FAVICON0);
+  const im = new Image(); // fit the logo into a square canvas (keep ratio) so the tab does not squash it
+  im.onload = () => { try {
+    const w = im.naturalWidth || 1, h = im.naturalHeight || 1, S = 64, k = Math.min(S / w, S / h);
+    const c = document.createElement("canvas"); c.width = c.height = S;
+    c.getContext("2d").drawImage(im, (S - w * k) / 2, (S - h * k) / 2, w * k, h * k);
+    put(c.toDataURL("image/png"), "image/png");
+  } catch { put(url); } };
+  im.onerror = () => put(FAVICON0);
+  im.src = url;
+}
 async function loadBrand() { try { const m = await api("/meta"); set({ brand: m }); document.title = m.name; setFavicon(m.logo_url); document.documentElement.dataset.accent = m.theme || "blue"; } catch {} }
 async function loadMe() { try { const me = tok() ? await api("/auth/me") : null; let showGroups = false; if (me) { try { showGroups = (await api("/groups/capabilities")).show_page; } catch {} } set({ me, showGroups }); } catch { try { localStorage.removeItem("aihub_token"); } catch {} set({ me: null }); } }
 const initials = (n) => (String(n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("") || "?").toUpperCase();
