@@ -49,6 +49,7 @@ The server stores no package files and has no upload or download routes (`/uploa
 | --- | --- | --- | --- |
 | POST | `/api/v1/packages/{name}/versions/{version}/yank` | User + package manager | Yank a version from resolution. |
 | POST | `/api/v1/packages/{name}/versions/{version}/unyank` | User + package manager | Make a yanked version resolvable again. |
+| DELETE | `/api/v1/packages/{name}?version=` | User + package manager | Unpublish: remove the package (or only `version`) from the hub database and index. Needs admin access on the package (site admin, owner, maintainer); 403 otherwise. Usage events stay. A package left with no versions is removed. |
 | GET | `/api/v1/resolve?name=&spec=` | Per `public_install` | Pick a version. The response carries `repo` (`url`, `branch`, `subdir`, `ref`) and the manifest, not a download URL. |
 | POST | `/api/v1/resolve/tree` | Per `public_install` | Resolve several packages and their dependencies, constraints merged. |
 | GET | `/api/v1/client-config` | No | Locations for the CLI: `index` (`url`, `branch`, `path`, default folder `index`), `telemetry` (`url`, `inbox`, `branch`: the git inbox repo, the one branch CLIs push to as a fallback, and the archive branch), `refresh_hours` and `hub` (`telemetry`, `index`: this hub takes events and serves the index; `telemetry_interval` and `index_ttl` in seconds, set by the admin). No credentials are stored or sent. Never cached. |

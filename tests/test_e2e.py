@@ -114,6 +114,16 @@ class Server(unittest.TestCase):
         self.c.post("/api/v1/packages/demo-tool/versions/1.0.0/yank", headers=h)
         self.assertEqual(self.c.get("/api/v1/resolve?name=demo-tool", headers=h).status_code, 404)
 
+    def test_unpublish_needs_manager(self):
+        h, hb = self.auth("root"), self.auth("bob")           # first account = admin
+        repos = self.c.app.state.repos
+        pid = repos.package_upsert("demo-tool", "tool", "d", [], "", visibility="public")
+        repos.version_sync(pid, "1.0.0", {"package": {"name": "demo-tool", "version": "1.0.0", "type": "tool"}})
+        self.assertEqual(self.c.delete("/api/v1/packages/demo-tool", headers=hb).status_code, 403)
+        self.assertEqual(self.c.get("/api/v1/packages/demo-tool", headers=h).status_code, 200)
+        self.assertEqual(self.c.delete("/api/v1/packages/demo-tool?version=1.0.0", headers=h).status_code, 200)
+        self.assertEqual(self.c.get("/api/v1/packages/demo-tool", headers=h).status_code, 404)
+
     def test_pages(self):
         self.assertEqual(self.c.get("/").status_code, 200)
         self.assertIn("aihub", self.c.get("/install.sh").text)

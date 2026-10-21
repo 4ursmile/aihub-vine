@@ -153,6 +153,56 @@ class PostgresTests(unittest.TestCase):
         self.assertEqual(c.get("/api/v1/dashboard?days=7", headers=H).json()["totals"], {"use": 1})
         self.assertEqual(c.get("/api/v1/readyz").json()["database"], "postgres")
 
+    def test_hostile_text_and_many_requests_on_postgres(self):
+        """A lone surrogate / NUL (the 'utf-8 codec can't encode' failure), a row Postgres rejects, and more requests than the pool has
+        connections: nothing may stay open, leak a pooled connection, or lose the good rows."""
+        import time
+        from fastapi.testclient import TestClient
+        from aihub.server.main import create_app
+        c = TestClient(create_app(Settings(seed_builtin=False, sync_enabled=False, data_dir=tempfile.mkdtemp(), db_backend="postgres",
+                                           database_url=self.uri, pg_pool_size=4, public_url="https://h.example/aihub")))
+        for _ in range(30):                                                                  # > pool size: a leaked connection per request would time out
+            self.assertEqual(c.get("/aihub/api/v1/healthz").status_code, 200)
+        r = c.app.state.repos
+        row = lambda i, **k: dict({"ts": time.time(), "kind": "use", "package": "pghost", "client_id": "c", "username": None, "ext_id": "h%d" % i}, **k)
+        n = r.events_insert_ext([row(1), row(2, cwd="/h\udc8d/a", detail="a\x00b", host="\ud800"), row(3, ts="not-a-number"), row(4)])
+        self.assertEqual(n, 3)
+        self.assertEqual(r.event_rejects, 1)
+        got = r.db.conn().execute("SELECT ext_id,cwd,detail FROM events WHERE package='pghost' ORDER BY ext_id").fetchall()
+        self.assertEqual([x["ext_id"] for x in got], ["h1", "h2", "h4"])
+        self.assertEqual((got[1]["cwd"], got[1]["detail"]), ("/h\ufffd/a", "ab"))
+        r.db.conn().execute("SELECT 1").fetchone()                                          # the connection is still usable after the skipped row
+        self.assertEqual(c.get("/aihub/api/v1/readyz").json()["database"], "postgres")
+
+    def test_overlapping_event_inserts_from_two_workers_never_deadlock(self):
+        """Two server processes (separate Repos, so separate locks) inserting overlapping event ids in opposite orders used to deadlock on the
+        unique ext_id index; inserts now take them in one fixed order."""
+        import random, threading, time
+        from aihub.server.db import init_db
+        from aihub.server.repos import Repos
+        mk = lambda: Repos(init_db(Settings(seed_builtin=False, sync_enabled=False, data_dir=tempfile.mkdtemp(), db_backend="postgres", database_url=self.uri)))
+        a, b = mk(), mk()
+        ids = ["dl%04d" % i for i in range(300)]
+        errs = []
+
+        def go(repos, rev):
+            try:
+                for _ in range(12):
+                    rows = [{"ts": time.time(), "kind": "use", "package": "pgdl", "client_id": "c", "username": None, "ext_id": i}
+                            for i in sorted(random.sample(ids, 150), reverse=rev)]
+                    repos.events_insert_ext(rows)
+                    repos.db.release()
+            except Exception as e:
+                errs.append(repr(e)[:200])
+        ts = [threading.Thread(target=go, args=(a, False)), threading.Thread(target=go, args=(b, True))]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(120)
+        self.assertEqual(errs, [])
+        n = a.db.conn().execute("SELECT COUNT(DISTINCT ext_id) FROM events WHERE package='pgdl'").fetchone()[0]
+        self.assertEqual(n, a.db.conn().execute("SELECT COUNT(*) FROM events WHERE package='pgdl'").fetchone()[0])      # no duplicates
+
     def test_two_app_instances_share_one_postgres_and_migrate_safely(self):
         from aihub.server.db import DB
         a = DB(Settings(db_backend="postgres", database_url=self.uri)); b = DB(Settings(db_backend="postgres", database_url=self.uri))   # re-running migrations is idempotent

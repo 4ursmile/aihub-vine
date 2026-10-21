@@ -2,11 +2,13 @@
 const { html, render, useState, useEffect, useRef, useCallback } = window.htmPreact;
 
 // ---------- api / state
+const BASE = ((document.getElementById("base") || {}).content || "").replace(/\/+$/, ""); // path prefix behind a reverse proxy ("" when served at the root)
+const U = (p) => BASE + p;
 const tok = () => { try { return localStorage.getItem("aihub_token"); } catch { return null; } };
 async function api(path, opt = {}) {
   const h = { "Content-Type": "application/json" };
   if (tok()) h.Authorization = "Bearer " + tok();
-  const r = await fetch("/api/v1" + path, { ...opt, headers: h, body: opt.body ? JSON.stringify(opt.body) : undefined });
+  const r = await fetch(U("/api/v1" + path), { ...opt, headers: h, body: opt.body ? JSON.stringify(opt.body) : undefined });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : r.statusText || "Request failed");
   return j;
@@ -288,7 +290,7 @@ function Sharing({ name, pkg, onChange }) {
       <div class="seg" role="group" aria-label="Access level"><button class=${lvl === "view" ? "on" : ""} aria-pressed=${lvl === "view"} onClick=${() => setLvl("view")}>Can view</button><button class=${lvl === "develop" ? "on" : ""} aria-pressed=${lvl === "develop"} onClick=${() => setLvl("develop")}>Can develop</button></div></div>
     <p class="xs mut3"><b>View</b>: find, read and install. <b>Develop</b>: also publish new versions. Repo admins can change visibility and sharing.</p>
     ${D.access.length ? html`<div class="list">${D.access.map((x) => html`<div class="li" key=${x.type + x.name}>
-      ${x.type === "group" ? html`<span class="av" style="width:36px;height:36px;background:var(--fg-3)">👥</span>` : html`<${Avatar} p=${{ username: x.name, display_name: x.display_name, avatar_url: x.avatar_v ? `/api/v1/users/${x.name}/avatar?v=${x.avatar_v}` : null }} size=${36} />`}
+      ${x.type === "group" ? html`<span class="av" style="width:36px;height:36px;background:var(--fg-3)">👥</span>` : html`<${Avatar} p=${{ username: x.name, display_name: x.display_name, avatar_url: x.avatar_v ? U(`/api/v1/users/${x.name}/avatar?v=${x.avatar_v}`) : null }} size=${36} />`}
       <div class="t"><b>${x.type === "user" && x.display_name ? x.display_name : x.name}</b><span>${x.type === "group" ? `group · ${x.members} ${x.members === 1 ? "member" : "members"}` : "person"}</span></div>
       <select class="field" style="min-height:32px;font-size:14px" aria-label="Access" onChange=${(e) => grant(x.type, x.name, e.target.value)}><option value="view" selected=${x.access === "view"}>Can view</option><option value="develop" selected=${x.access === "develop"}>Can develop</option></select>
       <button class="btn danger sm" onClick=${() => revoke(x.type, x.name)}>Remove</button></div>`)}</div>` : html`<p class="mut sm">${priv ? "Not shared with anyone yet." : "Public repositories are visible to everyone; share only to grant develop access."}</p>`}
@@ -339,7 +341,7 @@ const detectOS = () => { const u = (navigator.userAgentData && navigator.userAge
 
 function Start() {
   const m = useLoad(() => api("/meta"), []); const o = ((m.d && m.d.public_url) || location.origin).replace(/\/+$/, ""); const auto = detectOS(); const [os, setOs] = useState(auto); const [alt, setAlt] = useState(false);
-  const cfg = useLoad(() => fetch("/api/v1/client-config").then((r) => r.ok ? r.json() : null).catch(() => null), []);
+  const cfg = useLoad(() => fetch(U("/api/v1/client-config")).then((r) => r.ok ? r.json() : null).catch(() => null), []);
   const OS = { mac: "macOS", linux: "Linux", windows: "Windows" };
   const cmd = os === "windows" ? `irm ${o}/install.ps1 | iex` : `curl -fsSL ${o}/install.sh | sh`;
     const gitBranch = (m.d && m.d.cli_git_branch || "").trim(), gitSubdir = (m.d && m.d.cli_git_subdir || "").trim();
@@ -394,7 +396,7 @@ function ProfileCard({ me }) {
   const dirty = dn.trim() !== (me.display_name || "") || ti.trim() !== (me.title || "");
   const save = async (e) => { e.preventDefault(); setBusy(true); try { await api("/auth/me", { method: "PATCH", body: { display_name: dn, title: ti } }); await loadMe(); toast("Profile saved"); } catch (x) { toast(x.message, 1); } finally { setBusy(false); } };
   const pick = async (e) => { const f = e.target.files[0]; e.target.value = ""; if (!f) return; setBusy(true);
-    try { const blob = await toAvatarBlob(f); const r = await fetch("/api/v1/auth/avatar", { method: "POST", headers: { Authorization: "Bearer " + tok() }, body: blob });
+    try { const blob = await toAvatarBlob(f); const r = await fetch(U("/api/v1/auth/avatar"), { method: "POST", headers: { Authorization: "Bearer " + tok() }, body: blob });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "Upload failed"); await loadMe(); toast("Photo updated"); } catch (x) { toast(x.message, 1); } finally { setBusy(false); } };
   const remove = async () => { try { await api("/auth/avatar", { method: "DELETE" }); await loadMe(); toast("Photo removed"); } catch (x) { toast(x.message, 1); } };
   return html`<form class="card stack" onSubmit=${save}><div class="row" style="gap:20px"><${Avatar} p=${me} size=${84} />
@@ -474,7 +476,7 @@ function BatchImport({ roles, done }) {
   const [file, setFile] = useState(null); const [role, setRole] = useState("user"); const [busy, setBusy] = useState(false); const [res, setRes] = useState(null);
   const tpl = () => saveBlob(new Blob(["username,display_name,title,role,group\nalice,Alice Nguyen,Data Analyst,user,data-team\nbob,Bob Martin,Engineering Manager,publisher,data-team; platform\ncarol,Carol Diaz,,,\n"], { type: "text/csv" }), "accounts-template.csv");
   const go = async () => { if (!file) return; setBusy(true); setRes(null);
-    try { const r = await fetch(`/api/v1/admin/users/batch?role=${encodeURIComponent(role)}`, { method: "POST", headers: { Authorization: "Bearer " + tok(), "X-Aihub-Filename": file.name }, body: await file.arrayBuffer() });
+    try { const r = await fetch(U(`/api/v1/admin/users/batch?role=${encodeURIComponent(role)}`), { method: "POST", headers: { Authorization: "Bearer " + tok(), "X-Aihub-Filename": file.name }, body: await file.arrayBuffer() });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "Upload failed");
       const blob = await r.blob(); saveBlob(blob, "new-accounts.csv"); setRes({ created: +r.headers.get("X-Created"), skipped: +r.headers.get("X-Skipped") }); done();
     } catch (e) { toast(e.message, 1); } finally { setBusy(false); } };
@@ -523,7 +525,7 @@ function LogoSetting({ url, bump }) {
   const f = useRef(null); const [busy, setBusy] = useState(false);
   const pick = async (e) => { const file = e.target.files[0]; e.target.value = ""; if (!file) return; setBusy(true);
     try { const blob = file.type === "image/png" || file.type === "image/jpeg" || file.type === "image/webp" ? file : await toAvatarBlob(file);
-      const r = await fetch("/api/v1/admin/logo", { method: "POST", headers: { Authorization: "Bearer " + tok() }, body: blob });
+      const r = await fetch(U("/api/v1/admin/logo"), { method: "POST", headers: { Authorization: "Bearer " + tok() }, body: blob });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "Upload failed"); toast("Logo updated"); await loadBrand(); bump(); } catch (x) { toast(x.message, 1); } finally { setBusy(false); } };
   const rm = async () => { try { await api("/admin/logo", { method: "DELETE" }); toast("Logo removed"); await loadBrand(); bump(); } catch (x) { toast(x.message, 1); } };
   return html`<div class="li"><div class="t"><b>Logo</b><span>PNG, JPEG or WebP, up to 256 KB and 1024 px. Shown beside the site name.</span></div>
@@ -668,7 +670,7 @@ function Audit() {
   const d = useLoad(() => api("/audit?" + qs({ ...f, per_page: 50 })), [JSON.stringify(f)]);
   if (!can("audit")) return html`<${Empty} t="No access" d="You need the audit permission to view this page." />`;
   const up = (k, v) => setF((x) => ({ ...x, [k]: v, page: 1 })); const tools = f.source === "tools";
-  const exportCsv = async () => { try { const r = await fetch("/api/v1/audit/export?" + qs(f), { headers: { Authorization: "Bearer " + tok() } }); if (!r.ok) throw new Error("Export failed"); saveBlob(await r.blob(), `audit-${f.source}.csv`); } catch (e) { toast(e.message, 1); } };
+  const exportCsv = async () => { try { const r = await fetch(U("/api/v1/audit/export?" + qs(f)), { headers: { Authorization: "Bearer " + tok() } }); if (!r.ok) throw new Error("Export failed"); saveBlob(await r.blob(), `audit-${f.source}.csv`); } catch (e) { toast(e.message, 1); } };
   const rows = d.d ? d.d.items : [], total = d.d ? d.d.total : 0, pages = Math.max(1, Math.ceil(total / 50));
   const stamp = (t) => new Date(t * 1000).toLocaleString();
   return html`<div class="stack"><div class="row"><h1>Security audit</h1><span class="sp"></span><button class="btn sec sm" onClick=${exportCsv}>Export CSV</button></div>

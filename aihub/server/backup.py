@@ -20,7 +20,7 @@ import threading
 import time
 
 from ..cli import gitx
-from ..core import redact
+from ..core import redact, textsafe
 from . import db as dbmod
 from .sync import next_delay, parse_schedule
 
@@ -66,7 +66,7 @@ def summary(c):
 
 
 def _h(v):
-    return "sha256:" + hashlib.sha256(str(v).encode()).hexdigest()
+    return "sha256:" + hashlib.sha256(str(v).encode("utf-8", "replace")).hexdigest()
 
 
 def scrub(table, rec):
@@ -112,7 +112,7 @@ def write_sqlite(path, table, cols, rows):
     try:
         con.execute('CREATE TABLE "%s"(%s)' % (table, ",".join('"%s"' % c for c in cols)))
         con.executemany('INSERT INTO "%s" VALUES(%s)' % (table, ",".join("?" * len(cols))),
-                        ([bytes(r[c]) if isinstance(r[c], memoryview) else r[c] for c in cols] for r in rows))
+                        ([bytes(r[c]) if isinstance(r[c], memoryview) else textsafe.clean(r[c]) for c in cols] for r in rows))
         con.commit()
         con.execute("VACUUM")
     finally:
@@ -237,7 +237,7 @@ class Backup:
         """An empty database (lost data dir, wrong DATABASE_URL) must never overwrite a backup that holds data: that would
         turn the one good copy into an empty one. Recover first (start the server with --recover)."""
         try:
-            with open(os.path.join(d, "backups", "index.json")) as f:
+            with open(os.path.join(d, "backups", "index.json"), encoding="utf-8") as f:
                 old = json.load(f)
         except (OSError, ValueError):
             return
@@ -267,7 +267,7 @@ class Backup:
         os.makedirs(dbdir, exist_ok=True)
         old = {}
         try:
-            with open(os.path.join(root, "index.json")) as f:
+            with open(os.path.join(root, "index.json"), encoding="utf-8") as f:
                 old = {e["path"]: e for e in json.load(f).get("files", [])}
         except (OSError, ValueError, KeyError, TypeError):
             pass
@@ -316,7 +316,7 @@ class Backup:
             if f not in keep:
                 os.remove(os.path.join(dbdir, f))
         try:
-            with open(os.path.join(root, "index.json")) as f:
+            with open(os.path.join(root, "index.json"), encoding="utf-8") as f:
                 prev_idx = json.load(f)
         except (OSError, ValueError):
             prev_idx = {}
@@ -330,8 +330,8 @@ class Backup:
                                "app_settings": "values of secret-looking keys or secret-looking values are sha256 (not restorable: re-enter them)",
                                "events,audit_log": "free text passed through the credential redactor"}}
         tmpi = os.path.join(root, "index.json.tmp")
-        with open(tmpi, "w") as f:
-            json.dump(index, f, indent=1, sort_keys=True)
+        with open(tmpi, "w", encoding="utf-8") as f:
+            json.dump(textsafe.deep(index), f, indent=1, sort_keys=True)
             f.write("\n")
         os.replace(tmpi, os.path.join(root, "index.json"))
         return len(entries), total

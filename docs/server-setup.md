@@ -115,6 +115,27 @@ server {
 
 The application uses its configured `AIHUB_PUBLIC_URL` to generate client-facing links. Forwarded headers do not replace that setting.
 
+### Serving under a path prefix (`https://host/aihub`)
+
+Set `AIHUB_PUBLIC_URL=https://host/aihub` (or `AIHUB_BASE_PATH=/aihub`). The prefix is then added to every URL the hub hands out (logo, avatars, docs links, the page's own scripts and API calls) and the web app calls `/aihub/api/v1/...`. The proxy may strip the prefix before forwarding or keep it; the hub accepts both.
+
+```nginx
+location /aihub/ {
+    proxy_pass http://127.0.0.1:8000/;      # strips /aihub (a path after the port); drop the trailing "/" to keep it
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Order of precedence: `AIHUB_BASE_PATH` > the path of `AIHUB_PUBLIC_URL` / the admin CLI endpoint > the proxy's `X-Forwarded-Prefix` header. The header is **ignored unless `AIHUB_TRUST_PROXY_PREFIX=1`** (any client can send it; turn it on only when your proxy always overwrites it) and then only when nothing is configured. A prefix must be a plain path of at most 64 characters and 4 segments such as `/team/hub`; anything else is ignored. CLIs use the same URL as their hub (`aihub setup --hub https://host/aihub`).
+
+### Git access of the server
+
+The server runs git with no one to answer a prompt. It therefore:
+
+- **trusts its own data folder** (`safe.directory`), so a data volume owned by another account no longer fails with `detected dubious ownership` (and the checkout is not deleted as "broken");
+- **uses a stored login** for the git hosts of the index and telemetry URLs: `AIHUB_GIT_TOKEN` (+ `AIHUB_GIT_USER`, default `oauth2`; or `AIHUB_GIT_TOKEN_FILE`; extra hosts in `AIHUB_GIT_HOSTS`; all of these can sit in the server's `.env` file, which should be `chmod 600`), else the aihub vault of the account that runs the server (`aihub vault add https://git.example.com --user NAME --token-stdin`, `aihub setup`). The secret goes to one git child through its environment only: never to disk, git config or a command line. An inline credential helper prints it only for exactly the `https` host (and port) it was issued for, as git reports it, so look-alike URLs (`host#@other`), redirects, a repository's `.lfsconfig` and a repo-local `http.proxy` cannot receive it. Plain `http` is refused unless `AIHUB_GIT_ALLOW_HTTP=1`. Hosts match exactly (`git.example.com` and `git.example.com:8443` are different). Because `insecure_tls` is on by default, the server logs a warning once per host when it sends a login over an unverified connection: set `AIHUB_CA_BUNDLE=<ca.pem>` (or `aihub config set insecure_tls false`) to verify the git host.
+
 ## Choosing backends
 
 Choose SQLite/PostgreSQL, memory/Redis/none, and local/S3 independently in `.env`. See [Server configuration](configuration.md) for defaults, every setting, backend-specific guidance, Docker profiles, and examples.

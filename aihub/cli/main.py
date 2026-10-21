@@ -627,7 +627,9 @@ def cmd_credential(a):
 def cmd_vault(a):
     """Manage git remotes and their stored logins (interactive on a terminal)."""
     from . import vault
-    return vault.run(a)
+    rc = vault.run(a)
+    if rc:
+        raise SystemExit(rc)           # `vault test` fails the shell when a login does not work
 
 
 def cmd_policy(a):
@@ -1116,6 +1118,15 @@ def dev_publish(a):
                                                                  "; the other %d went out" % len(pushed) if pushed else ""))
 
 
+def cmd_unpublish(a):
+    name, _, ver = a.name.partition("@")
+    what = "%s %s" % (name, ver) if ver else "%s (all versions)" % name
+    if not a.yes and not (ui.INTERACTIVE and ui.confirm("Remove %s from the hub? Installed copies stay, new installs stop." % what, False)):
+        raise ValueError("not confirmed; pass --yes to unpublish without asking")
+    api.call("DELETE", "/packages/%s%s" % (urllib.parse.quote(name), "?version=" + urllib.parse.quote(ver) if ver else ""))
+    ui.good("unpublished " + what)
+
+
 def dev_index(a):
     """Ask the hub to index this project now (needs the `index` permission). For a publish event that was lost."""
     root = _root(a)
@@ -1198,7 +1209,7 @@ def build_parser():
     sp = ap.add_subparsers(dest="cmd", metavar="command")
     sp.command_groups = [
         ("Discover", ["search", "info"]),
-        ("Install", ["install", "uninstall", "update", "list", "download"]),
+        ("Install", ["install", "uninstall", "update", "list", "download", "unpublish"]),
         ("Manage", ["enable", "disable", "tree", "lock", "sync"]),
         ("Account", ["config", "login", "logout", "register", "vault"]),
         ("Publish", ["dev"]),
@@ -1291,6 +1302,11 @@ def build_parser():
         "Example:\n  aihub uninstall my-skill",
         arg("name", metavar="PACKAGE", help="Name of the installed package to remove."),
         arg("--force", action="store_true", help="Do not ask when other packages depend on it."))
+    add("unpublish", cmd_unpublish, "Remove a package, or one version, from the hub (package managers only).",
+        "Delete the package (or NAME@VERSION) from the hub index and database. Only an admin, owner or maintainer of the package may do it; others get 403. Git repositories and already installed copies are not touched. Needs `aihub login`.",
+        "Examples:\n  aihub unpublish my-skill\n  aihub unpublish my-skill@1.0.0 --yes",
+        arg("name", metavar="PACKAGE[@VERSION]", help="Package, or name@version to remove one version."),
+        arg("-y", "--yes", action="store_true", help="Do not ask for confirmation."))
     add("list", cmd_list, "List packages installed by this CLI.",
         "Show each locally installed package, its installed version, and the components it adds to supported tools.",
         "Examples:\n  aihub list\n  aihub list --plain\n  aihub list --name-only",
@@ -1327,8 +1343,8 @@ def build_parser():
         arg("--source", default="claude", metavar="TOOL", help="Source label recorded with the event (default: claude)."))
     add("vault", cmd_vault, "Add, edit or remove git remotes and their logins.",
         "Manage the git hosts the CLI fetches the index and packages from. Logins go to the git credential helper (Keychain, DPAPI, Secret Service or a 0600 file); vault.json keeps only host and user name. On a terminal, bare 'aihub vault' opens a menu and missing values are prompted for (token hidden). In scripts give the token on standard input.",
-        "Examples:\n  aihub vault\n  aihub vault add https://git.example.com --user sam\n  printf %s \"$TOKEN\" | aihub vault edit git.example.com --token-stdin\n  aihub vault remove git.example.com --yes",
-        arg("action", nargs="?", choices=["list", "add", "edit", "remove"], help="Default: menu on a terminal, else list."),
+        "Examples:\n  aihub vault\n  aihub vault add https://git.example.com --user sam\n  aihub vault test https://git.example.com\n  printf %s \"$TOKEN\" | aihub vault edit git.example.com --token-stdin\n  aihub vault remove git.example.com --yes",
+        arg("action", nargs="?", choices=["list", "add", "edit", "remove", "test"], help="Default: menu on a terminal, else list. test: check that a stored login reaches its host."),
         arg("remote", nargs="?", metavar="REMOTE", help="Git URL or host (add: URL; edit/remove: host)."),
         arg("--user", metavar="NAME", help="Git user name."),
         arg("--token-stdin", action="store_true", help="Read the token/password from standard input."),

@@ -13,6 +13,7 @@ from starlette.background import BackgroundTask
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from . import basepath, gitauth
 from ..core.release import VERSION
 from .cache import init_cache
 from .sync import Sync
@@ -202,6 +203,7 @@ Write-Host ""
 def create_app(settings: Settings = None) -> FastAPI:
     s = settings or Settings.from_env()
     os.makedirs(s.data_dir, exist_ok=True)
+    gitauth.install(s)                      # trusted data folder + stored git login for every git call, also before the sync thread starts
     @contextlib.asynccontextmanager
     async def lifespan(_app):
         logging.getLogger("aihub").info("backends: %s", json.dumps(s.describe()))
@@ -251,7 +253,7 @@ def create_app(settings: Settings = None) -> FastAPI:
     app.add_middleware(DbUnitOfWork)
 
     CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-           "img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+           "img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
 
     log = logging.getLogger("aihub")
 
@@ -264,19 +266,25 @@ def create_app(settings: Settings = None) -> FastAPI:
             log.exception("unhandled error %s %s", request.method, request.url.path)
             from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "internal error"}, status_code=500)
-        if request.url.path.startswith("/api/") and request.url.path not in ("/api/v1/healthz", "/api/v1/readyz"):
+        rp = basepath.current()          # the proxy prefix (NOT scope["root_path"]: a mount such as /static sets that to its own mount point)
+        route = request.url.path[len(rp):] if rp and request.url.path.startswith(rp + "/") else request.url.path      # the path the app routes
+        if route.startswith("/api/") and route not in ("/api/v1/healthz", "/api/v1/readyz"):
             log.info("%s %s %d %.0fms", request.method, request.url.path, resp.status_code, (time.time() - t0) * 1000)
         h = resp.headers
         h.setdefault("X-Content-Type-Options", "nosniff")
         h.setdefault("Referrer-Policy", "same-origin")
         h.setdefault("Content-Security-Policy", CSP)
         h.setdefault("X-Frame-Options", "DENY")
-        p = request.url.path
+        p = route
         if p.startswith("/static/"):
             h["Cache-Control"] = "no-cache"  # always revalidate (ETag); updates show on next load
         elif p.startswith("/api/") and "cache-control" not in h:
             h["Cache-Control"] = "no-store" if request.method != "GET" else "no-cache"
         return resp
+
+    app.add_middleware(basepath.Middleware, get_configured=lambda: basepath.configured(s, app.state.repos), done=lambda: db.release(),
+                       trust_header=lambda: s.env_get("AIHUB_TRUST_PROXY_PREFIX").lower() in ("1", "true", "yes", "on"))    
+    # ^ added last = outermost: the header/cache rules above, routing and every URL builder all see the prefix
 
     def _cli_url():
         """Admin-set CLI endpoint (Settings > Site), else the configured public URL."""
@@ -314,8 +322,12 @@ def create_app(settings: Settings = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return FileResponse(os.path.join(HERE, "static", "index.html"),
-                            headers={"Cache-Control": "no-cache"})
+        """The page, with the path prefix (behind a reverse proxy) in <base href> so /static/... and the app's API calls stay under it."""
+        with open(os.path.join(HERE, "static", "index.html"), encoding="utf-8") as f:
+            page = f.read()
+        base = basepath.current()
+        page = page.replace('<base href="/">', '<base href="%s/">' % base).replace('content="" id="base"', 'content="%s" id="base"' % base)
+        return HTMLResponse(page, headers={"Cache-Control": "no-cache", "Vary": "X-Forwarded-Prefix"})
 
     app.mount("/static", StaticFiles(directory=os.path.join(HERE, "static")), name="static")
     return app

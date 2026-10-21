@@ -1,14 +1,17 @@
 """Repository layer: the only module that writes SQL."""
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import threading
 import time
 import zlib
 
-from ..core import pkgindex, version as V
+from ..core import pkgindex, textsafe, version as V
 from .db import ALL_PERMS, ANON_LOCKED
+
+log = logging.getLogger("aihub")
 
 
 # Who an event belongs to when "localize user names" is off: the account, else the OS user, else a short client id.
@@ -43,6 +46,32 @@ def _integrity_errors():
 
 
 INTEGRITY = _integrity_errors()
+
+
+def _data_errors():
+    """Errors that mean THIS row's content is bad (retrying the same row can never work), as opposed to the database being busy or down."""
+    errs = [UnicodeError, ValueError, TypeError, OverflowError, sqlite3.InterfaceError, sqlite3.DataError]
+    try:
+        import psycopg
+        # NOT ProgrammingError: on Postgres that is also "undefined table/column" and syntax errors, i.e. a broken schema. Skipping every row
+        # for that would drop a whole window of acknowledged events silently; it must fail the batch so the rows are kept and retried.
+        errs += [psycopg.errors.DataError, psycopg.errors.NotNullViolation, psycopg.errors.CheckViolation]
+    except ImportError:
+        pass
+    return tuple(errs)
+
+
+DATA_ERRORS = _data_errors()
+
+
+def row_is_bad(e):
+    """True when exception `e` blames THIS row's content (retrying the same row can never work), false when the database or its schema is at
+    fault (then the batch must be kept and retried, never skipped)."""
+    if isinstance(e, sqlite3.ProgrammingError):          # SQLite: "Error binding parameter N: type 'x' is not supported" (a missing table is an OperationalError)
+        return "binding parameter" in str(e)
+    return isinstance(e, DATA_ERRORS)
+EVENT_COLS = ("ts,kind,package,version,client_id,username,component,duration,source,local_user,host,os,detail,cwd,ip,actor")
+EVENT_VALS = ":ts,:kind,:package,:version,:client_id,:username,:component,:duration,:source,:local_user,:host,:os,:detail,:cwd,:ip,:actor"
 
 # Bayesian average: (C*m + sum(ratings)) / (C + n). A package with few reviews is pulled toward the site-wide mean m,
 # so one 5-star review can't outrank 200 reviews averaging 4.8. C = how many reviews it takes to "count" fully.
@@ -793,6 +822,22 @@ class Repos:
             self._relatest(c, pid)
             c.commit()
 
+    def version_delete(self, pid, version):
+        with self.lock:
+            c = self.db.conn()
+            c.execute("DELETE FROM versions WHERE package_id=? AND version=?", (pid, version))
+            self._relatest(c, pid)
+            c.commit()
+
+    def package_delete(self, pid):
+        """Remove a package and everything attached to it. Usage events stay (history, rankings of the past)."""
+        with self.lock:
+            c = self.db.conn()
+            for t in ("versions", "package_access", "package_maintainers", "reviews"):
+                c.execute("DELETE FROM %s WHERE package_id=?" % t, (pid,))
+            c.execute("DELETE FROM packages WHERE id=?", (pid,))
+            c.commit()
+
     def _relatest(self, c, pid):
         vs = [r[0] for r in c.execute("SELECT version FROM versions WHERE package_id=? AND yanked=0", (pid,))]
         c.execute("UPDATE packages SET latest_version=? WHERE id=?", (V.latest(vs), pid))
@@ -828,17 +873,85 @@ class Repos:
         return {"avg": round(float(r[0]), 2) if r[0] else None, "count": int(r[1])}
 
     # ---- events / stats
+    event_rejects = 0                  # rows dropped because their own content could not be stored (never the database being busy)
+    event_reject_last = ""
+
+    def _bulk(self, c, sql, rows):
+        """executemany that a single bad row cannot break. The batch goes in as one statement; if that fails, everything is ROLLED BACK (an
+        open SQLite transaction would hold the write lock and make every web write answer "database is locked") and the rows are inserted
+        again by BISECTION: a half that inserts cleanly is kept, a half that fails is split further, until the single bad rows are found.
+        One bad row among 5000 costs about 2*log2(5000) statements, not 5000 savepoints.
+
+        All of it is ONE transaction (explicit BEGIN on SQLite, whose sqlite3 module would otherwise commit each outermost SAVEPOINT as it is
+        released): if anything other than a bad row's content fails (database busy or down, broken schema), the whole transaction is rolled
+        back and the error is raised, so the caller keeps the complete batch and retries it. -> list of (row, error) that were skipped."""
+        try:
+            c.executemany(sql, rows)
+            return []
+        except Exception as first:
+            self._abort(c)
+            if not row_is_bad(first):
+                raise
+        bad = []
+        try:
+            if self.db.engine != "postgres":
+                c.execute("BEGIN")
+            self._split(c, sql, list(rows), bad, 0)
+        except BaseException:
+            self._abort(c)                                       # nothing from this phase survives: the caller retries the whole batch
+            raise
+        if bad:
+            self.event_rejects += len(bad)
+            self.event_reject_last = "%s: %s" % (type(bad[-1][1]).__name__, str(bad[-1][1])[:160])
+            log.warning("events: %d row(s) could not be stored and were skipped (%s)", len(bad), self.event_reject_last.replace("\n", " "))
+        return bad
+
+    @staticmethod
+    def _abort(c):
+        try:
+            c.rollback()
+        except Exception:
+            pass
+
+    def _split(self, c, sql, rows, bad, depth):
+        """Insert `rows` under a savepoint; on a content error split in two and recurse; a single failing row is recorded in `bad`."""
+        if not rows:
+            return
+        name = "bulk_sp%d" % depth
+        c.execute("SAVEPOINT " + name)
+        try:
+            c.executemany(sql, rows)
+            c.execute("RELEASE SAVEPOINT " + name)
+            return
+        except Exception as e:
+            c.execute("ROLLBACK TO SAVEPOINT " + name)           # a failure of THIS statement is undone, earlier good halves stay
+            c.execute("RELEASE SAVEPOINT " + name)
+            if not row_is_bad(e):
+                raise
+            if len(rows) == 1:
+                bad.append((rows[0], e))
+                return
+        mid = len(rows) // 2
+        self._split(c, sql, rows[:mid], bad, depth + 1)
+        self._split(c, sql, rows[mid:], bad, depth + 1)
+
+    @staticmethod
+    def _event_defaults(rows):
+        for r in rows:
+            for k in ("version", "client_id", "username", "component", "duration", "source", "local_user", "host", "os", "detail", "cwd", "ip"):
+                r.setdefault(k, None)
+            for k, v in list(r.items()):
+                if isinstance(v, str):
+                    r[k] = textsafe.clean(v)            # a lone surrogate / NUL must never reach the driver
+            r["actor"] = actor_key(r.get("username"), r.get("local_user")) or ""
+
     def events_insert_batch(self, rows):
         if not rows:
             return
         with self.lock:
             c = self.db.conn()
-            for r in rows:
-                for k in ("source", "local_user", "host", "os", "detail", "cwd", "ip"):
-                    r.setdefault(k, None)
-                r["actor"] = actor_key(r.get("username"), r.get("local_user")) or ""
-            c.executemany("INSERT INTO events(ts,kind,package,version,client_id,username,component,duration,source,local_user,host,os,detail,cwd,ip,actor) "
-                          "VALUES(:ts,:kind,:package,:version,:client_id,:username,:component,:duration,:source,:local_user,:host,:os,:detail,:cwd,:ip,:actor)", rows)
+            self._event_defaults(rows)
+            self._bulk(c, "INSERT INTO events(%s) VALUES(%s)" % (EVENT_COLS, EVENT_VALS), rows)
             c.commit()
 
     def events_insert_ext(self, rows):
@@ -847,15 +960,21 @@ class Repos:
             return 0
         with self.lock:
             c = self.db.conn()
-            before = c.execute("SELECT COUNT(*) FROM events WHERE ext_id IS NOT NULL").fetchone()[0]
-            for r in rows:
-                for k in ("source", "local_user", "host", "os", "detail", "cwd", "ip", "version", "client_id", "component", "duration"):
-                    r.setdefault(k, None)
-                r["actor"] = actor_key(r.get("username"), r.get("local_user")) or ""
-            c.executemany("INSERT OR IGNORE INTO events(ts,kind,package,version,client_id,username,component,duration,source,local_user,host,os,detail,cwd,ip,ext_id,actor) "
-                          "VALUES(:ts,:kind,:package,:version,:client_id,:username,:component,:duration,:source,:local_user,:host,:os,:detail,:cwd,:ip,:ext_id,:actor)", rows)
-            c.commit()
-            return c.execute("SELECT COUNT(*) FROM events WHERE ext_id IS NOT NULL").fetchone()[0] - before
+            try:
+                before = c.execute("SELECT COUNT(*) FROM events WHERE ext_id IS NOT NULL").fetchone()[0]
+                self._event_defaults(rows)
+                # one fixed lock order: two transactions (another worker process, the sync thread) inserting overlapping ext_ids in
+                # different orders would each wait for the other's unique-index entry and deadlock on Postgres
+                rows = sorted(rows, key=lambda r: str(r.get("ext_id") or ""))
+                self._bulk(c, "INSERT OR IGNORE INTO events(%s,ext_id) VALUES(%s,:ext_id)" % (EVENT_COLS, EVENT_VALS), rows)
+                c.commit()
+                return c.execute("SELECT COUNT(*) FROM events WHERE ext_id IS NOT NULL").fetchone()[0] - before
+            except Exception:
+                try:
+                    c.rollback()                           # never leave a write transaction open on this thread's connection
+                except Exception:
+                    pass
+                raise
 
     def version_sync(self, pid, version, manifest, sha="", file=None):
         """Add a version from the git index if new; refresh its manifest if it changed. -> True when new."""

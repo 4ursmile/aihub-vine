@@ -74,7 +74,7 @@ install = false
 - Use `requires` when the package only needs other libraries.
 - Use `install = true` when the package ships a `pyproject.toml` with console scripts (`[project.scripts]`, or `[tool.poetry.scripts]`). Each script is linked as a shim in `~/.aihub/bin`, so it runs directly from PATH using the venv. `aihub uninstall` removes the shims and the venv.
 - The package folder must contain `pyproject.toml`. Lint reports "[python] install = true needs a pyproject.toml in the package folder", and an install without one fails with a clear error. If pip fails, the venv is removed and the install fails.
-- `aihub.toml` stays the source of truth for name, version and description; `aihub dev doctor` keeps `pyproject.toml` in step with it.
+- `aihub.toml` stays the source of truth for version and description; `aihub dev doctor` keeps `pyproject.toml` in step with them. The `name` may differ on purpose (hub name `my-pkg`, Python name `my_pkg`, since `-` is not valid in an import), so it is never synced or compared.
 
 ```toml
 [package]

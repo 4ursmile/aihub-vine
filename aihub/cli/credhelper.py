@@ -220,3 +220,20 @@ def unregister():
         key, _, val = line.partition(" ")
         if val.endswith(" credential") and "aihub" in val:
             _run(["git", "config", "--global", "--unset-all", key])
+
+
+# ---- reading a stored login from code (the server's git calls, `aihub vault test`) -------------------------------------------------
+def lookup(host):
+    """(username, secret) stored for exactly `host` (host or host:port as git connects) by `aihub vault add` / `aihub setup` / a git `store`,
+    or None. Asks the backends directly (no subprocess, no prompt). The default port is the one without ':port', so an entry for
+    git.example.com is NOT offered to git.example.com:9999."""
+    for key in [host]:
+        for b in backends():
+            try:
+                raw = b.get(key)
+                c = json.loads(raw) if raw else None
+            except Exception:
+                continue
+            if c and c.get("username") and c.get("password"):
+                return c["username"], c["password"]
+    return None

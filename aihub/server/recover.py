@@ -52,7 +52,7 @@ def _parse_iso(z):
 def remote_summary(d):
     """What the backup checkout holds, from backups/index.json -> dict or None when it holds no backup."""
     try:
-        with open(os.path.join(d, "backups", "index.json")) as f:
+        with open(os.path.join(d, "backups", "index.json"), encoding="utf-8") as f:
             idx = json.load(f)
     except (OSError, ValueError):
         return None
@@ -206,6 +206,8 @@ def run(s, mode="ask", interactive=None):
         raise SystemExit("aihub: --recover must be one of %s" % ", ".join(MODES))
     if mode == "skip":
         return "none"
+    from . import gitauth
+    gitauth.install(s, lambda: [s.env_get("AIHUB_INDEX_URL"), s.env_get("AIHUB_TELEMETRY_URL")])    # runs before the app exists
     if interactive is None:
         interactive = sys.stdin.isatty() and sys.stdout.isatty()
     repos = None

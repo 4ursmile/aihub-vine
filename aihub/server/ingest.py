@@ -36,8 +36,9 @@ class Ingest:
         self.rows, self.lines, self.pubs, self.first = [], [], {}, None
         self.wake, self.stop = threading.Event(), threading.Event()
         self.stats = {"received": 0, "stored": 0, "flushes": 0, "last_flush": None, "rejected": 0, "last_error": None,
-                      "duplicates": 0, "rate_limited": 0, "busy": 0, "gzip": 0}
+                      "duplicates": 0, "rate_limited": 0, "busy": 0, "gzip": 0, "skipped": 0, "failures": 0, "last_skipped": None}
         self.t = threading.Thread(target=self._loop, name="aihub-ingest", daemon=True)
+        self._rejects_seen = repos.event_rejects
         self.seen = OrderedDict()                       # event id -> True, oldest first
         self.hits = {}                                  # ip -> (window start, count): per-client request limit
         self._replay()
@@ -57,7 +58,7 @@ class Ingest:
             return
         os.makedirs(self.journal_dir, exist_ok=True)
         with open(self._cur(), "ab") as f:
-            f.write(("\n".join(lines) + "\n").encode("utf-8"))
+            f.write(("\n".join(lines) + "\n").encode("utf-8", "replace"))
             f.flush()
             if JOURNAL_FSYNC:
                 os.fsync(f.fileno())
@@ -210,12 +211,16 @@ class Ingest:
                 self.first = self.first or time.time()
                 self.jfiles = files + self.jfiles        # journal stays: nothing acknowledged is forgotten
             self.stats["last_error"] = str(e)[:200]
-            log.warning("ingest: database write failed (%d rows kept): %s", len(rows), e)
+            self.stats["failures"] += 1
+            log.warning("ingest: database write failed (%d rows kept, failure %d in a row): %s", len(rows), self.stats["failures"], e)
             raise
         finally:
             self.repos.db.release()
         self._drop(files)                                # committed: the journal copy has done its job
-        self.stats.update(stored=self.stats["stored"] + n, flushes=self.stats["flushes"] + 1, last_flush=time.time(), last_error=None)
+        skipped = self.repos.event_rejects - self._rejects_seen          # rows whose own content could not be stored: dropped, never retried
+        self._rejects_seen = self.repos.event_rejects
+        self.stats.update(stored=self.stats["stored"] + n, flushes=self.stats["flushes"] + 1, last_flush=time.time(), last_error=None, failures=0,
+                          skipped=self.stats["skipped"] + skipped, last_skipped=self.repos.event_reject_last or self.stats["last_skipped"])
         if n and self.cache is not None:
             try:
                 self.cache.invalidate("pkg")             # package lists, download counts, "Happening now"
@@ -244,7 +249,7 @@ class Ingest:
             try:
                 self.flush()
             except Exception:
-                self.stop.wait(2)                        # database trouble: events are kept, try again shortly
+                self.stop.wait(min(30.0, 2.0 * 2 ** min(self.stats["failures"], 4)))     # database trouble: events are kept; 4 s, 8 s ... 30 s
 
     def close(self):
         self.stop.set()

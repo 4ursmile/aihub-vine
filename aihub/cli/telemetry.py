@@ -18,6 +18,7 @@ import sys
 import time
 import uuid
 
+from ..core import textsafe
 from . import gitx, paths
 
 STALE = 30      # heartbeat age after which a flusher is considered dead (it beats every 5s)
@@ -73,7 +74,7 @@ def _prep(ev):
     if "client_id" not in ev:
         from . import hooks
         ev["client_id"] = hooks.client_id()
-    return json.dumps(ev, separators=(",", ":"))
+    return json.dumps(textsafe.deep(ev), separators=(",", ":"))     # a cwd with a non-UTF-8 byte must not poison the batch
 
 
 def enqueue(ev):
@@ -327,7 +328,7 @@ def post(lines, timeout=HUB_TIMEOUT):
             events.append(json.loads(l))
         except ValueError:
             pass
-    body = json.dumps({"events": events}, separators=(",", ":")).encode()
+    body = json.dumps(textsafe.deep({"events": events}), separators=(",", ":")).encode()
     h = {"Content-Type": "application/json", "User-Agent": "aihub-cli"}
     tok = paths.load("credentials.json", {}).get("token")
     if tok:

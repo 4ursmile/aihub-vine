@@ -1,18 +1,15 @@
 """Keep `pyproject.toml` in step with `aihub.toml` (aihub.toml is the source of truth). Stdlib only; never raises on odd input.
-Synced fields: name, version, description. Only single-line string values are touched; dynamic or missing fields are skipped."""
+Synced fields: version, description. `name` is NOT synced: pyproject may use an importable name (my_pkg) while aihub.toml uses a hub name (my-pkg). Only single-line string values are touched; dynamic or missing fields are skipped."""
 import os
 import re
 
 TABLES = ("project", "tool.poetry")            # PEP 621, then Poetry
-FIELDS = ("name", "version", "description")
+FIELDS = ("version", "description")
 _HEADER = re.compile(r"^\s*\[\s*([A-Za-z0-9_.\"' -]+?)\s*\]\s*(?:#.*)?$")
 _LINE = re.compile(r"""^(\s*(%s)\s*=\s*)(?:"((?:[^"\\]|\\.)*)"|'([^']*)')(.*)$""" % "|".join(FIELDS))
 
 
 def _same(field, a, b):
-    if field == "name":                        # PEP 503: my_pkg == My.Pkg == my-pkg
-        norm = lambda s: re.sub(r"[-_.]+", "-", s).lower()
-        return norm(a) == norm(b)
     return a == b
 
 

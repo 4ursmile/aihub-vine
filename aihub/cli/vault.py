@@ -4,6 +4,7 @@ Secrets live in the git credential helper's store (credhelper backends); `~/.aih
 (host -> scheme, username) so `list` works on every backend. Interactive when URL/user/token are not given on a terminal."""
 import getpass
 import json
+import re
 import sys
 import urllib.parse
 
@@ -20,9 +21,11 @@ def _load():
 def _norm(url):
     """'git.example.com' or a full URL -> (scheme, host). Raises ValueError when there is no host."""
     u = urllib.parse.urlsplit(url if "://" in url else "https://" + url)
-    if u.scheme not in ("http", "https") or not u.netloc:
-        raise ValueError("not an http(s) git URL: %s" % url)
-    return u.scheme, u.netloc
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise ValueError("not an http(s) git URL: %s" % urllib.parse.urlsplit(url).hostname)          # never echo a URL that may carry a token
+    host = u.hostname.lower()
+    host = "[%s]" % host if ":" in host else host
+    return u.scheme, host + (":%d" % u.port if u.port else "")           # no userinfo, lowercase: the key git's helper protocol uses
 
 
 def _secret(host):
@@ -149,7 +152,41 @@ def do_menu(a):
             ui.bad(str(e))
 
 
-ACTIONS = {"list": do_list, "add": do_add, "edit": do_edit, "remove": do_remove}
+def do_test(a):
+    """Does the stored login for a remote reach it? `vault test URL` (any git URL) or `vault test HOST`; no argument tests every remote in the vault.
+    Uses the same lookup the hub server does (`credhelper.lookup`), so a pass here means the server account can fetch too."""
+    from . import gitx
+    targets = []
+    if a.remote:
+        scheme, host = _norm(a.remote)
+        shown = a.remote if "://" in a.remote else "%s://%s" % (scheme, host)
+        targets.append((re.sub(r"//[^/@]+@", "//", shown), host))        # the login in a typed URL is not echoed back
+    else:
+        targets = [("%s://%s" % (v.get("scheme", "https"), h), h) for h, v in sorted(_load().items())]
+    if not targets:
+        raise ValueError("the vault is empty (add one: aihub vault add)")
+    bad = 0
+    for url, host in targets:
+        got = credhelper.lookup(host)
+        if not got:
+            ui.bad("%-28s no stored login (aihub vault add %s --user NAME)" % (host, url))
+            bad += 1
+            continue
+        saved = gitx.LOGIN
+        gitx.LOGIN = lambda h: credhelper.lookup(h)             # the same hook the server installs
+        try:
+            ok = gitx.reachable(url)
+        finally:
+            gitx.LOGIN = saved
+        if ok:
+            ui.good("%-28s %s: reachable" % (host, got[0]))
+        else:
+            ui.bad("%-28s %s: stored, but git could not use it (wrong token, no access to %s, or host unreachable)" % (host, got[0], url))
+            bad += 1
+    return 1 if bad else 0
+
+
+ACTIONS = {"list": do_list, "add": do_add, "edit": do_edit, "remove": do_remove, "test": do_test}
 
 
 def run(a):

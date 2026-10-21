@@ -143,9 +143,9 @@ class Conn:
             want_id = bool(ins) and ins.group(1).lower() in self.db.ID_TABLES and "RETURNING" not in sql.upper() and "ON CONFLICT" not in sql.upper()
             if want_id:
                 sql += " RETURNING id"
-            cur.execute(sql, tuple(args))
+            cur.execute(sql, args if isinstance(args, dict) else tuple(args))
             return Result(cur, cur.fetchone()["id"] if want_id else None)
-        cur = self.raw.execute(sql, tuple(args))
+        cur = self.raw.execute(sql, args if isinstance(args, dict) else tuple(args))      # a dict = named :params; tuple() would bind its KEYS
         return Result(cur, cur.lastrowid)
 
     def executemany(self, sql, rows):
@@ -208,6 +208,7 @@ class DB:
         if c is None:
             raw = sqlite3.connect(self.path, timeout=30)
             raw.row_factory = sqlite3.Row
+            raw.text_factory = lambda b: b.decode("utf-8", "replace")      # bytes that are not UTF-8 (written by an older server or another tool) must not fail every read
             raw.execute("PRAGMA journal_mode=WAL")           # readers never block the writer or each other
             raw.execute("PRAGMA cache_size=-32768")          # 32 MiB page cache per connection
             raw.execute("PRAGMA temp_store=MEMORY")

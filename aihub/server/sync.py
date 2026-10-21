@@ -15,12 +15,13 @@ import random
 import shutil
 import threading
 import time
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 
 from ..cli import gitx
-from ..core import naming, pkgindex, redact
-from . import nethost
+from ..core import naming, pkgindex, redact, textsafe, version as V
+from . import gitauth, nethost
 from .gitgate import Deferred, GitGate
 
 log = logging.getLogger("aihub")
@@ -123,6 +124,11 @@ def to_row(e):
     """One event from a CLI batch -> an events row (None if it is not one of ours). Everything in it is untrusted input."""
     if not isinstance(e, dict):
         return None
+    raw_id = e.get("id")
+    e = textsafe.deep(e)                                        # lone surrogates / NUL would fail the whole batch at the database
+    if isinstance(raw_id, str) and textsafe.clean(raw_id) != raw_id:
+        # "abc\udc80" and "abc\udc81" must stay two events: an id that had to be cleaned is replaced by a digest of its raw form
+        e["id"] = "h" + hashlib.sha256(raw_id.encode("utf-8", "surrogatepass")).hexdigest()[:40]
     kind = e.get("kind")
     if kind not in KINDS or not e.get("package") or not e.get("id"):
         return None
@@ -130,7 +136,9 @@ def to_row(e):
     anon = uid.startswith("~") or not uid
     try:
         ts = min(float(e.get("ts")), time.time() + 86400)       # a client clock in the far future must not pin itself to "now" forever
-    except (TypeError, ValueError):
+        if ts != ts or ts in (float("inf"), float("-inf")):
+            ts = time.time()                                    # NaN / infinity would poison sorting and charts
+    except (TypeError, ValueError, OverflowError):
         ts = time.time()
     return {"ts": ts, "kind": kind, "package": naming.normalize(str(e["package"])),
             "version": redact.text(e.get("version"), 64), "client_id": redact.text(e.get("client_id"), 64),
@@ -289,8 +297,12 @@ class Sync:
             self.held_bytes -= sum(len(x) for x in lines)
             log.warning("sync: archive backlog too large; batch %s is not archived to git (it is in the database)", key)
 
+    def git_login(self, host):
+        """The login the server's git uses for `host` (see gitauth.login_for), or None."""
+        return gitauth.login_for(self.s, host, [self.index_source()[0], self.inbox()])
+
     def start(self):
-        gitx.BATCH = True                                   # server: git must never wait for a prompt nobody can answer
+        gitauth.install(self.s, lambda: [self.index_source()[0], self.inbox()])    # no prompts, trusted data folder, stored login (token / vault)
         url, branch, path = self.index_source()
         log.info("sync: usage inbox %s (branch %s, archive %s); package index %s (branch %s, folder %s)",
                  gitx.redact_url(self.inbox()) or "-", self.inbox_branch(), self.archive_branch(), gitx.redact_url(url) or "-", branch, path)
@@ -660,8 +672,8 @@ class Sync:
             names = []
             for i, (key, good) in enumerate(batches):
                 f = os.path.join(work, "%d.jsonl" % i)
-                with open(f, "w") as fh:
-                    fh.write("\n".join(good) + "\n")
+                with open(f, "w", encoding="utf-8", errors="replace", newline="\n") as fh:          # explicit: the platform default breaks on non-ASCII
+                    fh.write(textsafe.clean("\n".join(good)) + "\n")
                 names.append(f)
             shas = gitx.run(["hash-object", "-w", "--stdin-paths", "--no-filters"], cwd=d, input="".join(n + "\n" for n in names)).split() if names else []
             entries = []
@@ -860,6 +872,30 @@ class Sync:
         self.repos.set_setting("sync_index_dirty", "1")
         self.invalidate_served()
         return changed
+
+    def unindex(self, name, version=None):
+        """Remove a package (or one version) from the hub's index folder, so a later import does not bring it back.
+        The git mirror (legacy `git_index_sync`) is not rewritten; the database and what the hub serves are the truth."""
+        d = self.index_dir
+        if d:
+            with self.index_lock:
+                folder = os.path.join(d, self.index_source()[2][:-5] if self.index_source()[2].endswith(".json") else self.index_source()[2])
+                f = os.path.join(folder, pkgindex.entry_rel(name))
+                try:
+                    with open(f, encoding="utf-8") as fh:
+                        e = json.load(fh)
+                except (OSError, ValueError):
+                    e = None
+                if e is not None:
+                    left = [v for v in e.get("versions", []) if version and v.get("version") != version]
+                    if left:
+                        e["versions"] = left
+                        e["latest_version"] = V.latest([v["version"] for v in left])
+                        pkgindex.write_entry(folder, e)
+                    else:
+                        os.remove(f)
+                    pkgindex.rebuild(folder)
+        self.invalidate_served()
 
     def invalidate_served(self):
         self.served_version += 1

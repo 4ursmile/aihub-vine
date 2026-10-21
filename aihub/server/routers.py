@@ -23,7 +23,7 @@ from ..cli import gitx
 from ..core import archive, manifest as M, naming, redact, version as V
 from .sync import LIMITS, parse_schedule
 from .transfer import TransferError
-from . import builtin, image, markdown, nethost, safehtml, sheet
+from . import basepath, builtin, image, markdown, nethost, safehtml, sheet
 from .categories import category_of
 from .db import ALL_PERMS, ANON_LOCKED
 from .deps import can_develop, can_manage, current_user, require_any, require_perm, require_user, viewer_of
@@ -92,7 +92,7 @@ def _clean(v, n):
 
 
 def _avatar_url(username, v):
-    return "/api/v1/users/%s/avatar?v=%d" % (username, v) if v else None
+    return basepath.url("/api/v1/users/%s/avatar?v=%d" % (username, v)) if v else None
 
 
 def _public(u):
@@ -294,7 +294,7 @@ def branding(request):
     rp = R(request)
     v = rp.setting("logo_v")
     theme = rp.setting("theme_color")
-    return {"name": rp.setting("site_name") or "AI Hub", "theme": theme if theme in THEME_COLORS else "blue", "logo_url": "/api/v1/logo?v=%s" % v if v else None,
+    return {"name": rp.setting("site_name") or "AI Hub", "theme": theme if theme in THEME_COLORS else "blue", "logo_url": basepath.url("/api/v1/logo?v=%s" % v) if v else None,
             "contact": {k[8:]: rp.setting(k) for k in TEXT_SETTINGS if k.startswith("contact_") and rp.setting(k)},
             "announcement": safehtml.clean(rp.setting("announcement") or "")}
 
@@ -348,7 +348,8 @@ def readyz(request: Request):
 
 def _cache_scope(v):
     """Cache key part: cached lists differ per viewer, so never share a private list across people."""
-    return "pub" if not v else ("all" if v["bypass"] else "u%d" % v["id"])
+    who = "pub" if not v else ("all" if v["bypass"] else "u%d" % v["id"])
+    return who + basepath.current().replace(":", "_")        # payloads hold URLs (avatars): one cache entry per path prefix
 
 
 @r.get("/packages")
@@ -663,6 +664,25 @@ def yank(name: str, version: str, request: Request, u=Depends(require_user)):
 @r.post("/packages/{name}/versions/{version}/unyank")
 def unyank(name: str, version: str, request: Request, u=Depends(require_user)):
     return _yank(request, name, version, False, u)
+
+
+@r.delete("/packages/{name}")
+def unpublish(name: str, request: Request, version: str = "", u=Depends(require_user)):
+    """Remove a package (or one version) from the hub. Only those who manage it (site admin, owner, maintainer)."""
+    p = _pkg_or_404(request, name, u, need="admin")
+    repos = R(request)
+    if version:
+        if not any(v["version"] == version for v in repos.versions(p["id"])):
+            raise HTTPException(404, "version not found")
+        repos.version_delete(p["id"], version)
+        if not repos.versions(p["id"]):
+            repos.package_delete(p["id"])
+    else:
+        repos.package_delete(p["id"])
+    request.app.state.sync.unindex(p["name"], version or None)
+    repos.audit(u["username"], "unpublish", p["name"], version)
+    C(request).invalidate("pkg")
+    return {"ok": True}
 
 
 @r.get("/packages/{name}/maintainers")
@@ -1434,7 +1454,7 @@ def docs_list():
     out = []
     for slug, path in _doc_files().items():
         first = open(path, encoding="utf-8").readline().lstrip("# ").strip()
-        out.append({"slug": slug, "title": first or slug, "raw_url": "/api/v1/docs/%s/raw" % slug})
+        out.append({"slug": slug, "title": first or slug, "raw_url": basepath.url("/api/v1/docs/%s/raw" % slug)})
     return {"docs": out}
 
 
