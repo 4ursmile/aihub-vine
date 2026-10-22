@@ -114,6 +114,12 @@ aihub knowledge share NOTE --user U|--group G [--write] | unshare | shares NOTE 
 aihub policy                          # guard that blocks agents from destructive calls (db/s3 delete, overwrite): on|off, enable|disable ID, add ID --pattern RE, test 'CMD', judge on|off (AI second opinion via claude -p; failure = allow), update
 aihub vault                           # menu: add/edit/remove git remotes and logins (aihub vault add URL --user NAME; token via prompt or --token-stdin)
 aihub vault test [URL|HOST]           # does the stored login reach the host? (the hub server uses the same lookup; run as its account)
+aihub password                        # change your hub password (prompts; other devices are signed out, this one stays)
+aihub admin users list [Q] | role ROLE USER... [-f FILE] | status active|pending|disabled USER... | reset-password USER... | delete USER... [--yes]   # hub admin; -f FILE = names (one per line or first CSV column, - = stdin); --dry-run, --json
+aihub admin users create FILE [--role R] [--out new-accounts.csv]   # bulk import; passwords written once to --out (0600)
+aihub admin users batch FILE [--mode add|replace] [--dry-run]       # sheet "username,role,groups": bulk role + group membership of existing accounts
+aihub admin groups list | show G | create G... | describe G --description T | delete G... | add G USER... [-f FILE] | remove G USER...
+aihub admin roles list | perms | show R | create R --perm a,b | set R [--perm a,b | --add-perm a --remove-perm b] | delete R
 aihub logout                          # forget the saved token (usage becomes anonymous, still merged by user name)
 aihub self-uninstall [--yes]          # remove aihub: packages, hooks, PATH block, ~/.aihub (not your published packages or git repos)
 aihub config                      # print settings as JSON

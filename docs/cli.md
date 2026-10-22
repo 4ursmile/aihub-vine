@@ -47,7 +47,7 @@ aihub register
 aihub login
 ```
 
-`register` prompts for username and password. `login [username]` prompts for a username if omitted and asks for the password without echoing it. Registration is subject to the server's signup policy. The first account on an empty server becomes admin.
+`register` prompts for username and password. `login [username]` prompts for a username if omitted and asks for the password without echoing it. Registration is subject to the server's signup policy. The first account on an empty server becomes admin. `password` changes the password of the signed-in account (prompts for the current one and the new one twice, no echo; minimum 6 characters, must differ from the current one); the hub then signs your other devices out and this machine stays signed in. A forgotten password is reset by an administrator (People > reset password).
 
 `AIHUB_URL` supplies the default hub URL when no saved `hub` value exists. `AIHUB_HOME` changes the CLI state directory from `~/.aihub` to the specified path.
 
@@ -103,6 +103,29 @@ aihub upgrade
 - `version` shows the CLI version and the one the hub offers; `upgrade` installs it (see [Versions and self-update](#versions-and-self-update)).
 
 During installation, missing required commands are reported with any manifest hint. Package dependencies are recursively installed. Python dependencies in `[python]` are installed into a package-specific virtual environment. With `[python] install = true` the package also installs itself (`pip install` of its folder, see [Requirements and Python dependencies](manifest.md#requirements-and-python-dependencies)), and its console scripts are linked into `bin/`. Installation asks before running the platform install script and before registering components; `--yes` skips these prompts. When stdin is closed (non-interactive), those prompts count as "no".
+
+## Hub administration (`aihub admin`)
+
+Needs `aihub login` as an account with the `admin` permission (group actions also work for the owner of a group). Every action is one call, or a loop of calls, to an existing `/api/v1` route; the hub does the permission checks and audit logging. Each item is tried; failures are listed at the end and the exit status is 1. `--dry-run` shows what would change, `--json` prints list/show output as JSON.
+
+```sh
+aihub admin users list [QUERY]                       # username, name, role, status
+aihub admin users role ROLE USER... [-f FILE]        # bulk role change
+aihub admin users status active|pending|disabled USER... [-f FILE]
+aihub admin users reset-password USER...             # new random password, printed once; that person is signed out everywhere
+aihub admin users delete USER... [-f FILE] [--yes]   # asks first (--yes in scripts)
+aihub admin users create FILE [--role user] [--out new-accounts.csv]
+aihub admin users batch FILE [--mode add|replace] [--dry-run]
+aihub admin groups list | show G | create G... [--description T] | describe G --description T | delete G... [--yes]
+aihub admin groups add G USER... [-f FILE] | remove G USER... [-f FILE]
+aihub admin roles list | perms | show R | create R [--perm a,b] [--description T] | delete R [--yes]
+aihub admin roles set R [--perm a,b | --add-perm a --remove-perm b] [--description T]
+```
+
+- **Name lists**: `-f FILE` (`-` = stdin) adds usernames from a file, one per line or the first column of a CSV/TSV (a `username` header row is skipped). Names given on the command line are used too.
+- **`users batch FILE`** updates existing accounts from a sheet with columns `username, role, groups` (header row optional; without one the order is `username, role, groups`; several groups in one cell separated by `;` or `|`). A blank role or groups cell leaves that person as is. `--mode add` (default) only adds people to the listed groups; `--mode replace` makes the listed groups their whole membership. Unknown accounts, roles and groups skip that row (create a group first with `groups create`); roles and memberships that already match are not touched. Use `--dry-run` first.
+- **`users create FILE`** is the hub's bulk import (CSV or xlsx; columns username, display_name, title, role, groups; missing groups are created). The generated passwords come back once and are written to `--out` (mode 0600, refuses to overwrite an existing file).
+- You cannot change your own role or status from the CLI. `groups create` makes the creating account a member (hub behavior).
 
 ## Enable, disable, tree, lock and sync
 
