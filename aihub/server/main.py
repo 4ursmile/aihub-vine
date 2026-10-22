@@ -227,7 +227,7 @@ def create_app(settings: Settings = None) -> FastAPI:
         except Exception:
             pass
 
-    app = FastAPI(title="AI Hub", version=VERSION, lifespan=lifespan)
+    app = FastAPI(title="AI Hub", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None)    # /docs and /redoc: own routes below (vendored, no CDN)
     db = init_db(s)
     app.state.settings = s
     app.state.repos = Repos(db)
@@ -336,6 +336,25 @@ def create_app(settings: Settings = None) -> FastAPI:
         base = basepath.current()
         page = page.replace('<base href="/">', '<base href="%s/">' % base).replace('content="" id="base"', 'content="%s" id="base"' % base)
         return HTMLResponse(page, headers={"Cache-Control": "no-cache", "Vary": "X-Forwarded-Prefix"})
+
+    def _docs_page(head, body, csp=None):
+        return HTMLResponse('<!doctype html><html><head><meta charset="utf-8"><title>AI Hub API</title>'
+                            '<meta name="viewport" content="width=device-width,initial-scale=1"><base href="%s/">%s</head>%s</html>'
+                            % (basepath.current(), head, body),
+                            headers=dict({"Cache-Control": "no-cache"}, **({"Content-Security-Policy": csp} if csp else {})))
+
+    @app.get("/docs", include_in_schema=False)
+    def swagger_docs():
+        """Swagger UI from static/vendor (the CSP forbids a CDN); the start script is an external file for the same reason."""
+        return _docs_page('<link rel="stylesheet" href="static/vendor/swagger-ui.css">', '<body><div id="ui" data-spec="%s"></div>'
+                          '<script src="static/vendor/swagger-ui-bundle.js"></script><script src="static/apidocs.js"></script></body>'
+                          % basepath.url("/openapi.json"))
+
+    @app.get("/redoc", include_in_schema=False)
+    def redoc_docs():
+        """Redoc builds its search worker from a blob: URL, so this one page also gets worker-src blob: (the middleware keeps a route's own CSP)."""
+        return _docs_page('', '<body><redoc spec-url="%s" hide-logo></redoc><script src="static/vendor/redoc.standalone.js"></script></body>'
+                          % basepath.url("/openapi.json"), csp=CSP + "; worker-src 'self' blob:")
 
     app.mount("/static", StaticFiles(directory=os.path.join(HERE, "static")), name="static")
     return app

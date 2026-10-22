@@ -704,5 +704,23 @@ class Stress(unittest.TestCase):
         ing.close()
 
 
+class ApiDocsTest(unittest.TestCase):
+    """/docs and /redoc are blank when a script comes from a CDN or inline: the CSP is script-src 'self'."""
+
+    def test_pages_use_only_local_files_and_every_file_is_served(self):
+        c = client()
+        for path in ("/docs", "/redoc"):
+            r = c.get(path)
+            self.assertEqual(r.status_code, 200)
+            self.assertNotIn("http", re.sub(r"<base[^>]*>", "", r.text), path)         # no CDN url
+            self.assertNotRegex(r.text, r"<script(?![^>]*\bsrc=)", path)                # no inline script
+            for src in re.findall(r'(?:src|href)="(static/[^"]+)"', r.text):
+                f = c.get("/" + src)
+                self.assertEqual(f.status_code, 200, src)
+                self.assertGreater(len(f.content), 100, src)
+        self.assertIn("worker-src 'self' blob:", c.get("/redoc").headers["content-security-policy"])
+        self.assertNotIn("worker-src", c.get("/docs").headers["content-security-policy"])
+
+
 if __name__ == "__main__":
     unittest.main()
