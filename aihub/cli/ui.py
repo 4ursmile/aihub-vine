@@ -335,6 +335,103 @@ def _getkey():
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
+_MOUSE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
+_CSI = re.compile(rb"\x1b\[([0-9;]*)([A-Za-z~])")
+_CSI_KEYS = {b"A": "up", b"B": "down", b"C": "right", b"D": "left", b"H": "home", b"F": "end", b"Z": "btab"}
+_TILDE_KEYS = {b"1": "home", b"4": "end", b"5": "pgup", b"6": "pgdn", b"7": "home", b"8": "end", b"3": "delete"}
+
+
+def parse_key(b):
+    """First key of a byte string -> (token, bytes used), or None when the sequence is incomplete.
+    Tokens: up down left right home end pgup pgdn delete tab btab enter backspace esc ctrl-c, a character, "" (ignored),
+    ("click", x, y) and ("wheel", -1|1) from xterm SGR mouse reports (x, y are 1-based screen cells)."""
+    if not b:
+        return None
+    c = b[0]
+    if c != 0x1b:
+        if c in (10, 13):
+            return "enter", 1
+        if c == 9:
+            return "tab", 1
+        if c in (8, 127):
+            return "backspace", 1
+        if c == 3:
+            return "ctrl-c", 1
+        if c < 32:
+            return "", 1
+        n = 1 if c < 0x80 else 2 if c >> 5 == 6 else 3 if c >> 4 == 14 else 4 if c >> 3 == 30 else 1
+        return (b[:n].decode("utf-8", "replace"), n) if len(b) >= n else None
+    if len(b) == 1:
+        return None
+    m = _MOUSE.match(b)
+    if m:
+        btn, x, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if btn & 64:
+            return ("wheel", 1 if btn & 1 else -1), m.end()
+        if m.group(4) == b"M" and btn & 3 == 0 and not btn & 32:
+            return ("click", x, y), m.end()
+        return "", m.end()
+    m = _CSI.match(b)
+    if m:
+        f = m.group(2)
+        return (_TILDE_KEYS.get(m.group(1).split(b";")[0], "") if f == b"~" else _CSI_KEYS.get(f, "")), m.end()
+    if b[1:2] == b"O":
+        return (_CSI_KEYS.get(b[2:3], ""), 3) if len(b) >= 3 else None
+    if b[1:2] == b"[":
+        return None
+    return "esc", 1
+
+
+class Keys(object):
+    """Full screen keyboard + mouse input for interactive views (context manager): alternate screen, hidden cursor, mouse
+    clicks and wheel. get() blocks for one key (see parse_key). Restores the terminal on exit."""
+
+    def __enter__(self):
+        self.buf = b""
+        self.nt = os.name == "nt"
+        if not self.nt:
+            import termios
+            import tty
+            try:
+                self.fd = sys.stdin.fileno()
+                self.old = termios.tcgetattr(self.fd)
+                tty.setcbreak(self.fd)
+            except Exception as e:                  # termios.error is not an OSError
+                raise OSError(str(e))
+        sys.stdout.write("\x1b[?1049h\x1b[?25l" + ("" if self.nt else "\x1b[?1000h\x1b[?1006h"))
+        sys.stdout.flush()
+        return self
+
+    def __exit__(self, *exc):
+        sys.stdout.write(("" if self.nt else "\x1b[?1006l\x1b[?1000l") + "\x1b[?25h\x1b[?1049l")
+        sys.stdout.flush()
+        if not self.nt:
+            import termios
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
+        return False
+
+    def get(self):
+        if self.nt:
+            import msvcrt
+            ch = msvcrt.getwch()
+            if ch in ("\x00", "\xe0"):
+                return {"H": "up", "P": "down", "K": "left", "M": "right", "G": "home", "O": "end", "I": "pgup", "Q": "pgdn"}.get(msvcrt.getwch(), "")
+            return {"\r": "enter", "\t": "tab", "\x08": "backspace", "\x1b": "esc", "\x03": "ctrl-c"}.get(ch, ch)
+        import select
+        while True:
+            got = parse_key(self.buf)
+            if got:
+                self.buf = self.buf[got[1]:]
+                return got[0]
+            if self.buf and not select.select([self.fd], [], [], 0.05)[0]:        # a lone Esc, or a sequence that never finished
+                self.buf = self.buf[1:]
+                return "esc"
+            data = os.read(self.fd, 256)
+            if not data:
+                return "q"
+            self.buf += data
+
+
 def _ask(prompt):
     try:
         return input(prompt)

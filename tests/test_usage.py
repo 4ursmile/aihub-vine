@@ -101,6 +101,99 @@ class UsageTest(unittest.TestCase):
         with mock.patch.object(usage.paths, "load", return_value={"mystery": {"input": 1, "output": 7}}):
             self.assertAlmostEqual(usage.report(("claude",), 30, self.now)[0]["total"]["cost"], 7.0)
 
+    def test_sessions_titles_context_and_tips(self):
+        rows = [{"type": "ai-title", "aiTitle": "Fix the build", "sessionId": "s1"}]
+        t0 = self.now - datetime.timedelta(hours=3)
+        iso = lambda d: (t0 + datetime.timedelta(seconds=d)).astimezone(datetime.timezone.utc).isoformat()
+        for i, (dt, cw, cr) in enumerate([(0, 50000, 0), (60, 1000, 50000), (3000, 60000, 0), (3060, 500, 160000), (3120, 500, 160500), (3180, 500, 161000), (9000, 60000, 0)]):
+            m = self.msg("m%d" % i, "claude-sonnet-5", iso(dt), cache_creation_input_tokens=cw, cache_read_input_tokens=cr, output_tokens=10)
+            m["cwd"] = "/work/proj"
+            rows.append(m)
+        self.claude(rows)
+        meta = {}
+        recs = usage.collect(("claude",), 0.0, None, meta)
+        zero = usage.sessions_of([dict(recs[0], input=0, cache_write=0, cache_read=0)], meta)[0]
+        self.assertEqual(zero["peak"], 0)
+        ss = usage.sessions_of(recs, meta)
+        self.assertEqual(len(ss), 1)
+        s = ss[0]
+        self.assertEqual((s["title"], s["project"], s["requests"], s["peak"], s["last"]), ("Fix the build", "proj", 7, 161500, 60000))
+        self.assertEqual(usage.notes_of(s)[2], ["cold"])                       # cache rebuilt after a 50 minute gap
+        self.assertEqual(usage.notes_of(s)[6], ["cold", "compact"])            # and after another, with context falling by half
+        self.assertEqual([i for i, n in enumerate(usage.notes_of(s)) if "big" in n], [3, 4, 5])
+        ids = [t["id"] for t in usage.tips(ss)]
+        self.assertIn("cold", ids)
+        self.assertIn("big", ids)
+        self.assertEqual(len(usage.find_sessions(ss, "build")), 1)
+        self.assertEqual(usage.find_sessions(ss, "nope"), [])
+        self.assertEqual(usage.sort_sessions(ss, "cost")[0]["session"], "s1")
+
+    def test_codex_session_title_from_first_message(self):
+        tc = lambda i: {"timestamp": self.ts, "type": "event_msg", "payload": {"type": "token_count", "info": {
+            "total_token_usage": {"input_tokens": i, "cached_input_tokens": 0, "output_tokens": 1}}}}
+        w(os.path.join(self.home, ".codex", "sessions", "r.jsonl"), [
+            {"type": "session_meta", "payload": {"id": "x1", "cwd": "/a/b"}}, {"type": "turn_context", "payload": {"model": "gpt-5-codex"}},
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "## My request for Codex:\nadd   a test"}}, tc(10)])
+        meta = {}
+        usage.collect(("codex",), 0.0, None, meta)
+        self.assertEqual(meta[("codex", "x1")], {"title": "add a test", "cwd": "/a/b"})
+
+    def test_browser_keys_mouse_and_drill(self):
+        from aihub.cli import ui as realui
+        d2 = (self.now - datetime.timedelta(days=2)).astimezone(datetime.timezone.utc).isoformat()
+        self.claude([self.msg("a", "claude-opus-5", self.ts, output_tokens=5), self.msg("b", "claude-opus-5", d2, output_tokens=7)])
+        meta = {}
+        recs = usage.collect(("claude",), 0.0, None, meta)
+        ui = mock.Mock(COLOR=False, U=False, BANG="!", ARROW=">", bold=str, dim=str, accent=str, ok=str, warn=str, err=str, clip=realui.clip, width=lambda: 100)
+        b = usage.Browser(usage.report(("claude",), 30, self.now, recs=recs), meta, ui, size=(100, 30))
+        f = b.frame()
+        self.assertIn("Last used", f)
+        self.assertEqual(f.count("\n"), 29)                                       # exactly the screen height
+        b.key("enter")
+        self.assertIsNotNone(b.detail)
+        self.assertIn("Context per request", b.frame())
+        b.key("esc")
+        self.assertIsNone(b.detail)
+        b.key("d")                                                               # days view, enter drills into that day's sessions
+        b.key("down")
+        b.key("enter")
+        self.assertEqual((b.view, b.drill[0]), ("sessions", "day"))
+        b.key("esc")
+        self.assertIsNone(b.drill)
+        self.assertTrue(b.key("tab"))
+        self.assertEqual(b.view, "summary")
+        b.key("t")
+        self.assertIn("Suggestion", b.frame())
+        b.go_view("sessions")
+        b.frame()
+        tab = next(h for h in b.hits if h[3] == ("period", 2))                   # click the "All time" tab
+        b.key(("click", tab[1], tab[0]))
+        self.assertEqual(b.pi, 2)
+        row = next(h for h in b.hits if h[3][0] == "row")
+        b.key(("click", 5, row[0]))
+        self.assertIsNotNone(b.detail)
+        b.key("esc")
+        for k in ("/", "o", "p", "u", "s", "enter"):                             # `/` model regex needs no refilter callback to be safe
+            b.key(k)
+        self.assertEqual(b.model, "opus")
+        b.key("f"); b.key("z"); b.key("enter")
+        self.assertEqual(b.sessions(), [])
+        self.assertIn("nothing here", b.frame())
+        b.key("c")
+        self.assertIsNone(b.find)
+        self.assertFalse(b.key("q"))
+
+    def test_parse_key_sequences(self):
+        from aihub.cli import ui as realui
+        pk = realui.parse_key
+        self.assertEqual(pk(b"\x1b[A"), ("up", 3))
+        self.assertEqual(pk(b"\x1b[5~"), ("pgup", 4))
+        self.assertEqual(pk(b"\x1b[<0;12;5M"), (("click", 12, 5), 10))
+        self.assertEqual(pk(b"\x1b[<64;1;1M")[0], ("wheel", -1))
+        self.assertEqual(pk(b"\x1b[<0;12;5m")[0], "")                           # release is ignored
+        self.assertIsNone(pk(b"\x1b[<0;12"))                                    # incomplete: wait for more bytes
+        self.assertEqual(pk(b"\xc3\xa9"), ("\xe9", 2))
+
 
 if __name__ == "__main__":
     unittest.main()

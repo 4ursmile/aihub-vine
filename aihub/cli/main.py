@@ -584,18 +584,43 @@ def cmd_hook(a):
 def cmd_usage(a):
     from . import usage
     tools = tuple(a.tool) if a.tool else usage.TOOLS
-    recs = []
-    with ui.Spinner("Reading session logs") as sp:
-        def prog(i, n, tool):
-            sp.text("Reading %s session logs (%d/%d)" % (tool, i, n) if n else "Reading session logs")
-        recs = usage.collect(tools, 0.0, prog)
-        sp.text("Read %d requests" % len(recs))
+    tty = sys.stdin.isatty() and sys.stdout.isatty()
+    recs, meta = usage.load(tools, ui, quiet=bool(a.json or a.plain or not tty))
     rep = usage.report(tools, a.days, model=a.model, recs=recs)
-    if a.json:
-        print(json.dumps([dict(p, by_model=[dict(x, name="/".join(x["name"])) for x in p["by_model"]]) for p in rep], default=lambda o: sorted(o)))
+    p = rep[1] if a.days > 0 else rep[2]                  # the window --days selects (all time when 0)
+    if a.session or a.sessions or a.tips:
+        ss = usage.sessions_of(p["recs"], meta)
+        if a.find:
+            ss = usage.find_sessions(ss, a.find)
+        if a.json:
+            body = {"tips": usage.tips(ss)} if a.tips else {"sessions": [{k: v for k, v in s.items() if k not in ("reqs", "notes", "text")} for s in usage.sort_sessions(ss, a.sort)]}
+            if a.session:
+                body = {"sessions": [dict(s, notes=usage.notes_of(s)) for s in usage.find_sessions(ss, a.session)]}
+            print(json.dumps(body, default=lambda o: sorted(o)))
+            return 0
+        if a.tips:
+            ui.heading("Efficiency tips  %s" % ui.dim(p["period"]))
+            usage.show_tips(usage.tips(ss), ui)
+        elif a.session:
+            hit = usage.find_sessions(ss, a.session)
+            if not hit:
+                ui.error("no session matches %r in %s" % (a.session, p["period"].lower()), "list them: aihub usage --sessions")
+                return 1
+            for s in usage.sort_sessions(hit, a.sort)[:1 if len(hit) == 1 else 5]:
+                usage.show_session(s, ui)
+            if len(hit) > 5:
+                ui.info("%d sessions match, showing 5; use a longer id" % len(hit))
+        else:
+            ui.heading("Sessions  %s" % ui.dim("%s, sorted by %s" % (p["period"].lower(), a.sort)))
+            usage.show_sessions(usage.sort_sessions(ss, a.sort), ui, a.top)
         return 0
-    if not a.plain and not a.by_day and sys.stdin.isatty() and sys.stdout.isatty():
-        usage.interactive(rep, ui, refilter=lambda m: usage.report(tools, a.days, model=m, recs=recs))
+    if a.json:
+        print(json.dumps([{k: v for k, v in dict(p, by_model=[dict(x, name="/".join(x["name"])) for x in p["by_model"]]).items() if k != "recs"} for p in rep],
+                         default=lambda o: sorted(o)))
+        return 0
+    if not a.plain and not a.by_day and tty:
+        usage.interactive(rep, ui, meta, refilter=lambda m: usage.report(tools, a.days, model=m, recs=recs),
+                          start="sessions")
     else:
         usage.show(rep, ui, a.by_day)
     return 0
@@ -669,9 +694,8 @@ def cmd_menu():
                 updater.cmd_upgrade(argparse.Namespace(check=False, force=False, rollback=False))
             elif choice == "usage":
                 from . import usage
-                with ui.Spinner("Reading session logs") as sp:
-                    recs = usage.collect(usage.TOOLS, 0.0, lambda i, n, t: sp.text("Reading %s session logs (%d/%d)" % (t, i, n) if n else "Reading session logs"))
-                usage.interactive(usage.report(usage.TOOLS, 30, recs=recs), ui, refilter=lambda m: usage.report(usage.TOOLS, 30, model=m, recs=recs))
+                recs, meta = usage.load(usage.TOOLS, ui)
+                usage.interactive(usage.report(usage.TOOLS, 30, recs=recs), ui, meta, refilter=lambda m: usage.report(usage.TOOLS, 30, model=m, recs=recs))
             elif choice == "policy":
                 from . import policy
                 policy.menu()
@@ -1386,12 +1410,18 @@ def build_parser():
         arg("action", choices=["get", "store", "erase"], help="Credential protocol action."))
     add("usage", cmd_usage, "Local usage report per AI tool: sessions, models, tokens, cache and estimated cost.",
         "Read the session logs of the AI tools on this machine (Claude Code ~/.claude/projects, Codex ~/.codex/sessions) and show sessions, requests, tokens, cache use and an ESTIMATED price for today, the last N days and all time, by tool and by model. Purely local: nothing is sent to the hub. Prices are list prices per 1M tokens; add or override models in ~/.aihub/prices.json as {\"model-substring\": {\"input\": 3, \"output\": 15, \"cache_write\": 3.75, \"cache_read\": 0.3}}.",
-        "Examples:\n  aihub usage\n  aihub usage --by-day --days 14\n  aihub usage --tool claude --days 7 --plain\n  aihub usage --json",
+        "Examples:\n  aihub usage\n  aihub usage --days 7 --sessions\n  aihub usage --session 3f9a1c2b\n  aihub usage --tips --days 14\n  aihub usage --by-day --days 14\n  aihub usage --tool claude --days 7 --plain\n  aihub usage --json",
         arg("--tool", action="append", choices=["claude", "codex"], help="Only this tool (repeatable)."),
-        arg("--days", type=int, default=30, help="Length of the middle window (default 30)."),
+        arg("--days", type=int, default=30, help="Last N days: the middle window, and the window of --sessions/--session/--tips (default 30, 0 = all time)."),
+        arg("--sessions", action="store_true", help="List sessions (last used, tool, project, requests, peak context, cache hit, cost, title) and exit."),
+        arg("--session", metavar="ID_OR_TEXT", help="Show one session: totals, context per request and cache rebuild flags. Matches an id (the last 8 characters are enough), title or folder."),
+        arg("--tips", action="store_true", help="Efficiency suggestions from your own usage (cold cache rebuilds, huge context, low cache hit, model choice)."),
+        arg("--find", metavar="TEXT", help="With --sessions/--tips: only sessions whose id, title, folder, tool or model contains TEXT."),
+        arg("--sort", choices=["recent", "cost", "ctx", "requests"], default="recent", help="Order of --sessions (default recent)."),
+        arg("--top", type=int, default=30, help="Rows shown by --sessions (default 30, 0 = all)."),
         arg("--model", help="Case-insensitive regex on 'tool model', e.g. 'opus|gpt' (in the interactive view type /regex)."),
         arg("--by-day", action="store_true", help="One row per day instead of by tool and model."),
-        arg("--plain", action="store_true", help="Print every period and exit (default in a terminal is an interactive view: 1/2/3 period, d by day, s summary, /regex filter, q quit)."),
+        arg("--plain", action="store_true", help="Print every period and exit (default in a terminal is a full screen view: arrows and mouse, 1/2/3 period, s sessions, m summary, d days, t tips, / model filter, f find, q quit)."),
         arg("--json", action="store_true", help="Machine readable output (includes by_day)."))
     add("flush", cmd_flush, "Send queued usage events to the hub.",
         "Push queued usage events to the telemetry inbox (a git repo) now. Events are normally pushed in the background as one batch, a few seconds after the last event (aihub config set telemetry_interval 15).",
