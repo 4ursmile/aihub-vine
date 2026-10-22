@@ -41,7 +41,7 @@ class Workspace(unittest.TestCase):
         self.assertEqual(cli.main(["dev", "publish", self.ws, "--only", "one"]), 0)
         self.assertEqual(self.log(), ["publish one 0.1.0"])
         cli.main(["dev", "publish", self.ws])
-        self.assertEqual(self.log(), ["publish two 0.1.0", "publish one 0.1.0"])      # one commit per package, one push
+        self.assertEqual(self.log(), ["publish two 0.1.0", "publish one 0.1.0"])      # one commit per publish run (only changed packages named), one push
 
     def test_unknown_name_is_an_error(self):
         self.assertEqual(cli.main(["dev", "validate", self.ws, "--only", "nope"]), 1)
@@ -173,7 +173,20 @@ class Monorepo(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(inner, ".git")))
         self.assertTrue(any(n.startswith("git-tools") for n in os.listdir(os.path.join(home, "backups"))))
         self.assertEqual(cli.main(["dev", "publish", self.w]), 0)
-        self.assertEqual(sorted(git("log", "--format=%s", cwd=self.bare).splitlines()), ["publish guide 0.1.0", "publish tools 0.1.0"])
+        self.assertEqual(git("log", "--format=%s", cwd=self.bare).splitlines(), ["publish 2 packages"])      # ONE commit for the whole monorepo
+        body = git("log", "-1", "--format=%b", cwd=self.bare)
+        self.assertIn("- guide 0.1.0", body); self.assertIn("- tools 0.1.0", body)
+
+    def test_mono_publish_reports_the_same_commit_for_every_package(self):
+        sent = []
+        pub.report = lambda info: sent.append(info) or True
+        self.assertEqual(cli.main(["dev", "publish", self.w]), 0)
+        head = git("rev-parse", "main", cwd=self.bare)
+        self.assertEqual(sorted((i["package"], i["commit"]) for i in sent), [("guide", head), ("tools", head)])
+        sent.clear()
+        self.assertEqual(cli.main(["dev", "publish", self.w]), 0)                      # nothing changed: no new commit, same head
+        self.assertEqual(git("rev-list", "--count", "main", cwd=self.bare), "1")
+        self.assertEqual({i["commit"] for i in sent}, {head})
 
     def test_tree_solve_keep_leaves_the_inner_repo_and_outer_ignores_it(self):
         inner = self._nest()

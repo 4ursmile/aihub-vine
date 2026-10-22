@@ -1103,8 +1103,8 @@ def dev_publish(a):
             for f, got, v in pysync.sync(d, pysync.want(_load(with_path(d)))):    # pyproject.toml follows aihub.toml (also after --bump)
                 ui.good("%s: pyproject.toml %s %r -> %r" % (label, f, got, v))
             m = dev_validate(with_path(d), quiet=True)
-            sp.text("%sCommitting %s" % (tag, label))
-            ready.append((d, pub.publish(d, m, push_now=False)))      # one commit per package: history says which was released
+            sp.text("%sStaging %s" % (tag, label))
+            ready.append((d, pub.publish(d, m, push_now=False, commit_now=False)))      # staged only: one commit per repository below
             sp.text("%sPrepared %s" % (tag, label))
             sp.__exit__(None, None, None)
         except (api.ApiError, ValueError, KeyError, OSError, gitx.GitError) as e:
@@ -1115,8 +1115,10 @@ def dev_publish(a):
     repos = {}
     for d, info in ready:
         repos.setdefault(pub.toplevel(d), []).append((d, info))
-    for top, items in repos.items():                 # phase 2: one push per repository
+    for top, items in repos.items():                 # phase 2: ONE commit and one push per repository
         try:
+            with ui.Spinner("Committing %s" % ", ".join(i["package"] for _, i in items)):
+                pub.commit_staged(top, items)
             pub.push(items[0][0])
             pushed += items
         except (gitx.GitError, ValueError) as e:

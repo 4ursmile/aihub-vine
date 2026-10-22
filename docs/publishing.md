@@ -49,12 +49,12 @@ Point any `aihub dev` command at the parent folder (or run it there):
 aihub dev list builtin                          # packages, versions, uncommitted changes
 aihub dev validate builtin                      # checks every package
 aihub dev tree builtin                          # packages, repository and [git] status
-aihub dev publish builtin                       # all of them: one commit each, one push per repository
+aihub dev publish builtin                       # all of them: one commit and one push per repository
 aihub dev publish builtin --only aihub-guide    # just one (folder or package name; repeat or comma-separate)
 aihub dev publish --bump patch builtin          # bump every selected package
 ```
 
-`publish` treats each package independently. Each one is prepared first (its `[git]` is refreshed, it is validated, then committed as one commit). A package that fails is reported and skipped, and the others still go out. The command exits with an error if any package failed. Add new packages with `aihub dev init builtin --sub --name <name>`, which creates `builtin/<name>`. `--sub` needs `--name`.
+`publish` treats each package independently. Each one is prepared first (its `[git]` is refreshed, it is validated, then staged); the packages of one repository are then committed together as ONE commit (its message lists the packages that changed) and pushed once. A package that fails is reported and skipped, and the others still go out. The command exits with an error if any package failed. Add new packages with `aihub dev init builtin --sub --name <name>`, which creates `builtin/<name>`. `--sub` needs `--name`.
 
 `aihub dev init` refuses to create a package inside another package, because that package's archive would include it, and refuses to create one above existing packages, because it would swallow them. Interactively it offers a valid location; otherwise it prints the command to run instead, such as `aihub dev init <parent folder> --sub --name <name>`. Re-running init on a folder that already has an `aihub.toml` keeps the manifest. `aihub dev validate` warns when a package folder contains other packages.
 

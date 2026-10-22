@@ -51,6 +51,59 @@ class TransferTest(unittest.TestCase):
             self.t.get({"url": self.src, "subdir": "../x"})
 
 
+class PinnedOldCommitTest(unittest.TestCase):
+    """A version pinned to a commit older than the branch tip, on a host that refuses `fetch <sha>` (protocol v0, e.g. GitLab defaults),
+    with a cache that is already shallow at the tip. Both installs must find it: direct (`gitx.fetch`) and indirect (`Transfer`, `-i`)."""
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.src = os.path.join(self.td, "src")
+        os.makedirs(os.path.join(self.src, "p"))
+        subprocess.check_call(["git", "init", "-q", "-b", "main"], cwd=self.src)
+        self.revs = []
+        for v in ("1", "2", "3"):
+            open(os.path.join(self.src, "p", "aihub.toml"), "w").write('[package]\nname="p"\nversion="%s"\n' % v)
+            git("add", ".", cwd=self.src)
+            git("commit", "-qm", v, cwd=self.src)
+            self.revs.append(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.src, text=True).strip())
+        self.bare = os.path.join(self.td, "o.git")
+        subprocess.check_call(["git", "clone", "-q", "--bare", self.src, self.bare])
+        self.env = {k: os.environ.get(k) for k in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0")}
+        os.environ.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="protocol.version", GIT_CONFIG_VALUE_0="0")
+        self.url = "file://" + self.bare
+
+    def tearDown(self):
+        for k, v in self.env.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def head(self, d):
+        return gitx.run(["rev-parse", "HEAD"], cwd=d)
+
+    def test_direct_install_finds_an_old_commit_in_a_shallow_cache(self):
+        base = os.path.join(self.td, "cache")
+        gitx.fetch(self.url, "main", None, base=base)                      # shallow at the tip
+        d = gitx.fetch(self.url, "main", self.revs[0], base=base)
+        self.assertEqual(self.head(d), self.revs[0])
+        self.assertEqual(self.head(gitx.fetch(self.url, "main", None, base=base)), self.revs[2])      # the tip still works afterwards
+        self.assertEqual(self.head(gitx.fetch(self.url, "main", self.revs[1], base=base)), self.revs[1])
+
+    def test_indirect_install_serves_each_pinned_version(self):
+        t = Transfer(self.td, lambda: 600)
+        repo = {"url": self.url, "branch": "main", "subdir": "p"}
+        t.lookup(dict(repo))                                               # latest first: leaves a shallow checkout
+        for i, v in enumerate(("1", "2", "3")):
+            path, rev, _ = t.lookup(dict(repo, ref=self.revs[i]))
+            self.assertEqual(rev, self.revs[i])
+            with tarfile.open(path) as tf:
+                self.assertIn('version="%s"' % v, tf.extractfile("aihub.toml").read().decode())
+
+    def test_missing_commit_is_still_an_error(self):
+        with self.assertRaises(gitx.GitError):
+            gitx.fetch(self.url, "main", "0" * 40, base=os.path.join(self.td, "c2"))
+        with self.assertRaises(TransferError):
+            Transfer(self.td, lambda: 600).lookup({"url": self.url, "branch": "main", "ref": "0" * 40})
+
+
 @unittest.skipUnless(shutil.which("git-lfs"), "git-lfs not installed")
 class LfsTest(unittest.TestCase):
     def setUp(self):

@@ -146,9 +146,27 @@ def push(root):
         gitx.run(["push", "-q"] + ([] if has_up else ["-u", "origin", branch]), cwd=top)
 
 
-def publish(root, m, bump=None, push_now=True):
+def commit_staged(top, items):
+    """ONE commit for everything staged by `publish(commit_now=False)` in the repo `top`; `items` = [(package folder, info)].
+    Sets `commit` on each info. The message names the packages that actually changed, so history still says what was released.
+    Nothing staged = no commit (HEAD is reported)."""
+    if gitx.run(["diff", "--cached", "--name-only"], cwd=top):
+        changed = [i for d, i in items if gitx.run(["diff", "--cached", "--name-only", "--", "."], cwd=d)] or [i for _, i in items]
+        if len(changed) == 1:
+            msg = "publish %s %s" % (changed[0]["package"], changed[0]["version"])
+        else:
+            msg = "publish %d packages\n\n%s" % (len(changed), "\n".join("- %s %s" % (i["package"], i["version"]) for i in changed))
+        gitx.run(["commit", "-q", "-m", msg], cwd=top)
+    head = gitx.run(["rev-parse", "HEAD"], cwd=top)
+    for _, i in items:
+        i["commit"] = head
+    return head
+
+
+def publish(root, m, bump=None, push_now=True, commit_now=True):
     """Commit this package folder (and push unless push_now=False, so several packages can share one push).
-    Returns the info dict reported to the telemetry inbox."""
+    commit_now=False only stages it (`git add`) and leaves `commit` empty: the caller makes ONE commit for all packages
+    with `commit_staged` (and must push after it). Returns the info dict reported to the telemetry inbox."""
     toml = os.path.join(root, "aihub.toml")
     if not shutil.which("git"):
         raise ValueError("git is not installed")
@@ -174,11 +192,13 @@ def publish(root, m, bump=None, push_now=True):
         ui.note("tracking %d large file(s) with git-lfs" % len(lfs))
     gitx.run(["add", "-A", "--", "."], cwd=root)
     pkg = m["package"]
-    if gitx.run(["status", "--porcelain", "--", "."], cwd=root):
-        gitx.run(["commit", "-q", "-m", "publish %s %s" % (pkg["name"], pkg["version"])], cwd=root)
-    if push_now:
-        push(root)
-    commit = gitx.run(["rev-parse", "HEAD"], cwd=top)
+    commit = ""
+    if commit_now:
+        if gitx.run(["status", "--porcelain", "--", "."], cwd=root):
+            gitx.run(["commit", "-q", "-m", "publish %s %s" % (pkg["name"], pkg["version"])], cwd=root)
+        if push_now:
+            push(root)
+        commit = gitx.run(["rev-parse", "HEAD"], cwd=top)
     who = identity.current()
     info = {"kind": "publish", "package": pkg["name"], "version": pkg["version"], "commit": commit,
             "client_id": "", "git_url": gitx.redact_url(git["url"]), "git_branch": git["branch"],

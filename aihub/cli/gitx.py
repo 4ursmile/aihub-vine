@@ -376,7 +376,10 @@ def _fetch(url, branch, ref, base):
         run(["fetch", "-q", "--depth", "1", "origin", want], cwd=d)           # branch, tag, or (if the host allows) a commit
     except GitError:
         try:
-            run(["fetch", "-q", "--tags", "origin", branch], cwd=d)             # full history of the branch, then resolve locally
+            # full history of the branch, then resolve locally. The cache is usually depth-1 from an earlier fetch, so a plain
+            # fetch would keep it shallow and an older pinned commit (hosts refuse a bare sha) could never be found.
+            deep = ["--unshallow"] if os.path.exists(os.path.join(d, ".git", "shallow")) else []
+            run(["fetch", "-q", "--tags"] + deep + ["origin", branch], cwd=d)
             run(["rev-parse", "--verify", "-q", want + "^{commit}"], cwd=d)
             run(["checkout", "-q", "--force", want], cwd=d)
             return d
