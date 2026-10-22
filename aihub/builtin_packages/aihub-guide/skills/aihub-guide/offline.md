@@ -97,8 +97,9 @@ aihub version                     # CLI version and the one the hub offers
 aihub upgrade [--check|--force|--rollback]
 aihub flush                       # send queued usage events now
 # bare `aihub` menu also has Usage and Policy (guard on/off, tick active rules)
-aihub usage [--tool claude|codex] [--days N] [--by-day] [--plain] [--json]   # full screen browser in a tty (arrows, mouse, Enter opens a session, tabs Sessions/Summary/Days/Tips); local report from the tools' own logs: sessions, models, tokens, cache, est. cost (no hub)
+aihub usage [--tool claude|codex] [--days N] [--by-day] [--plain] [--json]   # full screen browser in a tty, opens on Summary (arrows, mouse, Enter opens a session, tabs Summary/Sessions/Days/Tips, periods today/this month/last N days/all time, n = type N days); local report from the tools' own logs: sessions, models, tokens, cache, est. cost (no hub)
 aihub usage --sessions [--days N] [--sort recent|cost|ctx|requests] [--find TEXT] [--top N]   # session list
+aihub usage-sync                         # send your daily token totals to the hub now (normally automatic after each Claude answer turn; hub Usage page shows you and your groups; off: aihub config set usage_sync off)
 aihub usage --session ID                  # one session: context per request, cold cache rebuilds
 aihub usage --tips                        # efficiency suggestions from your own usage
 aihub hooks install [--tool claude]   # or: aihub hooks remove

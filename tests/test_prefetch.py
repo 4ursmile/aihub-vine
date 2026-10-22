@@ -67,5 +67,43 @@ class InstallManyTest(unittest.TestCase):
         self.assertEqual(seen[-1], ["a", "b"])
 
 
+class InstallPlanKeepsGoingTest(unittest.TestCase):
+    """One failing package must not stop the others: each installed one still sends its own install event."""
+
+    def test_failure_does_not_skip_later_packages(self):
+        from aihub.cli import api, installer
+        pkgs = [{"name": n, "version": "1", "requires": {"packages": deps}}
+                for n, deps in (("a", []), ("bad", []), ("c", []), ("needs-bad", ["bad"]))]
+        got = []
+
+        def fake_one(r, yes, tools, requested, archive_path=None):
+            if r["name"] == "bad":
+                raise api.ApiError("boom")
+            got.append(r["name"])
+
+        with mock.patch.object(installer, "_install_one", fake_one), \
+                mock.patch.object(installer.registry, "prefetch", lambda p, td: {}):
+            with self.assertRaises(api.ApiError) as cm:
+                installer.install_plan(pkgs, True, None, roots=["a", "bad", "c", "needs-bad"])
+        self.assertEqual(got, ["a", "c"])
+        self.assertIn("bad", str(cm.exception))
+
+
+class McpUsageMatchTest(unittest.TestCase):
+    """Claude Code rewrites MCP server names and prefixes plugin / connector servers: the use event must still be recorded."""
+
+    def test_server_name_variants(self):
+        from aihub.cli import hooks
+        comps = {"mcp:datalake-mcp": "dl", "mcp:data.lake": "dl2", "mcp:datalake": "short"}
+        for tool, want in (("mcp__datalake-mcp__search", "mcp:datalake-mcp"),
+                           ("mcp__datalake_mcp__search", "mcp:datalake-mcp"),
+                           ("mcp__claude_ai_datalake-mcp__search", "mcp:datalake-mcp"),
+                           ("mcp__plugin_x_datalake-mcp__search", "mcp:datalake-mcp"),
+                           ("mcp__data_lake__x", "mcp:data.lake"),
+                           ("mcp__datalake__x", "mcp:datalake"),
+                           ("mcp__other__x", None), ("mcp__x", None)):
+            self.assertEqual(hooks._mcp_comp(tool, comps), want, tool)
+
+
 if __name__ == "__main__":
     unittest.main()

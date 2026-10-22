@@ -19,7 +19,17 @@ import time
 import uuid
 
 from ..core import textsafe
-from . import gitx, paths
+from . import paths
+
+
+def __getattr__(name):
+    """`gitx` (and through it tls -> ssl, about 10 ms) is loaded on first use: the hook hot path only spools a line and never touches git,
+    so a hook process must not pay for it. `telemetry.gitx` still works (tests patch `telemetry.gitx.run`)."""
+    if name == "gitx":
+        from . import gitx as g
+        globals()["gitx"] = g
+        return g
+    raise AttributeError(name)
 
 STALE = 30      # heartbeat age after which a flusher is considered dead (it beats every 5s)
 MAX_SPOOL = 5 * 1024 * 1024
@@ -258,6 +268,7 @@ def target():
 
 def _scratch():
     """A private bare repo used only to build commits; nothing is ever checked out."""
+    from . import gitx
     d = paths.p("queue", "git")
     if os.path.isdir(d) and not _scratch_sound(d):
         gitx.rmtree(d)                                  # half-removed leftover (e.g. after self-uninstall): start clean
@@ -269,6 +280,7 @@ def _scratch():
 
 def _scratch_sound(d):
     """The scratch repo still has HEAD, objects and refs, and git accepts it as a bare repo."""
+    from . import gitx
     return all(os.path.exists(os.path.join(d, x)) for x in ("HEAD", "objects", "refs")) \
         and gitx.run(["rev-parse", "--is-bare-repository"], cwd=d, check=False) == "true"
 
@@ -282,6 +294,7 @@ def push(url, lines, timeout=20):
     clients racing never conflict in content: the loser is rejected as non-fast-forward, refetches the new tip and adds its file again.
     However long the server is down, the repo still has this ONE branch; the files just pile up inside it.
     Raises on any failure; the caller keeps the events."""
+    from . import gitx
     import random
     from . import hooks
     d = _scratch()
@@ -385,6 +398,7 @@ def send(url, lines, timeout=20):
     """Hub first, git as the fallback. -> "hub" | "git". Raises when neither worked (the caller keeps the events).
     Git is tried only when the hub is unreachable (not when it is merely busy) and not before GIT_AFTER failures in a row, so a short
     hub restart never moves the whole fleet onto the git host."""
+    from . import gitx
     last = None
     try:
         post(lines, min(timeout, HUB_TIMEOUT))
@@ -407,6 +421,7 @@ def send(url, lines, timeout=20):
 def _send_once(timeout=20):
     """Push everything spooled. Returns the number of events sent. The spool files are deleted only after the push succeeded;
     a failure leaves them for the next pass, and a crash between push and delete only causes a resend the hub dedups by id."""
+    from . import gitx
     url = target()
     if not url and not hub_enabled():
         return 0                                         # keep the spool until the hub or an inbox is configured
@@ -515,6 +530,7 @@ def record(ev):
 
 def deliver(ev, timeout=20):
     """Push one event now (publish needs the hub to hear about it quickly). Falls back to the spool. -> True when it was pushed."""
+    from . import gitx
     try:
         line = _prep(ev)
         url = target()

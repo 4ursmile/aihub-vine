@@ -39,6 +39,7 @@ DEFAULT_POLL = "300"                    # git is only the fallback path now: one
 LIMITS = {
     "sync_interval_sec": None,          # placeholder so the name is not reused; the real schedule is the `sync_interval` text setting
     "ingest_db_interval": (10, 1, 300, "Seconds events wait in memory (from the first one) before ONE database write"),
+    "usage_db_interval": (5, 1, 300, "Seconds token-usage uploads wait in memory (from the first one) before ONE database write"),
     "telemetry_git_interval": (3600, 0, 86400, "Seconds between archive + inbox clean-up pushes to git (0 = every sync pass)"),
     "index_git_interval": (1800, 0, 86400, "Seconds from the first publish until the index is pushed to git (the hub serves it at once)"),
     "git_job_gap": (300, 0, 3600, "Minimum seconds between git work of the sync job and the backup job"),

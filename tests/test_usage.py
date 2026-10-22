@@ -63,7 +63,7 @@ class UsageTest(unittest.TestCase):
         d2 = (self.now - datetime.timedelta(days=2)).astimezone(datetime.timezone.utc).isoformat()
         self.claude([self.msg("a", "claude-opus-5", self.ts, output_tokens=5), self.msg("b", "claude-opus-5", d2, output_tokens=7)])
         rep = usage.report(("claude",), 30, self.now)
-        days = rep[1]["by_day"]
+        days = usage.pick(rep)["by_day"]
         self.assertEqual([x["output"] for x in days], [5, 7])
         self.assertGreater(days[0]["name"], days[1]["name"])
         out, keys = [], iter(["2", "d", "q"])
@@ -138,6 +138,36 @@ class UsageTest(unittest.TestCase):
         usage.collect(("codex",), 0.0, None, meta)
         self.assertEqual(meta[("codex", "x1")], {"title": "add a test", "cwd": "/a/b"})
 
+    def test_periods_month_and_custom_days(self):
+        first = self.now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        early = (first + datetime.timedelta(hours=1)).astimezone(datetime.timezone.utc).isoformat()
+        before = (first - datetime.timedelta(days=1)).astimezone(datetime.timezone.utc).isoformat()
+        self.claude([self.msg("a", "claude-opus-5", early, output_tokens=5), self.msg("b", "claude-opus-5", before, output_tokens=7)])
+        rep = usage.report(("claude",), 9, self.now)
+        self.assertEqual([p["key"] for p in rep], ["today", "month", "last", "all"])
+        self.assertEqual(rep[2]["period"], "Last 9 days")
+        by = {p["key"]: p for p in rep}
+        self.assertEqual(by["month"]["total"]["output"], 5 if self.now.day > 1 or self.now.hour >= 1 else 0)
+        self.assertEqual(by["all"]["total"]["requests"], 2)
+        self.assertEqual([p["key"] for p in usage.report(("claude",), 0, self.now)], ["today", "month", "all"])
+        self.assertEqual(usage.pick(usage.report(("claude",), 0, self.now), 0)["key"], "all")
+
+    def test_browser_opens_on_summary_and_n_sets_days(self):
+        from aihub.cli import ui as realui
+        self.claude([self.msg("a", "claude-opus-5", self.ts, output_tokens=5)])
+        recs = usage.collect(("claude",), 0.0, None, {})
+        ui = mock.Mock(COLOR=False, U=False, BANG="!", ARROW=">", bold=str, dim=str, accent=str, ok=str, warn=str, err=str, clip=realui.clip, width=lambda: 100)
+        b = usage.Browser(usage.report(("claude",), 30, self.now, recs=recs), {}, ui, size=(100, 30),
+                          refilter=lambda m, d: usage.report(("claude",), d, model=m, recs=recs, now=self.now))
+        self.assertEqual((b.view, b.rep[b.pi]["key"]), ("summary", "last"))
+        for k in ("n", "backspace", "backspace", "7", "enter"):
+            b.key(k)
+        self.assertEqual((b.days, b.rep[b.pi]["period"]), (7, "Last 7 days"))
+        for k in ("n", "backspace", "x", "enter"):
+            b.key(k)
+        self.assertEqual(b.days, 7)                                              # junk is refused, the number stays
+        self.assertIn("whole number", b.frame())
+
     def test_browser_keys_mouse_and_drill(self):
         from aihub.cli import ui as realui
         d2 = (self.now - datetime.timedelta(days=2)).astimezone(datetime.timezone.utc).isoformat()
@@ -146,6 +176,9 @@ class UsageTest(unittest.TestCase):
         recs = usage.collect(("claude",), 0.0, None, meta)
         ui = mock.Mock(COLOR=False, U=False, BANG="!", ARROW=">", bold=str, dim=str, accent=str, ok=str, warn=str, err=str, clip=realui.clip, width=lambda: 100)
         b = usage.Browser(usage.report(("claude",), 30, self.now, recs=recs), meta, ui, size=(100, 30))
+        f = b.frame()
+        self.assertIn("This month", f)                                           # opens on Summary, with the new period tabs
+        b.go_view("sessions")
         f = b.frame()
         self.assertIn("Last used", f)
         self.assertEqual(f.count("\n"), 29)                                       # exactly the screen height
@@ -161,14 +194,14 @@ class UsageTest(unittest.TestCase):
         b.key("esc")
         self.assertIsNone(b.drill)
         self.assertTrue(b.key("tab"))
-        self.assertEqual(b.view, "summary")
+        self.assertEqual(b.view, "days")                                         # views run summary, sessions, days, tips
         b.key("t")
         self.assertIn("Suggestion", b.frame())
         b.go_view("sessions")
         b.frame()
-        tab = next(h for h in b.hits if h[3] == ("period", 2))                   # click the "All time" tab
+        tab = next(h for h in b.hits if h[3] == ("period", 3))                   # click the "All time" tab
         b.key(("click", tab[1], tab[0]))
-        self.assertEqual(b.pi, 2)
+        self.assertEqual(b.pi, 3)
         row = next(h for h in b.hits if h[3][0] == "row")
         b.key(("click", 5, row[0]))
         self.assertIsNotNone(b.detail)

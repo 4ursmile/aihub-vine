@@ -976,6 +976,234 @@ class Repos:
                     pass
                 raise
 
+    # ---- token usage per person (uploaded by the CLI after each answer turn; see cli/usagesync.py)
+    USAGE_AGG = ("COALESCE(SUM(d.requests),0) AS requests, COALESCE(SUM(d.inp),0) AS inp, COALESCE(SUM(d.outp),0) AS outp, "
+                 "COALESCE(SUM(d.cache_write),0) AS cache_write, COALESCE(SUM(d.cache_read),0) AS cache_read, "
+                 "COALESCE(SUM(d.cost),0) AS cost, COALESCE(SUM(d.unpriced),0) AS unpriced")
+
+    def usage_upsert(self, uid, client_id, rows):
+        """One device of one user (tests, small callers). -> rows stored. See usage_upsert_many."""
+        return self.usage_upsert_many({(uid, client_id): rows})
+
+    def usage_upsert_many(self, by, sessions=None):
+        """by = {(user_id, client_id): [row, ...]}. ONE transaction for all of it. A row is the day's total, so a resend overwrites it and never
+        counts twice. A day never SHRINKS: Claude Code deletes old session logs, so a later upload can hold less than what is stored; that
+        row is ignored (history stays). An equal or larger total replaces the whole row, cost included (prices may have changed). The old
+        totals are read with one query per (user, device) over the days involved, not one per row. -> rows stored."""
+        if not by and not sessions:
+            return 0
+        now = time.time()
+        with self.lock:
+            c = self.db.conn()
+            try:
+                data = []
+                self._sessions_upsert(c, sessions or {}, now)
+                for (uid, client), rows in by.items():
+                    if not rows:
+                        continue
+                    old, days = {}, sorted({r["day"] for r in rows})
+                    for i in range(0, len(days), 400):
+                        part = days[i:i + 400]
+                        for x in c.execute("SELECT day,tool,model,inp+outp+cache_write+cache_read FROM usage_daily WHERE user_id=? AND client_id=? AND day IN (%s)"
+                                           % ",".join("?" * len(part)), [uid, client] + part):
+                            old[(x[0], x[1], x[2])] = x[3]
+                    data += [(uid, client, r["day"], r["tool"], r["model"], r["requests"], r["inp"], r["outp"], r["cache_write"], r["cache_read"],
+                              r["cost"], r["unpriced"], now) for r in sorted(rows, key=lambda r: (r["day"], r["tool"], r["model"]))
+                             if r["inp"] + r["outp"] + r["cache_write"] + r["cache_read"] >= old.get((r["day"], r["tool"], r["model"]), 0)]
+                if data:
+                    data.sort(key=lambda t: (t[0], t[1], t[2], t[3], t[4]))      # one fixed lock order: two workers can never deadlock on Postgres
+                    c.executemany("INSERT OR REPLACE INTO usage_daily(user_id,client_id,day,tool,model,requests,inp,outp,cache_write,cache_read,cost,unpriced,updated) "
+                                  "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", data)
+                c.commit()
+                return len(data)
+            except Exception:
+                try:
+                    c.rollback()
+                except Exception:
+                    pass
+                raise
+
+    SESSION_COLS = ("tool", "model", "day", "started", "ended", "requests", "inp", "outp", "cache_write", "cache_read", "cost", "unpriced",
+                    "peak", "cold", "compact", "big", "light")
+
+    def _sessions_upsert(self, c, sessions, now):
+        """sessions = {(user_id, sid): row}. A session never shrinks either (same rule as a day): the larger token total wins, and the peak
+        context only goes up. One query reads the old totals of all of them."""
+        if not sessions:
+            return
+        keys = sorted(sessions)
+        old = {}
+        for uid in {k[0] for k in keys}:
+            sids = [k[1] for k in keys if k[0] == uid]
+            for i in range(0, len(sids), 400):
+                part = sids[i:i + 400]
+                for x in c.execute("SELECT sid,inp+outp+cache_write+cache_read,peak FROM usage_session WHERE user_id=? AND sid IN (%s)" % ",".join("?" * len(part)),
+                                   [uid] + part):
+                    old[(uid, x[0])] = (x[1], x[2])
+        data = []
+        for k in keys:
+            r = sessions[k]
+            tot = r["inp"] + r["outp"] + r["cache_write"] + r["cache_read"]
+            if k in old and tot < old[k][0]:
+                continue
+            peak = max(r["peak"], old.get(k, (0, 0))[1])
+            data.append((k[0], k[1]) + tuple(r[x] if x != "peak" else peak for x in self.SESSION_COLS) + (now,))
+        if data:
+            c.executemany("INSERT OR REPLACE INTO usage_session(user_id,sid,%s,updated) VALUES(?,?,%s?)" % (",".join(self.SESSION_COLS), "?," * len(self.SESSION_COLS)), data)
+
+    @staticmethod
+    def _usage_fix(r):
+        r = dict(r)
+        for k in ("requests", "inp", "outp", "cache_write", "cache_read", "unpriced"):
+            r[k] = int(r.get(k) or 0)
+        r["cost"] = round(float(r.get("cost") or 0), 6)
+        r["tokens"] = r["inp"] + r["outp"] + r["cache_write"] + r["cache_read"]
+        ctx = r["inp"] + r["cache_write"] + r["cache_read"]
+        r["cache_hit"] = round(r["cache_read"] / ctx, 4) if ctx else 0.0
+        return r
+
+    _USAGE_SUM = ("requests", "inp", "outp", "cache_write", "cache_read", "cost", "unpriced")
+
+    @classmethod
+    def _usage_sum(cls, rows):
+        return {k: sum(r.get(k) or 0 for r in rows) for k in cls._USAGE_SUM}
+
+    @classmethod
+    def _usage_regroup(cls, rows, key):
+        g = {}
+        for r in rows:
+            g.setdefault(r[key], []).append(r)
+        return [dict(cls._usage_sum(v), **{key: k}) for k, v in g.items()]
+
+    BIG_CTX, COLD_MIN_REQ = 150000, 2
+
+    def usage_sessions(self, since_day, until_day, uid=None, group_ids=None, tool=None, model=None, user=None, limit=200):
+        """Sessions in the window of one person or of everybody in the groups, biggest cost first, plus usage hints computed from the SAME
+        numbers the local `aihub usage` tips use (cold cache rebuilds, huge context, low cache hit, premium model for short replies, one-shot
+        sessions, one session dominating). -> {sessions, hints, totals}. Titles and folders never reach the hub, so a session is its short id."""
+        c = self.db.conn()
+        if group_ids is not None:
+            if not group_ids:
+                return {"sessions": [], "hints": [], "totals": {}}
+            scope, sa = "s.user_id IN (SELECT user_id FROM group_members WHERE group_id IN (%s))" % ",".join("?" * len(group_ids)), list(group_ids)
+        else:
+            scope, sa = "s.user_id=?", [uid]
+        w, a = "s.day>=? AND s.day<=? AND " + scope, [since_day, until_day] + sa
+        for col, v in (("s.tool", tool), ("s.model", model)):
+            if v:
+                w += " AND %s=?" % col
+                a.append(v)
+        if user:
+            w += " AND s.user_id IN (SELECT id FROM users WHERE username=?)"
+            a.append(user)
+        rows = []
+        for x in c.execute("SELECT s.sid,s.tool,s.model,s.day,s.started,s.ended,s.requests,s.inp,s.outp,s.cache_write,s.cache_read,s.cost,s.unpriced,s.peak,"
+                           "s.cold,s.compact,s.big,s.light,u.username,u.display_name FROM usage_session s JOIN users u ON u.id=s.user_id WHERE %s "
+                           "ORDER BY s.cost DESC, s.ended DESC LIMIT 20000" % w, a):
+            r = dict(zip(("sid", "tool", "model", "day", "started", "ended", "requests", "inp", "outp", "cache_write", "cache_read", "cost", "unpriced",
+                          "peak", "cold", "compact", "big", "light", "username", "display_name"), tuple(x)))
+            r["id"] = r["sid"][-8:]
+            r["tokens"] = r["inp"] + r["outp"] + r["cache_write"] + r["cache_read"]
+            ctx = r["inp"] + r["cache_write"] + r["cache_read"]
+            r["cache_hit"] = round(r["cache_read"] / ctx, 4) if ctx else 0.0
+            r["minutes"] = max(0, int((r["ended"] - r["started"]) // 60))
+            rows.append(r)
+        tot = {"sessions": len(rows), "peak": max([r["peak"] for r in rows] or [0]), "cost": round(sum(r["cost"] for r in rows), 6),
+               "requests": sum(r["requests"] for r in rows), "avg_requests": round(sum(r["requests"] for r in rows) / len(rows), 1) if rows else 0,
+               "big_sessions": sum(1 for r in rows if r["peak"] > self.BIG_CTX), "cold": sum(r["cold"] for r in rows),
+               "median_peak": sorted(r["peak"] for r in rows)[len(rows) // 2] if rows else 0}
+        return {"sessions": rows[:limit], "hints": self._usage_hints(rows, tot), "totals": tot, "truncated": len(rows) > limit}
+
+    def _usage_hints(self, rows, tot):
+        """[{id, level, title, detail, amount (USD affected), sessions: [sid...]}], biggest first. Thresholds mirror cli/usage.tips."""
+        out, total = [], tot["cost"]
+
+        def add(tid, title, detail, amount, sids):
+            out.append({"id": tid, "level": "warn" if total and amount >= 0.15 * total else "info", "title": title, "detail": detail,
+                        "amount": round(amount, 4), "sessions": [s[-8:] for s in sids][:50], "count": len(sids)})
+        money = lambda v: "$%.2f" % v if v >= 0.01 or not v else "$%.3f" % v
+        cold = [r for r in rows if r["cold"]]
+        if sum(r["cold"] for r in cold) >= 2:
+            add("cold", "Cache rebuilt after idle gaps", "%d requests in %d sessions re-wrote the prompt cache after more than 5 idle minutes. The cache lives about "
+                "5 minutes: send follow-ups in one go, and /compact or /clear before a long break." % (sum(r["cold"] for r in cold), len(cold)),
+                sum(r["cost"] for r in cold) * 0.15, [r["sid"] for r in cold])
+        big = [r for r in rows if r["big"]]
+        if sum(r["big"] for r in big) >= 3:
+            add("big", "Very large context", "%d requests carried more than 150k tokens of context, in %d sessions. Every request re-reads it: use /compact, or start a "
+                "new session when the task changes." % (sum(r["big"] for r in big), len(big)), sum(r["cost"] for r in big), [r["sid"] for r in big])
+        low = [r for r in rows if r["requests"] >= 5 and r["inp"] + r["cache_write"] + r["cache_read"] >= 200000 and r["cache_hit"] < 0.5]
+        if low:
+            add("lowhit", "Low cache hit rate", "%d sessions read less than half of their input from cache. Changing the model, tools or system prompt "
+                "mid-session, or long idle gaps, break the cache." % len(low), sum(r["cost"] for r in low), [r["sid"] for r in low])
+        light = [r for r in rows if r["light"]]
+        if sum(r["light"] for r in light) >= 10:
+            add("light", "Premium model for short replies", "%d requests on an Opus-class model produced under 300 output tokens with a small context. A "
+                "smaller model is usually enough for quick questions." % sum(r["light"] for r in light), sum(r["cost"] for r in light) * 0.5, [r["sid"] for r in light])
+        tiny = [r for r in rows if r["requests"] <= 2]
+        if len(tiny) >= 8:
+            add("tiny", "Many one-shot sessions", "%d sessions have one or two requests. Each starts with a cold cache and re-sends the system prompt and tools; "
+                "keep related questions in one session." % len(tiny), sum(r["cost"] for r in tiny), [r["sid"] for r in tiny])
+        if rows and total >= 1.0:
+            top = max(rows, key=lambda r: r["cost"])
+            if top["cost"] >= 0.4 * total:
+                add("top", "One session dominates the cost", "Session %s (%s) is %s of %s (%d%%). Check whether it is a long-running thread that could be split or "
+                    "compacted." % (top["id"], top["username"], money(top["cost"]), money(total), round(100 * top["cost"] / total)), top["cost"], [top["sid"]])
+        return sorted(out, key=lambda h: -h["amount"])
+
+    def group_member_ids(self, gid):
+        return [r[0] for r in self.db.conn().execute("SELECT user_id FROM group_members WHERE group_id=?", (gid,))]
+
+    def user_groups(self, uid, every=False):
+        """[{id,name,members}] the groups a person belongs to (every=True: all groups, for a site admin)."""
+        q = ("SELECT g.id AS id,g.name AS name,(SELECT COUNT(*) FROM group_members m2 WHERE m2.group_id=g.id) AS members FROM groups g "
+             + ("" if every else "JOIN group_members m ON m.group_id=g.id WHERE m.user_id=? ") + "ORDER BY g.name")
+        return _rows(self.db.conn().execute(q, () if every else (uid,)))
+
+    def usage_query(self, since_day, until_day, uid=None, group_ids=None, tool=None, model=None, user=None):
+        """Usage between two UTC days (YYYY-MM-DD, inclusive) of one person (`uid`) or of everybody in the groups `group_ids` (each person once,
+        even when in several of them). tool / model / user (username) narrow it. -> totals, daily, by_model, by_tool, by_user, by_group, options."""
+        c = self.db.conn()
+        if group_ids is not None:
+            if not group_ids:
+                return None
+            ph = ",".join("?" * len(group_ids))
+            scope, sa = "d.user_id IN (SELECT user_id FROM group_members WHERE group_id IN (%s))" % ph, list(group_ids)
+        else:
+            scope, sa = "d.user_id=?", [uid]
+        base = "d.day>=? AND d.day<=? AND " + scope
+        ba = [since_day, until_day] + sa
+        extra, ea = "", []
+        for col, v in (("d.tool", tool), ("d.model", model)):
+            if v:
+                extra += " AND %s=?" % col
+                ea.append(v)
+        if user:
+            extra += " AND d.user_id IN (SELECT id FROM users WHERE username=?)"
+            ea.append(user)
+        w, wa = base + extra, ba + ea
+        agg, fix = self.USAGE_AGG, self._usage_fix
+
+        def rows(sel, frm, where, args, tail):
+            return [fix(x) for x in c.execute("SELECT %s, %s FROM usage_daily d %s WHERE %s %s" % (sel, agg, frm, where, tail), args)]
+
+        daily = rows("d.day AS date", "", w, wa, "GROUP BY d.day ORDER BY d.day")
+        by_model = rows("d.tool AS tool, d.model AS model", "", w, wa, "GROUP BY d.tool, d.model")
+        by_user = rows("u.username AS username, u.display_name AS display_name", "JOIN users u ON u.id=d.user_id", w, wa, "GROUP BY u.id, u.username, u.display_name")
+        # totals, by_tool and the people count come from rows already read: no extra statements
+        out = {"totals": fix(self._usage_sum(daily)), "daily": daily, "by_model": by_model, "by_user": by_user, "people": len(by_user),
+               "by_tool": [fix(x) for x in self._usage_regroup(by_model, "tool")]}
+        if group_ids is not None:
+            ph = ",".join("?" * len(group_ids))
+            gw, ga = "d.day>=? AND d.day<=? AND g.id IN (%s)%s" % (ph, extra), [since_day, until_day] + list(group_ids) + ea
+            out["by_group"] = rows("g.id AS id, g.name AS name, (SELECT COUNT(*) FROM group_members m2 WHERE m2.group_id=g.id) AS members",
+                                   "JOIN group_members m ON m.user_id=d.user_id JOIN groups g ON g.id=m.group_id", gw, ga, "GROUP BY g.id, g.name")
+            out["members"] = _rows(c.execute(
+                "SELECT DISTINCT u.username AS username, u.display_name AS display_name FROM group_members m JOIN users u ON u.id=m.user_id "
+                "WHERE m.group_id IN (%s) ORDER BY u.username" % ph, list(group_ids)))
+        opt = c.execute("SELECT DISTINCT d.tool,d.model FROM usage_daily d WHERE %s" % base, ba).fetchall()
+        out["options"] = {"tools": sorted({r[0] for r in opt}), "models": sorted({r[1] for r in opt})}
+        return out
+
     def version_sync(self, pid, version, manifest, sha="", file=None):
         """Add a version from the git index if new; refresh its manifest if it changed. -> True when new."""
         with self.lock:

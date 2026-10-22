@@ -17,7 +17,7 @@ const subs = new Set();
 const store = { me: null, route: location.hash.slice(1) || "/", toast: null };
 const set = (p) => { Object.assign(store, p); subs.forEach((f) => f({})); };
 const useStore = () => { const [, f] = useState({}); useEffect(() => { subs.add(f); return () => subs.delete(f); }, []); return store; };
-addEventListener("hashchange", () => { set({ route: location.hash.slice(1) || "/" }); scrollTo(0, 0); });
+addEventListener("hashchange", () => { const old = store.route.split("?")[0], now = location.hash.slice(1) || "/"; set({ route: now }); if (old !== now.split("?")[0]) scrollTo(0, 0); });   // a filter / tab / group click on the same page keeps the scroll position
 let tt; const toast = (m, err) => { set({ toast: { m, err } }); clearTimeout(tt); tt = setTimeout(() => set({ toast: null }), 3200); };
 const FAVICON0 = (document.getElementById("favicon") || {}).href;
 function setFavicon(url) {
@@ -902,7 +902,7 @@ const delta = (a, b) => { if (!b) return a ? { t: "new", c: "green" } : null; co
 const Kpi = ({ label, value, prev, invert }) => { const d = delta(value, prev);
   return html`<div class="card stat"><span>${label}</span><b>${fmt(value)}</b>${d ? html`<span class=${"badge " + (invert ? (d.c === "green" ? "red" : "green") : d.c)}>${d.t} vs prior</span>` : html`<span class="xs mut3">no prior data</span>`}</div>`; };
 
-function LineChart({ daily, series, colors = KC }) {
+function LineChart({ daily, series, colors = KC, f = fmt, labels = {} }) {
   const W = 760, H = 220, P = { l: 34, r: 10, t: 10, b: 24 }, n = daily.length;
   const mx = Math.max(1, ...daily.map((d) => Math.max(...series.map((k) => d[k] || 0))));
   const nice = Math.ceil(mx / 4) * 4 || 4, x = (i) => P.l + (n < 2 ? 0 : i * (W - P.l - P.r) / (n - 1)), y = (v) => P.t + (H - P.t - P.b) * (1 - v / nice);
@@ -910,21 +910,21 @@ function LineChart({ daily, series, colors = KC }) {
   const move = (e) => { const r = e.currentTarget.getBoundingClientRect(); const px = (e.clientX - r.left) / r.width * W; setHv(Math.max(0, Math.min(n - 1, Math.round((px - P.l) / ((W - P.l - P.r) / Math.max(1, n - 1)))))); };
   const step = Math.ceil(n / 6);
   return html`<div style="position:relative"><svg viewBox=${`0 0 ${W} ${H}`} style="width:100%;height:auto;display:block" role="img" aria-label="Daily activity chart" onMouseMove=${move} onMouseLeave=${() => setHv(null)}>
-    ${[0, 1, 2, 3, 4].map((i) => html`<g key=${i}><line x1=${P.l} x2=${W - P.r} y1=${y(nice * i / 4)} y2=${y(nice * i / 4)} stroke="var(--sep)" stroke-width="1"/><text x=${P.l - 6} y=${y(nice * i / 4) + 4} text-anchor="end" font-size="11" fill="var(--fg-3)">${fmt(Math.round(nice * i / 4))}</text></g>`)}
+    ${[0, 1, 2, 3, 4].map((i) => html`<g key=${i}><line x1=${P.l} x2=${W - P.r} y1=${y(nice * i / 4)} y2=${y(nice * i / 4)} stroke="var(--sep)" stroke-width="1"/><text x=${P.l - 6} y=${y(nice * i / 4) + 4} text-anchor="end" font-size="11" fill="var(--fg-3)">${f(nice * i / 4)}</text></g>`)}
     ${daily.map((d, i) => i % step === 0 ? html`<text key=${i} x=${x(i)} y=${H - 6} text-anchor="middle" font-size="11" fill="var(--fg-3)">${d.date.slice(5)}</text>` : null)}
     ${series.map((k) => html`<g key=${k}><path d=${daily.map((d, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(d[k] || 0).toFixed(1)}`).join("")} fill="none" stroke=${colors[k]} stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
-      ${hv !== null && html`<circle cx=${x(hv)} cy=${y(daily[hv][k] || 0)} r="4" fill=${colors[k]} stroke="var(--surface)" stroke-width="2"/>`}</g>`)}
+      ${n < 3 && daily.map((d, i) => html`<circle key=${i} cx=${x(i)} cy=${y(d[k] || 0)} r="3.5" fill=${colors[k]}/>`)}${hv !== null && html`<circle cx=${x(hv)} cy=${y(daily[hv][k] || 0)} r="4" fill=${colors[k]} stroke="var(--surface)" stroke-width="2"/>`}</g>`)}
     ${hv !== null && html`<line x1=${x(hv)} x2=${x(hv)} y1=${P.t} y2=${H - P.b} stroke="var(--fg-3)" stroke-dasharray="3 3"/>`}</svg>
-    ${hv !== null && html`<div class="tip" style=${`left:${Math.min(78, Math.max(2, x(hv) / W * 100))}%`}><b>${daily[hv].date}</b>${series.map((k) => html`<div key=${k}><i style=${"background:" + colors[k]}></i>${k} <b>${daily[hv][k] || 0}</b></div>`)}</div>`}
-    <div class="row xs mut" style="gap:16px;margin-top:6px">${series.map((k) => html`<span key=${k}><i class="dot" style=${"background:" + colors[k]}></i>${k}</span>`)}</div></div>`;
+    ${hv !== null && html`<div class="tip" style=${`left:${Math.min(78, Math.max(2, x(hv) / W * 100))}%`}><b>${daily[hv].date}</b>${series.map((k) => html`<div key=${k}><i style=${"background:" + colors[k]}></i>${labels[k] || k} <b>${f(daily[hv][k] || 0)}</b></div>`)}</div>`}
+    <div class="row xs mut" style="gap:16px;margin-top:6px">${series.map((k) => html`<span key=${k}><i class="dot" style=${"background:" + colors[k]}></i>${labels[k] || k}</span>`)}</div></div>`;
 }
-const Bars = ({ items, color = "var(--blue)", link }) => { const mx = Math.max(1, ...items.map((i) => i.count));
-  return items.length ? html`<div>${items.map((i) => html`<div class="hb" key=${i.name}><span class="hl">${link ? html`<a href=${"#/package/" + i.name}>${i.name}</a>` : i.name}</span><span class="ht"><i style=${`width:${i.count / mx * 100}%;background:${color}`}></i></span><span class="hn">${fmt(i.count)}</span></div>`)}</div>` : html`<p class="mut sm">No data in this period.</p>`; };
-const Donut = ({ items }) => { const tot = items.reduce((a, b) => a + b.count, 0); if (!tot) return html`<p class="mut sm">No data in this period.</p>`;
+const Bars = ({ items, color = "var(--blue)", link, f = fmt }) => { const mx = Math.max(1, ...items.map((i) => i.count));
+  return items.length ? html`<div>${items.map((i) => html`<div class="hb" key=${i.name}><span class="hl">${link ? html`<a href=${"#/package/" + i.name}>${i.name}</a>` : i.name}</span><span class="ht"><i style=${`width:${i.count / mx * 100}%;background:${color}`}></i></span><span class="hn">${f(i.count)}</span></div>`)}</div>` : html`<p class="mut sm">No data in this period.</p>`; };
+const Donut = ({ items, f = fmt }) => { const tot = items.reduce((a, b) => a + b.count, 0); if (!tot) return html`<p class="mut sm">No data in this period.</p>`;
   const pal = ["var(--blue)", "var(--green)", "var(--orange)", "var(--red)", "var(--fg-3)"]; let acc = 0, R = 42, C = 2 * Math.PI * R;
   return html`<div class="row" style="gap:20px;flex-wrap:nowrap"><svg viewBox="0 0 100 100" width="120" height="120" style="flex:none;transform:rotate(-90deg)" role="img" aria-label="Breakdown">
     ${items.map((it, i) => { const len = it.count / tot * C, el = html`<circle key=${it.name} cx="50" cy="50" r=${R} fill="none" stroke=${pal[i % 5]} stroke-width="14" stroke-dasharray=${`${len} ${C - len}`} stroke-dashoffset=${-acc}/>`; acc += len; return el; })}</svg>
-    <div class="sm" style="min-width:0">${items.map((it, i) => html`<div key=${it.name}><i class="dot" style=${"background:" + pal[i % 5]}></i>${it.name} <b>${Math.round(it.count / tot * 100)}%</b> <span class="mut3">${fmt(it.count)}</span></div>`)}</div></div>`; };
+    <div class="sm" style="min-width:0">${items.map((it, i) => html`<div key=${it.name}><i class="dot" style=${"background:" + pal[i % 5]}></i>${it.name} <b>${Math.round(it.count / tot * 100)}%</b> <span class="mut3">${f(it.count)}</span></div>`)}</div></div>`; };
 
 const OS_PAL = ["var(--blue)", "var(--green)", "var(--orange)", "var(--red)", "var(--fg-3)"];
 const osColors = (names) => Object.fromEntries(names.map((n, i) => [n, OS_PAL[i % 5]]));
@@ -993,6 +993,123 @@ function Dashboard() {
         : html`<${Empty} t="No events match" d="Widen the period or clear a filter." />`}</div>`)}</div>`;
 }
 
+// ---------- usage (tokens and estimated cost, per person and per group; uploaded by the CLI after each answer turn)
+const USAGE_KEYS = ["scope", "group", "tool", "model", "user"];
+const usageParams = () => { const q = new URLSearchParams((store.route.split("?")[1]) || ""); const o = { days: +q.get("days") || 30, from: q.get("from") || "", to: q.get("to") || "", tab: q.get("tab") || "summary", rank: q.get("rank") || "cost", range: ["today", "month"].includes(q.get("range")) ? q.get("range") : "" }; USAGE_KEYS.forEach((k) => (o[k] = q.get(k) || "")); o.scope = o.scope === "groups" ? "groups" : "me"; return o; };
+const usageHash = (o) => { const q = new URLSearchParams(); if (o.range) q.set("range", o.range); else if (o.from || o.to) { o.from && q.set("from", o.from); o.to && q.set("to", o.to); } else if (o.days !== 30) q.set("days", o.days); USAGE_KEYS.forEach((k) => o[k] && !(k === "scope" && o[k] === "me") && q.set(k, o[k])); if (o.tab !== "summary") q.set("tab", o.tab); if (o.rank !== "cost") q.set("rank", o.rank); const t = q.toString(); return "/usage" + (t ? "?" + t : ""); };
+const utcDay = (d = new Date()) => d.toISOString().slice(0, 10);
+const RANGES = { today: () => [utcDay(), utcDay()], month: () => [utcDay().slice(0, 8) + "01", utcDay()] };   // resolved on every load, so a saved link keeps meaning "today"
+const usd = (v) => "$" + (v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v.toFixed(3));
+const RANKS = [["cost", "Cost"], ["tokens", "Tokens"], ["requests", "Requests"], ["inp", "Input"], ["outp", "Output"], ["cache_write", "Cache write"], ["cache_read", "Cache read"], ["cache_hit", "Cache rate"]];
+const UCOL = { cost: "var(--orange)", tokens: "var(--blue)", requests: "var(--green)", inp: "var(--blue)", outp: "var(--blue)", cache_write: "var(--orange)", cache_read: "var(--green)", cache_hit: "var(--green)" };
+const usdAxis = (v) => "$" + (v >= 100 ? Math.round(v) : v >= 10 ? v.toFixed(0) : v.toFixed(1));
+const ufmt = (k) => (k === "cost" ? usd : k === "cache_hit" ? (v) => Math.round(v * 100) + "%" : fmt);
+const uval = (r, k) => (k === "cost" ? usd(r.cost || 0) : k === "cache_hit" ? Math.round((r.cache_hit || 0) * 100) + "%" : fmt(r[k] || 0));
+
+// a tiny trend line for a KPI card: one value per day, newest on the right
+function Spark({ vals, color }) {
+  const n = vals.length; if (!n) return null; const W = 120, H = 34, mx = Math.max(1e-9, ...vals), x = (i) => (n < 2 ? W - 4 : 3 + i * (W - 7) / (n - 1)), y = (v) => H - 4 - (H - 8) * v / mx;
+  const line = vals.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+  return html`<svg class="spark" viewBox=${`0 0 ${W} ${H}`} aria-hidden="true" style="width:100%;height:auto;display:block;margin-top:6px">${n > 1 && html`<path d=${line + `L${x(n - 1)},${H}L${x(0)},${H}Z`} fill=${color} fill-opacity=".14"/>`}${n > 1 && html`<path d=${line} fill="none" stroke=${color} stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>`}<circle cx=${x(n - 1)} cy=${y(vals[n - 1])} r="2.6" fill=${color}/></svg>`;
+}
+
+function UsageTable({ rows, name, sub, rank, onRank, empty }) {
+  const sorted = [...(rows || [])].sort((a, b) => (b[rank] || 0) - (a[rank] || 0)), mx = Math.max(1e-9, ...sorted.map((r) => r[rank]));
+  if (!sorted.length) return html`<p class="mut sm">${empty || "No usage in this view."}</p>`;
+  return html`<div class="tscroll"><table><thead><tr><th>#</th><th>${name.label}</th>${RANKS.map(([k, l]) => html`<th key=${k} style="text-align:right"><button class=${"chip" + (rank === k ? " on" : "")} aria-pressed=${rank === k} onClick=${() => onRank(k)} title=${"Rank by " + l.toLowerCase()}>${l}${rank === k ? " ↓" : ""}</button></th>`)}<th style="width:22%"></th></tr></thead>
+    <tbody>${sorted.map((r, i) => html`<tr key=${name.key(r)}><td class="mut sm">${i + 1}</td><td>${name.cell(r)}${sub ? html`<div class="xs mut3">${sub(r)}</div>` : ""}</td>${RANKS.map(([k]) => html`<td key=${k} class=${k === rank ? "" : "mut"} style="text-align:right;font-variant-numeric:tabular-nums">${uval(r, k)}</td>`)}<td><span class="ht"><i style=${`width:${Math.max(2, r[rank] / mx * 100)}%;background:${UCOL[rank]}`}></i></span></td></tr>`)}</tbody></table></div>`;
+}
+
+
+const pk = (n) => (n >= 1e3 ? Math.round(n / 1e3) + "k" : String(n || 0));
+const dur = (m) => (m < 1 ? "<1m" : m < 60 ? m + "m" : m < 1440 ? Math.floor(m / 60) + "h" + String(m % 60).padStart(2, "0") + "m" : Math.floor(m / 1440) + "d");
+const HINT_ICON = { warn: "var(--orange)", info: "var(--blue)" };
+
+function UsageHints({ hints, onOpen }) {
+  if (!hints.length) return html`<p class="mut sm">No hints: nothing stands out in this view.</p>`;
+  return html`<div class="stack" style="gap:10px">${hints.map((h) => html`<div class="card" key=${h.id} style=${`border-left:4px solid ${HINT_ICON[h.level]};padding:14px 16px`}>
+    <div class="row" style="gap:10px"><b>${h.title}</b><span class="sp"></span>${h.amount ? html`<span class="badge">${usd(h.amount)} affected</span>` : ""}<span class="xs mut3">${h.count} ${h.count === 1 ? "session" : "sessions"}</span></div>
+    <p class="sm mut" style="margin:6px 0 0">${h.detail}</p></div>`)}</div>`;
+}
+
+function UsageSessions({ qs, rank, f, go, who }) {
+  const [tick] = useState(0); const [by, setBy] = useState("cost");
+  const d = useLoad(() => api("/usage/sessions?" + qs + "&limit=100"), [qs, tick]);
+  if (d.loading && !d.d) return html`<${Skels} n=3 />`; if (d.e) return html`<${Err} e=${d.e} />`;
+  const D = d.d, t = D.totals || {}, rows = [...D.sessions].sort((a, b) => b[by] - a[by]), mx = Math.max(1, ...rows.map((r) => r.peak));
+  const col = (k, l) => html`<th style="text-align:right"><button class=${"chip" + (by === k ? " on" : "")} aria-pressed=${by === k} onClick=${() => setBy(k)}>${l}${by === k ? " ↓" : ""}</button></th>`;
+  return html`<div class="stack">
+    <div class="kpis">${[["Sessions", fmt(t.sessions || 0), "in this view"], ["Peak context", pk(t.peak || 0), `median ${pk(t.median_peak || 0)}`], ["Over 150k context", String(t.big_sessions || 0), "sessions to compact"], ["Avg requests", String(t.avg_requests || 0), "per session"]]
+      .map(([l, v, n]) => html`<div class="card stat" key=${l}><span>${l}</span><b>${v}</b><span class="xs mut3">${n}</span></div>`)}</div>
+    <div class="card stack"><div class="row"><h3>Usage hints</h3><span class="sp"></span><span class="xs mut3">from the numbers of the sessions below</span></div><${UsageHints} hints=${D.hints || []} /></div>
+    <div class="card stack"><div class="row"><h3>Sessions</h3><span class="sp"></span><span class="xs mut3">${D.truncated ? "top 100 shown · " : ""}no titles or folders leave a machine, a session is its short id</span></div>
+      ${rows.length ? html`<div class="tscroll"><table><thead><tr><th>Session</th>${f.scope === "groups" ? html`<th>Person</th>` : ""}<th>Model</th>${col("cost", "Cost")}${col("peak", "Peak context")}${col("requests", "Requests")}${col("cache_hit", "Cache hit")}${col("minutes", "Length")}<th>Flags</th></tr></thead>
+        <tbody>${rows.map((r) => html`<tr key=${r.sid}><td><span class="mono sm">${r.id}</span><div class="xs mut3">${r.day} · ${r.tool}</div></td>${f.scope === "groups" ? html`<td>${who(r)}</td>` : ""}<td class="mono xs" style="max-width:9rem;overflow-wrap:anywhere">${r.model}</td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums">${usd(r.cost)}</td>
+          <td style="text-align:right"><div class="row" style="gap:6px;justify-content:flex-end;flex-wrap:nowrap"><span class="ht" style="width:3.2rem"><i style=${`width:${Math.max(2, r.peak / mx * 100)}%;background:${r.peak > 150000 ? "var(--red)" : "var(--blue)"}`}></i></span><b class=${r.peak > 150000 ? "" : "mut"} style="font-variant-numeric:tabular-nums">${pk(r.peak)}</b></div></td>
+          <td style="text-align:right">${r.requests}</td><td style="text-align:right" class=${r.cache_hit < 0.5 ? "" : "mut"}>${Math.round(r.cache_hit * 100)}%</td><td style="text-align:right" class="mut">${dur(r.minutes)}</td>
+          <td class="xs" style="white-space:nowrap">${r.big ? html`<span class="badge red" title=${r.big + " requests over 150k tokens of context"}>big ${r.big}</span>` : ""}${r.cold ? html` <span class="badge orange" title=${r.cold + " cache rebuilds after an idle gap"}>cold ${r.cold}</span>` : ""}${r.compact ? html` <span class="badge green" title="context was compacted">compact</span>` : ""}</td></tr>`)}</tbody></table></div>`
+        : html`<${Empty} t="No sessions yet" d="Sessions appear after the next answer turn of Claude Code, or run “aihub usage-sync” on your machine." />`}</div></div>`;
+}
+
+function UsageHub() {
+  const { me } = useStore(); const f = usageParams(); const [tick, setTick] = useState(0); const [open, setOpen] = useState(false); const [nd, setNd] = useState(String(f.days));
+  const go = (patch) => nav(usageHash({ ...f, ...patch }));
+  useEffect(() => setNd(String(f.days)), [f.days]);
+  useEffect(() => { const t = setInterval(() => setTick((x) => x + 1), 60000); return () => clearInterval(t); }, []);
+  const signed = !!(me || tok());                          // the token is there at once; `me` arrives a round trip later and must not delay the first request
+  const gl = useLoad(() => signed ? api("/usage/groups") : Promise.resolve(null), [signed]);
+  const ser = new URLSearchParams(); ser.set("scope", f.scope); if (f.range) { const [a, b] = RANGES[f.range](); ser.set("from", a); ser.set("to", b); } else if (f.from || f.to) { f.from && ser.set("from", f.from); f.to && ser.set("to", f.to); } else ser.set("days", f.days); USAGE_KEYS.slice(1).forEach((k) => f[k] && ser.set(k, f[k]));
+  const qs = ser.toString();
+  const d = useLoad(() => signed ? api("/usage?" + qs) : Promise.resolve(null), [signed, qs, tick]);
+  const one = f.range === "today" || (!!f.from && f.from === f.to);                   // a single day has no trend: the sparklines then show the last 7 days
+  const q7 = new URLSearchParams(ser); q7.delete("from"); q7.delete("to"); q7.set("days", 7);
+  const wk = useLoad(() => signed && one ? api("/usage?" + q7.toString()) : Promise.resolve(null), [signed, one, q7.toString(), tick]);
+  if (!signed) return html`<${Empty} t="Sign in to see usage" d="Usage is tied to your account. Sign in, then run “aihub login” on your machine." />`;
+  const D = d.d && (d.d.scope || f.scope) === f.scope ? d.d : null;       // the answer for the OTHER scope (Me <-> My groups) lacks by_group etc.: wait for the new one instead of crashing
+  const t = (D && D.totals) || {}, o = (D && D.options) || {}, groups = (gl.d && gl.d.groups) || [], custom = !f.range && !!(f.from || f.to), preset = !f.range && !custom && [7, 30, 90, 365].includes(f.days);
+  const picked = f.group ? f.group.split(",").filter(Boolean) : [];
+  const toggle = (id) => { const s = String(id); go({ group: (picked.includes(s) ? picked.filter((x) => x !== s) : [...picked, s]).join(",") }); };
+  const sel = (k, label, opts, any) => html`<select class="field" aria-label=${label} value=${f[k]} onChange=${(e) => go({ [k]: e.target.value })}><option value="">${any}</option>${opts.map((x) => html`<option value=${x} key=${x} selected=${x === f[k]}>${x}</option>`)}</select>`;
+  const who = (r) => r.display_name && r.display_name !== r.username ? r.display_name : r.username;
+  const exportCsv = () => saveBlob(new Blob([["date,requests,input,output,cache_write,cache_read,cost", ...D.daily.map((x) => [x.date, x.requests, x.inp, x.outp, x.cache_write, x.cache_read, x.cost].join(","))].join("\n")], { type: "text/csv" }), `token-usage-${D.filters.from}_${D.filters.to}.csv`);
+  const active = USAGE_KEYS.slice(2).filter((k) => f[k]);
+  const days = D && D.daily ? D.daily : [], last = days[days.length - 1], td = last && D.filters.to === utcDay() && last.date === D.filters.to ? last : null;
+  const trend = one && wk.d && wk.d.daily ? wk.d.daily : days, yd = one && trend.length > 1 ? trend[trend.length - 2] : null;
+  const tabs = f.scope === "groups" ? [["summary", "Summary"], ["sessions", "Sessions & hints"], ["models", "Models"], ["people", "People"], ["groups", "Groups"]] : [["summary", "Summary"], ["sessions", "Sessions & hints"], ["models", "Models"]];
+  const tab = tabs.some(([k]) => k === f.tab) ? f.tab : "summary";
+  const modelRows = (D ? D.by_model : []).map((m) => ({ ...m, key: m.tool + "/" + m.model }));
+  return html`<div class="stack"><div class="row"><h1>Usage</h1><span class="sp"></span>
+      <div class="seg" role="group" aria-label="Whose usage"><button class=${f.scope === "me" ? "on" : ""} onClick=${() => go({ scope: "me", group: "", user: "", tab: "summary" })}>Me</button><button class=${f.scope === "groups" ? "on" : ""} onClick=${() => go({ scope: "groups", tab: "summary" })} disabled=${!groups.length && !gl.loading} title=${groups.length ? "" : "You are not in a group"}>My groups</button></div></div>
+    <div class="row"><div class="seg" role="group" aria-label="Period"><button class=${f.range === "today" ? "on" : ""} onClick=${() => go({ range: "today", from: "", to: "" })}>Today</button><button class=${f.range === "month" ? "on" : ""} onClick=${() => go({ range: "month", from: "", to: "" })}>This month</button>${[7, 30, 90, 365].map((n) => html`<button key=${n} class=${preset && f.days === n ? "on" : ""} onClick=${() => go({ days: n, range: "", from: "", to: "" })}>${n === 365 ? "1y" : n + "d"}</button>`)}<button class=${!f.range && !preset ? "on" : ""} onClick=${() => setOpen(!open)} aria-expanded=${open}>Custom</button></div>
+      ${!f.range && (open || !preset) && html`<form class="row" style="gap:6px" onSubmit=${(e) => { e.preventDefault(); const n = parseInt(nd, 10); if (n >= 1 && n <= 366) go({ days: n, range: "", from: "", to: "" }); }}><label class="sm mut" for="ud">Last</label><input id="ud" class="field" type="number" min="1" max="366" value=${nd} onInput=${(e) => setNd(e.target.value)} style="width:5.5rem" /><span class="sm mut">days</span><button class="btn sec sm" type="submit">Apply</button>
+        <label class="sm mut" for="uf">or from</label><input id="uf" class="field" type="date" value=${f.from || (D && D.filters.from) || ""} max=${D && D.filters.to} onChange=${(e) => go({ from: e.target.value, range: "", to: f.to || (D && D.filters.to) || "" })} /><label class="sm mut" for="ut">to</label><input id="ut" class="field" type="date" value=${f.to || (D && D.filters.to) || ""} onChange=${(e) => go({ to: e.target.value, range: "", from: f.from || (D && D.filters.from) || "" })} /></form>`}
+      <span class="sp"></span><button class="btn sec sm" onClick=${() => setTick(tick + 1)}>Refresh</button><button class="btn sec sm" onClick=${exportCsv} disabled=${!D || !D.daily}>Export CSV</button></div>
+    ${f.scope === "groups" && html`<div class="row" role="group" aria-label="Groups" style="gap:6px"><span class="sm mut">Groups</span><button class=${!picked.length ? "chip on" : "chip"} aria-pressed=${!picked.length} onClick=${() => go({ group: "" })}>All my groups</button>${groups.map((g) => html`<button key=${g.id} class=${picked.includes(String(g.id)) ? "chip on" : "chip"} aria-pressed=${picked.includes(String(g.id))} onClick=${() => toggle(g.id)} title=${g.members + " members"}>${g.name}<i>${g.members} ${g.members === 1 ? "member" : "members"}</i></button>`)}</div>`}
+    <div class="row filters" role="group" aria-label="Filters">${sel("tool", "Tool", o.tools || [], "Any tool")}${sel("model", "Model", o.models || [], "Any model")}${f.scope === "groups" && sel("user", "Person", ((D && D.members) || []).map((m) => m.username), "Anyone")}</div>
+    ${active.length > 0 && html`<div class="row" style="gap:8px" aria-label="Active filters">${active.map((k) => html`<button key=${k} class="chip" onClick=${() => go({ [k]: "" })}>${k}: <b>${f[k]}</b> ✕</button>`)}</div>`}
+    ${d.loading && D && html`<div class="ubar" role="progressbar" aria-label="Loading"></div>`}
+    ${!D && !d.e ? html`<${Skels} n=4 />` : d.e ? html`<${Err} e=${d.e} />` : D && D.empty ? html`<${Empty} t="No groups yet" d="You are not in a group. Ask a group owner to add you, or look at your own usage with “Me”." />` : D && html`<div class="stack" style=${d.loading ? "opacity:.55;transition:opacity .15s" : "transition:opacity .15s"} aria-busy=${!!d.loading}>
+      <div class="kpis">${[["Est. cost", usd(t.cost || 0), td && days.length > 1 ? `today ${usd(td.cost)}` : yd ? `yesterday ${usd(yd.cost)}` : "list-price estimate", "cost", "var(--orange)"], ["Tokens", fmt(t.tokens || 0), "input + output + cache", "tokens", "var(--blue)"], ["Requests", fmt(t.requests || 0), td && days.length > 1 ? `today ${fmt(td.requests)}` : yd ? `yesterday ${fmt(yd.requests)}` : "model calls", "requests", "var(--green)"],
+        f.scope === "groups" ? ["Active people", String(D.people || 0), "with usage in this view", null] : ["Per request", t.requests ? usd(t.cost / t.requests) : "–", t.requests ? `${fmt(Math.round(t.tokens / t.requests))} tokens each` : "no requests", null]].map(([l, v, n, k, c]) => html`<div class="card stat" key=${l}><span>${l}</span><b>${v}</b><span class="xs mut3">${n}</span>${k && html`<${Spark} vals=${trend.map((x) => x[k] || 0)} color=${c} />`}</div>`)}</div>
+      <div class="kpis" aria-label="Token breakdown">${[["Input", "inp", "var(--blue)", "fresh input tokens"], ["Output", "outp", "var(--blue)", "generated tokens"], ["Cache write", "cache_write", "var(--orange)", "input stored in the cache"], ["Cache read", "cache_read", "var(--green)", "input served from the cache"], ["Cache rate", "cache_hit", "var(--green)", "cache read ÷ all input"]]
+        .map(([l, k, c, n]) => html`<div class="card stat" key=${k}><span>${l}</span><b>${uval(t, k)}</b><span class="xs mut3">${k === "cache_hit" ? n : `${t.tokens ? Math.round((t[k] || 0) / t.tokens * 100) : 0}% of tokens · ${n}`}</span><${Spark} vals=${trend.map((x) => x[k] || 0)} color=${c} /></div>`)}</div>
+      <p class="xs mut3">${D.filters.from} to ${D.filters.to} · UTC days · cost is an estimate from list prices${t.unpriced ? ` · ${fmt(t.unpriced)} requests use a model with no known price` : ""}</p>
+      <div class="seg" role="tablist" style="align-self:flex-start">${tabs.map(([k, l]) => html`<button key=${k} role="tab" aria-selected=${tab === k} class=${tab === k ? "on" : ""} onClick=${() => go({ tab: k })}>${l}</button>`)}</div>
+      ${tab === "summary" && html`<div class="stack"><div class="card stack"><div class="row"><h3>Per day</h3><span class="sp"></span><span class="xs mut3">estimated cost</span></div>${days.length && t.requests ? html`<${LineChart} daily=${days} series=${["cost"]} colors=${{ cost: "var(--orange)" }} f=${usdAxis} labels=${{ cost: "Est. cost" }} />` : html`<${Empty} t="No usage in this view" d="Widen the period, clear a filter, or run “aihub usage-sync” on your machine." />`}</div>
+        <div class="card stack"><h3>Tokens per day</h3>${days.length && t.requests ? html`<${LineChart} daily=${days} series=${["inp", "outp", "cache_write", "cache_read"]} colors=${{ inp: "var(--blue)", outp: "var(--red)", cache_write: "var(--orange)", cache_read: "var(--green)" }} labels=${{ inp: "Input", outp: "Output", cache_write: "Cache write", cache_read: "Cache read" }} />` : html`<p class="mut sm">No data.</p>`}</div>
+        <div class="two"><div class="card stack"><h3>Top models</h3><${Bars} items=${[...modelRows].sort((a, b) => b[f.rank] - a[f.rank]).slice(0, 6).map((m) => ({ name: m.model, count: m[f.rank] }))} color=${UCOL[f.rank]} f=${ufmt(f.rank)} /></div>
+          <div class="card stack"><h3>By tool</h3><${Donut} items=${(D.by_tool || []).map((x) => ({ name: x.tool, count: x[f.rank === "cache_hit" ? "cost" : f.rank] || 0 }))} f=${ufmt(f.rank === "cache_hit" ? "cost" : f.rank)} /></div></div>
+        ${f.scope === "groups" && html`<div class="two"><div class="card stack"><h3>Top people</h3><${Bars} items=${[...(D.by_user || [])].sort((a, b) => b[f.rank] - a[f.rank]).slice(0, 6).map((u) => ({ name: who(u), count: u[f.rank] }))} color="var(--green)" f=${ufmt(f.rank)} /></div>
+          <div class="card stack"><h3>Groups</h3><${Bars} items=${[...(D.by_group || [])].sort((a, b) => b[f.rank] - a[f.rank]).slice(0, 6).map((g) => ({ name: g.name, count: g[f.rank] }))} color="var(--blue)" f=${ufmt(f.rank)} /></div></div>`}
+        <div class="row" style="gap:6px"><span class="sm mut">Rank by</span>${RANKS.map(([k, l]) => html`<button key=${k} class=${f.rank === k ? "chip on" : "chip"} aria-pressed=${f.rank === k} onClick=${() => go({ rank: k })}>${l}</button>`)}</div></div>`}
+      ${tab === "sessions" && html`<${UsageSessions} qs=${qs} rank=${f.rank} f=${f} go=${go} who=${who} />`}
+      ${tab === "models" && html`<div class="card stack"><div class="row"><h3>Model breakdown</h3><span class="sp"></span><span class="xs mut3">click a column to rank</span></div><${UsageTable} rows=${modelRows} rank=${f.rank} onRank=${(k) => go({ rank: k })} name=${{ label: "Model", key: (r) => r.key, cell: (r) => html`<span class="mono sm">${r.model}</span>` }} sub=${(r) => r.tool} /></div>`}
+      ${tab === "people" && html`<div class="card stack"><div class="row"><h3>People</h3><span class="sp"></span><span class="xs mut3">ranked within the chosen groups, each person once</span></div><${UsageTable} rows=${D.by_user || []} rank=${f.rank} onRank=${(k) => go({ rank: k })} name=${{ label: "Person", key: (r) => r.username, cell: (r) => html`<a href=${"#" + usageHash({ ...f, user: r.username, tab: "summary" })}>${who(r)}</a>` }} sub=${(r) => (r.display_name && r.display_name !== r.username ? r.username : "")} /></div>`}
+      ${tab === "groups" && html`<div class="card stack"><div class="row"><h3>Groups</h3><span class="sp"></span><span class="xs mut3">a person in two groups counts in both rows, once in the totals</span></div><${UsageTable} rows=${D.by_group || []} rank=${f.rank} onRank=${(k) => go({ rank: k })} name=${{ label: "Group", key: (r) => r.id, cell: (r) => html`<a href=${"#" + usageHash({ ...f, group: String(r.id), tab: "people" })}>${r.name}</a>` }} sub=${(r) => r.members + " members"} /></div>`}
+    </div>`}</div>`;
+}
+
 // ---------- shell
 function App() {
   const s = useStore(); const path = s.route.split("?")[0], seg = path.split("/").filter(Boolean);
@@ -1026,11 +1143,11 @@ function App() {
   const on = (k) => (seg[0] === k ? "on" : "");
   const br = s.brand || {}, ct = br.contact || {};
   const page = { "": html`<${Home} />`, browse: html`<${Browse} key=${s.route} />`, package: html`<${Package} name=${seg[1]} key=${seg[1]} />`, rankings: html`<${Rankings} />`, docs: html`<${Docs} slug=${seg[1]} key=${seg[1]} />`, start: html`<${Start} />`,
-    login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, knowledge: html`<${Knowledge} />`, dashboard: html`<${Dashboard} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
+    login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, knowledge: html`<${Knowledge} />`, dashboard: html`<${Dashboard} />`, usage: html`<${UsageHub} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
   return html`<div><a class="skip" href="#/" onClick=${(e) => { e.preventDefault(); const m = document.getElementById("main"); if (m) m.focus(); }}>Skip to content</a>${br.announcement && html`<div class="announce" role="status" dangerouslySetInnerHTML=${{ __html: br.announcement }}></div>`}<header class="nav"><div class="nav-in"><a class="brand glow" href="#/">${br.logo_url && html`<img decoding="async" class="logo" src=${br.logo_url} alt="" />`}<span>${br.name || "AI Hub"}</span></a>
     <button type="button" class="burger" aria-label="Menu" aria-expanded=${menu} aria-controls="menu" onClick=${() => setMenu(!menu)}><i></i><i></i><i></i></button>
     <div id="menu" class=${"menu" + (menu ? " open" : "")} onClick=${(e) => { if (e.target.closest && e.target.closest("a")) setMenu(false); }}><nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
-    <div class="r">${s.me ? html`<a href="#/account" class="me-link"><${Avatar} p=${s.me} size=${24} /><span>${shown(s.me)}</span></a><a class=${on("knowledge")} href="#/knowledge">Knowledge</a>${s.showGroups ? html`<a class=${on("groups")} href="#/groups">Groups</a>` : ""}${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}${can("audit") ? html`<a class=${on("audit")} href="#/audit">Audit</a>` : ""}${can("admin") || can("reset_password") ? html`<a href="#/admin">Admin</a>` : ""}<a href="#/" onClick=${logout}>Sign out</a>` :
+    <div class="r">${s.me ? html`<a href="#/account" class="me-link"><${Avatar} p=${s.me} size=${24} /><span>${shown(s.me)}</span></a><a class=${on("knowledge")} href="#/knowledge">Knowledge</a><a class=${on("usage")} href="#/usage">Usage</a>${s.showGroups ? html`<a class=${on("groups")} href="#/groups">Groups</a>` : ""}${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}${can("audit") ? html`<a class=${on("audit")} href="#/audit">Audit</a>` : ""}${can("admin") || can("reset_password") ? html`<a href="#/admin">Admin</a>` : ""}<a href="#/" onClick=${logout}>Sign out</a>` :
       html`${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}<a href="#/login">Sign in</a>`}</div></div></div></header>
     <main id="main" tabindex="-1"><div class="page" key=${path}>${page}</div></main>
     <footer class="foot"><b class="glow">${br.logo_url && html`<img decoding="async" class="logo sm" src=${br.logo_url} alt="" />`}${br.name || "AI Hub"}</b><span>Skills, agents and MCP servers for your team.</span>

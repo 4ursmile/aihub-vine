@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import time
 
-from . import gitx, paths
+from . import paths
 
 NAME = "aihub-policy"
 USER = "policy-user.json"
@@ -248,6 +248,7 @@ def _cache(key, value=None):
 
 
 def _ask_model(exe, text, cfg):
+    from . import gitx          # lazy: gitx -> tls -> ssl costs ~10 ms in every hook process, and only the judge needs it
     cmd = [exe, "-p", "--model", str(cfg.get("model") or "haiku"), "--no-session-persistence", "--disable-slash-commands", "--tools", "",
            "--output-format", "json", "--json-schema", JUDGE_SCHEMA,
            "--system-prompt", JUDGE_SYSTEM + str(cfg.get("criteria") or ""),
@@ -352,6 +353,7 @@ def _cache(key, value=None):
 
 
 def _ask_model(exe, text, cfg):
+    from . import gitx
     cmd = [exe, "-p", "--model", str(cfg.get("model") or "haiku"), "--no-session-persistence", "--disable-slash-commands", "--tools", "",
            "--output-format", "json", "--json-schema", JUDGE_SCHEMA,
            "--system-prompt", JUDGE_SYSTEM + str(cfg.get("criteria") or ""),

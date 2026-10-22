@@ -470,18 +470,35 @@ def install_plan(pkgs, assume_yes=False, tools=None, roots=()):
         td = tempfile.mkdtemp()
         ui.step("downloading %d packages in parallel" % len(pkgs))
         pre = registry.prefetch(pkgs, td)
+    bad = {}                                                  # name -> error: one broken package must not hide the others
     try:
         for r in pkgs:
             if len(pkgs) > 1:
                 ui.step("%s %s" % (ui.accent(r["name"]), r["version"]) + ("" if r["name"] in roots else ui.dim("  (dependency)")))
+            broken = [d for d in ((r.get("requires") or {}).get("packages") or []) if naming.normalize(V.split_spec(d)[0]) in bad]
+            if broken:
+                ui.note("%s skipped: needs %s, which failed" % (r["name"], ", ".join(broken)))
+                bad[r["name"]] = api.ApiError("%s skipped because %s failed" % (r["name"], ", ".join(broken)))
+                continue
             folder, err = pre.get(r["name"], (None, None))
-            if err:
-                raise err
-            _install_one(r, assume_yes, tools, r["name"] in roots, archive_path=folder)
+            try:
+                if err:
+                    raise err
+                _install_one(r, assume_yes, tools, r["name"] in roots, archive_path=folder)
+            except (api.ApiError, ValueError, OSError) as e:
+                if len(pkgs) == 1:
+                    raise
+                ui.note("%s failed: %s" % (r["name"], e))
+                bad[r["name"]] = e
+                continue
             done.append(r)
     finally:
         if td:
             shutil.rmtree(td, ignore_errors=True)
+    if bad:
+        first = next(iter(bad.values()))
+        raise first.__class__(*first.args) if len(bad) == 1 else api.ApiError(
+            "%d packages failed: %s" % (len(bad), "; ".join("%s (%s)" % (n, e) for n, e in bad.items())))
     return done
 
 

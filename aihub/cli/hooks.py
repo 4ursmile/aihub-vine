@@ -4,6 +4,7 @@ import os
 import re
 import shlex
 import sys
+import time
 
 from ..core import redact
 from . import integrations, paths, telemetry
@@ -55,6 +56,29 @@ def verify():
         pass
 
 
+CHECK_EVERY = 300       # seconds between settings.json checks made from the hooks themselves
+
+
+def verify_soon(every=CHECK_EVERY):
+    """verify(), but at most once per `every` seconds across all hook processes (one stat of a stamp file otherwise). Called from the hooks,
+    so a hand edit that removed one of our entries is undone by the next tool call or prompt, without anyone running `aihub`. The stamp
+    is touched BEFORE the check, so a burst of hook calls runs it once. -> True when it ran. Never raises."""
+    try:
+        f = paths.p("queue", "hooks.checked")
+        try:
+            if time.time() - os.path.getmtime(f) < every:
+                return False
+        except OSError:
+            pass
+        paths.ensure("queue")
+        with open(f, "w"):
+            pass
+        verify()
+        return True
+    except Exception:
+        return False
+
+
 def _components():
     st = paths.load("state.json", {"packages": {}})
     m = {}
@@ -81,14 +105,29 @@ def _skill_comp(name, comps):
     return None
 
 
-def _emit(d):
-    sys.stdout.write(json.dumps(__import__("aihub.cli.policy", fromlist=["x"]).hook_output(d)))
-    sys.stdout.flush()
-
-
 def _call(stdin_text):
     data = json.loads(stdin_text or "{}")
     return str(data.get("tool_name") or data.get("tool") or ""), data.get("tool_input") or {}, str(data.get("cwd") or "")
+
+
+def _norm(s):
+    return re.sub(r"[^a-z0-9]+", "_", str(s or "").lower()).strip("_")
+
+
+def _mcp_comp(tool, comps):
+    """Map `mcp__<server>__<tool>` to an installed `mcp:<name>` component, or None. Claude Code rewrites server names (`.`, `-`, spaces
+    -> `_`) and prefixes plugin / connector servers (`plugin_<plugin>_<server>`, `claude_ai_<server>`), so compare normalized and accept
+    a prefix. The longest match wins (`datalake` must not take `datalake-mcp` calls)."""
+    parts = tool.split("__")
+    srv = _norm(parts[1]) if len(parts) > 2 else ""
+    best = None
+    for c in comps:
+        if not c.startswith("mcp:") or not srv:
+            continue
+        n = _norm(c[4:])
+        if n and (srv == n or srv.endswith("_" + n)) and (best is None or len(n) > len(_norm(best[4:]))):
+            best = c
+    return best
 
 
 def _emit(d):
@@ -124,22 +163,31 @@ def _judge(stdin_text):
         pass
 
 
+def _is_stop(stdin_text):
+    if '"Stop"' not in (stdin_text or ""):
+        return False
+    try:
+        return json.loads(stdin_text).get("hook_event_name") == "Stop"
+    except Exception:
+        return False
+
+
 def handle(stdin_text, source="claude"):
     if os.environ.get("AIHUB_JUDGE"):         # inside the judge's own claude session: no guard, no usage event
         return
-    hit = _guard(stdin_text)
-    _usage(stdin_text, source)
-    if not hit:
-        _judge(stdin_text)
-
-
-def _usage(stdin_text, source="claude"):
-    if os.environ.get("AIHUB_JUDGE"):         # we are inside the judge's own claude session: no guard, no usage event
+    if _is_stop(stdin_text):                  # end of an answer turn: queue the usage upload (background, batched), nothing else
+        try:
+            from . import usagesync
+            usagesync.kick()
+        except Exception:
+            pass
+        verify_soon()
         return
     hit = _guard(stdin_text)
     _usage(stdin_text, source)
     if not hit:
         _judge(stdin_text)
+    verify_soon()                             # after the answer to the agent: the check never delays a guard decision
 
 
 def _usage(stdin_text, source="claude"):
@@ -169,11 +217,12 @@ def _usage(stdin_text, source="claude"):
             s = inp.get("subagent_type") or ""
             hit = ("agent:" + s, "agent:" + s)
         elif tool.startswith("mcp__"):
-            srv = tool.split("__")[1]
-            hit = ("mcp:" + srv, tool)
+            c = _mcp_comp(tool, comps)
+            if c:
+                hit = (c, tool)
         else:  # OpenCode names MCP tools <server>_<tool>
             for c in comps:
-                if c.startswith("mcp:") and tool.startswith(c[4:] + "_"):
+                if c.startswith("mcp:") and _norm(tool).startswith(_norm(c[4:]) + "_"):
                     hit = (c, tool)
                     break
         if hit and hit[0] in comps:

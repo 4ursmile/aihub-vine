@@ -1,9 +1,12 @@
 """Tool adapters (Claude Code, Codex, OpenCode). Every mutation returns a revert record."""
+import contextlib
 import json
 import os
 import re
 import shlex
 import shutil
+import time
+import uuid
 
 HOME = lambda: os.path.expanduser("~")
 MARK = "aihub"
@@ -31,12 +34,58 @@ def _read_json(path):
 
 
 def _write_json(path, d):
+    """Atomic write. The temp name is unique per writer: two hook processes verifying at the same moment used to share `<file>.aihub.tmp`,
+    so one's os.replace pulled the file from under the other (FileNotFoundError) or a reader saw half of it (JSONDecodeError)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".aihub.tmp"
-    with open(tmp, "w") as f:
-        json.dump(d, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
+    tmp = "%s.aihub.%d.%s.tmp" % (path, os.getpid(), uuid.uuid4().hex[:8])
+    try:
+        with open(tmp, "w") as f:
+            json.dump(d, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+@contextlib.contextmanager
+def locked(path, wait=2.0, stale=30.0):
+    """Cross-process lock around read-modify-write of one settings file (O_EXCL lock file). Held only for the few milliseconds of an edit.
+    Never blocks the agent: after `wait` seconds it goes ahead without the lock (the atomic write above still keeps the file valid), and a
+    lock older than `stale` seconds belongs to a dead process and is taken over."""
+    lock, have, end = path + ".aihub.lock", False, time.time() + wait
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except OSError:
+        pass
+    while True:
+        try:
+            os.close(os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            have = True
+            break
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock) > stale:
+                    os.remove(lock)
+                    continue
+            except OSError:
+                pass
+            if time.time() >= end:
+                break
+            time.sleep(0.01)
+        except OSError:
+            break
+    try:
+        yield have
+    finally:
+        if have:
+            try:
+                os.remove(lock)
+            except OSError:
+                pass
 
 
 def block_begin(i): return "# >>> aihub:%s" % i
@@ -133,9 +182,8 @@ class ClaudeCode(Tool):
     @staticmethod
     def _ours(h): return " hook --source " in h.get("command", "")
 
-    TIMEOUT = {"PreToolUse": 25, "UserPromptSubmit": 5}     # PreToolUse may wait for the aihub-policy AI judge
-    TIMEOUT = {"PreToolUse": 25, "UserPromptSubmit": 5}     # PreToolUse may wait for the aihub-policy AI judge
-    EVENTS = ("PreToolUse", "UserPromptSubmit")     # tool calls, and "/skill" typed by the user (no tool call)
+    TIMEOUT = {"PreToolUse": 25, "UserPromptSubmit": 5, "Stop": 5}     # PreToolUse may wait for the aihub-policy AI judge
+    EVENTS = ("PreToolUse", "UserPromptSubmit", "Stop")     # tool calls, "/skill" typed by the user (no tool call), end of every answer turn (usage upload)
 
     def _want(self, cmd): return cmd + " --source claude"
 
@@ -154,8 +202,15 @@ class ClaudeCode(Tool):
         return True
 
     def install_hook(self, cmd):
-        """Add only our hook entries; every other setting and hook is left as is. Writes nothing when already correct."""
+        """Add only our hook entries; every other setting and hook is left as is. Writes nothing when already correct. The edit holds the
+        file lock and re-reads inside it, so two processes (or the user's editor saving at the same moment) cannot lose each other's change."""
         if self.has_hook(cmd):
+            return False
+        with locked(self._settings()):
+            return self._install_locked(cmd)
+
+    def _install_locked(self, cmd):
+        if self.has_hook(cmd):                              # another process did it while we waited for the lock
             return False
         d = _read_json(self._settings())
         if not isinstance(d.get("hooks"), dict):
@@ -176,6 +231,10 @@ class ClaudeCode(Tool):
         return True
 
     def remove_hook(self):
+        with locked(self._settings()):
+            return self._remove_locked()
+
+    def _remove_locked(self):
         d = _read_json(self._settings())
         n0 = n1 = 0
         for ev in self.EVENTS:

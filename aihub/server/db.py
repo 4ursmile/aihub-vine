@@ -42,6 +42,15 @@ CREATE TABLE IF NOT EXISTS reviews(package_id INTEGER, user_id INTEGER, rating I
 CREATE TABLE IF NOT EXISTS audit_log(id {pk}, ts {real}, actor TEXT, action TEXT, target TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS knowledge(user_id INTEGER, name TEXT, body TEXT, updated {real}, PRIMARY KEY(user_id,name));
+CREATE TABLE IF NOT EXISTS usage_daily(user_id INTEGER, client_id TEXT, day TEXT, tool TEXT, model TEXT, requests {bigint} DEFAULT 0,
+  inp {bigint} DEFAULT 0, outp {bigint} DEFAULT 0, cache_write {bigint} DEFAULT 0, cache_read {bigint} DEFAULT 0, cost {real} DEFAULT 0,
+  unpriced {bigint} DEFAULT 0, updated {real}, PRIMARY KEY(user_id,client_id,day,tool,model));
+CREATE INDEX IF NOT EXISTS ud_day ON usage_daily(day);
+CREATE TABLE IF NOT EXISTS usage_session(user_id INTEGER, sid TEXT, tool TEXT, model TEXT, day TEXT, started {real}, ended {real}, requests {bigint} DEFAULT 0,
+  inp {bigint} DEFAULT 0, outp {bigint} DEFAULT 0, cache_write {bigint} DEFAULT 0, cache_read {bigint} DEFAULT 0, cost {real} DEFAULT 0,
+  unpriced {bigint} DEFAULT 0, peak {bigint} DEFAULT 0, cold {bigint} DEFAULT 0, compact {bigint} DEFAULT 0, big {bigint} DEFAULT 0, light {bigint} DEFAULT 0,
+  updated {real}, PRIMARY KEY(user_id,sid));
+CREATE INDEX IF NOT EXISTS us_day ON usage_session(day);
 CREATE TABLE IF NOT EXISTS knowledge_share(owner_id INTEGER, name TEXT, principal_type TEXT, principal_id INTEGER, access TEXT, PRIMARY KEY(owner_id,name,principal_type,principal_id));
 """
 

@@ -511,3 +511,18 @@ a.pk-pill{color:color-mix(in srgb,var(--blue) 60%,var(--fg))}a.pk-pill:hover{bac
 .cols .side b{font-size:12px;color:var(--fg-2);font-weight:600}
 .cfile pre{margin:4px 0 0;font-size:12.5px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto}
 .cfile pre.ctx{margin:0;color:var(--fg-3);padding:0 4px}
+/* usage page: ranking header chips stay on one line; the table scrolls inside its card */
+.tscroll th .chip{white-space:nowrap}
+@media (max-width:700px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* usage sessions table: dense, never clipped, never wrapping inside a cell */
+.tscroll th .chip{padding:4px 10px;min-height:28px;font-size:13px;white-space:nowrap}
+.tscroll td .mono{white-space:nowrap}
+.tscroll td .badge{white-space:nowrap}
+.tscroll td:last-child,.tscroll th:last-child{white-space:nowrap;padding-right:8px}
+.tscroll td .xs.mut3{white-space:nowrap}
+.tscroll th{padding-left:8px;padding-right:8px}.tscroll td{padding-left:8px;padding-right:8px}
+
+/* usage page: thin busy bar while a new view loads (the old one stays, dimmed) */
+.ubar{height:3px;border-radius:3px;background:linear-gradient(90deg,transparent,var(--blue),transparent);background-size:40% 100%;background-repeat:no-repeat;animation:ubar 1s linear infinite}
+@keyframes ubar{from{background-position:-40% 0}to{background-position:140% 0}}
+@media(prefers-reduced-motion:reduce){.ubar{animation:none;background:var(--blue);opacity:.5}}

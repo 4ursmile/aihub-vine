@@ -30,6 +30,9 @@ def cmd_login(a):
     r = api.call("POST", "/auth/login", {"username": u, "password": getpass.getpass("password: ")})
     paths.save("credentials.json", {"token": r["token"], "username": u}, private=True)
     ui.celebrate("Welcome back, %s" % u)
+    from . import hooks, usagesync
+    hooks.verify()
+    usagesync.kick()                                         # a new account: upload your usage history in the background
 
 
 def cmd_logout(a):
@@ -191,6 +194,9 @@ def record_cli_install():
         open(marker, "w").write(VERSION)
         telemetry.record({"kind": "install", "package": CLI_PACKAGE, "version": VERSION, "client_id": hooks.client_id(),
                           "detail": "origin=" + _cli_origin()})
+        hooks.verify()                                       # first run: be sure the usage hooks are in place...
+        from . import usagesync
+        usagesync.kick()                                     # ...and send what the logs already hold (no-op until a hub and a login exist)
     except Exception:
         pass
 
@@ -585,9 +591,13 @@ def cmd_usage(a):
     from . import usage
     tools = tuple(a.tool) if a.tool else usage.TOOLS
     tty = sys.stdin.isatty() and sys.stdout.isatty()
+    if not (a.json or a.plain):
+        from . import hooks, usagesync
+        hooks.verify()                                       # looking at usage: repair our hooks if they were edited away, and refresh the hub copy
+        usagesync.kick()
     recs, meta = usage.load(tools, ui, quiet=bool(a.json or a.plain or not tty))
     rep = usage.report(tools, a.days, model=a.model, recs=recs)
-    p = rep[1] if a.days > 0 else rep[2]                  # the window --days selects (all time when 0)
+    p = usage.pick(rep, a.days)                           # the window --days selects (all time when 0)
     if a.session or a.sessions or a.tips:
         ss = usage.sessions_of(p["recs"], meta)
         if a.find:
@@ -619,8 +629,7 @@ def cmd_usage(a):
                          default=lambda o: sorted(o)))
         return 0
     if not a.plain and not a.by_day and tty:
-        usage.interactive(rep, ui, meta, refilter=lambda m: usage.report(tools, a.days, model=m, recs=recs),
-                          start="sessions")
+        usage.interactive(rep, ui, meta, refilter=lambda m, d: usage.report(tools, d, model=m, recs=recs), start="summary", days=a.days)
     else:
         usage.show(rep, ui, a.by_day)
     return 0
@@ -635,6 +644,22 @@ def cmd_flush(a):
         if st and not st.get("ok"):
             print("last push failed: %s" % (st.get("error") or "unknown error"))
             print("inbox: %s" % gitx.redact_url(telemetry.target()))
+
+
+def cmd_usage_sync(a):
+    from . import usagesync
+    if a.background:
+        usagesync.run(background=True)                     # the Stop hook's detached worker: silent
+        return
+    if not usagesync.enabled():
+        ui.error("usage upload is off", "needs a hub (aihub setup), a signed-in user (aihub login) and usage_sync not off")
+        return 1
+    usagesync.run.error = ""
+    n = usagesync.run(full=True)
+    if usagesync.run.error:
+        ui.error(usagesync.run.error, "the upload is retried after the next answer turn")
+        return 1
+    ui.good("sent %d changed daily rows to the hub" % n if n else "the hub already has your latest usage")
 
 
 def cmd_skill(a):
@@ -1239,7 +1264,7 @@ def build_parser():
         ("Manage", ["enable", "disable", "tree", "lock", "sync"]),
         ("Account", ["config", "login", "logout", "register", "vault"]),
         ("Publish", ["dev"]),
-        ("Setup and maintenance", ["run", "onboard", "knowledge", "soul", "policy", "welcome", "doctor", "version", "upgrade", "hook", "flush", "hooks", "skill", "self-uninstall"]),
+        ("Setup and maintenance", ["run", "onboard", "knowledge", "soul", "policy", "welcome", "doctor", "version", "upgrade", "hook", "flush", "usage-sync", "hooks", "skill", "self-uninstall"]),
     ]
 
     def add(name, fn, help, description, epilog, *args):
@@ -1414,7 +1439,7 @@ def build_parser():
         "Read the session logs of the AI tools on this machine (Claude Code ~/.claude/projects, Codex ~/.codex/sessions) and show sessions, requests, tokens, cache use and an ESTIMATED price for today, the last N days and all time, by tool and by model. Purely local: nothing is sent to the hub. Prices are list prices per 1M tokens; add or override models in ~/.aihub/prices.json as {\"model-substring\": {\"input\": 3, \"output\": 15, \"cache_write\": 3.75, \"cache_read\": 0.3}}.",
         "Examples:\n  aihub usage\n  aihub usage --days 7 --sessions\n  aihub usage --session 3f9a1c2b\n  aihub usage --tips --days 14\n  aihub usage --by-day --days 14\n  aihub usage --tool claude --days 7 --plain\n  aihub usage --json",
         arg("--tool", action="append", choices=["claude", "codex"], help="Only this tool (repeatable)."),
-        arg("--days", type=int, default=30, help="Last N days: the middle window, and the window of --sessions/--session/--tips (default 30, 0 = all time)."),
+        arg("--days", type=int, default=30, help="Last N days: one of the windows (with today, this month and all time), and the window of --sessions/--session/--tips (default 30, 0 = all time). In the full screen view press n to type another number."),
         arg("--sessions", action="store_true", help="List sessions (last used, tool, project, requests, peak context, cache hit, cost, title) and exit."),
         arg("--session", metavar="ID_OR_TEXT", help="Show one session: totals, context per request and cache rebuild flags. Matches an id (the last 8 characters are enough), title or folder."),
         arg("--tips", action="store_true", help="Efficiency suggestions from your own usage (cold cache rebuilds, huge context, low cache hit, model choice)."),
@@ -1423,12 +1448,16 @@ def build_parser():
         arg("--top", type=int, default=30, help="Rows shown by --sessions (default 30, 0 = all)."),
         arg("--model", help="Case-insensitive regex on 'tool model', e.g. 'opus|gpt' (in the interactive view type /regex)."),
         arg("--by-day", action="store_true", help="One row per day instead of by tool and model."),
-        arg("--plain", action="store_true", help="Print every period and exit (default in a terminal is a full screen view: arrows and mouse, 1/2/3 period, s sessions, m summary, d days, t tips, / model filter, f find, q quit)."),
+        arg("--plain", action="store_true", help="Print every period and exit (default in a terminal is a full screen view: arrows and mouse, 1-4 period, n custom days, m summary, s sessions, d days, t tips, / model filter, f find, q quit)."),
         arg("--json", action="store_true", help="Machine readable output (includes by_day)."))
     add("flush", cmd_flush, "Send queued usage events to the hub.",
         "Push queued usage events to the telemetry inbox (a git repo) now. Events are normally pushed in the background as one batch, a few seconds after the last event (aihub config set telemetry_interval 15).",
         "Examples:\n  aihub flush\n  aihub flush --verbose",
         arg("-v", "--verbose", action="store_true", help="Print the number of events sent."),
+        arg("--background", action="store_true", help=argparse.SUPPRESS))
+    add("usage-sync", cmd_usage_sync, "Send your daily token totals to the hub now.",
+        "Upload your usage (tokens, cache, estimated cost per day, tool and model; no prompts, titles or folders) so the hub's Usage page can show you and your groups. It normally runs by itself in the background after every answer turn of Claude Code (Stop hook), batched and only for what changed. Needs a hub and `aihub login`. Turn off with `aihub config set usage_sync off`.",
+        "Examples:\n  aihub usage-sync\n  aihub config set usage_sync off",
         arg("--background", action="store_true", help=argparse.SUPPRESS))
     add("hooks", cmd_hooks, "Install or remove usage hooks for detected tools.",
         "Install or remove AI-tool hooks that report usage of components from installed packages. The optional tool filter is repeatable; only detected tools are processed, and Codex has no tool-call hook.",
@@ -1514,7 +1543,7 @@ def build_parser():
 def main(argv=None):
     ap = build_parser()
     a = ap.parse_args(argv)
-    from . import hooks, integrations, policy, telemetry, tls
+    from . import hooks, integrations, policy, telemetry, tls, usage, usagesync
     from ..core import release                  # `aihub upgrade` swaps aihub.pyz under this process: load every module the tail of main needs BEFORE it
     try:
         if not getattr(a, "cmd", None):
@@ -1526,16 +1555,16 @@ def main(argv=None):
                 return 0
             cmd_menu()
             return 0
-        if ui.INTERACTIVE and a.cmd not in ("hook", "flush", "welcome", "config", "credential", "vault", "policy", "run") and not os.path.exists(paths.p(".welcomed")):
+        if ui.INTERACTIVE and a.cmd not in ("hook", "flush", "usage-sync", "welcome", "config", "credential", "vault", "policy", "run") and not os.path.exists(paths.p(".welcomed")):
             cmd_welcome(argparse.Namespace(yes=False))
         if a.cmd == "credential":
             return a.fn(a)              # git calls this on every fetch: no welcome, updater or network
-        if a.cmd not in ("hook", "flush", "credential"):
+        if a.cmd not in ("hook", "flush", "usage-sync", "credential"):
             tls.warn_if_insecure()
         a.fn(a)
-        if a.cmd not in ("hook", "flush", "credential", "self-uninstall"):
+        if a.cmd not in ("hook", "flush", "usage-sync", "credential", "self-uninstall"):
             record_cli_install()
-        if a.cmd not in ("hook", "flush", "credential", "hooks", "self-uninstall", "uninstall"):
+        if a.cmd not in ("hook", "flush", "usage-sync", "credential", "hooks", "self-uninstall", "uninstall"):
             hooks.verify()      # install/use/update/...: make sure our usage hooks are still in place
         updater.auto(a.cmd)
         policy.auto(a.cmd)

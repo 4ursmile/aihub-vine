@@ -1871,6 +1871,187 @@ async def telemetry_in(request: Request, u=Depends(current_user)):
     return out
 
 
+# ---------------- token usage per person and per group (the CLI uploads daily totals after each answer turn)
+MAX_USAGE_ROWS = 20000
+_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+_USAGE_INTS = (("requests", "requests"), ("input", "inp"), ("output", "outp"), ("cache_write", "cache_write"), ("cache_read", "cache_read"),
+               ("unpriced", "unpriced"))
+
+
+def _usage_rows(raw):
+    """Validate uploaded daily rows; a bad row is dropped, never an error for the rest (hostile or old clients must not break a batch)."""
+    out = []
+    for x in raw:
+        if not isinstance(x, dict) or not _DAY.fullmatch(str(x.get("day") or "")):
+            continue
+        row = {"day": x["day"], "tool": _clean(x.get("tool"), 32), "model": _clean(x.get("model"), 128)}
+        if not row["tool"] or not row["model"]:
+            continue
+        try:
+            for src, dst in _USAGE_INTS:
+                v = int(x.get(src) or 0)
+                row[dst] = v if 0 <= v < 10 ** 13 else 0
+            c = float(x.get("cost") or 0)
+            row["cost"] = c if 0 <= c < 1e9 else 0.0
+        except (TypeError, ValueError, OverflowError):
+            continue
+        out.append(row)
+    return out
+
+
+_SESSION_INTS = ("requests", "input", "output", "cache_write", "cache_read", "unpriced", "peak", "cold", "compact", "big", "light")
+_SESSION_DST = {"input": "inp", "output": "outp"}
+
+
+def _usage_sessions(raw):
+    """Validate uploaded session summaries (numbers only). A bad one is dropped, never an error for the rest."""
+    out = []
+    for x in raw if isinstance(raw, list) else []:
+        if not isinstance(x, dict) or not re.fullmatch(r"[0-9a-f]{8,64}", str(x.get("sid") or "")) or not _DAY.fullmatch(str(x.get("day") or "")):
+            continue
+        row = {"sid": x["sid"], "day": x["day"], "tool": _clean(x.get("tool"), 32), "model": _clean(x.get("model"), 128)}
+        if not row["tool"] or not row["model"]:
+            continue
+        try:
+            for k in _SESSION_INTS:
+                v = int(x.get(k) or 0)
+                row[_SESSION_DST.get(k, k)] = v if 0 <= v < 10 ** 13 else 0
+            row["started"], row["ended"] = float(x.get("start") or 0), float(x.get("end") or 0)
+            c = float(x.get("cost") or 0)
+            row["cost"] = c if 0 <= c < 1e9 else 0.0
+        except (TypeError, ValueError, OverflowError):
+            continue
+        out.append(row)
+    return out
+
+
+@r.post("/usage/sync")
+async def usage_sync(request: Request, u=Depends(require_user)):
+    """Daily token totals of one device of the signed-in user: {"client_id", "rows": [{day, tool, model, requests, input, output, cache_write,
+    cache_read, cost, unpriced}]}. A row is the whole day, so sending it again only overwrites it."""
+    ing, buf = request.app.state.ingest, request.app.state.usagebuf
+    ok, wait = ing.allow(request.client.host if request.client else "?")
+    if not ok:
+        return JSONResponse({"detail": "too many requests"}, status_code=429, headers={"Retry-After": str(wait)})
+    if buf.full():                                                        # counted in buf.stats["busy"]
+        return JSONResponse({"detail": "busy"}, status_code=503, headers={"Retry-After": str(30 + secrets.randbelow(30))})
+    raw = await request.body()
+    if len(raw) > MAX_TELEMETRY_BYTES:
+        raise HTTPException(413, "batch too large")
+    if request.headers.get("content-encoding", "").strip().lower() == "gzip":
+        try:
+            d = zlib.decompressobj(31)
+            raw = d.decompress(raw, MAX_TELEMETRY_BYTES + 1)
+            if len(raw) > MAX_TELEMETRY_BYTES or d.unconsumed_tail:
+                raise HTTPException(413, "batch too large")
+        except zlib.error:
+            raise HTTPException(400, "body is not valid gzip")
+    try:
+        body = json.loads(raw or b"{}")
+    except ValueError:
+        raise HTTPException(400, "body must be JSON")
+    rows = body.get("rows") if isinstance(body, dict) else None
+    if not isinstance(rows, list) or len(rows) > MAX_USAGE_ROWS:
+        raise HTTPException(400, "send {\"client_id\": ..., \"rows\": [...]} with at most %d rows" % MAX_USAGE_ROWS)
+    client = _clean(body.get("client_id"), 64) or "-"
+    good = _usage_rows(rows)
+    sess = _usage_sessions(body.get("sessions"))[:MAX_USAGE_ROWS]
+    try:
+        stored = await run_in_threadpool(buf.add, u["id"], client, good, sess)  # journal fsync must not block the event loop
+    except OSError:                                                       # cannot make it durable: do NOT acknowledge, the CLI retries
+        return JSONResponse({"detail": "cannot store usage right now"}, status_code=503, headers={"Retry-After": "30"})
+    return {"stored": stored, "received": len(rows) + (len(body.get("sessions")) if isinstance(body.get("sessions"), list) else 0)}
+
+
+def _usage_window(request, days, date_from, date_to):
+    try:
+        n, start, since, until = R(request)._window(days, date_from, date_to)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    import datetime
+    return n, start.isoformat(), (datetime.datetime.fromtimestamp(until - 1, datetime.timezone.utc).date()).isoformat()
+
+
+@r.get("/usage/groups")
+def usage_groups(request: Request, u=Depends(require_user)):
+    """Groups whose usage the caller may see: the ones they belong to (a site admin: all)."""
+    repos = R(request)
+    return {"groups": repos.user_groups(u["id"], every="admin" in repos.perms(u["role"]))}
+
+
+@r.get("/usage/sessions")
+def usage_sessions(request: Request, scope: str = "me", group: str = "", days: int = 30, tool: str = None, model: str = None, user: str = None,
+                   limit: int = 100, date_from: str = Query(None, alias="from"), date_to: str = Query(None, alias="to"), u=Depends(require_user)):
+    """Sessions (biggest cost first, with peak context, cold rebuilds and so on) and usage hints for the same scope and filters as /usage."""
+    ids, mine = _usage_scope(request, u, scope, group)
+    if scope == "groups" and not ids:
+        return {"sessions": [], "hints": [], "totals": {}}
+    n, lo, hi = _usage_window(request, days, date_from, date_to)
+    limit = max(1, min(int(limit), 500))
+    _usage_fresh(request, u, ids)
+    key = "usage:s:%s:%s" % (u["id"], "|".join(str(x) for x in (scope, ids, lo, hi, tool, model, user, limit)))
+    return C(request).get_or_set(key, 15, lambda: R(request).usage_sessions(lo, hi, uid=u["id"], group_ids=ids, tool=tool or None, model=model or None,
+                                                                            user=(user or None) if scope == "groups" else None, limit=limit))
+
+
+def _usage_fresh(request, u, ids):
+    """Read-your-writes: write what is still buffered for the people being looked at (the caller, or the members of the chosen groups)."""
+    buf = request.app.state.usagebuf
+    if ids is None:
+        buf.flush_for([u["id"]])
+    elif buf.pending():
+        who = {m for g in ids for m in R(request).group_member_ids(g)}
+        buf.flush_for(who | {u["id"]})
+
+
+def _usage_scope(request, u, scope, group):
+    """-> (group ids or None for 'me', the caller's groups). 403 for a group the caller is not in (a site admin may see all)."""
+    if scope not in ("me", "groups"):
+        raise HTTPException(400, "scope must be me or groups")
+    if scope == "me":
+        return None, []
+    repos = R(request)
+    mine = repos.user_groups(u["id"], every="admin" in repos.perms(u["role"]))
+    allowed = {g["id"] for g in mine}
+    try:
+        asked = [int(x) for x in group.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(400, "group must be a comma list of group ids")
+    if any(g not in allowed for g in asked):
+        raise HTTPException(403, "you can only see groups you belong to")
+    return sorted(asked or allowed), mine
+
+
+@r.get("/usage")
+def usage_report(request: Request, scope: str = "me", group: str = "", days: int = 30, tool: str = None, model: str = None, user: str = None,
+                 date_from: str = Query(None, alias="from"), date_to: str = Query(None, alias="to"), u=Depends(require_user)):
+    """scope=me: the caller's own usage (all devices). scope=groups: everybody in the chosen groups (`group` = comma list of group ids; blank = all
+    the caller's groups), each person counted once even when in several of them, with by_group / by_user / by_model. Filters: tool, model, user."""
+    if scope not in ("me", "groups"):
+        raise HTTPException(400, "scope must be me or groups")
+    repos = R(request)
+    n, lo, hi = _usage_window(request, days, date_from, date_to)
+    ids = None
+    mine = []
+    if scope == "groups":
+        mine = repos.user_groups(u["id"], every="admin" in repos.perms(u["role"]))
+        allowed = {g["id"] for g in mine}
+        try:
+            asked = [int(x) for x in group.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(400, "group must be a comma list of group ids")
+        if any(g not in allowed for g in asked):
+            raise HTTPException(403, "you can only see groups you belong to")
+        ids = sorted(asked or allowed)
+        if not ids:
+            return {"scope": scope, "groups": [], "filters": {"from": lo, "to": hi, "days": n}, "empty": True}
+    _usage_fresh(request, u, ids)
+    key = "usage:%s:%s" % (u["id"], "|".join(str(x) for x in (scope, ids, lo, hi, tool, model, user)))
+    res = C(request).get_or_set(key, 15, lambda: repos.usage_query(lo, hi, uid=u["id"], group_ids=ids, tool=tool or None, model=model or None,
+                                                                   user=(user or None) if scope == "groups" else None))
+    return dict(res, scope=scope, groups=mine, selected=ids or [], filters={"from": lo, "to": hi, "days": n})
+
+
 # ---------------- the package index, served by the hub (CLI asks here first; git is the fallback). ETag + 304.
 def _index_view(request, u):
     """{"etag","rows","h","entries"} of the index as THIS viewer may see it, built from the database. Cached per viewer scope; every package

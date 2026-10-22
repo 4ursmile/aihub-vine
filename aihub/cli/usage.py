@@ -348,11 +348,20 @@ def summarize(records, key, rates=None):
 
 
 def periods(now=None, days=30):
-    """Local-time windows: today (since local midnight), last N days, all."""
+    """Local-time windows -> [(key, label, since)]: today (since local midnight), this month (since the 1st, local midnight), the last N
+    days (left out when days <= 0), all time."""
     now = now or datetime.datetime.now()
-    mid = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-    last = ("Last %s" % ("day" if days == 1 else "%d days" % days), now.timestamp() - days * 86400) if days > 0 else ("All time", 0.0)
-    return [("Today", mid), last, ("All time", 0.0)]
+    mid = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    out = [("today", "Today", mid.timestamp()), ("month", "This month", mid.replace(day=1).timestamp())]
+    if days > 0:
+        out.append(("last", "Last %s" % ("day" if days == 1 else "%d days" % days), now.timestamp() - days * 86400))
+    out.append(("all", "All time", 0.0))
+    return out
+
+
+def pick(rep, days=30):
+    """The report entry the --days window selects (all time when days <= 0)."""
+    return next(p for p in rep if p["key"] == ("last" if days > 0 else "all"))
 
 
 _DAYS = {}
@@ -440,9 +449,9 @@ def report(tools=TOOLS, days=30, now=None, model=None, recs=None, progress=None,
         rx = _rx(model)
         recs = [r for r in recs if rx.search("%s %s" % (r["tool"], r["model"]))]
     out, rates = [], {}
-    for label, lo in periods(now, days):
+    for key, label, lo in periods(now, days):
         rs = [r for r in recs if r["ts"] >= lo]
-        out.append({"period": label, "since": lo, "recs": rs, "total": (summarize(rs, lambda r: "all", rates) or [None])[0],
+        out.append({"key": key, "period": label, "since": lo, "recs": rs, "total": (summarize(rs, lambda r: "all", rates) or [None])[0],
                     "by_day": sorted(summarize(rs, lambda r: _day(r["ts"]), rates), key=lambda x: x["name"], reverse=True),
                     "by_tool": summarize(rs, lambda r: r["tool"], rates), "by_model": summarize(rs, lambda r: (r["tool"], r["model"]), rates)})
     return out
@@ -519,10 +528,10 @@ def show(rep, ui, by_day=False):
     footer(ui, unpriced)
 
 
-def prompt_view(rep, ui, read=input, refilter=None):
+def prompt_view(rep, ui, read=input, refilter=None, days=30):
     """Line based fallback when the terminal has no raw keys (pipes, dumb terminals). Keys (then Enter): 1/2/3 period, d = by day, s = summary, /regex = filter tool+model (case-insensitive, `/` alone clears),
     q = quit. refilter(regex or None) -> a new report (records already loaded: instant)."""
-    idx, view, flt = 1, "summary", None
+    idx, view, flt = next((i for i, q in enumerate(rep) if q["key"] == "last"), len(rep) - 1), "summary", None
     while True:
         ui.out("")
         un = show_period(rep[idx], ui, view)
@@ -531,9 +540,9 @@ def prompt_view(rep, ui, read=input, refilter=None):
         if flt:
             ui.info("filter: /%s" % flt)
         names = [p["period"] for p in rep]
-        prompt = "  %s  %s  %s   %s  %s  %s > " % tuple(
-            [ui.accent("[%d]" % (i + 1)) + " " + (ui.bold(n) if i == idx else n) for i, n in enumerate(names)] +
-             [ui.accent("[s]") + "ummary", ui.accent("[d]") + "ay", ui.accent("[/]") + "filter  " + ui.accent("[q]") + "uit"])
+        prompt = "  %s   %s  %s  %s > " % (
+            "  ".join(ui.accent("[%d]" % (i + 1)) + " " + (ui.bold(n) if i == idx else n) for i, n in enumerate(names)),
+            ui.accent("[s]") + "ummary", ui.accent("[d]") + "ay", ui.accent("[/]") + "filter  " + ui.accent("[q]") + "uit")
         try:
             k = read(prompt).strip()
         except (EOFError, KeyboardInterrupt):
@@ -542,12 +551,12 @@ def prompt_view(rep, ui, read=input, refilter=None):
         if k.startswith("/"):
             flt = k[1:].strip() or None
             if refilter:
-                rep = refilter(flt)
+                rep = refilter(flt, days)
             continue
         k = k.lower()
         if k in ("q", "quit", "exit"):
             return
-        if k in ("1", "2", "3"):
+        if k in ("1", "2", "3", "4") and int(k) <= len(rep):
             idx = int(k) - 1
         elif k in ("d", "day"):
             view = "day"
@@ -555,16 +564,16 @@ def prompt_view(rep, ui, read=input, refilter=None):
             view = "summary"
 
 
-def interactive(rep, ui, meta=None, refilter=None, read=None, start="sessions"):
+def interactive(rep, ui, meta=None, refilter=None, read=None, start="summary", days=30):
     """Full screen browser (arrows, mouse) in a real terminal; the line based prompt when there is none or `read` is given."""
     if read is None and getattr(ui, "INTERACTIVE", False) and getattr(ui, "FANCY", False):
         try:
             with ui.Keys() as keys:
-                Browser(rep, meta, ui, refilter, view=start).run(keys)
+                Browser(rep, meta, ui, refilter, view=start, days=days).run(keys)
             return
         except OSError:
             pass
-    prompt_view(rep, ui, read or input, refilter)
+    prompt_view(rep, ui, read or input, refilter, days)
 
 
 # ---------- efficiency tips
@@ -752,14 +761,16 @@ class Browser(object):
     Arrows, PgUp/PgDn, Home/End, mouse click and wheel. Rows are drawn only for the visible window and every derived list is
     memoized per (period, filter), so keys never re-read logs or recompute sessions.
 
-    keys: up/down k/j move, left/right period (prev/next session in detail), enter or click open, esc back, tab or s m d t views,
-    1 2 3 period, o sort, / model regex, f find in sessions, c clear filters, q quit."""
-    VIEWS = (("sessions", "Sessions", "s"), ("summary", "Summary", "m"), ("days", "Days", "d"), ("tips", "Tips", "t"))
+    keys: up/down k/j move, left/right period (prev/next session in detail), enter or click open, esc back, tab or m s d t views,
+    1-4 period, n custom number of days, o sort, / model regex, f find in sessions, c clear filters, q quit."""
+    VIEWS = (("summary", "Summary", "m"), ("sessions", "Sessions", "s"), ("days", "Days", "d"), ("tips", "Tips", "t"))
     NUM = ["Sess", "Req", "Input", "Output", "Cache w", "Cache r", "Hit", "Est. cost"]
 
-    def __init__(self, rep, meta, ui, refilter=None, size=None, out=None, view="sessions", period=1, sort="recent"):
+    def __init__(self, rep, meta, ui, refilter=None, size=None, out=None, view="summary", period=None, sort="recent", days=30):
         self.rep, self.meta, self.ui, self.refilter = rep, meta or {}, ui, refilter
-        self.size, self.out = size, out
+        self.size, self.out, self.days = size, out, days
+        if period is None:                               # open on the "last N days" window (else the last entry)
+            period = next((i for i, q in enumerate(rep) if q["key"] == "last"), len(rep) - 1)
         self.view, self.pi, self.sort = view, min(max(period, 0), len(rep) - 1), sort
         self.model = self.find = None
         self.drill = None                                # ("day"|"model"|"tool"|"keys", value, label)
@@ -1015,7 +1026,8 @@ class Browser(object):
     def footer(self):
         ui = self.ui
         if self.mode:
-            return "  " + ui.accent("/" if self.mode == "model" else "find ") + self.buf + ui.dim("   enter apply, esc cancel")
+            lab = {"model": "/", "find": "find ", "days": "last N days: "}[self.mode]
+            return "  " + ui.accent(lab) + self.buf + ui.dim("   enter apply, esc cancel")
         if self.msg:
             return "  " + ui.warn(self.msg)
         if self.detail:
@@ -1023,7 +1035,7 @@ class Browser(object):
         else:
             h = {"sessions": "enter/click open   o sort   f find   / model   ", "summary": "enter/click: sessions of that row   / model   ",
                  "days": "enter/click: sessions of that day   / model   ", "tips": "enter/click: sessions behind the tip   "}[self.view]
-            h += "arrows move   left/right period   tab views   c clear   q quit"
+            h += "arrows move   left/right period   n days   tab views   c clear   q quit"
         return "  " + ui.dim(ui.clip(h, self.cols - 4))
 
     # ----- movement
@@ -1096,9 +1108,12 @@ class Browser(object):
             self.drill, self.view = it["drill"], "sessions"
             self.reset()
 
-    def refilter_now(self):
+    def refilter_now(self, keep=False):
+        """Rebuild the report for the current model filter and number of days. keep=True leaves the selected period tab where it is."""
         if self.refilter:
-            self.rep = self.refilter(self.model)
+            key = self.rep[self.pi]["key"]
+            self.rep = self.refilter(self.model, self.days)
+            self.pi = next((i for i, q in enumerate(self.rep) if q["key"] == key), min(self.pi, len(self.rep) - 1))
         self.memo.clear()
         self.detail = None
         self.drill = None
@@ -1163,8 +1178,10 @@ class Browser(object):
                 self.activate(its[self.cur])
         elif k == "backspace":
             self.back()
-        elif k in ("1", "2", "3") and int(k) <= len(self.rep):
+        elif k in ("1", "2", "3", "4") and int(k) <= len(self.rep):
             self.go_period(int(k) - 1)
+        elif k == "n" and self.refilter:
+            self.mode, self.buf = "days", str(self.days) if self.days > 0 else ""
         elif k in ("tab", "btab"):
             vs = [v[0] for v in self.VIEWS]
             self.go_view(vs[(vs.index(self.view) + (1 if k == "tab" else -1)) % len(vs)])
@@ -1193,7 +1210,14 @@ class Browser(object):
         elif k == "enter":
             mode, v = self.mode, self.buf.strip() or None
             self.mode, self.buf = None, ""
-            if mode == "model":
+            if mode == "days":
+                if v and v.isdigit() and 0 < int(v) <= 3650:
+                    self.days = int(v)
+                    self.refilter_now(keep=True)
+                    self.go_period(next(i for i, q in enumerate(self.rep) if q["key"] == "last"))
+                else:
+                    self.msg = "Type a whole number of days (1-3650)."
+            elif mode == "model":
                 self.model = v
                 self.refilter_now()
             else:

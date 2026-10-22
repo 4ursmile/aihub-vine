@@ -19,6 +19,7 @@ from .cache import init_cache
 from .sync import Sync
 from .transfer import Transfer
 from .ingest import Ingest
+from .usagebuf import UsageBuffer
 from .backup import Backup
 from .updater import Updater
 from .config import Settings
@@ -209,11 +210,13 @@ def create_app(settings: Settings = None) -> FastAPI:
     async def lifespan(_app):
         logging.getLogger("aihub").info("backends: %s", json.dumps(s.describe()))
         _app.state.ingest.start()
+        _app.state.usagebuf.start()
         if s.sync_enabled:
             _app.state.sync.start()
             _app.state.backup.start()
             _app.state.updater.start()
         yield
+        _app.state.usagebuf.close()         # last usage uploads reach the database
         _app.state.ingest.close()           # last events reach the database (and the git queue) before the sync stops
         _app.state.sync.close()
         _app.state.backup.close()
@@ -234,6 +237,7 @@ def create_app(settings: Settings = None) -> FastAPI:
     app.state.sync = Sync(app.state.repos, s, app.state.cache)
     app.state.transfer = Transfer(s.data_dir, lambda: app.state.sync.num("transfer_repo_ttl"))
     app.state.ingest = Ingest(app.state.repos, app.state.sync, app.state.cache, os.path.join(s.data_dir, "ingest-journal"))
+    app.state.usagebuf = UsageBuffer(app.state.repos, app.state.sync, app.state.cache, os.path.join(s.data_dir, "usage-journal"))
     app.state.backup = Backup(app.state.repos, s, app.state.sync)
     app.state.updater = Updater(app)
     app.add_middleware(GZipMiddleware, minimum_size=800)

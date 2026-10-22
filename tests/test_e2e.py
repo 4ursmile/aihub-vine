@@ -282,7 +282,8 @@ class Integrations(unittest.TestCase):
         self.assertTrue(c.install_hook("/x/aihub hook"))
         d = json.load(open(p))
         self.assertEqual(d["model"], "x"); self.assertEqual(d["permissions"], orig["permissions"])
-        self.assertEqual(d["hooks"]["Stop"], orig["hooks"]["Stop"])
+        self.assertEqual(d["hooks"]["Stop"][0], orig["hooks"]["Stop"][0])             # the user's own Stop hook is untouched...
+        self.assertEqual(sum(1 for g in d["hooks"]["Stop"] for h in g["hooks"] if " hook --source " in h["command"]), 1)   # ...ours is added beside it
         self.assertEqual(set(d["hooks"]), {"Stop", "PreToolUse", "UserPromptSubmit"})
         self.assertFalse(c.install_hook("/x/aihub hook"))          # already right: no write
         self.assertFalse(c.has_hook("/y/aihub hook"))               # moved binary counts as outdated
@@ -342,7 +343,7 @@ class Integrations(unittest.TestCase):
         c = I.ClaudeCode()
         c.install_hook("/x/aihub hook")
         d = json.load(open(os.path.join(self.h, ".claude", "settings.json")))["hooks"]
-        self.assertEqual(sorted(d), ["PreToolUse", "UserPromptSubmit"])
+        self.assertEqual(sorted(d), ["PreToolUse", "Stop", "UserPromptSubmit"])
         self.assertTrue(c.has_hook()); c.remove_hook(); self.assertFalse(c.has_hook())
 
 
