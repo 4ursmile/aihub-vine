@@ -20,6 +20,7 @@ from .sync import Sync
 from .transfer import Transfer
 from .ingest import Ingest
 from .backup import Backup
+from .updater import Updater
 from .config import Settings
 from .db import init_db
 from .repos import EventBuffer, Repos
@@ -211,10 +212,12 @@ def create_app(settings: Settings = None) -> FastAPI:
         if s.sync_enabled:
             _app.state.sync.start()
             _app.state.backup.start()
+            _app.state.updater.start()
         yield
         _app.state.ingest.close()           # last events reach the database (and the git queue) before the sync stops
         _app.state.sync.close()
         _app.state.backup.close()
+        _app.state.updater.close()
         _app.state.events.close()  # drain queued usage events on shutdown
         try:
             db.close()
@@ -232,6 +235,7 @@ def create_app(settings: Settings = None) -> FastAPI:
     app.state.transfer = Transfer(s.data_dir, lambda: app.state.sync.num("transfer_repo_ttl"))
     app.state.ingest = Ingest(app.state.repos, app.state.sync, app.state.cache, os.path.join(s.data_dir, "ingest-journal"))
     app.state.backup = Backup(app.state.repos, s, app.state.sync)
+    app.state.updater = Updater(app)
     app.add_middleware(GZipMiddleware, minimum_size=800)
     app.include_router(api)
 
@@ -369,7 +373,9 @@ def cli():
         raise SystemExit(check(s))
     from . import recover
     recover.run(s, a.recover)
-    uvicorn.run(create_app(s), host=host, port=port, ssl_certfile=cert, ssl_keyfile=key)
+    app = create_app(s)
+    app.state.bound = ("https" if cert else "http", "127.0.0.1" if host in ("0.0.0.0", "::", "") else host, port)       # where the updater probes this server
+    uvicorn.run(app, host=host, port=port, ssl_certfile=cert, ssl_keyfile=key)
 
 
 def check(s):

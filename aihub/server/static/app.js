@@ -446,10 +446,10 @@ function Account() {
 function Admin() {
   const { me } = useStore(); const [tab, setTab] = useState("People"); const [tick, setTick] = useState(0); const bump = () => setTick((x) => x + 1);
   if (!can("admin") && !can("reset_password")) return html`<${Empty} t="Admins only" d="You don’t have access to this page." />`;
-  const tabs = can("admin") ? ["People", "Roles", "Sync", "Backup", "Settings"] : ["People"];
+  const tabs = can("admin") ? ["People", "Roles", "Sync", "Backup", "Updates", "Settings"] : ["People"];
   return html`<div class="stack"><h1>Admin</h1>${tabs.length > 1 && html`<div class="seg">${tabs.map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} aria-pressed=${tab === t} onClick=${() => setTab(t)}>${t}</button>`)}</div>`}
     ${tab === "People" && html`<${People} me=${me} tick=${tick} bump=${bump} />`}${tab === "Roles" && can("admin") && html`<${Roles} tick=${tick} bump=${bump} />`}
-    ${tab === "Sync" && can("admin") && html`<${AdminSync} />`}${tab === "Backup" && can("admin") && html`<${AdminBackup} />`}${tab === "Settings" && can("admin") && html`<${AdminSettings} />`}</div>`;
+    ${tab === "Sync" && can("admin") && html`<${AdminSync} />`}${tab === "Backup" && can("admin") && html`<${AdminBackup} />`}${tab === "Updates" && can("admin") && html`<${AdminUpdates} />`}${tab === "Settings" && can("admin") && html`<${AdminSettings} />`}</div>`;
 }
 const SC = { active: "green", pending: "orange", disabled: "red" };
 function People({ me, tick, bump }) {
@@ -581,6 +581,136 @@ function AdminSync() {
     <div class="stack"><h3>Package index</h3><div class="list">${T("index_url", "Git URL", "Repository holding the package index")}${T("index_branch", "Branch", "default: main")}${T("index_path", "Folder", "default: index (a folder index; an old index.json file also works)")}</div></div>
     <div class="stack"><h3>CLI setup</h3><div class="list">
       ${T("cli_git_url", "CLI git URL", "Where to pip install the CLI from when this server is unreachable")}${T("cli_git_branch", "Branch (optional)", "Leave empty to hide. Install from this branch instead of the default")}${T("cli_git_subdir", "Sub folder (optional)", "Leave empty to hide. Install from this folder of the repo")}${T("client_refresh_hours", "CLI refresh (hours)", "How often installed CLIs re-pull these settings (default 24)")}</div></div></div>`;
+}
+
+const UPD_STATE = { confirmed: ["green", "Updated"], probation: ["orange", "Watching"], applied: ["green", "Switched"], available: ["blue", "Available"], up_to_date: ["", "Up to date"],
+  failed: ["red", "Failed"], rolled_back: ["red", "Rolled back"], rollback_failed: ["red", "Rollback failed"], skipped: ["", "Skipped"], running: ["blue", "Running"], conflict: ["orange", "Needs you"] };
+const UPD_SCHEDULES = [["Hourly", "0 * * * *"], ["Every 6 hours", "0 */6 * * *"], ["Daily 04:00", "0 4 * * *"], ["Weekly (Sun 04:00)", "0 4 * * 0"]];
+const STAGE_ICON = { done: "✓", failed: "✕", blocked: "!", warn: "!", skipped: "–" };
+const UpdBadge = ({ s }) => { const [c, t] = UPD_STATE[s] || ["", s]; return html`<span class=${"badge " + c}>${t}</span>`; };
+function UpdStages({ stages, compact }) {
+  if (!stages || !stages.length) return null;
+  return html`<ol class=${"stages" + (compact ? " compact" : "")} aria-label="Update progress">${stages.map((s) => {
+    const pct = s.progress && s.progress[1] ? Math.min(100, Math.round(100 * s.progress[0] / s.progress[1])) : null;
+    const secs = s.started && s.finished ? ((s.finished - s.started)).toFixed(1) + " s" : "";
+    return html`<li key=${s.key} class=${"stg " + s.state} aria-current=${s.state === "running" ? "step" : null}>
+      <span class="dot" aria-hidden="true">${STAGE_ICON[s.state] || ""}</span><span class="lbl">${s.label}</span>
+      <span class="sub">${s.state === "running" && pct !== null ? pct + "%" : s.detail || (s.state === "pending" ? "waiting" : s.state)}${secs && s.state === "done" ? " · " + secs : ""}</span>
+      ${s.state === "running" && pct !== null && html`<i class="bar"><b style=${"width:" + pct + "%"}></b></i>`}</li>`;
+  })}</ol>`;
+}
+function UpdRun({ id }) {
+  const [run, setRun] = useState(null);
+  useEffect(() => { let on = 1, t; setRun(null); const go = async () => { try { const r = await api("/admin/update/runs/" + id); if (!on) return; setRun(r); if (r.state === "running" || r.state === "probation") t = setTimeout(go, 1500); } catch { if (on) t = setTimeout(go, 3000); } }; go(); return () => { on = 0; clearTimeout(t); }; }, [id]);
+  if (!run) return html`<div class="skel"></div>`;
+  return html`<div class="stack"><${UpdStages} stages=${run.stages} />
+    <div class="updlog" role="log" aria-label="Update log">${run.log.map((e, i) => html`<div key=${i} class=${"ul " + e.l}><time>${new Date(e.t * 1000).toLocaleTimeString()}</time><span>${e.m}</span></div>`)}</div></div>`;
+}
+const blockPick = (v) => (v === undefined || v === null ? "" : typeof v === "object" ? "custom" : v);
+function ConflictBlock({ b, val, set }) {
+  const pick = blockPick(val);
+  return html`<div class=${"cblk" + (pick ? " done" : "")}>
+    <div class="cols"><div class=${"side" + (pick === "ours" || pick === "both" ? " sel" : "")}><b>Mine (this hub)</b><pre>${b.ours || "(empty)"}</pre></div>
+      <div class=${"side" + (pick === "theirs" || pick === "both" ? " sel" : "")}><b>Incoming (update)</b><pre>${b.theirs || "(empty)"}</pre></div></div>
+    ${pick === "custom" && html`<textarea class="field mono" rows="6" aria-label="Edit the result" value=${val.text} onInput=${(e) => set({ text: e.target.value })}></textarea>`}
+    <div class="seg" role="group" aria-label="Choose for this block">${[["Keep mine", "ours"], ["Take incoming", "theirs"], ["Both", "both"]].map(([n, v]) => html`<button key=${v} class=${pick === v ? "on" : ""} aria-pressed=${pick === v} onClick=${() => set(v)}>${n}</button>`)}
+      <button class=${pick === "custom" ? "on" : ""} aria-pressed=${pick === "custom"} onClick=${() => set({ text: pick === "custom" ? val.text : b.ours + b.theirs })}>Edit</button></div></div>`;
+}
+function Context({ text, first, last }) {
+  const lines = text.replace(/\n$/, "").split("\n");
+  let shown = lines, gap = 0;
+  if (lines.length > 7) { const a = first ? 0 : 3, z = last ? 0 : 3; shown = [...lines.slice(0, a), null, ...lines.slice(lines.length - z)]; gap = lines.length - a - z; }
+  return html`<pre class="ctx">${shown.map((l) => (l === null ? "⋯ " + gap + " unchanged lines ⋯" : l)).join("\n")}</pre>`;
+}
+const fileDone = (f, r) => !!r && (r.mode === "ours" || r.mode === "theirs" || (r.mode === "hunks" && r.choices.length === f.conflicts && r.choices.every((c) => c !== null && c !== undefined)));
+function ConflictResolver({ busy, submit }) {
+  const d = useLoad(() => api("/admin/update/conflict"), []); const [res, setRes] = useState({});
+  if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
+  const files = d.d.files; const left = files.filter((f) => !fileDone(f, res[f.path])).length;
+  const put = (p, v) => setRes((r) => ({ ...r, [p]: v }));
+  const setBlock = (f, bi, v) => { const cur = res[f.path]; const ch = cur && cur.mode === "hunks" ? cur.choices.slice() : Array(f.conflicts).fill(null); ch[bi] = v; put(f.path, { mode: "hunks", choices: ch }); };
+  return html`<div class="stack resolver">${files.map((f) => {
+    const r = res[f.path]; let bi = -1; const n = f.segments ? f.segments.length : 0;
+    return html`<section class="cfile" key=${f.path} aria-label=${"Conflict in " + f.path}>
+      <div class="row"><b class="mono">${f.path}</b><span class=${"badge " + (fileDone(f, r) ? "green" : "orange")}>${fileDone(f, r) ? "resolved" : f.kind === "text" ? f.conflicts + " block" + (f.conflicts === 1 ? "" : "s") : f.kind}</span><span class="sp"></span>
+        <div class="seg" role="group" aria-label="Whole file"><button class=${r && r.mode === "ours" ? "on" : ""} aria-pressed=${!!r && r.mode === "ours"} onClick=${() => put(f.path, { mode: "ours" })}>Keep mine</button>
+          <button class=${r && r.mode === "theirs" ? "on" : ""} aria-pressed=${!!r && r.mode === "theirs"} onClick=${() => put(f.path, { mode: "theirs" })}>Take incoming</button></div></div>
+      ${f.note && html`<p class="mut sm">${f.note}</p>`}
+      ${f.kind === "text" && f.segments.map((sg, si) => { if (sg.t === "text") return html`<${Context} key=${si} text=${sg.text} first=${si === 0} last=${si === n - 1} />`; bi += 1; const k = bi;
+        return html`<${ConflictBlock} key=${si} b=${sg} val=${r && r.mode === "hunks" ? r.choices[k] : undefined} set=${(v) => setBlock(f, k, v)} />`; })}</section>`; })}
+    <div class="row"><span class="mut sm">${left ? left + " file" + (left === 1 ? "" : "s") + " still to decide" : "All files decided."}</span><span class="sp"></span>
+      <button class="btn" disabled=${left > 0 || busy} onClick=${() => submit(res)}>Apply and update</button></div></div>`;
+}
+function AdminUpdates() {
+  const [d, setD] = useState(null); const [err, setErr] = useState(""); const [busy, setBusy] = useState(""); const [open, setOpen] = useState(""); const [tick, setTick] = useState(0);
+  const [runs, setRuns] = useState([]); const [vers, setVers] = useState([]); const [down, setDown] = useState(false); const [resolve, setResolve] = useState(false);
+  const load = async () => { try { const [v, r] = await Promise.all([api("/admin/update"), api("/admin/update/runs")]); setD(v); setRuns(r.runs); setErr(""); setDown(false); if (v.git) setVers((await api("/admin/update/versions")).versions); } catch (e) { if (d) setDown(true); else setErr(e.message); } };
+  useEffect(() => { load(); }, [tick]);
+  const live = d && (d.status.running || (d.pending && d.pending.state === "probation")) || down;
+  useEffect(() => { if (!live) return; const t = setInterval(() => setTick((x) => x + 1), 2500); return () => clearInterval(t); }, [live]);
+  if (err) return html`<${Err} e=${err} />`; if (!d) return html`<div class="skel"></div>`;
+  const { config: c, status: st, source: src, pending: pd, conflict: cf } = d;
+  const on = c.update_enabled === "1"; const envLock = d.from_env.update_enabled;
+  const act = async (k, path, opts, ok) => { setBusy(k); try { await api(path, Object.assign({ method: "POST" }, opts)); toast(ok); setTick((x) => x + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
+  const save = async (k, v) => { setBusy(k); try { await api("/admin/update", { method: "PUT", body: { [k]: v } }); toast("Saved"); setTick((x) => x + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
+  const back = (v) => { if (confirm("Roll back to " + v.short + " (" + v.subject + ")? The hub is verified, switched and restarted, then watched.")) act("rb-" + v.sha, "/admin/update/rollback", { body: { target: v.sha } }, "Rollback started"); };
+  const sendResolution = async (files) => { setBusy("resolve"); try { await api("/admin/update/resolve", { method: "POST", body: { files } }); toast("Update started"); setResolve(false); setTick((x) => x + 1); } catch (e) { toast(e.message, 1); setTick((x) => x + 1); } finally { setBusy(""); } };
+  const when = (t) => t ? new Date(t * 1000).toLocaleString() : "never";
+  const next = st.next_in >= 3600 ? Math.round(st.next_in / 3600) + " h" : st.next_in >= 60 ? Math.round(st.next_in / 60) + " min" : st.next_in + " s";
+  const av = st.available; const idle = !st.running && !(pd && pd.state === "probation");
+  const liveId = st.running || (pd && pd.state === "probation" && pd.run) || "";
+  const sw = (k, label, help) => html`<div class="li"><div class="t"><b>${label}</b><span>${help}</span></div><label class="switch"><input type="checkbox" role="switch" checked=${c[k] === "1"} disabled=${busy === k} onChange=${(e) => save(k, e.target.checked ? "1" : "0")} aria-label=${label} /><i></i></label></div>`;
+  const sel = (k, label, help, opts) => html`<div class="li"><div class="t"><b>${label}</b><span>${help}</span></div><div class="seg">${opts.map(([n, v]) => html`<button key=${v} class=${c[k] === v ? "on" : ""} aria-pressed=${c[k] === v} disabled=${busy === k} onClick=${() => save(k, v)}>${n}</button>`)}</div></div>`;
+  const mode = !on ? "Auto-update is off: nothing runs by itself. “Check now” and “Update now” still work."
+    : c.update_auto_apply === "1" ? "Auto-update is on: it checks " + c.update_schedule + " and installs a version by itself once it passes verification. A conflict it cannot resolve waits for you here."
+    : "Auto-update is on: it checks " + c.update_schedule + " and only tells you when a version is available. You press “Update now”.";
+  const last = runs[0];
+  return html`<div class="stack">
+    ${down && html`<div class="card" role="status"><b>The hub is restarting…</b> <span class="mut sm">This page reconnects by itself.</span></div>`}
+    ${cf && html`<div class="card stack conflict" role="alert"><div class="row"><h3>Manual update required</h3><span class="sp"></span><${UpdBadge} s="conflict" /></div>
+      <p class="sm">${cf.files.length} file${cf.files.length === 1 ? "" : "s"} could not be merged automatically${cf.version ? " (incoming v" + cf.version + ")" : ""}. The hub keeps running <code>${src ? src.short : "the current version"}</code>; nothing was changed. Decide what to keep, and the update continues from there.</p>
+      <div class="list">${cf.files.map((f) => html`<div class="li" key=${f.path}><div class="t"><b class="mono">${f.path}</b><span>${f.note || (f.kind === "text" ? f.conflicts + " conflicting block" + (f.conflicts === 1 ? "" : "s") : f.kind)}</span></div></div>`)}</div>
+      <div class="row"><button class="btn" onClick=${() => setResolve(!resolve)} aria-expanded=${resolve}>${resolve ? "Hide resolver" : "Resolve conflicts"}</button>
+        <button class="btn sec" disabled=${!idle} onClick=${() => act("dismiss", "/admin/update/conflict", { method: "DELETE" }, "Dismissed")} title="Forget this conflict; the next check looks again">Dismiss</button></div>
+      ${resolve && html`<${ConflictResolver} busy=${busy === "resolve"} submit=${sendResolution} />`}</div>`}
+    ${pd && pd.state === "probation" && html`<div class="card stack" role="status"><div class="row"><h3>Watching the new version</h3><span class="sp"></span><${UpdBadge} s="probation" /></div>
+      <p class="mut sm">The hub switched to <code>${pd.to.slice(0, 8)}</code> and checks its own health for ${pd.probation} s. If it fails, it goes back to <code>${pd.from.slice(0, 8)}</code> on its own.</p></div>`}
+    ${!d.git && html`<div class="card"><b>Self-update is not available</b><p class="mut sm">${d.why}. Run the hub from a git clone (<code>git clone … && python -m aihub.server</code>) to use it.</p></div>`}
+    <div class="card stack"><div class="row wrap"><h3>Software update</h3><span class="sp"></span>
+      <div class="row autosw" title=${envLock ? "Set by environment (AIHUB_UPDATE_ENABLED)" : "Turn scheduled automatic updates on or off"}><b id="au-l">Auto-update</b><span class=${"badge " + (on ? "green" : "")}>${on ? "On" : "Off"}</span>
+        <label class="switch"><input type="checkbox" role="switch" aria-labelledby="au-l" checked=${on} disabled=${busy === "update_enabled" || envLock || !d.git} onChange=${(e) => save("update_enabled", e.target.checked ? "1" : "0")} /><i></i></label></div></div>
+      <p class="mut sm" role="status">${mode}${envLock ? " Set by environment (AIHUB_UPDATE_ENABLED): that value is used and this switch is locked." : ""}</p>
+      <div class="row wrap">
+        <button class="btn sec sm" disabled=${!d.git || !idle || busy === "check"} onClick=${() => act("check", "/admin/update/check", {}, "Checking…")} title="Fetch and compare; nothing is changed">Check now</button>
+        <button class="btn sm" disabled=${!d.git || !idle || busy === "run"} onClick=${() => act("run", "/admin/update/run", {}, "Update started")} title="Fetch, merge, verify, switch and restart">Update now</button>
+        ${src && src.skip && av && av.tip === src.skip && html`<button class="btn sec sm" disabled=${!idle} onClick=${() => act("force", "/admin/update/run?force=1", {}, "Retrying…")} title="This commit failed before; try it again">Update anyway</button>`}</div>
+      ${src && html`<div class="kpis"><div class="stat"><b>${src.short}</b><span>running commit${src.dirty ? " (local changes)" : ""}</span></div><div class="stat"><b>${av ? "+" + av.behind : "0"}</b><span>${av ? "commits to pull" + (av.version ? " · v" + av.version : "") : "up to date"}</span></div>
+        <div class="stat"><b>${on ? next : "-"}</b><span>next automatic check</span></div><div class="stat"><b>${st.running ? "…" : st.last_check ? ago(st.last_check) : "-"}</b><span>last check</span></div></div>
+      <p class="mut sm">Source: <code>${src.url || "(none)"}</code>, branch <code>${src.branch}</code>. Checkout: <code>${src.path}</code>.</p>`}
+      ${av && av.subjects.length > 0 && html`<div class="list">${av.subjects.map((x, i) => html`<div class="li" key=${i}><div class="t mono">${x}</div></div>`)}</div>`}
+      ${st.last_error && html`<p role="alert" class="sm" style="color:var(--red)">Last problem: ${st.last_error}</p>`}</div>
+    ${(liveId || (last && last.stages)) && html`<div class="card stack"><div class="row"><h3>${liveId ? "Progress" : "Latest run"}</h3><span class="sp"></span>${!liveId && last && html`<${UpdBadge} s=${last.state} />`}</div>
+      ${liveId ? html`<${UpdRun} id=${liveId} />` : html`<${UpdStages} stages=${last.stages} /><p class="mut sm">${last.title || ""} · ${when(last.ts)}</p>`}</div>`}
+    <div class="card stack"><h3>Automatic update</h3>
+      ${sw("update_auto_apply", "Apply automatically", "On: a new version that passes verification is switched in at once. Off: the schedule only looks and reports “available”.")}
+      <div class="li"><div class="t"><b>Schedule</b><span>Seconds (10-86400) or a cron expression: <code>0 4 * * *</code> daily at 04:00.</span></div>
+        <div class="row"><input class="field" id="up-sched" defaultValue=${c.update_schedule} style="width:11rem" aria-label="Update schedule" /><button class="btn sm" disabled=${busy === "update_schedule"} onClick=${() => save("update_schedule", document.getElementById("up-sched").value)}>Save</button></div></div>
+      <div class="li"><div class="t"><b>Presets</b></div><div class="seg">${UPD_SCHEDULES.map(([n, v]) => html`<button key=${v} class=${c.update_schedule === v ? "on" : ""} onClick=${() => save("update_schedule", v)}>${n}</button>`)}</div></div>
+      ${sel("update_conflict", "If local changes conflict", "Ask me: clean merges go through, a real conflict waits here for you to resolve it side by side. Remote wins: the new code replaces the clashing files. Local wins: your version stays. Stop: the update fails and nothing changes.", [["Ask me", "manual"], ["Remote wins", "remote"], ["Local wins", "local"], ["Stop", "abort"]])}
+      ${sw("update_tests", "Run the test suite", "Slow (a few minutes), but the strictest check. The boot test always runs.")}
+      ${sw("update_backup", "Back up the database first", "Only when scheduled backups are on.")}
+      ${sw("update_pip", "Install dependencies", "If requirements changed, run pip install in the hub’s Python before the boot test.")}
+      ${sel("update_restart", "Restart method", "Replace this process by itself, or exit and let systemd, Docker or another supervisor start it again.", [["Restart itself", "exec"], ["Exit (supervisor)", "exit"]])}
+      <${TextSetting} x=${{ label: "Probation (seconds)", help: "After a switch the new version must stay healthy this long (10-900, default 60), or it is rolled back.", kind: "text", max: 3 }} v=${c.update_probation} busy=${busy === "update_probation"} save=${(n) => save("update_probation", n)} />
+      <${TextSetting} x=${{ label: "Source URL", help: "Blank = this checkout’s origin. A different git URL to pull from (the server’s git login is used).", kind: "text", max: 300 }} v=${c.update_url} busy=${busy === "update_url"} save=${(n) => save("update_url", n)} />
+      <${TextSetting} x=${{ label: "Source branch", help: "Blank = the checked-out branch’s upstream.", kind: "text", max: 100 }} v=${c.update_branch} busy=${busy === "update_branch"} save=${(n) => save("update_branch", n)} /></div>
+    <div class="card stack"><h3>Versions</h3><p class="mut sm">Roll back to any commit of this checkout. It is verified like an update, switched, restarted and watched.</p>
+      ${vers.length ? html`<div class="list">${vers.map((v) => html`<div class="li" key=${v.sha}><div class="t"><b class="mono">${v.short} ${v.current ? html`<span class="badge green">running</span>` : null} ${v.deployed ? html`<span class="badge blue">deployed${v.deployed.version ? " v" + v.deployed.version : ""}</span>` : null}</b><span>${v.subject} · ${ago(v.ts)}${v.author ? " · " + v.author : ""}</span></div>
+        ${!v.current && html`<button class="btn sec sm" disabled=${!d.git || !idle || busy === "rb-" + v.sha} onClick=${() => back(v)}>Roll back</button>`}</div>`)}</div>` : html`<p class="mut sm">No history available.</p>`}</div>
+    <div class="card stack"><h3>History</h3>
+      ${runs.length ? html`<div class="list">${runs.map((r) => html`<div key=${r.id}><button class="li updrow" aria-expanded=${open === r.id} onClick=${() => setOpen(open === r.id ? "" : r.id)}><div class="t"><b>${r.kind === "rollback" ? "Rollback" : "Update"} <${UpdBadge} s=${r.state} /></b><span>${r.title || ""}${r.version_from || r.version_to ? " · " + (r.version_from || "?") + " → " + (r.version_to || "?") : ""} · ${when(r.ts)} · ${r.trigger}${r.user ? " by " + r.user : ""}</span>
+        ${r.stages && open !== r.id && html`<${UpdStages} stages=${r.stages} compact=${true} />`}</div></button>
+        ${open === r.id && html`<${UpdRun} id=${r.id} />`}</div>`)}</div>` : html`<p class="mut sm">Nothing yet. A scheduled check that finds no new commit is not recorded.</p>`}</div></div>`;
 }
 
 const BACKUP_SCHEDULES = [["Hourly", "0 * * * *"], ["Every 6 hours", "0 */6 * * *"], ["Daily 03:00", "0 3 * * *"], ["Weekly (Sun 03:00)", "0 3 * * 0"]];

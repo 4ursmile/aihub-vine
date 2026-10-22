@@ -270,3 +270,35 @@ The server can back up its database into the index git repo, under `backups/`. I
 `--recover ask|local|remote|latest|skip` sets the behaviour. Before a restore, local data is copied to `<data>/pre-recover-<time>/`, so the side you did not pick is still recoverable. Restored secrets are hashes: a secret that already exists locally is kept, otherwise re-enter it in the admin page.
 
 A backup also runs once right after the first sync pass at startup (`AIHUB_BACKUP_ON_START=0` disables it). Events that waited in the inbox while the server was down are pulled first, so they reach git before the next cron slot. If the database is replaced, events that were already archived stay in the `telemetry-archive` branch. A backup never overwrites a backup that holds data with an empty database.
+
+
+## Self-update from git
+
+The hub can pull its own source from git, verify it and switch, and go back if the new version misbehaves. It needs a git checkout of the hub (`git clone … && python -m aihub.server`); a container image, zip or wheel shows "not available" in Admin > Updates. Off by default.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `AIHUB_UPDATE_ENABLED` | unset | Environment switch for the schedule; when set it wins over the saved `update_enabled`. |
+| `update_enabled` / `update_schedule` | `0` / `0 4 * * *` | Admin settings: scheduled checks, seconds (10-86400) or a cron expression. |
+| `update_auto_apply` | `1` | On: a version that passes verification is switched in. Off: the schedule only reports "available". |
+| `update_url` / `update_branch` | blank | Blank = the checkout's `origin` and the upstream of the checked-out branch. The server's git login (vault or `AIHUB_GIT_TOKEN`) applies. |
+| `update_conflict` | `remote` | Local commits or uncommitted edits that clash with the new code: `remote` keeps the new file, `local` keeps yours (the rest of the remote change still arrives), `abort` fails the update and changes nothing, `manual` ("Ask me") merges everything git can merge and, on a real conflict, stops WITHOUT changing anything: Admin > Updates shows "Manual update required" with a side-by-side resolver (per block: keep mine, take incoming, both, or edit; per file: keep mine or take incoming; binary and delete-vs-change files by whole file). The answer is applied to a fresh candidate which is then verified, switched and watched like any update. The conflict is dropped when the checkout moves, a stale answer is refused, and a scheduled check does not add a history row while one waits. Uncommitted edits are also saved as `updates/local-<run>.patch`. |
+| `update_tests` | `0` | Also run the unit test suite on the candidate (minutes). |
+| `update_pip` | `0` | If requirements changed, `pip install -r` before the boot test. |
+| `update_backup` | `1` | Back up the database before switching (when scheduled backups are on). |
+| `update_probation` | `60` | Seconds the new version must stay healthy (10-900). |
+| `update_restart` | `exec` | `exec` = the process replaces itself; `exit` = it stops and a supervisor (systemd `Restart=always`, Docker `restart:`) starts it again. |
+
+How an update runs (every step is written to the run log in Admin > Updates):
+
+1. Fetch the branch into a private ref. Nothing to pull = done (a scheduled check that finds nothing is not recorded).
+2. Build a **candidate in a separate git worktree**; the running checkout is not touched. Fast-forward when possible, otherwise local commits and uncommitted edits are merged with the remote using `update_conflict`.
+3. Verify: byte-compile, optionally the tests, then **boot** the candidate on a free port with a temp folder and a copy of the SQLite database, and require `/api/v1/readyz` and the web page. A failure discards the candidate, keeps the hub as it is and skips that commit until the branch moves (the page offers "Update anyway").
+4. Optional database backup, then `git reset --hard` to the candidate and restart.
+5. **Probation**: the new process probes its own `/readyz` for `update_probation` seconds. Three failed checks, no answer, or three boots in a row = it resets to the old commit and restarts. A small stdlib watchdog (`updates/guard.py`, copied from the old version) does the same from outside when the new code crashes on start or hangs. Healthy = "confirmed".
+
+Manual rollback (Admin > Updates > Versions, or `POST /admin/update/rollback`) goes through steps 3-5 with the chosen commit as the candidate. A target from before this feature existed is switched without probation (that code cannot confirm itself). Hubs with a database migration that is not backward compatible should keep `update_backup` on: a rollback restores the code, not the data.
+
+Auto-update has an on/off button at the top of Admin > Updates (the same `update_enabled` setting; locked when `AIHUB_UPDATE_ENABLED` is set). Every run records its **stages** (Fetch, Merge, Check code, Tests, Boot test, Backup, Switch, Watch), drawn as a live stepper with a progress bar for the boot test and the probation window.
+
+Files are under `<data>/updates/`: `conflict.json` (the waiting conflict), `runs/<id>.json` (log, last 200), `status.json`, `pending.json` (a switch being watched), `guard.py`/`guard.log`. Local refs `refs/aihub/updates/*` keep every deployed commit from being garbage collected.

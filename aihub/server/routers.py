@@ -1653,6 +1653,127 @@ def backup_run(request: Request, u=admin):
     return _backup_view(request, u)
 
 
+def _updater(request):
+    return request.app.state.updater
+
+
+def _update_view(request):
+    from . import updater as U
+    up = _updater(request)
+    v = up.view()
+    v["config"] = {k: up.cfg(k) for k in U.KEYS}
+    v["from_env"] = {"update_enabled": bool(request.app.state.settings.env_get("AIHUB_UPDATE_ENABLED"))}
+    v["restart_hint"] = "exec" if up.cfg("update_restart") == "exec" else "exit"
+    return v
+
+
+@r.get("/admin/update")
+def update_status(request: Request, u=admin):
+    return _update_view(request)
+
+
+@r.put("/admin/update")
+def update_settings(body: dict, request: Request, u=admin):
+    from . import updater as U
+    up, repos = _updater(request), R(request)
+    for k in U.KEYS:
+        if k in body and body[k] is not None:
+            try:
+                v = U.check_setting(k, body[k])
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            repos.set_setting(k, v)
+    repos.audit(u["username"], "settings.update", "", ",".join(k for k in U.KEYS if k in body))
+    up.wake.set()
+    return _update_view(request)
+
+
+def _update_go(request, u, action, label, target="", apply=True, force=False, wait=False, resolutions=None):
+    from . import updater as U
+    up = _updater(request)
+    R(request).audit(u["username"], "update." + label, target[:40], "force" if force else "")
+    kw = dict(action=action, trigger="manual", user=u["username"], apply=apply, force=force, target=target)
+    if resolutions is not None:
+        kw["resolutions"] = resolutions
+    try:
+        if wait:
+            return {"run": up.run(**kw)}
+        up.start_async(**kw)
+    except U.Busy as e:
+        raise HTTPException(409, str(e))
+    return _update_view(request)
+
+
+@r.post("/admin/update/check")
+def update_check(request: Request, wait: bool = False, u=admin):
+    """Fetch and report whether a newer version is on the update branch; nothing is changed."""
+    return _update_go(request, u, "update", "check", apply=False, wait=wait)
+
+
+@r.post("/admin/update/run")
+def update_run(request: Request, force: bool = False, wait: bool = False, u=admin):
+    """Update now: fetch, merge, verify, switch and restart (force = also try a commit that failed before)."""
+    return _update_go(request, u, "update", "run", force=force, wait=wait)
+
+
+@r.post("/admin/update/rollback")
+def update_rollback(body: dict, request: Request, wait: bool = False, u=admin):
+    """Go back to a commit (full or short hash, tag, branch) of this checkout: verified, switched, restarted and watched."""
+    target = str(body.get("target") or "").strip()
+    if not target:
+        raise HTTPException(400, "target is required")
+    return _update_go(request, u, "rollback", "rollback", target=target, wait=wait)
+
+
+@r.get("/admin/update/conflict")
+def update_conflict(request: Request, u=admin):
+    """The conflict that waits for a person (policy "manual"): every file with its three sides and the merge blocks, for the resolver page."""
+    c = _updater(request).conflict()
+    if not c:
+        raise HTTPException(404, "no conflict is waiting")
+    return c
+
+
+@r.post("/admin/update/resolve")
+def update_resolve(body: dict, request: Request, wait: bool = False, u=admin):
+    """Apply the admin's answers and continue the update (verify, switch, restart, watch).
+    body: {"files": {"<path>": {"mode": "ours"|"theirs"} | {"mode": "hunks", "choices": ["ours"|"theirs"|"both"|{"text": ...}, ...]} | {"mode": "custom", "text": "..."}}}
+    "ours" = the file as it is on this hub, "theirs" = the incoming version."""
+    files = body.get("files")
+    if not isinstance(files, dict) or not files:
+        raise HTTPException(400, "files is required")
+    if not _updater(request).conflict():
+        raise HTTPException(409, "no conflict is waiting (the branch or the local files changed): press Update now to look again")
+    return _update_go(request, u, "update", "resolve", force=True, wait=wait, resolutions=files)
+
+
+@r.delete("/admin/update/conflict")
+def update_conflict_dismiss(request: Request, u=admin):
+    """Drop the waiting conflict (the next check looks again)."""
+    _updater(request).dismiss_conflict()
+    R(request).audit(u["username"], "update.dismiss", "", "")
+    return _update_view(request)
+
+
+@r.get("/admin/update/versions")
+def update_versions(request: Request, limit: int = Query(40, ge=1, le=200), u=admin):
+    return {"versions": _updater(request).versions(limit)}
+
+
+@r.get("/admin/update/runs")
+def update_runs(request: Request, limit: int = Query(50, ge=1, le=200), u=admin):
+    return {"runs": _updater(request).runs(limit)}
+
+
+@r.get("/admin/update/runs/{rid}")
+def update_run_get(rid: str, request: Request, u=admin):
+    from . import updater as U
+    run = U.Run.load(_updater(request), rid)
+    if not run:
+        raise HTTPException(404, "run not found")
+    return run.d
+
+
 @r.post("/admin/sync/run")
 def sync_run(request: Request, full: bool = False, u=admin):
     """Poll now. full=true forgets the cursor and looks back over everything (safe: events are deduplicated)."""
