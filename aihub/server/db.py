@@ -59,6 +59,7 @@ ALL_PERMS = {
     "publish": "Publish packages",
     "review": "Write reviews",
     "view_dashboard": "View the usage dashboard",
+    "view_usage": "Token usage: upload from the CLI, see own and group usage",
     "manage_all": "Manage every package (not only own)",
     "admin": "Administer accounts, roles and settings",
     "create_groups": "Create and manage own groups",
@@ -69,8 +70,8 @@ ALL_PERMS = {
 }
 PERMS = {
     "admin": list(ALL_PERMS),
-    "publisher": ["publish", "review", "install_indirect"],
-    "user": ["publish", "review", "install_indirect"],
+    "publisher": ["publish", "review", "install_indirect", "view_usage"],
+    "user": ["publish", "review", "install_indirect", "view_usage"],
 }
 # Permissions a visitor who is not signed in can never hold: they would hand out control of accounts and the audit trail
 ANON_LOCKED = ("admin", "manage_all", "reset_password", "audit", "create_groups")   # create_groups: groups need a real owner
@@ -364,6 +365,10 @@ class DB:
                     c.execute("INSERT OR IGNORE INTO role_permissions VALUES(?,?)", (r, "install_indirect"))
                 c.execute("INSERT OR IGNORE INTO app_settings VALUES('perm_install_indirect','1')")
             c.execute("INSERT OR IGNORE INTO roles VALUES('anonymous','Visitors who are not signed in',1)")
+            if not c.execute("SELECT 1 FROM app_settings WHERE key='perm_view_usage'").fetchone():     # token usage: on for every role (anonymous too), once; an admin can switch it off
+                for (r,) in c.execute("SELECT name FROM roles").fetchall():
+                    c.execute("INSERT OR IGNORE INTO role_permissions VALUES(?,?)", (r, "view_usage"))
+                c.execute("INSERT OR IGNORE INTO app_settings VALUES('perm_view_usage','1')")
             for p in ALL_PERMS:
                 c.execute("INSERT OR IGNORE INTO role_permissions VALUES('admin',?)", (p,))
             c.execute("DELETE FROM role_permissions WHERE role='anonymous' AND permission IN (%s)" % ",".join("?" * len(ANON_LOCKED)), ANON_LOCKED)

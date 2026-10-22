@@ -106,6 +106,16 @@ class Repos:
             c.commit()
 
     # ---- users / auth
+    def user_by_actor(self, name, localize=True):
+        """The active hub account a CLI user name belongs to (an anonymous CLI sends its OS user). localize on: same rule as `actor_key`, so
+        `Sam`, `sam@corp.com` and the account `sam` are one person; off: the exact name. None when nobody (or more than one person) matches."""
+        key = actor_key(name) if localize else str(name or "").strip()
+        if not key or key == "anonymous":
+            return None
+        rows = self.db.conn().execute("SELECT * FROM users WHERE " + ("lower(username)=?" if localize else "username=?") + " AND status='active' "
+                                      "AND role<>'anonymous' LIMIT 2", (key,)).fetchall()
+        return dict(rows[0]) if len(rows) == 1 else None
+
     def user_by_name(self, u):
         r = self.db.conn().execute("SELECT * FROM users WHERE username=?", (u,)).fetchone()
         return dict(r) if r else None

@@ -48,7 +48,7 @@ class HubBase(unittest.TestCase):
 
 class Hub(HubBase):
     def test_upload_needs_login_and_resend_never_double_counts(self):
-        self.assertEqual(self.c.post(API + "/usage/sync", json={"rows": []}).status_code, 401)
+        self.assertEqual(self.c.post(API + "/usage/sync", json={"rows": []}).json()["matched"], False)     # anonymous may upload (view_usage), but nobody matches
         self.assertEqual(self.up("ann", [row(D(0))]).json()["stored"], 1)
         self.up("ann", [row(D(0))])                                              # same day again: overwritten
         t = self.get("ann").json()["totals"]
@@ -110,6 +110,44 @@ class Hub(HubBase):
         self.assertEqual(self.get("ann", **{"from": D(1), "to": D(5)}).status_code, 400)
 
 
+class Permission(HubBase):
+    def anon_up(self, name, rows=None):
+        return self.c.post(API + "/usage/sync", json={"client_id": "x", "local_user": name, "rows": rows or [row(D(0))]})
+
+    def test_view_usage_is_in_the_matrix_and_on_for_every_role_including_anonymous(self):
+        roles = {x["name"]: x["permissions"] for x in self.c.get(API + "/admin/roles", headers=self.h["root"]).json()["detail"]}
+        for r in ("admin", "user", "publisher", "anonymous"):
+            self.assertIn("view_usage", roles[r], r)
+        self.assertIn("view_usage", self.c.get(API + "/meta").json()["anonymous_perms"])           # the web reads this when signed out
+        self.assertIn("view_usage", {p["key"] for p in self.c.get(API + "/admin/roles", headers=self.h["root"]).json()["permissions"]})
+
+    def test_switching_it_off_blocks_web_and_cli(self):
+        self.c.put(API + "/admin/roles/user", json={"permissions": ["publish", "review"]}, headers=self.h["root"])
+        self.assertEqual(self.get("ann").status_code, 403)
+        self.assertEqual(self.c.get(API + "/usage/groups", headers=self.h["ann"]).status_code, 403)
+        self.assertEqual(self.c.get(API + "/usage/sessions", headers=self.h["ann"]).status_code, 403)
+        self.assertEqual(self.up("ann", [row(D(0))]).status_code, 403)
+        self.assertEqual(self.get("root").status_code, 200)                                          # admin keeps it
+        self.c.put(API + "/admin/roles/anonymous", json={"permissions": []}, headers=self.h["root"])
+        self.assertEqual(self.anon_up("ann").status_code, 401)
+
+    def test_cli_without_login_is_matched_by_normalized_name_and_the_group_sees_it(self):
+        self.assertEqual(self.anon_up("Ann").json()["matched"], True)                                # OS user `Ann` = account ann
+        self.assertEqual(self.anon_up("ann@corp.com", [row(D(1))]).json()["stored"], 1)
+        self.assertEqual(self.get("ann").json()["totals"]["requests"], 4)
+        red = self.get("bob", scope="groups", group=str(self.g["red"])).json()                       # bob is in ann's group
+        self.assertEqual((red["totals"]["requests"], [x["username"] for x in red["by_user"]]), (4, ["ann"]))
+        self.assertEqual(self.get("eve", scope="groups").json()["totals"]["requests"], 0)
+        self.assertEqual(self.anon_up("stranger").json(), {"stored": 0, "matched": False, "received": 1})
+        self.assertEqual(self.anon_up("").json()["matched"], False)
+        self.assertEqual(self.anon_up("anonymous").json()["matched"], False)
+
+    def test_localize_off_needs_the_exact_name(self):
+        self.c.put(API + "/admin/sync", json={"localize_users": "0"}, headers=self.h["root"])
+        self.assertEqual(self.anon_up("Ann").json()["matched"], False)
+        self.assertEqual(self.anon_up("ann").json()["matched"], True)
+
+
 class Uploader(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp()
@@ -139,12 +177,13 @@ class Uploader(unittest.TestCase):
             self.assertIn("usage-sync", pop.call_args[0][0])
         usagesync._release()
 
-    def test_off_without_login_or_when_disabled(self):
+    def test_off_when_disabled_and_not_signed_in_still_uploads(self):
         from aihub.cli import paths
         paths.save("credentials.json", {}, private=True)
         with mock.patch("subprocess.Popen") as pop:
             usagesync.kick()
-            self.assertEqual(pop.call_count, 0)
+            self.assertEqual(pop.call_count, 1)                                  # no login: the hub matches the OS user name
+        usagesync._release()
         paths.save("credentials.json", {"token": "t", "username": "ann"}, private=True)
         with mock.patch.dict(os.environ, {"AIHUB_USAGE_SYNC": "off"}), mock.patch("subprocess.Popen") as pop:
             usagesync.kick()

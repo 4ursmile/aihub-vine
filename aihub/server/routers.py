@@ -1350,20 +1350,22 @@ async def a_batch(request: Request, role: str = "user", u=admin):
     if len(items) > MAX_BATCH:
         raise HTTPException(400, "too many rows (max %d per upload)" % MAX_BATCH)
 
-    # Groups must already exist, and the caller must be allowed to add people to them. Nothing is auto-created.
-    group_ids = repos.group_ids_by_name({x for it in items for x in it["groups"]})
+    # A group named in the sheet that does not exist yet is created (owned by the admin who uploads), then the people are added. No row is skipped for it.
+    wanted = {x for it in items for x in it["groups"]}
+    bad_group = {n for n in wanted if not GROUP_RE.match(n)}
+    new_groups = []
 
     def work():
         seen, plan, result = set(), [], []
         for it in items:
             row = dict(it, password="", status="", groups=", ".join(it["groups"]))
-            unknown = [x for x in it["groups"] if x not in group_ids]
+            invalid = [x for x in it["groups"] if x in bad_group]
             if not re.match(r"^[A-Za-z0-9_.-]{2,40}$", it["username"]):
                 row["status"] = "invalid username"
             elif it["role"] not in roles:
                 row["status"] = "unknown role"
-            elif unknown:
-                row["status"] = "unknown group: " + ", ".join(unknown)
+            elif invalid:
+                row["status"] = "invalid group name: " + ", ".join(invalid)
             elif it["username"].lower() in seen:
                 row["status"] = "duplicate in file"
             else:
@@ -1371,6 +1373,17 @@ async def a_batch(request: Request, role: str = "user", u=admin):
                 row["password"] = gen_password()
                 plan.append(row)
             result.append(row)
+        need = {n for x in plan for n in (y.strip() for y in x["groups"].split(",")) if n}   # only groups a created account will join
+        group_ids = repos.group_ids_by_name(need)
+        for n in sorted(need - set(group_ids)):
+            try:
+                group_ids[n] = repos.group_create(n, "", u["id"])
+                new_groups.append(n)
+            except Exception:                                       # created meanwhile by someone else: use theirs
+                gid = repos.group_by_name(n)
+                if not gid:
+                    raise
+                group_ids[n] = gid["id"]
         made = repos.users_create_many([(x["username"], hash_password(x["password"]), x["role"], x["display_name"], x["title"],
                                          [group_ids[n] for n in (y.strip() for y in x["groups"].split(",")) if n]) for x in plan])
         for x in plan:
@@ -1381,8 +1394,8 @@ async def a_batch(request: Request, role: str = "user", u=admin):
         return result, len(made)
 
     result, created = await run_in_threadpool(work)
-    repos.audit(u["username"], "users.batch", "", "created=%d rows=%d groups=%d" % (created, len(items), len(group_ids)))
-    if group_ids:
+    repos.audit(u["username"], "users.batch", "", "created=%d rows=%d new_groups=%d" % (created, len(items), len(new_groups)))
+    if wanted:
         C(request).invalidate("pkg")   # group membership changes who can see private repositories
     buf = io.StringIO()
     w = csv.writer(buf)
@@ -1392,7 +1405,7 @@ async def a_batch(request: Request, role: str = "user", u=admin):
                     x["role"], sheet.safe_cell(x["groups"]), x["password"], x["status"]])
     return Response("﻿" + buf.getvalue(), media_type="text/csv; charset=utf-8", headers={
         "Content-Disposition": 'attachment; filename="new-accounts.csv"', "Cache-Control": "no-store",
-        "X-Created": str(created), "X-Skipped": str(len(result) - created)})
+        "X-Created": str(created), "X-Skipped": str(len(result) - created), "X-Groups-Created": str(len(new_groups))})
 
 
 audit_dep = Depends(require_perm("audit"))
@@ -1925,10 +1938,35 @@ def _usage_sessions(raw):
     return out
 
 
+def usage_user(request: Request, u=Depends(current_user)):
+    """A signed-in user whose role holds `view_usage` (Admin > Roles; on for every role by default). Reading usage needs an account."""
+    if not u:
+        raise HTTPException(401, "authentication required")
+    if "view_usage" not in R(request).perms(u["role"]):
+        raise HTTPException(403, "missing permission: view_usage")
+    return u
+
+
+def _usage_owner(request, u, body):
+    """Whose usage an upload is: the signed-in account (its role needs `view_usage`), else, for a CLI that is not signed in, the hub account
+    its OS user name belongs to - same rule as the dashboard's `localize_users` (`Sam` / `sam@corp.com` / `sam` are one person), so that
+    person's groups see it. Needs `view_usage` on the anonymous role (on by default). None = nobody to attribute it to."""
+    repos = R(request)
+    if u:
+        if "view_usage" not in repos.perms(u["role"]):
+            raise HTTPException(403, "missing permission: view_usage")
+        return u
+    if "view_usage" not in repos.perms("anonymous"):
+        raise HTTPException(401, "authentication required")
+    name = _clean(body.get("local_user"), 64) if isinstance(body, dict) else ""
+    return repos.user_by_actor(name, repos.localize())
+
+
 @r.post("/usage/sync")
-async def usage_sync(request: Request, u=Depends(require_user)):
-    """Daily token totals of one device of the signed-in user: {"client_id", "rows": [{day, tool, model, requests, input, output, cache_write,
-    cache_read, cost, unpriced}]}. A row is the whole day, so sending it again only overwrites it."""
+async def usage_sync(request: Request, u=Depends(current_user)):
+    """Daily token totals of one device: {"client_id", "local_user", "rows": [{day, tool, model, requests, input, output, cache_write,
+    cache_read, cost, unpriced}]}. A row is the whole day, so sending it again only overwrites it. Signed in: the account's usage. Not signed
+    in (permission `view_usage` on the anonymous role): the hub account whose name matches `local_user`, else `{"stored": 0, "matched": false}`."""
     ing, buf = request.app.state.ingest, request.app.state.usagebuf
     ok, wait = ing.allow(request.client.host if request.client else "?")
     if not ok:
@@ -1953,14 +1991,17 @@ async def usage_sync(request: Request, u=Depends(require_user)):
     rows = body.get("rows") if isinstance(body, dict) else None
     if not isinstance(rows, list) or len(rows) > MAX_USAGE_ROWS:
         raise HTTPException(400, "send {\"client_id\": ..., \"rows\": [...]} with at most %d rows" % MAX_USAGE_ROWS)
+    owner = await run_in_threadpool(_usage_owner, request, u, body)
+    if not owner:
+        return {"stored": 0, "matched": False, "received": len(rows)}   # nobody to attribute it to: not an error, the CLI must not retry for ever
     client = _clean(body.get("client_id"), 64) or "-"
     good = _usage_rows(rows)
     sess = _usage_sessions(body.get("sessions"))[:MAX_USAGE_ROWS]
     try:
-        stored = await run_in_threadpool(buf.add, u["id"], client, good, sess)  # journal fsync must not block the event loop
+        stored = await run_in_threadpool(buf.add, owner["id"], client, good, sess)  # journal fsync must not block the event loop
     except OSError:                                                       # cannot make it durable: do NOT acknowledge, the CLI retries
         return JSONResponse({"detail": "cannot store usage right now"}, status_code=503, headers={"Retry-After": "30"})
-    return {"stored": stored, "received": len(rows) + (len(body.get("sessions")) if isinstance(body.get("sessions"), list) else 0)}
+    return {"stored": stored, "matched": True, "received": len(rows) + (len(body.get("sessions")) if isinstance(body.get("sessions"), list) else 0)}
 
 
 def _usage_window(request, days, date_from, date_to):
@@ -1973,7 +2014,7 @@ def _usage_window(request, days, date_from, date_to):
 
 
 @r.get("/usage/groups")
-def usage_groups(request: Request, u=Depends(require_user)):
+def usage_groups(request: Request, u=Depends(usage_user)):
     """Groups whose usage the caller may see: the ones they belong to (a site admin: all)."""
     repos = R(request)
     return {"groups": repos.user_groups(u["id"], every="admin" in repos.perms(u["role"]))}
@@ -1981,7 +2022,7 @@ def usage_groups(request: Request, u=Depends(require_user)):
 
 @r.get("/usage/sessions")
 def usage_sessions(request: Request, scope: str = "me", group: str = "", days: int = 30, tool: str = None, model: str = None, user: str = None,
-                   limit: int = 100, date_from: str = Query(None, alias="from"), date_to: str = Query(None, alias="to"), u=Depends(require_user)):
+                   limit: int = 100, date_from: str = Query(None, alias="from"), date_to: str = Query(None, alias="to"), u=Depends(usage_user)):
     """Sessions (biggest cost first, with peak context, cold rebuilds and so on) and usage hints for the same scope and filters as /usage."""
     ids, mine = _usage_scope(request, u, scope, group)
     if scope == "groups" and not ids:
@@ -2024,7 +2065,7 @@ def _usage_scope(request, u, scope, group):
 
 @r.get("/usage")
 def usage_report(request: Request, scope: str = "me", group: str = "", days: int = 30, tool: str = None, model: str = None, user: str = None,
-                 date_from: str = Query(None, alias="from"), date_to: str = Query(None, alias="to"), u=Depends(require_user)):
+                 date_from: str = Query(None, alias="from"), date_to: str = Query(None, alias="to"), u=Depends(usage_user)):
     """scope=me: the caller's own usage (all devices). scope=groups: everybody in the chosen groups (`group` = comma list of group ids; blank = all
     the caller's groups), each person counted once even when in several of them, with by_group / by_user / by_model. Filters: tool, model, user."""
     if scope not in ("me", "groups"):

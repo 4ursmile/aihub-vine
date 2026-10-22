@@ -409,6 +409,7 @@ All routes use `/api/v1`. Send `Authorization: Bearer <token>` on protected rout
 - Admin (needs `admin`): `GET|PUT /admin/sync`, `POST /admin/sync/run?full=false`, `GET|PUT /admin/backup`, `POST /admin/backup/run`, `GET|PUT /admin/update`, `POST /admin/update/check|run|rollback` (body `{"target":"<commit>"}`), `GET /admin/update/versions|runs|runs/{id}` (hub self-update from git, off by default; candidate in a worktree, boot test, probation, automatic and manual rollback), `GET|PUT /admin/settings/registration` (`open`, `approval`, `closed`), `GET|PUT /admin/settings`, `GET /admin/roles`, `GET /admin/users?q=`, `POST /admin/users/{u}/status|role|reset-password`, `DELETE /admin/users/{u}`, `GET /admin/audit`.
 - Audit (needs `audit`): `GET /audit` and `GET /audit/export` (CSV, up to 5000 rows).
 - Dashboard (needs `view_dashboard`): `GET /dashboard`, `GET /dashboard/events`.
+- Token usage (needs `view_usage`, on for every role incl. anonymous by default): `POST /usage/sync` (a CLI that is not signed in is matched to the hub account with the same OS user name), `GET /usage`, `/usage/groups`, `/usage/sessions` (signed in).
 - Not present: upload, download and `/files/...` routes return 404. The server accepts no events.
 
 ## 13. Server configuration (admin)

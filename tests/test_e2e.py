@@ -769,8 +769,9 @@ class GroupsPageAndBulk(unittest.TestCase):
                  b"a1,Ann One,data-team\n"
                  b"b2,Bob Two,Data-Team; platform\n"      # several groups, case-insensitive, ; separated
                  b"c3,Cy Three,data-team|platform|data-team\n"   # pipe separated, duplicates ignored
-                 b"d4,Di Four,ghost\n"                        # unknown group -> row skipped
-                 b"e5,Ed Five,data-team;ghost\n"              # one unknown among valid ones -> whole row skipped
+                 b"d4,Di Four,ghost\n"                        # unknown group -> created
+                 b"e5,Ed Five,data-team;ghost\n"              # valid + new
+                 b"g7,Gus Seven,Bad Name!\n"                  # not a valid group name -> row skipped
                  b"f6,Flo Six,\n")                            # no group is fine
         r = self.c.post("/api/v1/admin/users/batch?role=user", content=sheet, headers=self.admin)
         self.assertEqual(r.status_code, 200, r.text)
@@ -778,18 +779,23 @@ class GroupsPageAndBulk(unittest.TestCase):
         rows = {x["username"]: x for x in _csv.DictReader(io.StringIO(r.text.lstrip("\ufeff")))}
         self.assertEqual(rows["a1"]["status"], "created"); self.assertEqual(rows["b2"]["groups"], "data-team, platform")
         self.assertEqual(rows["c3"]["groups"], "data-team, platform")
-        self.assertEqual(rows["d4"]["status"], "unknown group: ghost"); self.assertEqual(rows["d4"]["password"], "")
-        self.assertEqual(rows["e5"]["status"], "unknown group: ghost")
+        self.assertEqual((rows["d4"]["status"], bool(rows["d4"]["password"])), ("created", True))
+        self.assertEqual(rows["e5"]["status"], "created")
+        self.assertTrue(rows["g7"]["status"].startswith("invalid group name")); self.assertEqual(rows["g7"]["password"], "")
         self.assertEqual(rows["f6"]["status"], "created")
-        self.assertEqual(r.headers["x-created"], "4")
+        self.assertEqual((r.headers["x-created"], r.headers["x-groups-created"]), ("6", "1"))
         members = lambda g: sorted(m["username"] for m in self.c.get("/api/v1/groups/" + g, headers=self.admin).json()["members"])
-        # "root" created both groups, so the creator is a member (existing behaviour); the sheet added the rest
-        self.assertEqual(members("data-team"), ["a1", "b2", "c3", "root"]); self.assertEqual(members("platform"), ["b2", "c3", "root"])
-        # no group was auto-created, and skipped rows created no account
-        self.assertEqual(sorted(g["name"] for g in self.c.get("/api/v1/groups", headers=self.admin).json()["groups"]), ["data-team", "platform"])
+        # "root" created data-team and platform, so the creator is a member (existing behaviour); the sheet added the rest
+        self.assertEqual(members("data-team"), ["a1", "b2", "c3", "e5", "root"]); self.assertEqual(members("platform"), ["b2", "c3", "root"])
+        self.assertEqual(members("ghost"), ["d4", "e5"])                  # created by the sheet: only the new people, the uploader is not added
+        self.assertEqual(sorted(g["name"] for g in self.c.get("/api/v1/groups", headers=self.admin).json()["groups"]), ["data-team", "ghost", "platform"])
         all_users = {u["username"] for u in self.c.get("/api/v1/admin/users", headers=self.admin).json()["users"]}
-        self.assertTrue({"a1", "b2", "c3", "f6"} <= all_users)
-        self.assertFalse({"d4", "e5"} & all_users)                         # skipped rows created no account
+        self.assertTrue({"a1", "b2", "c3", "d4", "e5", "f6"} <= all_users)
+        self.assertNotIn("g7", all_users)
+        # a second upload names the same group again: it is reused, not duplicated
+        r2 = self.c.post("/api/v1/admin/users/batch?role=user", content=b"username,group\nh8,ghost\n", headers=self.admin)
+        self.assertEqual(r2.headers["x-groups-created"], "0")
+        self.assertIn("h8", members("ghost"))
         # group membership from the sheet grants access to private repos shared with the group
         tok = self.c.post("/api/v1/auth/login", json={"username": "a1", "password": rows["a1"]["password"]}).json()["token"]
         self.assertEqual(self.c.get("/api/v1/groups", headers={"Authorization": "Bearer " + tok}).json()["groups"][0]["name"], "data-team")

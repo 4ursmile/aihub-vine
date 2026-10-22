@@ -4,7 +4,8 @@ The hook only calls `kick()`: it marks "something changed" and starts one detach
 is alive. The worker waits a short window (a burst of turns becomes ONE upload), reads the usage logs through the per-file parse cache
 (only changed files are parsed), totals them per UTC day / tool / model and sends only the rows that differ from the last successful
 upload. A row is the whole day, so the hub overwrites it: a resend or a lost answer can never double count. Only numbers and model names
-leave the machine (no titles, prompts or folders). Needs a hub and a signed-in user; off with AIHUB_USAGE_SYNC=off or
+leave the machine (no titles, prompts or folders). Needs a hub; signed in = your account, not signed in = the hub account whose name equals your
+OS user (the hub's `view_usage` permission on the anonymous role, on by default; no match = nothing stored); off with AIHUB_USAGE_SYNC=off or
 `aihub config set usage_sync off`. Nothing here may raise or block the agent. Stdlib only."""
 import gzip
 import json
@@ -29,7 +30,7 @@ STATE = "usage-sync.json"
 
 def enabled():
     v = str(os.environ.get("AIHUB_USAGE_SYNC") or paths.config().get("usage_sync") or "on").lower()
-    return v not in ("off", "0", "false", "no") and paths.hub_configured() and bool(paths.load("credentials.json", {}).get("token"))
+    return v not in ("off", "0", "false", "no") and paths.hub_configured()
 
 
 def _q(name):
@@ -184,15 +185,23 @@ def _post(client, rows, sessions=()):
     import urllib.error
     import urllib.request
     from . import api
-    body = json.dumps(textsafe.deep({"client_id": client, "rows": rows, "sessions": list(sessions)}), separators=(",", ":")).encode()
-    h = {"Content-Type": "application/json", "User-Agent": "aihub-cli",
-         "Authorization": "Bearer " + str(paths.load("credentials.json", {}).get("token") or "")}
+    from . import identity
+    body = json.dumps(textsafe.deep({"client_id": client, "local_user": identity.os_user(), "rows": rows, "sessions": list(sessions)}), separators=(",", ":")).encode()
+    h = {"Content-Type": "application/json", "User-Agent": "aihub-cli"}
+    token = paths.load("credentials.json", {}).get("token")
+    if token:
+        h["Authorization"] = "Bearer " + str(token)
     if len(body) > 512:
         body, h["Content-Encoding"] = gzip.compress(body, 6, mtime=0), "gzip"
     rq = urllib.request.Request(paths.config()["hub"].rstrip("/") + "/api/v1/usage/sync", data=body, headers=h, method="POST")
     try:
         with api._opener.open(rq, timeout=TIMEOUT) as r:
-            r.read()
+            raw = r.read()
+        try:
+            if json.loads(raw or b"{}").get("matched") is False and not token:
+                raise OSError("no hub account named %r: sign in (aihub login) or ask an admin to create it; usage is kept and sent later" % identity.os_user())
+        except ValueError:
+            pass
         return True
     except urllib.error.HTTPError as e:
         if e.code in (429, 502, 503, 504):
@@ -217,7 +226,9 @@ def push(recs=None, full=False):
     on the hub. The state file keeps one short signature per key, and keys older than KEEP_DAYS are dropped from it, so it stays small."""
     from . import hooks
     st = _state()
-    hub, user = paths.config()["hub"], paths.load("credentials.json", {}).get("username")
+    from . import identity
+    hub = paths.config()["hub"]
+    user = paths.load("credentials.json", {}).get("username") or "~" + identity.os_user()
     sent = st.get("sent") if isinstance(st.get("sent"), dict) else {}
     ssent = st.get("ssent") if isinstance(st.get("ssent"), dict) else {}
     if st.get("hub") != hub or st.get("user") != user:
