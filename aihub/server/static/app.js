@@ -507,6 +507,26 @@ function Roles({ tick, bump }) {
       <input class="field" style="flex:2;min-width:200px" placeholder="Description (optional)" value=${nd} onInput=${(e) => setNd(e.target.value)} /><button class="btn" disabled=${!nn} onClick=${create}>Create role</button></div>
       <p class="xs mut3">Lowercase letters, digits, - or _. Create it, then tick its permissions in the table above.</p></div></div>`;
 }
+// Collapsible sections for long admin tabs. `init` lists every section key (false = closed by default); the choice is remembered per tab in this browser.
+function useFolds(scope, init) {
+  const key = "aihub_folds_" + scope, keys = Object.keys(init);
+  const [st, setSt] = useState(() => { try { return JSON.parse(localStorage.getItem(key)) || {}; } catch { return {}; } });
+  const open = (k) => (k in st ? !!st[k] : init[k] !== false);
+  const put = (n) => { setSt(n); try { localStorage.setItem(key, JSON.stringify(n)); } catch {} };
+  return { open, keys, openCount: keys.filter(open).length, toggle: (k) => put({ ...st, [k]: !open(k) }), all: (v) => put(Object.fromEntries(keys.map((k) => [k, v]))) };
+}
+function FoldBar({ f, children }) {
+  return html`<div class="foldbar"><span class="xs mut3" aria-live="polite">${f.openCount} of ${f.keys.length} sections open</span><span class="sp"></span>${children}
+    <button type="button" class="btn sec sm" disabled=${f.openCount === f.keys.length} onClick=${() => f.all(true)}>Expand all</button>
+    <button type="button" class="btn sec sm" disabled=${f.openCount === 0} onClick=${() => f.all(false)}>Collapse all</button></div>`;
+}
+function Fold({ f, k, title, hint, badge, children }) {
+  const on = f.open(k), id = "fold-" + k;
+  return html`<section class=${"fold" + (on ? " open" : "")}><h3 class="fold-h"><button type="button" aria-expanded=${on} aria-controls=${id} onClick=${() => f.toggle(k)}>
+      <svg class="fold-chev" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2l4 4-4 4"/></svg>
+      <span class="fold-t">${title}</span>${badge != null && badge !== "" && html`<span class="badge">${badge}</span>`}${hint && html`<span class="fold-s">${hint}</span>`}</button></h3>
+    ${on && html`<div class="fold-b" id=${id}>${children}</div>`}</section>`;
+}
 function NumSetting({ x, v, busy, save }) {
   const [t, setT] = useState(v); const n = Number(t), ok = /^\d+$/.test(t) && n >= x.min && n <= x.max;
   return html`<div class="li"><div class="t"><b>${x.label}</b><span>${x.help}</span>${!ok && html`<span class="xs" style="color:var(--orange)">Enter a whole number from ${x.min} to ${x.max}.</span>`}</div>
@@ -534,15 +554,16 @@ function LogoSetting({ url, bump }) {
 }
 function AdminSettings() {
   const [tick, setTick] = useState(0); const d = useLoad(() => api("/admin/settings"), [tick]); const [busy, setBusy] = useState("");
+  const f = useFolds("settings", { Site: true, Access: true, Repositories: false, Groups: false });
   if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
   const set1 = async (k, v) => { setBusy(k); if (k === "cli_endpoint" && v) toast("Checking endpoint…"); try { await api("/admin/settings", { method: "PUT", body: { [k]: v } }); toast("Saved"); if (k === "theme_color") loadBrand(); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
   const sections = [["Site", ["site_name", "theme_color", "cli_endpoint", "contact_name", "contact_email", "contact_url", "contact_phone", "announcement"]], ["Access", ["signup", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility"]], ["Groups", ["allow_group_creation"]]];
   const by = Object.fromEntries(d.d.schema.map((x) => [x.key, x]));
   const warn = d.d.values.public_install === "1";
-  return html`<div class="stack"><div class="card row"><b>Server version</b><span class="mono">v${d.d.server_version}</span><span class="sp"></span><span class="xs mut3">CLIs on this hub self-update to this version (<code>aihub upgrade</code>)</span></div>${sections.map(([title, keys]) => html`<div class="stack" key=${title}><h3>${title}</h3><div class="list">${title === "Site" && html`<${LogoSetting} url=${d.d.logo_url} bump=${() => setTick(tick + 1)} />`}${keys.filter((k) => by[k]).map((k) => { const x = by[k], v = d.d.values[k]; if (x.type === "text") return html`<${TextSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; if (x.type === "number") return html`<${NumSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; const onoff = x.options.length === 2 && x.options[0] === "0";
+  return html`<div class="stack"><div class="card row"><b>Server version</b><span class="mono">v${d.d.server_version}</span><span class="sp"></span><span class="xs mut3">CLIs on this hub self-update to this version (<code>aihub upgrade</code>)</span></div><${FoldBar} f=${f} />${sections.map(([title, keys]) => html`<${Fold} key=${title} f=${f} k=${title} title=${title} badge=${keys.filter((k) => by[k]).length}><div class="list">${title === "Site" && html`<${LogoSetting} url=${d.d.logo_url} bump=${() => setTick(tick + 1)} />`}${keys.filter((k) => by[k]).map((k) => { const x = by[k], v = d.d.values[k]; if (x.type === "text") return html`<${TextSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; if (x.type === "number") return html`<${NumSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; const onoff = x.options.length === 2 && x.options[0] === "0";
       return html`<div class="li" key=${k}><div class="t"><b>${x.label}</b><span>${x.help}</span></div>
         ${onoff ? html`<label class="switch"><input type="checkbox" role="switch" checked=${v === "1"} disabled=${busy === k} onChange=${(e) => set1(k, e.target.checked ? "1" : "0")} aria-label=${x.label} /><i></i></label>`
-        : html`<div class="seg">${x.options.map((o) => html`<button key=${o} class=${v === o ? "on" : ""} disabled=${busy === k} onClick=${() => v !== o && set1(k, o)}>${o}</button>`)}</div>`}</div>`; })}</div></div>`)}
+        : html`<div class="seg">${x.options.map((o) => html`<button key=${o} class=${v === o ? "on" : ""} disabled=${busy === k} onClick=${() => v !== o && set1(k, o)}>${o}</button>`)}</div>`}</div>`; })}</div><//>`)}
     ${warn && html`<div class="card" style="border:1px solid var(--orange)"><b>Public install is on.</b> <span class="mut">Anyone who can reach this server can download <u>public</u> packages without signing in. Private packages always require access.</span></div>`}</div>`;
 }
 
@@ -553,6 +574,7 @@ function SecretField({ label, help, v, onSave }) {
 }
 function AdminSync() {
   const [tick, setTick] = useState(0); const d = useLoad(() => api("/admin/sync"), [tick]); const [busy, setBusy] = useState("");
+  const fd = useFolds("sync", { legacy: false, schedule: true, inbox: false, load: false, index: false, cli: false });
   if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
   const { config: c, status: st, from_env: env } = d.d; const ing = st.ingest;
   const dur = (n) => n >= 3600 ? Math.round(n / 360) / 10 + " h" : n >= 60 ? Math.round(n / 60) + " min" : n + " s";
@@ -566,21 +588,21 @@ function AdminSync() {
       <p class="mut sm">Last run: ${when(st.last_run)}${st.last_error ? html` · <b style="color:var(--red)">${st.last_error}</b>` : html` · <span style="color:var(--green)">OK</span>`}</p>
       ${st.publish_error && html`<p class="sm"><b style="color:var(--red)">A published package is not in the index yet (retrying): ${st.publish_error}</b></p>`}
       <p class="mut sm">Archive: ${c.telemetry_archive === "0" ? "off" : html`${st.archive_last ? "last written " + when(st.archive_last) : "nothing written since the server started"}${st.archive_batches ? html` · ${st.archive_batches} batch(es) this run` : ""}${st.archive_files ? html` · ${st.archive_files} file(s) on <code>${c.telemetry_branch || "telemetry-archive"}</code>` : ""}${st.archive_commit ? html` · commit <code>${st.archive_commit}</code>` : ""}`}${st.inbox_pending ? html` · ${st.inbox_pending} batch(es) were waiting in the inbox` : ""}</p></div>
-    <div class="stack"><h3>Legacy git sync</h3><div class="list"><div class="li"><div class="t"><b>Git telemetry inbox sync</b><span>Legacy, off by default. Reads usage batches from the git inbox and archives events to git. Events sent to the hub over HTTP are unaffected.</span></div><label class="switch"><input type="checkbox" role="switch" checked=${c.git_telemetry_sync === "1"} disabled=${busy === "git_telemetry_sync"} onChange=${(e) => save("git_telemetry_sync", e.target.checked ? "1" : "0")} aria-label="Git telemetry inbox sync" /><i></i></label></div><div class="li"><div class="t"><b>Git index sync</b><span>Legacy, off by default. Reads the package index from git and pushes publishes back to it. Sync now runs both regardless.</span></div><label class="switch"><input type="checkbox" role="switch" checked=${c.git_index_sync === "1"} disabled=${busy === "git_index_sync"} onChange=${(e) => save("git_index_sync", e.target.checked ? "1" : "0")} aria-label="Git index sync" /><i></i></label></div></div></div>
-    <div class="stack"><h3>Schedule</h3><div class="list"><div class="li"><div class="t"><b>Pull interval</b><span>Seconds (10-86400) or a cron expression: <code>*/5 * * * *</code> every 5 min, <code>0 3 * * *</code> daily at 03:00. Applies immediately.</span></div>
+    <${FoldBar} f=${fd} /><${Fold} f=${fd} k="legacy" title="Legacy git sync" hint=${c.git_telemetry_sync === "1" || c.git_index_sync === "1" ? "in use" : "off"}><div class="list"><div class="li"><div class="t"><b>Git telemetry inbox sync</b><span>Legacy, off by default. Reads usage batches from the git inbox and archives events to git. Events sent to the hub over HTTP are unaffected.</span></div><label class="switch"><input type="checkbox" role="switch" checked=${c.git_telemetry_sync === "1"} disabled=${busy === "git_telemetry_sync"} onChange=${(e) => save("git_telemetry_sync", e.target.checked ? "1" : "0")} aria-label="Git telemetry inbox sync" /><i></i></label></div><div class="li"><div class="t"><b>Git index sync</b><span>Legacy, off by default. Reads the package index from git and pushes publishes back to it. Sync now runs both regardless.</span></div><label class="switch"><input type="checkbox" role="switch" checked=${c.git_index_sync === "1"} disabled=${busy === "git_index_sync"} onChange=${(e) => save("git_index_sync", e.target.checked ? "1" : "0")} aria-label="Git index sync" /><i></i></label></div></div><//>
+    <${Fold} f=${fd} k="schedule" title="Schedule" hint=${/^\d+$/.test(c.sync_interval) ? "every " + dur(+c.sync_interval) : c.sync_interval}><div class="list"><div class="li"><div class="t"><b>Pull interval</b><span>Seconds (10-86400) or a cron expression: <code>*/5 * * * *</code> every 5 min, <code>0 3 * * *</code> daily at 03:00. Applies immediately.</span></div>
       <div class="row"><input class="field" id="sched" defaultValue=${c.sync_interval} style="width:11rem" aria-label="Pull interval" /><button class="btn sm" disabled=${busy === "sync_interval"} onClick=${() => save("sync_interval", document.getElementById("sched").value)}>Save</button></div></div>
-      <div class="li"><div class="t"><b>Presets</b></div><div class="seg">${SCHEDULES.map(([n, v]) => html`<button key=${v} class=${c.sync_interval === v ? "on" : ""} onClick=${() => save("sync_interval", v)}>${n}</button>`)}</div></div></div></div>
-    <div class="stack"><h3>Usage inbox</h3><div class="list">${T("telemetry_url", "Git URL", "Repo CLIs push usage batches to (refs/telemetry/*). Empty = the default, then the package index repo")}${T("telemetry_inbox_branch", "Inbox branch", "default: telemetry-inbox. The one branch CLIs add usage files to; the server empties it")}${T("telemetry_branch", "Archive branch", "default: telemetry-archive")}
+      <div class="li"><div class="t"><b>Presets</b></div><div class="seg">${SCHEDULES.map(([n, v]) => html`<button key=${v} class=${c.sync_interval === v ? "on" : ""} onClick=${() => save("sync_interval", v)}>${n}</button>`)}</div></div></div><//>
+    <${Fold} f=${fd} k="inbox" title="Usage inbox"><div class="list">${T("telemetry_url", "Git URL", "Repo CLIs push usage batches to (refs/telemetry/*). Empty = the default, then the package index repo")}${T("telemetry_inbox_branch", "Inbox branch", "default: telemetry-inbox. The one branch CLIs add usage files to; the server empties it")}${T("telemetry_branch", "Archive branch", "default: telemetry-archive")}
       <div class="li"><div class="t"><b>Archive batches to git</b><span>Before deleting an ingested batch, copy it to the archive branch so git keeps a durable copy of every event.</span></div><label class="switch"><input type="checkbox" role="switch" checked=${c.telemetry_archive !== "0"} disabled=${busy === "telemetry_archive"} onChange=${(e) => save("telemetry_archive", e.target.checked ? "1" : "0")} aria-label="Archive batches" /><i></i></label></div>
       <div class="li"><div class="t"><b>Home page “Happening now” shows</b><span>Which events appear in the live feed. None ticked = default (install, use, update, publish).</span></div><div class="seg">${DASH_KINDS.map((k) => { const cur = (c.live_kinds || "").split(",").filter(Boolean), on = cur.includes(k); return html`<button key=${k} class=${on ? "on" : ""} aria-pressed=${on} disabled=${busy === "live_kinds"} onClick=${() => save("live_kinds", (on ? cur.filter((x) => x !== k) : [...cur, k]).join(","))}>${k}</button>`; })}</div></div>
-      <div class="li"><div class="t"><b>Localize user names for analysis</b><span>Count one person once, by name only: a signed-in account, an anonymous run on that person's machine (OS user) and an e-mail all merge into the same lowercase name in rankings, the dashboard and top developers.</span></div><label class="switch"><input type="checkbox" role="switch" checked=${c.localize_users !== "0"} disabled=${busy === "localize_users"} onChange=${(e) => save("localize_users", e.target.checked ? "1" : "0")} aria-label="Localize user names" /><i></i></label></div></div></div>
-    <div class="stack"><h3>Throughput and git load</h3>
+      <div class="li"><div class="t"><b>Localize user names for analysis</b><span>Count one person once, by name only: a signed-in account, an anonymous run on that person's machine (OS user) and an e-mail all merge into the same lowercase name in rankings, the dashboard and top developers.</span></div><label class="switch"><input type="checkbox" role="switch" checked=${c.localize_users !== "0"} disabled=${busy === "localize_users"} onChange=${(e) => save("localize_users", e.target.checked ? "1" : "0")} aria-label="Localize user names" /><i></i></label></div></div><//>
+    <${Fold} f=${fd} k="load" title="Throughput and git load">
       <p class="mut sm">CLIs send usage to this hub first and read the package index from it; git is only their fallback. Events are held in memory and written in batches, and git is touched rarely and never at the same time as the backup. Blank = default.</p>
       <p class="mut sm">${ing ? html`In memory now: ${ing.buffered || 0} event(s) · ${ing.stored || 0} stored since start in ${ing.flushes || 0} write(s) · ${ing.duplicates || 0} repeat(s) skipped · ${ing.rate_limited || 0} × 429 · ${ing.busy || 0} × 503` : ""}${st.held_batches ? html` · ${st.held_batches} batch(es) waiting for the git push${st.git_flush_in != null ? " (in " + dur(st.git_flush_in) + ")" : ""}` : ""}${st.staged_publishes ? html` · ${st.staged_publishes} publish(es) served, waiting for the index push${st.index_push_in != null ? " (in " + dur(st.index_push_in) + ")" : ""}` : ""}${st.deferred ? html` · <b>${st.deferred}</b>` : ""}</p>
-      <div class="list">${(d.d.limits || []).filter((x) => x.key !== "backup_jitter" && x.key !== "backup_jitter_max").map((x) => html`<${TextSetting} x=${{ label: x.label, help: "Allowed " + x.min + " to " + x.max + ", default " + x.default + ".", kind: "text", max: 7 }} v=${c[x.key]} busy=${busy === x.key} save=${(n) => save(x.key, n)} key=${x.key} />`)}</div></div>
-    <div class="stack"><h3>Package index</h3><div class="list">${T("index_url", "Git URL", "Repository holding the package index")}${T("index_branch", "Branch", "default: main")}${T("index_path", "Folder", "default: index (a folder index; an old index.json file also works)")}</div></div>
-    <div class="stack"><h3>CLI setup</h3><div class="list">
-      ${T("cli_git_url", "CLI git URL", "Where to pip install the CLI from when this server is unreachable")}${T("cli_git_branch", "Branch (optional)", "Leave empty to hide. Install from this branch instead of the default")}${T("cli_git_subdir", "Sub folder (optional)", "Leave empty to hide. Install from this folder of the repo")}${T("client_refresh_hours", "CLI refresh (hours)", "How often installed CLIs re-pull these settings (default 24)")}</div></div></div>`;
+      <div class="list">${(d.d.limits || []).filter((x) => x.key !== "backup_jitter" && x.key !== "backup_jitter_max").map((x) => html`<${TextSetting} x=${{ label: x.label, help: "Allowed " + x.min + " to " + x.max + ", default " + x.default + ".", kind: "text", max: 7 }} v=${c[x.key]} busy=${busy === x.key} save=${(n) => save(x.key, n)} key=${x.key} />`)}</div><//>
+    <${Fold} f=${fd} k="index" title="Package index"><div class="list">${T("index_url", "Git URL", "Repository holding the package index")}${T("index_branch", "Branch", "default: main")}${T("index_path", "Folder", "default: index (a folder index; an old index.json file also works)")}</div><//>
+    <${Fold} f=${fd} k="cli" title="CLI setup"><div class="list">
+      ${T("cli_git_url", "CLI git URL", "Where to pip install the CLI from when this server is unreachable")}${T("cli_git_branch", "Branch (optional)", "Leave empty to hide. Install from this branch instead of the default")}${T("cli_git_subdir", "Sub folder (optional)", "Leave empty to hide. Install from this folder of the repo")}${T("client_refresh_hours", "CLI refresh (hours)", "How often installed CLIs re-pull these settings (default 24)")}</div><//></div>`;
 }
 
 const UPD_STATE = { confirmed: ["green", "Updated"], probation: ["orange", "Watching"], applied: ["green", "Switched"], available: ["blue", "Available"], up_to_date: ["", "Up to date"],
@@ -644,6 +666,7 @@ function ConflictResolver({ busy, submit }) {
 function AdminUpdates() {
   const [d, setD] = useState(null); const [err, setErr] = useState(""); const [busy, setBusy] = useState(""); const [open, setOpen] = useState(""); const [tick, setTick] = useState(0);
   const [runs, setRuns] = useState([]); const [vers, setVers] = useState([]); const [down, setDown] = useState(false); const [resolve, setResolve] = useState(false);
+  const fd = useFolds("updates", { auto: true, versions: true, history: true });
   const load = async () => { try { const [v, r] = await Promise.all([api("/admin/update"), api("/admin/update/runs")]); setD(v); setRuns(r.runs); setErr(""); setDown(false); if (v.git) setVers((await api("/admin/update/versions")).versions); } catch (e) { if (d) setDown(true); else setErr(e.message); } };
   useEffect(() => { load(); }, [tick]);
   const live = d && (d.status.running || (d.pending && d.pending.state === "probation")) || down;
@@ -691,7 +714,8 @@ function AdminUpdates() {
       ${st.last_error && html`<p role="alert" class="sm" style="color:var(--red)">Last problem: ${st.last_error}</p>`}</div>
     ${(liveId || (last && last.stages)) && html`<div class="card stack"><div class="row"><h3>${liveId ? "Progress" : "Latest run"}</h3><span class="sp"></span>${!liveId && last && html`<${UpdBadge} s=${last.state} />`}</div>
       ${liveId ? html`<${UpdRun} id=${liveId} />` : html`<${UpdStages} stages=${last.stages} /><p class="mut sm">${last.title || ""} · ${when(last.ts)}</p>`}</div>`}
-    <div class="card stack"><h3>Automatic update</h3>
+    <${FoldBar} f=${fd} />
+    <${Fold} f=${fd} k="auto" title="Automatic update" hint=${on ? (c.update_auto_apply === "1" ? "installs by itself" : "reports only") : "off"}><div class="list">
       ${sw("update_auto_apply", "Apply automatically", "On: a new version that passes verification is switched in at once. Off: the schedule only looks and reports “available”.")}
       <div class="li"><div class="t"><b>Schedule</b><span>Seconds (10-86400) or a cron expression: <code>0 4 * * *</code> daily at 04:00.</span></div>
         <div class="row"><input class="field" id="up-sched" defaultValue=${c.update_schedule} style="width:11rem" aria-label="Update schedule" /><button class="btn sm" disabled=${busy === "update_schedule"} onClick=${() => save("update_schedule", document.getElementById("up-sched").value)}>Save</button></div></div>
@@ -703,14 +727,15 @@ function AdminUpdates() {
       ${sel("update_restart", "Restart method", "Replace this process by itself, or exit and let systemd, Docker or another supervisor start it again.", [["Restart itself", "exec"], ["Exit (supervisor)", "exit"]])}
       <${TextSetting} x=${{ label: "Probation (seconds)", help: "After a switch the new version must stay healthy this long (10-900, default 60), or it is rolled back.", kind: "text", max: 3 }} v=${c.update_probation} busy=${busy === "update_probation"} save=${(n) => save("update_probation", n)} />
       <${TextSetting} x=${{ label: "Source URL", help: "Blank = this checkout’s origin. A different git URL to pull from (the server’s git login is used).", kind: "text", max: 300 }} v=${c.update_url} busy=${busy === "update_url"} save=${(n) => save("update_url", n)} />
-      <${TextSetting} x=${{ label: "Source branch", help: "Blank = the checked-out branch’s upstream.", kind: "text", max: 100 }} v=${c.update_branch} busy=${busy === "update_branch"} save=${(n) => save("update_branch", n)} /></div>
-    <div class="card stack"><h3>Versions</h3><p class="mut sm">Roll back to any commit of this checkout. It is verified like an update, switched, restarted and watched.</p>
-      ${vers.length ? html`<div class="list">${vers.map((v) => html`<div class="li" key=${v.sha}><div class="t"><b class="mono">${v.short} ${v.current ? html`<span class="badge green">running</span>` : null} ${v.deployed ? html`<span class="badge blue">deployed${v.deployed.version ? " v" + v.deployed.version : ""}</span>` : null}</b><span>${v.subject} · ${ago(v.ts)}${v.author ? " · " + v.author : ""}</span></div>
-        ${!v.current && html`<button class="btn sec sm" disabled=${!d.git || !idle || busy === "rb-" + v.sha} onClick=${() => back(v)}>Roll back</button>`}</div>`)}</div>` : html`<p class="mut sm">No history available.</p>`}</div>
-    <div class="card stack"><h3>History</h3>
-      ${runs.length ? html`<div class="list">${runs.map((r) => html`<div key=${r.id}><button class="li updrow" aria-expanded=${open === r.id} onClick=${() => setOpen(open === r.id ? "" : r.id)}><div class="t"><b>${r.kind === "rollback" ? "Rollback" : "Update"} <${UpdBadge} s=${r.state} /></b><span>${r.title || ""}${r.version_from || r.version_to ? " · " + (r.version_from || "?") + " → " + (r.version_to || "?") : ""} · ${when(r.ts)} · ${r.trigger}${r.user ? " by " + r.user : ""}</span>
+      <${TextSetting} x=${{ label: "Source branch", help: "Blank = the checked-out branch’s upstream.", kind: "text", max: 100 }} v=${c.update_branch} busy=${busy === "update_branch"} save=${(n) => save("update_branch", n)} /></div><//>
+    <${Fold} f=${fd} k="versions" title="Versions" badge=${vers.length || ""}>
+      <p class="mut sm">Roll back to any commit of this checkout. It is verified like an update, switched, restarted and watched.</p>
+      ${vers.length ? html`<div class="list vscroll" tabindex="0" role="region" aria-label="Versions, scrollable">${vers.map((v) => html`<div class="li" key=${v.sha}><div class="t"><b class="mono">${v.short} ${v.current ? html`<span class="badge green">running</span>` : null} ${v.deployed ? html`<span class="badge blue">deployed${v.deployed.version ? " v" + v.deployed.version : ""}</span>` : null}</b><span>${v.subject} · ${ago(v.ts)}${v.author ? " · " + v.author : ""}</span></div>
+        ${!v.current && html`<button class="btn sec sm" disabled=${!d.git || !idle || busy === "rb-" + v.sha} onClick=${() => back(v)}>Roll back</button>`}</div>`)}</div>` : html`<p class="mut sm">No history available.</p>`}<//>
+    <${Fold} f=${fd} k="history" title="History" badge=${runs.length || ""}>
+      ${runs.length ? html`<div class="list vscroll" tabindex="0" role="region" aria-label="Update history, scrollable">${runs.map((r) => html`<div key=${r.id}><button class="li updrow" aria-expanded=${open === r.id} onClick=${() => setOpen(open === r.id ? "" : r.id)}><div class="t"><b>${r.kind === "rollback" ? "Rollback" : "Update"} <${UpdBadge} s=${r.state} /></b><span>${r.title || ""}${r.version_from || r.version_to ? " · " + (r.version_from || "?") + " → " + (r.version_to || "?") : ""} · ${when(r.ts)} · ${r.trigger}${r.user ? " by " + r.user : ""}</span>
         ${r.stages && open !== r.id && html`<${UpdStages} stages=${r.stages} compact=${true} />`}</div></button>
-        ${open === r.id && html`<${UpdRun} id=${r.id} />`}</div>`)}</div>` : html`<p class="mut sm">Nothing yet. A scheduled check that finds no new commit is not recorded.</p>`}</div></div>`;
+        ${open === r.id && html`<${UpdRun} id=${r.id} />`}</div>`)}</div>` : html`<p class="mut sm">Nothing yet. A scheduled check that finds no new commit is not recorded.</p>`}<//></div>`;
 }
 
 const BACKUP_SCHEDULES = [["Hourly", "0 * * * *"], ["Every 6 hours", "0 */6 * * *"], ["Daily 03:00", "0 3 * * *"], ["Weekly (Sun 03:00)", "0 3 * * 0"]];
@@ -739,9 +764,6 @@ function AdminBackup() {
       <${TextSetting} x=${{ label: "Spread limit (seconds)", help: "...but never by more than this (0-3600, default 600).", kind: "text", max: 5 }} v=${c.backup_jitter_max} busy=${busy === "backup_jitter_max"} save=${(n) => save("backup_jitter_max", n)} />
       <div class="li"><div class="t"><b>Gap between sync and backup</b><span>The backup and the event sync never use git within the set time of each other (Sync > Throughput and git load, “Minimum seconds between git work”). A job that has to wait just waits.${st.waiting ? " A backup is waiting for it right now." : ""}</span></div></div></div></div></div>`;
 }
-const GTINT = ["var(--blue)", "var(--tint-b)", "var(--tint-c)", "var(--tint-d)"];
-const gTint = (n) => { let h = 0; for (const ch of String(n)) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return GTINT[h % GTINT.length]; };
-const GroupMark = ({ name, size = 44 }) => html`<span class="gr-mark" aria-hidden="true" style=${`--gt:${gTint(name)};width:${size}px;height:${size}px;font-size:${Math.round(size * 0.42)}px`}>${(String(name)[0] || "?").toUpperCase()}</span>`;
 const plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
 function Groups() {
   const { me } = useStore(); const [tick, setTick] = useState(0); const bump = () => setTick((x) => x + 1);
@@ -754,7 +776,7 @@ function Groups() {
   const create = async () => { try { await api("/groups", { method: "POST", body: { name: nn, description: nd } }); setSel(nn.trim().toLowerCase()); setPane("edit"); setNn(""); setNd(""); setMk(false); toast("Group created"); bump(); } catch (e) { toast(e.message, 1); } };
   const f = q.trim().toLowerCase(), list = all.filter((g) => !f || g.name.toLowerCase().includes(f));
   const pick = (n) => { setSel(n); setPane("edit"); };
-  return html`<div class="stack"><div class="kn-head"><div><h1>Groups</h1><p class="lead">${c.is_admin ? "Every group on this hub." : "Groups you own or belong to."} Share a repository with a group and every member gets access.</p></div>
+  return html`<div class="stack"><div class="kn-head"><div><h1>Groups</h1><p class="lead">${c.is_admin ? "All groups on this hub." : "Groups you own or belong to."} A repository shared with a group is open to all of its members.</p></div>
       ${c.can_create && html`<button class="btn" aria-expanded=${mk} onClick=${() => { setMk(!mk); setPane("list"); }}>${mk ? "Close" : "New group"}</button>`}</div>
     <div class=${"kn gr pane-" + pane}>
       <aside class="kn-list" aria-label="Groups">
@@ -762,11 +784,11 @@ function Groups() {
           <div class="row"><button class="btn sm" type="submit" disabled=${!nn.trim()}>Create group</button><button class="btn sec sm" type="button" onClick=${() => setMk(false)}>Cancel</button></div></form>`}
         ${all.length > 5 && html`<${Search} value=${q} onInput=${setQ} ph="Filter groups" />`}
         <div class="kn-sec"><span>${c.is_admin ? "All groups" : "Your groups"}</span><span>${all.length}</span></div>
-        ${list.length ? list.map((g) => html`<button type="button" key=${g.name} class=${"kn-row gr-row" + (sel === g.name ? " on" : "")} aria-current=${sel === g.name ? "true" : "false"} onClick=${() => pick(g.name)}><${GroupMark} name=${g.name} size=${36} />
-            <span class="gr-t"><b>${g.name}</b><span>${plural(g.members, "member")} · ${plural(g.packages, "repo")}</span></span>${g.can_manage ? (g.manager && !c.is_admin ? html`<span class="badge">manager</span>` : "") : html`<span class="badge">member</span>`}</button>`)
+        ${list.length ? list.map((g) => html`<button type="button" key=${g.name} class=${"kn-row gr-row" + (sel === g.name ? " on" : "")} aria-current=${sel === g.name ? "true" : "false"} onClick=${() => pick(g.name)}>
+            <span class="gr-t"><b>${g.name}</b><span>${plural(g.members, "member")} · ${plural(g.packages, "repo")}</span></span>${g.can_manage ? (g.manager && !c.is_admin ? html`<span class="gr-role">Manager</span>` : "") : html`<span class="gr-role">Member</span>`}</button>`)
           : html`<p class="kn-none">${all.length ? "No group matches." : c.can_create ? "No groups yet. Use New group to make the first one." : "You are not in any groups."}</p>`}
       </aside>
-      <section class="kn-ed gr-ed" aria-label="Group">${sel ? html`<${GroupDetail} name=${sel} repos=${(all.find((x) => x.name === sel) || {}).packages || 0} key=${sel} bump=${bump} onBack=${() => setPane("list")} onGone=${() => { setSel(null); setPane("list"); }} />` : html`<div class="gr-empty"><${GroupMark} name="G" size=${56} /><h3>Select a group</h3><p class="mut">Pick one on the left to see and manage its members.</p></div>`}</section></div></div>`;
+      <section class="kn-ed gr-ed" aria-label="Group">${sel ? html`<${GroupDetail} name=${sel} repos=${(all.find((x) => x.name === sel) || {}).packages || 0} key=${sel} bump=${bump} onBack=${() => setPane("list")} onGone=${() => { setSel(null); setPane("list"); }} />` : html`<div class="gr-empty"><h3>No group selected</h3><p class="mut">Choose a group from the list to view and manage its members.</p></div>`}</section></div></div>`;
 }
 function GroupDetail({ name, repos, bump, onGone, onBack }) {
   const [tick, setTick] = useState(0); const g = useLoad(() => api("/groups/" + name), [name, tick]); const [asking, setAsking] = useState(false); const [typed, setTyped] = useState("");
@@ -780,16 +802,18 @@ function GroupDetail({ name, repos, bump, onGone, onBack }) {
   const del = async () => { try { await api("/groups/" + name, { method: "DELETE" }); toast("Group deleted"); bump(); onGone(); } catch (e) { toast(e.message, 1); } };
   const members = g.d.members, mfl = mf.trim().toLowerCase(), mshown = members.filter((m) => !mfl || (shown(m) + " " + m.username).toLowerCase().includes(mfl));
   return html`<div class="gr-detail">
-    <div class="kn-bar gr-bar"><button type="button" class="btn sec sm kn-back" onClick=${onBack}>All groups</button><${GroupMark} name=${name} size=${52} />
-      <div class="kn-title" style="display:block"><h2>${name}</h2>${g.d.description ? html`<p class="sm mut" style="margin-top:2px">${g.d.description}</p>` : ""}</div></div>
-    <div class="gr-stats"><div><b>${members.length}</b><span>${members.length === 1 ? "member" : "members"}</span></div><div><b>${fmt(repos)}</b><span>shared ${repos === 1 ? "repo" : "repos"}</span></div></div>
-    <div class="kn-share"><h3>Add people</h3>
-      <div class="row"><${PrincipalPicker} ph="Search for a person…" exclude=${members.map((m) => "user:" + m.username).concat(["group:*"])} onPick=${(t, n) => t === "user" ? add([n]) : toast("Pick a person", 1)} /></div>
-      <details class="kn-help"><summary>Add many at once</summary><div class="stack" style="margin-top:8px"><textarea class="field" rows="3" style="padding:12px;height:auto" aria-label="Usernames" placeholder="Usernames separated by commas, spaces or new lines" value=${paste} onInput=${(e) => setPaste(e.target.value)}></textarea>
-        <button class="btn sec sm" style="width:fit-content" disabled=${!paste.trim()} onClick=${() => add(paste.split(/[\s,;]+/).filter(Boolean))}>Add usernames</button></div></details></div>
-    <div class="kn-share"><div class="row"><h3>Members</h3><span class="badge">${members.length}</span><span class="sp"></span>${members.length > 6 && html`<input class="field gr-find" aria-label="Filter members" placeholder="Filter" value=${mf} onInput=${(e) => setMf(e.target.value)} />`}</div>
-      ${members.length ? html`<div class="gr-members">${mshown.map((m) => html`<div class="gr-mem" key=${m.username}><${Avatar} p=${m} size=${40} /><div class="t"><b>${shown(m)}${m.manager ? html` <span class="badge">manager</span>` : ""}</b><span>${m.title || "@" + m.username}</span></div><button type="button" class="btn sec sm" aria-label=${(m.manager ? "Remove manager from " : "Make manager: ") + shown(m)} onClick=${() => setMgr(m.username, !m.manager)}>${m.manager ? "Remove manager" : "Make manager"}</button><button type="button" class="kn-x" aria-label=${"Remove " + shown(m)} onClick=${() => rm(m.username)}><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8"/></svg></button></div>`)}${!mshown.length && html`<p class="kn-none">No member matches.</p>`}</div>` : html`<p class="mut sm">No members yet. Search above to add the first person.</p>`}</div>
-    ${g.d.can_delete && html`<div class="kn-share gr-danger"><h3>Delete group</h3><p class="sm mut">Removes the group and every repository share that points to it. Members keep their accounts.</p>
+    <div class="kn-bar gr-bar"><button type="button" class="btn sec sm kn-back" onClick=${onBack}>All groups</button>
+      <div class="kn-title" style="display:block"><h2>${name}</h2><p class="sm mut gr-meta">${plural(members.length, "member")} · ${repos + (repos === 1 ? " shared repository" : " shared repositories")}${g.d.description ? " · " + g.d.description : ""}</p></div></div>
+    <div class="gr-sec"><div class="gr-sh"><h3>Members</h3>${members.length > 6 && html`<input class="field gr-find" aria-label="Filter members" placeholder="Filter members" value=${mf} onInput=${(e) => setMf(e.target.value)} />`}</div>
+      <div class="gr-add"><${PrincipalPicker} ph="Add a person by name or username…" exclude=${members.map((m) => "user:" + m.username).concat(["group:*"])} onPick=${(t, n) => t === "user" ? add([n]) : toast("Pick a person", 1)} />
+        <details class="kn-help"><summary>Add several by username</summary><div class="stack" style="margin-top:8px"><textarea class="field" rows="3" style="padding:12px;height:auto" aria-label="Usernames" placeholder="Separate usernames with commas, spaces or new lines" value=${paste} onInput=${(e) => setPaste(e.target.value)}></textarea>
+          <button class="btn sec sm" style="width:fit-content" disabled=${!paste.trim()} onClick=${() => add(paste.split(/[\s,;]+/).filter(Boolean))}>Add</button></div></details></div>
+      ${members.length ? html`<div class="tscroll"><table class="gr-tbl"><thead><tr><th>Member</th><th>Role</th><th><span class="sr">Actions</span></th></tr></thead><tbody>
+        ${mshown.map((m) => html`<tr key=${m.username}><td><div class="gr-who"><${Avatar} p=${m} size=${32} /><div class="t"><b>${shown(m)}</b><span>${m.title ? m.title + " · " : ""}@${m.username}</span></div></div></td>
+          <td class=${m.manager ? "" : "mut"}>${m.manager ? "Manager" : "Member"}</td>
+          <td class="gr-act"><button type="button" class="gr-link" aria-label=${(m.manager ? "Remove manager role from " : "Make manager: ") + shown(m)} onClick=${() => setMgr(m.username, !m.manager)}>${m.manager ? "Remove manager" : "Make manager"}</button><button type="button" class="gr-link bad" aria-label=${"Remove " + shown(m) + " from the group"} onClick=${() => rm(m.username)}>Remove</button></td></tr>`)}
+        ${!mshown.length && html`<tr><td colspan="3" class="mut">No member matches “${mf}”.</td></tr>`}</tbody></table></div>` : html`<p class="mut sm">This group has no members yet.</p>`}</div>
+    ${g.d.can_delete && html`<div class="gr-sec"><h3>Delete group</h3><p class="sm mut">Removes the group and every repository share that points to it. Members keep their accounts.</p>
       ${asking ? html`<div class="kn-add"><input class="field" style="flex:1;min-width:160px" aria-label=${"Type " + name + " to confirm"} placeholder=${"Type " + name + " to confirm"} value=${typed} onInput=${(e) => setTyped(e.target.value)} /><button class="btn danger sm" disabled=${typed.trim() !== name} onClick=${del}>Delete group</button><button class="btn sec sm" onClick=${() => { setAsking(false); setTyped(""); }}>Cancel</button></div>` : html`<button class="btn danger sm" style="width:fit-content" onClick=${() => setAsking(true)}>Delete this group…</button>`}</div>`}</div>`;
 }
 const KINDS = ["install", "update", "uninstall", "use", "error"];
@@ -1053,19 +1077,54 @@ function UsageSessions({ qs, rank, f, go, who }) {
         : html`<${Empty} t="No sessions yet" d="Sessions appear after the next answer turn of Claude Code, or run “aihub usage-sync” on your machine." />`}</div></div>`;
 }
 
+// Group scope for the usage page. Empty selection in the URL = every group of mine; edits are drafted here and applied once.
+function GroupPicker({ groups, picked, onApply }) {
+  const ids = groups.map((g) => String(g.id)), key = picked.join(",") + "|" + ids.join(",");
+  const base = () => new Set(picked.length ? picked.filter((x) => ids.includes(x)) : ids);
+  const [open, setOpen] = useState(false); const [q, setQ] = useState(""); const [draft, setDraft] = useState(base);
+  useEffect(() => { setDraft(base()); }, [key]);
+  useEffect(() => { if (!open) return; const k = (e) => { if (e.key === "Escape") setOpen(false); }; addEventListener("keydown", k); return () => removeEventListener("keydown", k); }, [open]);
+  const cur = base(), fl = q.trim().toLowerCase(), rows = groups.filter((g) => !fl || g.name.toLowerCase().includes(fl));
+  const change = (fn) => setDraft((d) => { const n = new Set(d); fn(n); return n; });
+  const on = (g) => draft.has(String(g.id));
+  const same = draft.size === cur.size && [...draft].every((x) => cur.has(x));
+  const emit = (set) => onApply(set.size === ids.length ? "" : ids.filter((x) => set.has(x)).join(","));
+  const names = groups.filter((g) => cur.has(String(g.id))).map((g) => g.name), all = cur.size === ids.length;
+  const apply = () => { emit(draft); setOpen(false); };
+  return html`<div class="gp"><div class="row gp-bar">
+      <button type="button" class="btn sec sm gp-open" aria-expanded=${open} aria-controls="gp-panel" onClick=${() => setOpen(!open)}>Groups<b>${all ? "All " + ids.length : cur.size + " of " + ids.length}</b><svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style=${open ? "transform:rotate(180deg)" : ""}><path d="M2 4l4 4 4-4"/></svg></button>
+      ${!all && names.slice(0, 4).map((n) => { const g = groups.find((x) => x.name === n); return html`<button type="button" key=${g.id} class="chip" title="Remove from the selection" onClick=${() => { const s2 = new Set(cur); s2.delete(String(g.id)); emit(s2.size ? s2 : new Set(ids)); }}>${n} <span aria-hidden="true">✕</span><span class="sr">remove ${n}</span></button>`; })}
+      ${!all && names.length > 4 && html`<span class="xs mut3">+${names.length - 4} more</span>`}
+      ${!all && html`<button type="button" class="chip" onClick=${() => onApply("")}>Reset to all</button>`}</div>
+    ${open && html`<div class="gp-panel" id="gp-panel" role="group" aria-label="Choose groups">
+      <div class="gp-tools"><div class="gp-find"><${Search} value=${q} onInput=${setQ} ph=${"Filter " + ids.length + " groups"} /></div>
+        <button type="button" class="btn sec sm" onClick=${() => change((n) => rows.forEach((g) => n.add(String(g.id))))}>Select all${fl ? " shown" : ""}</button>
+        <button type="button" class="btn sec sm" onClick=${() => change((n) => rows.forEach((g) => n.delete(String(g.id))))}>Clear${fl ? " shown" : ""}</button>
+        <button type="button" class="btn sec sm" onClick=${() => change((n) => rows.forEach((g) => { const i = String(g.id); n.has(i) ? n.delete(i) : n.add(i); }))}>Invert</button></div>
+      <div class="gp-list" tabindex="0" role="region" aria-label="Groups, scrollable">${rows.map((g) => html`<label class=${"gp-row" + (on(g) ? " on" : "")} key=${g.id}>
+          <input type="checkbox" class="chk" checked=${on(g)} onChange=${() => change((n) => { const i = String(g.id); n.has(i) ? n.delete(i) : n.add(i); })} />
+          <span class="gp-n">${g.name}</span><span class="xs mut3">${plural(g.members, "member")}</span>
+          <button type="button" class="gp-only" title=${"Only " + g.name} onClick=${() => setDraft(new Set([String(g.id)]))}>Only</button></label>`)}
+        ${!rows.length && html`<p class="kn-none">No group matches “${q}”.</p>`}</div>
+      <div class="gp-foot"><span class="sm mut" aria-live="polite">${draft.size} of ${ids.length} selected${draft.size === 0 ? " · pick at least one" : ""}</span><span class="sp"></span>
+        <button type="button" class="btn sec sm" onClick=${() => { setDraft(base()); setOpen(false); }}>Cancel</button>
+        <button type="button" class="btn sm" disabled=${same || draft.size === 0} onClick=${apply}>Apply</button></div></div>`}</div>`;
+}
+
 function UsageHub() {
   const { me } = useStore(); const f = usageParams(); const [tick, setTick] = useState(0); const [open, setOpen] = useState(false); const [nd, setNd] = useState(String(f.days));
   const go = (patch) => nav(usageHash({ ...f, ...patch }));
   useEffect(() => setNd(String(f.days)), [f.days]);
   useEffect(() => { const t = setInterval(() => setTick((x) => x + 1), 60000); return () => clearInterval(t); }, []);
   const signed = !!(me || tok());                          // the token is there at once; `me` arrives a round trip later and must not delay the first request
-  const gl = useLoad(() => signed && can("view_usage") ? api("/usage/groups") : Promise.resolve(null), [signed]);
+  const allowed = can("view_usage");                       // brand / account arrive after the first render: a load that decided "no" must run again once it flips
+  const gl = useLoad(() => signed && allowed ? api("/usage/groups") : Promise.resolve(null), [signed, allowed]);
   const ser = new URLSearchParams(); ser.set("scope", f.scope); if (f.range) { const [a, b] = RANGES[f.range](); ser.set("from", a); ser.set("to", b); } else if (f.from || f.to) { f.from && ser.set("from", f.from); f.to && ser.set("to", f.to); } else ser.set("days", f.days); USAGE_KEYS.slice(1).forEach((k) => f[k] && ser.set(k, f[k]));
   const qs = ser.toString();
-  const d = useLoad(() => signed && can("view_usage") ? api("/usage?" + qs) : Promise.resolve(null), [signed, qs, tick]);
+  const d = useLoad(() => signed && allowed ? api("/usage?" + qs) : Promise.resolve(null), [signed, allowed, qs, tick]);
   const one = f.range === "today" || (!!f.from && f.from === f.to);                   // a single day has no trend: the sparklines then show the last 7 days
   const q7 = new URLSearchParams(ser); q7.delete("from"); q7.delete("to"); q7.set("days", 7);
-  const wk = useLoad(() => signed && one ? api("/usage?" + q7.toString()) : Promise.resolve(null), [signed, one, q7.toString(), tick]);
+  const wk = useLoad(() => signed && allowed && one ? api("/usage?" + q7.toString()) : Promise.resolve(null), [signed, allowed, one, q7.toString(), tick]);
   if (!can("view_usage")) return html`<${Empty} t="No access" d="Your role doesn’t include token usage. Ask an admin to grant “Token usage” in Admin → Roles." />`;
   if (!signed) return html`<${Empty} t="Sign in to see usage" d="Usage is tied to your account. Sign in, then run “aihub login” on your machine." />`;
   const D = d.d && (d.d.scope || f.scope) === f.scope ? d.d : null;       // the answer for the OTHER scope (Me <-> My groups) lacks by_group etc.: wait for the new one instead of crashing
@@ -1087,7 +1146,7 @@ function UsageHub() {
       ${!f.range && (open || !preset) && html`<form class="row" style="gap:6px" onSubmit=${(e) => { e.preventDefault(); const n = parseInt(nd, 10); if (n >= 1 && n <= 366) go({ days: n, range: "", from: "", to: "" }); }}><label class="sm mut" for="ud">Last</label><input id="ud" class="field" type="number" min="1" max="366" value=${nd} onInput=${(e) => setNd(e.target.value)} style="width:5.5rem" /><span class="sm mut">days</span><button class="btn sec sm" type="submit">Apply</button>
         <label class="sm mut" for="uf">or from</label><input id="uf" class="field" type="date" value=${f.from || (D && D.filters.from) || ""} max=${D && D.filters.to} onChange=${(e) => go({ from: e.target.value, range: "", to: f.to || (D && D.filters.to) || "" })} /><label class="sm mut" for="ut">to</label><input id="ut" class="field" type="date" value=${f.to || (D && D.filters.to) || ""} onChange=${(e) => go({ to: e.target.value, range: "", from: f.from || (D && D.filters.from) || "" })} /></form>`}
       <span class="sp"></span><button class="btn sec sm" onClick=${() => setTick(tick + 1)}>Refresh</button><button class="btn sec sm" onClick=${exportCsv} disabled=${!D || !D.daily}>Export CSV</button></div>
-    ${f.scope === "groups" && html`<div class="row" role="group" aria-label="Groups" style="gap:6px"><span class="sm mut">Groups</span><button class=${!picked.length ? "chip on" : "chip"} aria-pressed=${!picked.length} onClick=${() => go({ group: "" })}>All my groups</button>${groups.map((g) => html`<button key=${g.id} class=${picked.includes(String(g.id)) ? "chip on" : "chip"} aria-pressed=${picked.includes(String(g.id))} onClick=${() => toggle(g.id)} title=${g.members + " members"}>${g.name}<i>${g.members} ${g.members === 1 ? "member" : "members"}</i></button>`)}</div>`}
+    ${f.scope === "groups" && groups.length > 0 && html`<${GroupPicker} groups=${groups} picked=${picked} onApply=${(g) => go({ group: g })} />`}
     <div class="row filters" role="group" aria-label="Filters">${sel("tool", "Tool", o.tools || [], "Any tool")}${sel("model", "Model", o.models || [], "Any model")}${f.scope === "groups" && sel("user", "Person", ((D && D.members) || []).map((m) => m.username), "Anyone")}</div>
     ${active.length > 0 && html`<div class="row" style="gap:8px" aria-label="Active filters">${active.map((k) => html`<button key=${k} class="chip" onClick=${() => go({ [k]: "" })}>${k}: <b>${f[k]}</b> ✕</button>`)}</div>`}
     ${d.loading && D && html`<div class="ubar" role="progressbar" aria-label="Loading"></div>`}
@@ -1110,6 +1169,21 @@ function UsageHub() {
       ${tab === "people" && html`<div class="card stack"><div class="row"><h3>People</h3><span class="sp"></span><span class="xs mut3">ranked within the chosen groups, each person once</span></div><${UsageTable} rows=${D.by_user || []} rank=${f.rank} onRank=${(k) => go({ rank: k })} name=${{ label: "Person", key: (r) => r.username, cell: (r) => html`<a href=${"#" + usageHash({ ...f, user: r.username, tab: "summary" })}>${who(r)}</a>` }} sub=${(r) => (r.display_name && r.display_name !== r.username ? r.username : "")} /></div>`}
       ${tab === "groups" && html`<div class="card stack"><div class="row"><h3>Groups</h3><span class="sp"></span><span class="xs mut3">a person in two groups counts in both rows, once in the totals</span></div><${UsageTable} rows=${D.by_group || []} rank=${f.rank} onRank=${(k) => go({ rank: k })} name=${{ label: "Group", key: (r) => r.id, cell: (r) => html`<a href=${"#" + usageHash({ ...f, group: String(r.id), tab: "people" })}>${r.name}</a>` }} sub=${(r) => r.members + " members"} /></div>`}
     </div>`}</div>`;
+}
+
+// Top-right menu: a trigger plus a small panel of links. On phones the panel is always open inside the burger menu (CSS).
+function NavMenu({ label, lead, items }) {
+  const [open, setOpen] = useState(false); const ref = useRef();
+  useEffect(() => {
+    if (!open) return;
+    const away = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const key = (e) => { if (e.key === "Escape") { setOpen(false); const b = ref.current && ref.current.querySelector("button"); if (b) b.focus(); } };
+    addEventListener("pointerdown", away); addEventListener("keydown", key); return () => { removeEventListener("pointerdown", away); removeEventListener("keydown", key); };
+  }, [open]);
+  const act = items.some((i) => i.on);
+  return html`<div class=${"dd" + (open ? " open" : "") + (act ? " on" : "")} ref=${ref}>
+    <button type="button" class="dd-b" aria-haspopup="true" aria-expanded=${open} onClick=${() => setOpen(!open)}>${lead}<span>${label}</span><svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4l4 4 4-4"/></svg></button>
+    <div class="dd-p">${items.map((i) => html`<a key=${i.k} href=${i.href} class=${i.on ? "on" : ""} aria-current=${i.on ? "page" : null} onClick=${(e) => { setOpen(false); i.onClick && i.onClick(e); }}>${i.label}</a>`)}</div></div>`;
 }
 
 // ---------- shell
@@ -1143,13 +1217,17 @@ function App() {
   useEffect(() => { addEventListener("resize", place); return () => removeEventListener("resize", place); }, []);
   const logout = async () => { try { await api("/auth/logout", { method: "POST" }); } catch {} try { localStorage.removeItem("aihub_token"); } catch {} set({ me: null }); nav("/"); };
   const on = (k) => (seg[0] === k ? "on" : "");
+  const nl = (k, label) => ({ k, label, href: "#/" + k, on: seg[0] === k });
+  const ws = s.me ? [nl("knowledge", "Knowledge"), can("view_usage") && nl("usage", "Usage"), s.showGroups && nl("groups", "Groups")].filter(Boolean) : [];
+  const mg = s.me ? [can("view_dashboard") && nl("dashboard", "Dashboard"), can("audit") && nl("audit", "Audit"), (can("admin") || can("reset_password")) && nl("admin", "Admin")].filter(Boolean) : [];
+  const navGroup = (label, items) => items.length > 1 ? html`<${NavMenu} label=${label} items=${items} />` : items.length ? html`<a class=${items[0].on ? "on" : ""} href=${items[0].href}>${items[0].label}</a>` : "";
   const br = s.brand || {}, ct = br.contact || {};
   const page = { "": html`<${Home} />`, browse: html`<${Browse} key=${s.route} />`, package: html`<${Package} name=${seg[1]} key=${seg[1]} />`, rankings: html`<${Rankings} />`, docs: html`<${Docs} slug=${seg[1]} key=${seg[1]} />`, start: html`<${Start} />`,
     login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, knowledge: html`<${Knowledge} />`, dashboard: html`<${Dashboard} />`, usage: html`<${UsageHub} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
   return html`<div><a class="skip" href="#/" onClick=${(e) => { e.preventDefault(); const m = document.getElementById("main"); if (m) m.focus(); }}>Skip to content</a>${br.announcement && html`<div class="announce" role="status" dangerouslySetInnerHTML=${{ __html: br.announcement }}></div>`}<header class="nav"><div class="nav-in"><a class="brand glow" href="#/">${br.logo_url && html`<img decoding="async" class="logo" src=${br.logo_url} alt="" />`}<span>${br.name || "AI Hub"}</span></a>
     <button type="button" class="burger" aria-label="Menu" aria-expanded=${menu} aria-controls="menu" onClick=${() => setMenu(!menu)}><i></i><i></i><i></i></button>
     <div id="menu" class=${"menu" + (menu ? " open" : "")} onClick=${(e) => { if (e.target.closest && e.target.closest("a")) setMenu(false); }}><nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
-    <div class="r">${s.me ? html`<a href="#/account" class="me-link"><${Avatar} p=${s.me} size=${24} /><span>${shown(s.me)}</span></a><a class=${on("knowledge")} href="#/knowledge">Knowledge</a>${can("view_usage") ? html`<a class=${on("usage")} href="#/usage">Usage</a>` : ""}${s.showGroups ? html`<a class=${on("groups")} href="#/groups">Groups</a>` : ""}${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}${can("audit") ? html`<a class=${on("audit")} href="#/audit">Audit</a>` : ""}${can("admin") || can("reset_password") ? html`<a href="#/admin">Admin</a>` : ""}<a href="#/" onClick=${logout}>Sign out</a>` :
+    <div class="r">${s.me ? html`${navGroup("Workspace", ws)}${navGroup("Manage", mg)}<${NavMenu} label=${shown(s.me)} lead=${html`<${Avatar} p=${s.me} size=${22} />`} items=${[{ k: "account", label: "Account", href: "#/account", on: seg[0] === "account" }, { k: "out", label: "Sign out", href: "#/", onClick: logout }]} />` :
       html`${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}<a href="#/login">Sign in</a>`}</div></div></div></header>
     <main id="main" tabindex="-1"><div class="page" key=${path}>${page}</div></main>
     <footer class="foot"><b class="glow">${br.logo_url && html`<img decoding="async" class="logo sm" src=${br.logo_url} alt="" />`}${br.name || "AI Hub"}</b><span>Skills, agents and MCP servers for your team.</span>
