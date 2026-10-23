@@ -342,7 +342,8 @@ def groups_show(a):
     if _json(a, g):
         return
     ui.out("  %s  %s" % (g["name"], ui.dim(g.get("description") or "")))
-    ui.table(["username", "name"], [[m["username"], m.get("display_name") or ""] for m in g["members"]]) if g["members"] else ui.info("no members")
+    ui.table(["username", "name", "role"], [[m["username"], m.get("display_name") or "", "manager" if m.get("manager") else "member"]
+                                            for m in g["members"]]) if g["members"] else ui.info("no members")
 
 
 def groups_create(a):
@@ -384,7 +385,7 @@ def groups_delete(a):
 
 
 def groups_add(a):
-    _need(a.items, 1, "groups add GROUP USER... [-f FILE]")
+    _need(a.items, 1, "groups add GROUP USER... [-f FILE] [--manager]")
     group, names = a.items[0], _names(a, a.items[1:])
     if not names:
         raise ValueError("no usernames given")
@@ -393,7 +394,10 @@ def groups_add(a):
     missing, bad = [], Failures()
     for i in range(0, len(names), CHUNK):
         try:
-            missing += api.call("POST", "/groups/%s/members" % Q(group), {"usernames": names[i:i + CHUNK]}).get("missing") or []
+            body = {"usernames": names[i:i + CHUNK]}
+            if a.manager:
+                body["manager"] = True
+            missing += api.call("POST", "/groups/%s/members" % Q(group), body).get("missing") or []
         except api.ApiError as e:
             bad.add(group, e)
             break
@@ -419,6 +423,34 @@ def groups_remove(a):
         except api.ApiError as e:
             bad.add(n, e)
     bad.finish()
+
+
+def _set_manager(a, flag):
+    verb = "manager" if flag else "unmanager"
+    _need(a.items, 1, "groups %s GROUP USER... [-f FILE]" % verb)
+    group, names = a.items[0], _names(a, a.items[1:])
+    if not names:
+        raise ValueError("no usernames given")
+    bad = Failures()
+    for n in names:
+        if a.dry_run:
+            ui.info("would %s %s in %s" % ("make manager" if flag else "take manager from", n, group))
+            continue
+        try:
+            api.call("PUT", "/groups/%s/members/%s/manager" % (Q(group), Q(n)), {"manager": flag})
+            ui.good("%s is %s of %s" % (n, "now a manager" if flag else "no longer a manager", group))
+        except api.ApiError as e:
+            bad.add(n, e)
+    bad.finish()
+
+
+def groups_manager(a):
+    """Admins, the owner and the group's managers can grant it; someone who is not a member yet is added."""
+    _set_manager(a, True)
+
+
+def groups_unmanager(a):
+    _set_manager(a, False)
 
 
 # ---------------- roles
@@ -496,7 +528,8 @@ ACTIONS = {
     "users": {"list": users_list, "role": users_role, "status": users_status, "reset-password": users_reset,
               "delete": users_delete, "create": users_create, "batch": users_batch},
     "groups": {"list": groups_list, "show": groups_show, "create": groups_create, "describe": groups_describe,
-               "delete": groups_delete, "add": groups_add, "remove": groups_remove},
+               "delete": groups_delete, "add": groups_add, "remove": groups_remove,
+               "manager": groups_manager, "unmanager": groups_unmanager},
     "roles": {"list": roles_list, "perms": roles_perms, "show": roles_show, "create": roles_create,
               "set": roles_set, "delete": roles_delete},
 }

@@ -417,9 +417,9 @@ td,th{border-top-color:var(--glass-line)}
 .gr-stats div{padding:16px 20px;display:flex;flex-direction:column;gap:2px}.gr-stats div+div{border-left:1px solid var(--glass-line)}
 .gr-stats b{font-size:clamp(30px,5vw,44px);line-height:1;letter-spacing:-.04em;color:var(--blue);font-variant-numeric:tabular-nums}.gr-stats span{font-size:14px;font-weight:600}
 .gr-find{max-width:200px;min-height:36px;font-size:14px}
-.gr-members{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,250px),1fr));gap:8px}
+.gr-members{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr));gap:8px}
 .gr-mem{display:flex;align-items:center;gap:12px;padding:8px 6px 8px 10px;border-radius:14px;background:var(--fill);min-width:0}
-.gr-mem .t{flex:1;min-width:0}.gr-mem .t b{display:block;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.gr-mem .t span{font-size:13px;color:var(--fg-2);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gr-mem .t{flex:1;min-width:0}.gr-mem .t b{display:block;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.gr-mem .t>span{font-size:13px;color:var(--fg-2);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.gr-mem .t b .badge{display:inline-block;margin-left:4px;vertical-align:1px}.gr-mem>.btn{flex:none}
 .gr-danger{background:color-mix(in srgb,var(--red) 5%,transparent)}.gr-danger h3{color:color-mix(in srgb,var(--red) 70%,var(--fg))}
 @media(max-width:760px){.gr.kn.pane-list .gr-ed{display:none}.gr.kn.pane-edit .kn-list{display:none}.gr-members{grid-template-columns:1fr}}
 

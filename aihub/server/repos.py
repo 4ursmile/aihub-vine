@@ -348,7 +348,7 @@ class Repos:
                     cur = c.execute("INSERT INTO users(username,password_hash,role,status,display_name,title,created) VALUES(?,?,?,?,?,?,?)",
                                     (u, h, role, "active", dn, title, now))
                     for gid in gids:
-                        c.execute("INSERT OR IGNORE INTO group_members VALUES(?,?)", (gid, cur.lastrowid))
+                        c.execute("INSERT OR IGNORE INTO group_members(group_id,user_id) VALUES(?,?)", (gid, cur.lastrowid))
                     c.execute("RELEASE SAVEPOINT row_sp")
                     made.add(u)
                 except INTEGRITY:
@@ -559,15 +559,23 @@ class Repos:
 
     def group_members(self, gid):
         return _rows(self.db.conn().execute(
-            "SELECT u.username,u.display_name,u.title,u.avatar_v FROM group_members m JOIN users u ON u.id=m.user_id "
+            "SELECT u.username,u.display_name,u.title,u.avatar_v,COALESCE(m.manager,0) AS manager FROM group_members m JOIN users u ON u.id=m.user_id "
             "WHERE m.group_id=? ORDER BY u.username", (gid,)))
 
-    def group_member_add(self, gid, uids):
+    def group_member_add(self, gid, uids, manager=None):
+        """Add members (existing ones stay). manager True/False also sets or clears the manager flag; None leaves it as is."""
         with self.lock:
             c = self.db.conn()
             for uid in uids:
-                c.execute("INSERT OR IGNORE INTO group_members VALUES(?,?)", (gid, uid))
+                c.execute("INSERT OR IGNORE INTO group_members(group_id,user_id) VALUES(?,?)", (gid, uid))
+                if manager is not None:
+                    c.execute("UPDATE group_members SET manager=? WHERE group_id=? AND user_id=?", (1 if manager else 0, gid, uid))
             c.commit()
+
+    def managed_groups(self, uid):
+        """Names of the groups this account manages (manager flag, not ownership)."""
+        return {r[0] for r in self.db.conn().execute(
+            "SELECT g.name FROM groups g JOIN group_members m ON m.group_id=g.id WHERE m.user_id=? AND m.manager=1", (uid,))}
 
     def group_member_remove(self, gid, uid):
         with self.lock:

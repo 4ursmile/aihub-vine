@@ -118,7 +118,7 @@ aihub password                        # change your hub password (prompts; other
 aihub admin users list [Q] | role ROLE USER... [-f FILE] | status active|pending|disabled USER... | reset-password USER... | delete USER... [--yes]   # hub admin; -f FILE = names (one per line or first CSV column, - = stdin); --dry-run, --json
 aihub admin users create FILE [--role R] [--out new-accounts.csv]   # bulk import; passwords written once to --out (0600)
 aihub admin users batch FILE [--mode add|replace] [--dry-run]       # sheet "username,role,groups": bulk role + group membership of existing accounts
-aihub admin groups list | show G | create G... | describe G --description T | delete G... | add G USER... [-f FILE] | remove G USER...
+aihub admin groups list | show G | create G... | describe G --description T | delete G... | add G USER... [-f FILE] [--manager] | remove G USER... | manager G USER... | unmanager G USER...
 aihub admin roles list | perms | show R | create R --perm a,b | set R [--perm a,b | --add-perm a --remove-perm b] | delete R
 aihub logout                          # forget the saved token (usage becomes anonymous, still merged by user name)
 aihub self-uninstall [--yes]          # remove aihub: packages, hooks, PATH block, ~/.aihub (not your published packages or git repos)

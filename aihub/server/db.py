@@ -80,7 +80,7 @@ DESCR = {"admin": "Full access", "publisher": "Can publish and review", "user": 
 # Columns added after the first release. Existing databases get them via ALTER TABLE.
 LATE_COLUMNS = [
     ("users", "display_name", "TEXT DEFAULT ''"), ("users", "title", "TEXT DEFAULT ''"), ("users", "avatar_v", "INTEGER DEFAULT 0"),
-    ("groups", "owner_id", "INTEGER"),
+    ("groups", "owner_id", "INTEGER"), ("group_members", "manager", "INTEGER DEFAULT 0"),
     ("packages", "readme", "TEXT DEFAULT ''"), ("packages", "visibility", "TEXT NOT NULL DEFAULT 'public'"),
     ("events", "source", "TEXT"),
     ("events", "local_user", "TEXT"), ("events", "host", "TEXT"), ("events", "os", "TEXT"), ("events", "detail", "TEXT"), ("events", "cwd", "TEXT"), ("events", "ip", "TEXT"),

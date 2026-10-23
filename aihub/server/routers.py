@@ -1100,11 +1100,14 @@ def logo_clear(request: Request, u=admin):
 
 
 # ---------------- groups. Site admins manage all groups; people with `create_groups` manage the ones they made.
+# A group manager (flag on the membership, granted by an admin, the owner or another manager) runs the member list
+# like the owner does, including who else is a manager; only an admin or the owner can delete the group.
 GROUP_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,39}$")
 
 
 def _can_group(request, u, g):
-    return "admin" in R(request).perms(u["role"]) or g.get("owner_id") == u["id"]
+    repos = R(request)
+    return "admin" in repos.perms(u["role"]) or g.get("owner_id") == u["id"] or g["name"] in repos.managed_groups(u["id"])
 
 
 @r.get("/groups/capabilities")
@@ -1124,12 +1127,15 @@ def groups_list(request: Request, u=Depends(require_user)):
     allg = repos.groups()
     is_admin = "admin" in repos.perms(u["role"])
     mine = set(repos.groups_of(u["id"]))
+    managed = repos.managed_groups(u["id"])
     out = []
     for g in allg:
         owned = g.get("owner_id") == u["id"]
         if is_admin or owned or g["name"] in mine:
             # `can_manage` is decided here, on the server; owner ids never reach the browser
-            out.append({k: v for k, v in g.items() if k != "owner_id"} | {"can_manage": is_admin or owned})
+            out.append({k: v for k, v in g.items() if k != "owner_id"}
+                       | {"can_manage": is_admin or owned or g["name"] in managed, "manager": g["name"] in managed,
+                          "can_delete": is_admin or owned})
     return {"groups": out}
 
 
@@ -1169,7 +1175,9 @@ def _group_or_404(request, name, u):
 @r.get("/groups/{name}")
 def group_get(name: str, request: Request, u=Depends(require_user)):
     g = _group_or_404(request, name, u)
-    return {"name": g["name"], "description": g["description"], "members": [dict(_public(m)) for m in R(request).group_members(g["id"])]}
+    return {"name": g["name"], "description": g["description"],
+            "can_delete": "admin" in R(request).perms(u["role"]) or g.get("owner_id") == u["id"],
+            "members": [dict(_public(m)) | {"manager": bool(m.get("manager"))} for m in R(request).group_members(g["id"])]}
 
 
 @r.put("/groups/{name}")
@@ -1182,6 +1190,8 @@ def group_update(name: str, body: dict, request: Request, u=Depends(require_user
 @r.delete("/groups/{name}")
 def group_delete(name: str, request: Request, u=Depends(require_user)):
     g = _group_or_404(request, name, u)
+    if not ("admin" in R(request).perms(u["role"]) or g.get("owner_id") == u["id"]):
+        raise HTTPException(403, "only an admin or the group owner can delete a group")
     R(request).group_delete(g["id"])
     R(request).audit(u["username"], "group.delete", name)
     C(request).invalidate("pkg")
@@ -1194,10 +1204,27 @@ def group_members_add(name: str, body: dict, request: Request, u=Depends(require
     names = body.get("usernames") if isinstance(body.get("usernames"), list) else [body.get("username", "")]
     found = [R(request).user_by_name(str(n)) for n in names[:200]]
     missing = [str(n) for n, f in zip(names, found) if not f]
-    R(request).group_member_add(g["id"], [f["id"] for f in found if f])
-    R(request).audit(u["username"], "group.members.add", name, ",".join(str(n) for n in names[:20]))
+    mgr = body.get("manager") if isinstance(body.get("manager"), bool) else None      # true = also make them managers
+    R(request).group_member_add(g["id"], [f["id"] for f in found if f], mgr)
+    R(request).audit(u["username"], "group.members.add", name, ",".join(str(n) for n in names[:20]) + (" (manager)" if mgr else ""))
     C(request).invalidate("pkg")
     return {"ok": True, "missing": missing}
+
+
+@r.put("/groups/{name}/members/{username}/manager")
+def group_manager_set(name: str, username: str, body: dict, request: Request, u=Depends(require_user)):
+    """Grant or take back the manager flag: {manager: true|false}. Granting to a non-member adds them first.
+    Allowed for admins, the owner and the group's managers."""
+    g = _group_or_404(request, name, u)
+    flag = body.get("manager")
+    if not isinstance(flag, bool):
+        raise HTTPException(400, "give manager: true or false")
+    t = R(request).user_by_name(username)
+    if not t:
+        raise HTTPException(404, "no such account")
+    R(request).group_member_add(g["id"], [t["id"]], flag)
+    R(request).audit(u["username"], "group.manager." + ("grant" if flag else "revoke"), name, t["username"])
+    return {"ok": True}
 
 
 @r.delete("/groups/{name}/members/{username}")

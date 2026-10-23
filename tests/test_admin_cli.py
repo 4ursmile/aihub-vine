@@ -9,7 +9,7 @@ from aihub.cli import admin, api
 
 def ns(**k):
     d = dict(area="users", action=None, items=[], file=None, dry_run=False, yes=False, json=False, role="user",
-             out="x.csv", mode="add", description=None, perm=None, add_perm=None, remove_perm=None)
+             out="x.csv", mode="add", manager=False, description=None, perm=None, add_perm=None, remove_perm=None)
     d.update(k)
     return argparse.Namespace(**d)
 
@@ -96,6 +96,32 @@ class RolesTest(unittest.TestCase):
         with mock.patch.object(admin.api, "call", call):
             admin.roles_set(ns(items=["rv"], add_perm="c", remove_perm="a"))
         self.assertEqual(sent, [("PUT", "/admin/roles/rv", {"permissions": ["b", "c"]})])
+
+
+class GroupManagerTest(unittest.TestCase):
+    def run_action(self, fn, **k):
+        sent = []
+
+        def call(method, path, body=None, **kw):
+            sent.append((method, path, body))
+            return {"ok": True, "missing": []}
+        with mock.patch.object(admin.api, "call", call):
+            fn(ns(area="groups", **k))
+        return sent
+
+    def test_manager_and_unmanager_call_the_grant_route(self):
+        self.assertEqual(self.run_action(admin.groups_manager, items=["data", "ann", "bob"]),
+                         [("PUT", "/groups/data/members/ann/manager", {"manager": True}),
+                          ("PUT", "/groups/data/members/bob/manager", {"manager": True})])
+        self.assertEqual(self.run_action(admin.groups_unmanager, items=["data", "ann"]),
+                         [("PUT", "/groups/data/members/ann/manager", {"manager": False})])
+
+    def test_add_with_manager_flag_and_dry_run(self):
+        self.assertEqual(self.run_action(admin.groups_add, items=["data", "ann"], manager=True),
+                         [("POST", "/groups/data/members", {"usernames": ["ann"], "manager": True})])
+        self.assertEqual(self.run_action(admin.groups_add, items=["data", "ann"]),
+                         [("POST", "/groups/data/members", {"usernames": ["ann"]})])
+        self.assertEqual(self.run_action(admin.groups_manager, items=["data", "ann"], dry_run=True), [])
 
 
 if __name__ == "__main__":

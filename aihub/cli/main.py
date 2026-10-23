@@ -1320,15 +1320,16 @@ def build_parser():
         "Example:\n  aihub password")
     add("admin", cmd_admin, "Manage accounts, groups and roles on the hub (admin).",
         "Administer the hub you are signed in to. Areas: 'users' (list [QUERY], role ROLE USER..., status STATE USER..., reset-password USER..., delete USER..., create FILE, batch FILE), "
-        "'groups' (list, show G, create G..., describe G, delete G..., add G USER..., remove G USER...) and 'roles' (list, perms, show R, create R, set R, delete R). "
+        "'groups' (list, show G, create G..., describe G, delete G..., add G USER... [--manager], remove G USER..., manager G USER..., unmanager G USER...) and 'roles' (list, perms, show R, create R, set R, delete R). "
         "USER lists can also come from a file or stdin (-f FILE, '-' = stdin, one name per line or a sheet whose first column is the username). "
         "Every item is tried; failures are listed at the end and the exit status is 1. --dry-run shows what would change. Needs 'aihub login' as an administrator.",
         "Examples:\n  aihub admin users list sam\n  aihub admin users role editor -f people.txt\n  aihub admin users status disabled alice bob\n"
         "  aihub admin users create new-hires.csv --role user\n  aihub admin users batch changes.csv --mode replace --dry-run\n"
         "  aihub admin groups create backend data\n  aihub admin groups add backend alice bob -f more.csv\n  aihub admin groups remove backend carol\n"
+        "  aihub admin groups manager backend alice\n  aihub admin groups unmanager backend alice\n"
         "  aihub admin roles create reviewer --perm view_usage,audit\n  aihub admin roles set reviewer --add-perm reset_password",
         arg("area", choices=["users", "groups", "roles"], help="What to manage."),
-        arg("action", nargs="?", metavar="ACTION", help="Default: list. users: list|role|status|reset-password|delete|create|batch; groups: list|show|create|describe|delete|add|remove; roles: list|perms|show|create|set|delete."),
+        arg("action", nargs="?", metavar="ACTION", help="Default: list. users: list|role|status|reset-password|delete|create|batch; groups: list|show|create|describe|delete|add|remove|manager|unmanager; roles: list|perms|show|create|set|delete."),
         arg("items", nargs="*", metavar="ARG", help="Names, ROLE/STATE/GROUP first where the action takes one (see examples)."),
         arg("-f", "--file", metavar="FILE", help="Read usernames (or, for 'users create'/'users batch', the sheet) from FILE; '-' = stdin."),
         arg("--dry-run", action="store_true", help="Show what would change; change nothing."),
@@ -1337,6 +1338,7 @@ def build_parser():
         arg("--role", default="user", help="users create: role for rows without one (default user)."),
         arg("--out", default="new-accounts.csv", help="users create: file for the generated passwords (default new-accounts.csv, mode 0600, never overwritten)."),
         arg("--mode", choices=["add", "replace"], default="add", help="users batch: 'add' only adds to the listed groups (default); 'replace' makes the listed groups the person's whole membership."),
+        arg("--manager", action="store_true", help="groups add: also make the added people managers of the group."),
         arg("--description", help="groups create/describe, roles create/set: description text."),
         arg("--perm", help="roles create/set: comma list of permissions (set replaces the list)."),
         arg("--add-perm", help="roles set: permissions to add."),

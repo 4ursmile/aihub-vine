@@ -106,7 +106,7 @@ During installation, missing required commands are reported with any manifest hi
 
 ## Hub administration (`aihub admin`)
 
-Needs `aihub login` as an account with the `admin` permission (group actions also work for the owner of a group). Every action is one call, or a loop of calls, to an existing `/api/v1` route; the hub does the permission checks and audit logging. Each item is tried; failures are listed at the end and the exit status is 1. `--dry-run` shows what would change, `--json` prints list/show output as JSON.
+Needs `aihub login` as an account with the `admin` permission (group actions also work for the owner and the managers of a group; deleting a group only for an admin or the owner). Every action is one call, or a loop of calls, to an existing `/api/v1` route; the hub does the permission checks and audit logging. Each item is tried; failures are listed at the end and the exit status is 1. `--dry-run` shows what would change, `--json` prints list/show output as JSON.
 
 ```sh
 aihub admin users list [QUERY]                       # username, name, role, status
@@ -117,7 +117,8 @@ aihub admin users delete USER... [-f FILE] [--yes]   # asks first (--yes in scri
 aihub admin users create FILE [--role user] [--out new-accounts.csv]
 aihub admin users batch FILE [--mode add|replace] [--dry-run]
 aihub admin groups list | show G | create G... [--description T] | describe G --description T | delete G... [--yes]
-aihub admin groups add G USER... [-f FILE] | remove G USER... [-f FILE]
+aihub admin groups add G USER... [-f FILE] [--manager] | remove G USER... [-f FILE]
+aihub admin groups manager G USER... [-f FILE] | unmanager G USER... [-f FILE]   # grant / take back group manager
 aihub admin roles list | perms | show R | create R [--perm a,b] [--description T] | delete R [--yes]
 aihub admin roles set R [--perm a,b | --add-perm a --remove-perm b] [--description T]
 ```
@@ -125,6 +126,7 @@ aihub admin roles set R [--perm a,b | --add-perm a --remove-perm b] [--descripti
 - **Name lists**: `-f FILE` (`-` = stdin) adds usernames from a file, one per line or the first column of a CSV/TSV (a `username` header row is skipped). Names given on the command line are used too.
 - **`users batch FILE`** updates existing accounts from a sheet with columns `username, role, groups` (header row optional; without one the order is `username, role, groups`; several groups in one cell separated by `;` or `|`). A blank role or groups cell leaves that person as is. `--mode add` (default) only adds people to the listed groups; `--mode replace` makes the listed groups their whole membership. Unknown accounts, roles and groups skip that row (create a group first with `groups create`); roles and memberships that already match are not touched. Use `--dry-run` first.
 - **`users create FILE`** is the hub's bulk import (CSV or xlsx; columns username, display_name, title, role, groups; missing groups are created). The generated passwords come back once and are written to `--out` (mode 0600, refuses to overwrite an existing file).
+- **Group managers**: an admin, the owner or a manager can make a member a manager (`groups manager G USER...`, or `groups add G USER... --manager`; someone who is not in the group yet is added) and take it back (`unmanager`). Managers add and remove members and pass the flag on, like the owner; they cannot delete the group. `groups show` lists each member's role.
 - You cannot change your own role or status from the CLI. `groups create` makes the creating account a member (hub behavior).
 
 ## Enable, disable, tree, lock and sync

@@ -762,6 +762,36 @@ class GroupsPageAndBulk(unittest.TestCase):
         self.assertTrue(self.c.get("/api/v1/groups/capabilities", headers=self.ann).json()["show_page"])
         self.assertEqual(self.c.get("/api/v1/groups/team", headers=self.ann).status_code, 404)          # member list is manager-only
 
+    def test_group_manager_grant_and_assign(self):
+        G = lambda path="": "/api/v1/groups/team" + path
+        self.c.post("/api/v1/groups", json={"name": "team"}, headers=self.admin)
+        self.c.post(G("/members"), json={"usernames": ["ann"]}, headers=self.admin)
+        self.assertEqual(self.c.post(G("/members"), json={"usernames": ["root"]}, headers=self.ann).status_code, 404)   # plain member
+        self.assertEqual(self.c.put(G("/members/ann/manager"), json={"manager": True}, headers=self.ann).status_code, 404)
+        # the admin grants; the flag shows in the member list and in /groups
+        self.assertEqual(self.c.put(G("/members/ann/manager"), json={"manager": True}, headers=self.admin).status_code, 200)
+        mem = {m["username"]: m["manager"] for m in self.c.get(G(), headers=self.admin).json()["members"]}
+        self.assertTrue(mem["ann"])
+        g = self.c.get("/api/v1/groups", headers=self.ann).json()["groups"][0]
+        self.assertEqual((g["can_manage"], g["manager"], g["can_delete"]), (True, True, False))
+        # a manager assigns others and passes the manager flag on, even to someone outside the group
+        self.user("bo")
+        self.assertEqual(self.c.post(G("/members"), json={"usernames": ["bo"]}, headers=self.ann).status_code, 200)
+        self.assertEqual(self.c.put(G("/members/bo/manager"), json={"manager": True}, headers=self.ann).status_code, 200)
+        self.assertEqual(self.c.put(G("/members/root/manager"), json={"manager": True}, headers=self.ann).status_code, 200)
+        mem = {m["username"]: m["manager"] for m in self.c.get(G(), headers=self.ann).json()["members"]}
+        self.assertEqual(mem, {"ann": True, "bo": True, "root": True})
+        # a manager cannot delete the group; revoke works; bad input and unknown accounts are refused
+        self.assertEqual(self.c.delete(G(), headers=self.ann).status_code, 403)
+        self.assertEqual(self.c.put(G("/members/bo/manager"), json={"manager": False}, headers=self.ann).status_code, 200)
+        self.assertFalse({m["username"]: m["manager"] for m in self.c.get(G(), headers=self.ann).json()["members"]}["bo"])
+        self.assertEqual(self.c.put(G("/members/bo/manager"), json={"manager": "yes"}, headers=self.ann).status_code, 400)
+        self.assertEqual(self.c.put(G("/members/nobody/manager"), json={"manager": True}, headers=self.ann).status_code, 404)
+        # add with manager=true in one call
+        self.assertEqual(self.c.post(G("/members"), json={"usernames": ["bo"], "manager": True}, headers=self.ann).status_code, 200)
+        self.assertTrue({m["username"]: m["manager"] for m in self.c.get(G(), headers=self.ann).json()["members"]}["bo"])
+        self.assertEqual(self.c.delete(G(), headers=self.admin).status_code, 200)
+
     def test_bulk_group_column(self):
         for g in ("data-team", "platform"):
             self.c.post("/api/v1/groups", json={"name": g}, headers=self.admin)
