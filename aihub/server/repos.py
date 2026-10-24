@@ -8,7 +8,7 @@ import threading
 import time
 import zlib
 
-from ..core import pkgindex, textsafe, version as V
+from ..core import naming, pkgindex, textsafe, version as V
 from .db import ALL_PERMS, ANON_LOCKED
 
 log = logging.getLogger("aihub")
@@ -814,7 +814,9 @@ class Repos:
             e = {"name": p["name"], "type": p["type"] or "tool", "description": p["description"] or "",
                  "tags": [t for t in (p["tags"] or "").split(",") if t], "readme": p["readme"] or "", "latest_version": latest,
                  "repo": {k: v for k, v in (man.get("repo") or {}).items() if k != "ref"},
-                 "versions": [{"version": v, "ref": (m.get("repo") or {}).get("ref") or "", "requires": m.get("requires") or {}} for v, m in vs]}
+                 "versions": [dict({"version": v, "ref": (m.get("repo") or {}).get("ref") or "", "requires": m.get("requires") or {}},
+                                   **({"repo": pkgindex.location(m["repo"])} if isinstance(m.get("repo"), dict) and m["repo"].get("url") else {}))
+                              for v, m in vs]}      # normalize_entry drops a version's repo when it is the entry's (only moved packages carry one)
             for k in ("authors", "license"):
                 if meta.get(k):
                     e[k] = meta[k]
@@ -1222,20 +1224,111 @@ class Repos:
         out["options"] = {"tools": sorted({r[0] for r in opt}), "models": sorted({r[1] for r in opt})}
         return out
 
-    def version_sync(self, pid, version, manifest, sha="", file=None):
-        """Add a version from the git index if new; refresh its manifest if it changed. -> True when new."""
+    def version_sync(self, pid, version, manifest, sha="", file=None, size=0):
+        """Add a version from the git index if new; refresh its manifest if it changed. -> True when new.
+        `sha`/`size` (known only for archive versions) also fill in a row that has none yet."""
         with self.lock:
             c = self.db.conn()
-            row = c.execute("SELECT id,manifest FROM versions WHERE package_id=? AND version=?", (pid, version)).fetchone()
+            row = c.execute("SELECT id,manifest,sha256 FROM versions WHERE package_id=? AND version=?", (pid, version)).fetchone()
             js = json.dumps(manifest)
             if row:
                 if row[1] != js:
                     c.execute("UPDATE versions SET manifest=? WHERE id=?", (js, row[0]))
                     c.commit()
+                if sha and not row[2]:
+                    c.execute("UPDATE versions SET sha256=?,size=? WHERE id=?", (sha, size, row[0]))
+                    c.commit()
                 return False
             c.execute("INSERT INTO versions(package_id,version,file,sha256,size,manifest,signature,created) VALUES(?,?,?,?,?,?,?,?)",
-                      (pid, version, file, sha, 0, js, None, time.time()))
+                      (pid, version, file, sha, size, js, None, time.time()))
             self._relatest(c, pid)
+            c.commit()
+            return True
+
+    # ---- where each version lives (a package may have moved to another repo, branch or folder since an old version was published)
+    def publish_locations(self, package=None):
+        """Where publish events say a version was published from, newest first: [{package, version, git_url, git_branch, git_subdir, commit}].
+        Only events stored since publish events carry their location in `detail` (older ones are recovered from the git archive, see Sync)."""
+        sql, a = "SELECT package,version,detail FROM events WHERE kind='publish' AND detail LIKE ?", ['{"git_url":%']
+        if package:
+            sql, a = sql + " AND package=?", a + [package]
+        out = []
+        for r in self.db.conn().execute(sql + " ORDER BY ts DESC, id DESC", a).fetchall():
+            try:
+                d = json.loads(r[2])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(d, dict) and d.get("git_url") and r[1]:
+                out.append({"package": r[0], "version": r[1], "git_url": str(d["git_url"]), "git_branch": str(d.get("git_branch") or "main"),
+                            "git_subdir": str(d.get("git_subdir") or ""), "commit": str(d.get("commit") or "")})
+        return out
+
+    def known_locations(self, package):
+        """Every distinct {url, branch, subdir} this package was ever seen in: publish events first (newest first), then its versions'
+        manifests (newest version first). For finding an old commit after the package moved."""
+        out, seen = [], set()
+
+        def add(loc):
+            if loc.get("url") and pkgindex.repo_key(loc) not in seen:
+                seen.add(pkgindex.repo_key(loc))
+                out.append(pkgindex.location(loc))
+
+        for e in self.publish_locations(package):
+            add({"url": e["git_url"], "branch": e["git_branch"], "subdir": e["git_subdir"]})
+        pid = (self.db.conn().execute("SELECT id FROM packages WHERE name=?", (package,)).fetchone() or [None])[0]
+        for v in (self.versions(pid) if pid else []):
+            add((v.get("manifest") or {}).get("repo") or {})
+        return out
+
+    def version_repos_backfill(self, extra=()):
+        """Repair version manifests whose repo is not where the version was published: before versions carried their own location every
+        old version got the latest one (a package moved into a monorepo made `install X@old` look for an old commit in the new repo).
+        The truth is the publish event (`publish_locations`, plus `extra`: events recovered from the git archive). Changed only when the
+        event's commit is the version's ref (or the version has none). Idempotent. -> [(package, version, {url, branch, subdir})]."""
+        locs = {}
+        for e in list(self.publish_locations()) + [x for x in extra if isinstance(x, dict)]:
+            locs.setdefault((naming.normalize(str(e.get("package") or "")), str(e.get("version") or "")), e)    # first = newest
+        fixed = []
+        if not locs:
+            return fixed
+        with self.lock:
+            c = self.db.conn()
+            for r in c.execute("SELECT v.id,p.name,v.version,v.manifest FROM versions v JOIN packages p ON p.id=v.package_id").fetchall():
+                ev = locs.get((r[1], r[2]))
+                if not ev or not ev.get("git_url"):
+                    continue
+                try:
+                    man = json.loads(r[3] or "{}")
+                except ValueError:
+                    continue
+                repo = man.get("repo") if isinstance(man.get("repo"), dict) else {}
+                ref, com = str(repo.get("ref") or ""), str(ev.get("commit") or "")
+                if not repo.get("url") or (ref and com and ref != com):
+                    continue                                    # not a git version, or another publish of that version than the one indexed
+                want = {"url": ev["git_url"], "branch": ev.get("git_branch") or "main", "subdir": ev.get("git_subdir") or ""}
+                if pkgindex.same_repo(repo, want):
+                    continue
+                man["repo"] = dict(repo, **pkgindex.location(want))
+                c.execute("UPDATE versions SET manifest=? WHERE id=?", (json.dumps(man), r[0]))
+                fixed.append((r[1], r[2], pkgindex.location(want)))
+            if fixed:
+                c.commit()
+        return fixed
+
+    def version_set_repo(self, package, version, loc):
+        """Record where one version really lives (found by the transfer safety net). -> True when it changed."""
+        with self.lock:
+            c = self.db.conn()
+            row = c.execute("SELECT v.id,v.manifest FROM versions v JOIN packages p ON p.id=v.package_id WHERE p.name=? AND v.version=?",
+                            (package, version)).fetchone()
+            if not row:
+                return False
+            man = json.loads(row[1] or "{}")
+            repo = man.get("repo") if isinstance(man.get("repo"), dict) else {}
+            if repo.get("url") and pkgindex.same_repo(repo, loc):
+                return False
+            man["repo"] = dict(repo, **pkgindex.location(loc))
+            c.execute("UPDATE versions SET manifest=? WHERE id=?", (json.dumps(man), row[0]))
             c.commit()
             return True
 

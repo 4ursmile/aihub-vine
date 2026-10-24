@@ -21,7 +21,7 @@ Signed-in users appear under their account name. Everyone else appears as `~<os-
 3. It clones the package repo at the entry's branch, subdir and ref, then follows the repo's own `aihub.toml` to install and register.
 4. It records the commit. `aihub lock` pins that commit and `aihub sync` installs exactly it.
 
-An index entry may point at any repo and branch. A version can override the repo, so a monorepo with one tag per version works.
+An index entry may point at any repo and branch. A version can override the repo, so a monorepo with one tag per version works, and so does a package that moved: the entry's `repo` is where the LATEST version lives, and a version published from somewhere else (an older repo, branch or folder) carries its own full `repo`, so `aihub install NAME@old` looks for the old commit where it exists. The hub fills this in on every publish and repairs older data (see Index format).
 
 ## Usage events
 
@@ -80,3 +80,5 @@ The inbox is resolved as: environment (`AIHUB_TELEMETRY_URL`, `AIHUB_TELEMETRY_I
 ```
 
 `requires` is used for planning and filtering. The `aihub.toml` in the repo is authoritative at install time.
+
+**Per-version repo.** A version may carry `"repo": {"url","branch","subdir"}`, merged over the entry's (`dict(entry.repo, **version.repo)`). It is stored only for a version that lives somewhere else than the entry's repo (the package moved after it was published); an empty `subdir` is kept as `""` then, because an absent one would read as the entry's. A package that never moved has no per-version repo, so its entry is unchanged and old CLIs read it as before. Comparison ignores host case, a trailing `/` and `.git`. The hub keeps where each publish came from (the publish event's `detail`), repairs old databases at start from it (`version_repo_backfill`, plus the git archive when the legacy telemetry sync is on), and, when a pinned commit is not in the repo the index names, `install -i` tries the package's other known locations and remembers the one that has it; the CLI does the same with the other repos listed in the entry.

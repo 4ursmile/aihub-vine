@@ -161,7 +161,7 @@ def cmd_install(a):
     if not specs:
         raise ValueError("nothing to install: give package names or -r requirements.txt")
     specs = list(dict.fromkeys(specs))               # same line twice installs once
-    registry.INDIRECT = bool(getattr(a, "indirect", False))
+    registry.INDIRECT, registry.REPO_ONLY = _source_mode(a)
     ui.out()
     if len(specs) == 1:
         n, sp = _spec(specs[0])
@@ -174,11 +174,41 @@ def cmd_install(a):
         raise ValueError("%d of %d package(s) not installed: %s" % (len(failed), len(specs), ", ".join(n for n, _ in failed)))
 
 
+def _source_mode(a):
+    """(INDIRECT, REPO_ONLY) from `-i` and `--from archive|repo`. archive = through the hub (what -i does), repo = git only."""
+    src = getattr(a, "source", None) or ""
+    ind = bool(getattr(a, "indirect", False))
+    if ind and src == "repo":
+        raise ValueError("-i (through the hub) and --from repo (git only) contradict each other")
+    return ind or src == "archive", src == "repo"
+
+
 def cmd_download(a):
-    """Copy a package's files out of git into a folder, without installing."""
+    """Save a package without installing it: its .tar.gz (the default for a package published to the hub, and with --archive) or its
+    files in a folder (the default for a git package, and with --folder)."""
     n, s = _spec(a.name.replace("@", "==", 1) if "@" in a.name else a.name)
     r = registry.resolve(n, s)
-    dest = os.path.join(os.path.abspath(a.output or "."), "%s-%s" % (r["name"], r["version"]))
+    registry.INDIRECT, registry.REPO_ONLY = _source_mode(a)
+    if a.archive and a.folder:
+        raise ValueError("--archive and --folder contradict each other")
+    out = os.path.abspath(a.output or ".")
+    base = "%s-%s" % (r["name"], r["version"])
+    if a.archive or (not a.folder and registry.on_hub(r["repo"]) and not registry.REPO_ONLY):
+        if registry.REPO_ONLY:
+            raise ValueError("--from repo cannot save an archive")
+        os.makedirs(out, exist_ok=True)
+        dest = os.path.join(out, base + ".tar.gz")
+        with ui.Spinner("Downloading %s %s" % (r["name"], r["version"])) as sp:
+            last = [-1]
+            def prog(done, total):
+                pct = int(100 * done / total) if total else 100
+                if pct != last[0]:
+                    last[0] = pct
+                    sp.text("Downloading %s %s (%s of %s, %d%%)" % (r["name"], r["version"], ui.human(done), ui.human(total), pct))
+            got = registry.fetch_archive(r, dest, progress=prog)
+        ui.good("Saved %s (%s, sha256 %s)" % (dest, ui.human(os.path.getsize(dest)), got["sha256"][:16]))
+        return
+    dest = os.path.join(out, base)
     with ui.Spinner("Fetching %s %s" % (r["name"], r["version"])):
         registry.checkout(r, dest)
     ui.good("Saved %s" % dest)
@@ -1123,6 +1153,87 @@ def dev_tree_solve(a):
     ui.good("workspace is clean" if not resolved else "resolved %d nested repositor%s" % (resolved, "y" if resolved == 1 else "ies"))
 
 
+def _bump_version(path, part):
+    """Raise `version` in the [package] table of aihub.toml (any spacing, single or double quotes). -> (old, new)."""
+    with open(path, encoding="utf-8", newline="") as f:
+        text = f.read()
+    head = re.search(r"^[ \t]*\[package\][ \t]*(?:#.*)?$", text, re.M)
+    start = head.end() if head else 0
+    nxt = re.search(r"^[ \t]*\[", text[start:], re.M)
+    end = start + nxt.start() if nxt else len(text)
+    found = []
+
+    def sub(m):
+        found.append(m.group(3))
+        return m.group(1) + m.group(2) + V.bump(m.group(3), part) + m.group(2)
+    body = re.sub(r"^([ \t]*version[ \t]*=[ \t]*)(['\"])([^'\"\n]*)\2", sub, text[start:end], count=1, flags=re.M)
+    if not found:
+        raise ValueError('cannot bump: no  version = "..."  line in the [package] table of %s' % path)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text[:start] + body + text[end:])
+    return found[0], V.bump(found[0], part)
+
+
+def _bump_and_sync(a, d, label, with_path):
+    """--bump (rewrites the version in aihub.toml), then pyproject.toml follows aihub.toml."""
+    if a.bump:
+        old, new = _bump_version(os.path.join(d, "aihub.toml"), a.bump)
+        ui.good("%s: version %s -> %s" % (label, old, new))
+    for f, got, v in pysync.sync(d, pysync.want(_load(with_path(d)))):
+        ui.good("%s: pyproject.toml %s %r -> %r" % (label, f, got, v))
+
+
+def _publish_direct(a, roots):
+    """`dev publish -i`: pack each package and upload the archive to the hub, which keeps it in its own data folder and lists it.
+    No git repository, remote or git account is needed. Packages are independent: a failure is reported, the rest still go out."""
+    import shutil, tempfile
+    with_path = lambda d: argparse.Namespace(**dict(vars(a), path=d))
+    failed, sent = [], []
+    for n, d in enumerate(roots, 1):
+        label = _label(a, d)
+        tag = "[%d/%d] " % (n, len(roots)) if len(roots) > 1 else ""
+        sp = ui.Spinner("%sPreparing %s" % (tag, label))
+        sp.__enter__()
+        tmp = tempfile.mkdtemp(prefix="aihub-publish-")
+        try:
+            _bump_and_sync(a, d, label, with_path)
+            m = dev_validate(with_path(d), quiet=True)
+            pkg = m["package"]
+            files = [f for f in ignore.list_files(d, upto=_root(a)) if not f.startswith("dist/")]     # ignore files between the package and the workspace apply
+            dest = os.path.join(tmp, "%s-%s.tar.gz" % (pkg["name"], pkg["version"]))
+            archive.build(d, files, dest)
+            sp.text("%sUploading %s %s (%s)" % (tag, pkg["name"], pkg["version"], ui.human(os.path.getsize(dest))))
+            last = [-1]
+
+            def prog(done, total, pkg=pkg, tag=tag):                      # chunks of a big archive finish in any order: show the bytes that are in
+                pct = int(100 * done / total) if total else 100
+                if pct != last[0]:
+                    last[0] = pct
+                    sp.text("%sUploading %s %s (%s of %s, %d%%)" % (tag, pkg["name"], pkg["version"], ui.human(done), ui.human(total), pct))
+            res = api.publish_direct(dest, progress=prog)
+            sp.text("%sSent %s %s" % (tag, pkg["name"], pkg["version"]))
+            sp.__exit__(None, None, None)
+            sent.append((pkg, res))
+        except (api.ApiError, ValueError, KeyError, OSError) as e:
+            sp.text("%s: %s" % (label, e))
+            sp.__exit__(ValueError, e, None)
+            failed.append(label)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    for pkg, res in sent:
+        if res.get("status") == "already published":
+            ui.good("%s %s is already on the hub with these files (nothing to do)" % (pkg["name"], pkg["version"]))
+            continue
+        ui.celebrate("Published %s %s to the hub" % (pkg["name"], pkg["version"]))
+        ui.info("stored on the hub (%s, sha256 %s), no git involved" % (res.get("status", "published"), str(res.get("sha256", ""))[:12]))
+        ui.info("install: aihub install %s" % pkg["name"])
+        if res.get("status") == "queued":
+            ui.note("the hub will list it in a moment")
+    if failed:
+        raise ValueError("%d of %d package(s) not published: %s%s" % (len(failed), len(roots), ", ".join(failed),
+                                                                 "; the other %d went out" % len(sent) if sent else ""))
+
+
 def dev_publish(a):
     """Publish each selected package on its own: a problem in one is reported and skipped, the others still go out."""
     roots = _projects(a)
@@ -1131,6 +1242,8 @@ def dev_publish(a):
         roots = ui.select("Publish which packages?", [(d, _label(a, d)) for d in roots], multi=True, preset=tuple(roots))
         if not roots:
             return ui.note("nothing selected")
+    if getattr(a, "indirect", False):
+        return _publish_direct(a, roots)
     with_path = lambda d: argparse.Namespace(**dict(vars(a), path=d))
     failed, ready = [], []
     for n, d in enumerate(roots, 1):                 # phase 1: prepare. Nothing is pushed yet
@@ -1143,14 +1256,7 @@ def dev_publish(a):
             block = ws.blocking(ws.inspect_package(d, top_root))
             if block:
                 raise ValueError("%s (fix with: aihub dev tree-solve)" % block[0][1])
-            if a.bump:
-                m = _load(with_path(d))
-                p = os.path.join(d, "aihub.toml")
-                t = open(p).read()
-                old = m["package"]["version"]
-                open(p, "w").write(t.replace('version = "%s"' % old, 'version = "%s"' % V.bump(old, a.bump), 1))
-            for f, got, v in pysync.sync(d, pysync.want(_load(with_path(d)))):    # pyproject.toml follows aihub.toml (also after --bump)
-                ui.good("%s: pyproject.toml %s %r -> %r" % (label, f, got, v))
+            _bump_and_sync(a, d, label, with_path)               # --bump, then pyproject.toml follows aihub.toml
             m = dev_validate(with_path(d), quiet=True)
             sp.text("%sStaging %s" % (tag, label))
             ready.append((d, pub.publish(d, m, push_now=False, commit_now=False)))      # staged only: one commit per repository below
@@ -1303,7 +1409,7 @@ def build_parser():
     PLAIN = (arg("--plain", action="store_true", help="One 'name version' line per package, nothing else (for scripts)."),
              arg("--name-only", action="store_true", help="One package name per line, nothing else (implies --plain)."))
     add("config", cmd_config, "Show or change CLI configuration.",
-        "Print the current CLI configuration, or set a configuration value. The hub URL is stored under the key 'hub'.",
+        "Print the current CLI configuration, or set a configuration value. The hub URL is stored under the key 'hub'. Self-update keys: auto_update (on|notify|off) and auto_update_hours (1..720).",
         "Examples:\n  aihub config\n  aihub config set hub https://hub.example.com",
         arg("action", nargs="?", default="show", metavar="ACTION", help="'show' (default) or 'set'."),
         arg("key", nargs="?", metavar="KEY", help="Configuration key to change when ACTION is 'set'."),
@@ -1363,7 +1469,8 @@ def build_parser():
         arg("-r", "--requirement", action="append", metavar="FILE", help="Install every package listed in FILE (pip style: one per line, # comments, nested -r); repeatable."),
         arg("-y", "--yes", action="store_true", help="Skip install-script and tool-registration prompts; use detected tools unless --tool is given."),
         arg("--tool", action="append", metavar="TOOL", help="Register components with this tool; repeat to select multiple (claude, codex, or opencode)."),
-        arg("-i", "--indirect", action="store_true", help="Get the package through the hub instead of straight from git (needs the install_indirect permission; falls back to git if the hub cannot fetch it)."))
+        arg("-i", "--indirect", action="store_true", help="Get the package through the hub instead of straight from git (needs the install_indirect permission). The hub does all git work with its own login, so no git credentials are needed on this machine; it never falls back to git."),
+        arg("--from", dest="source", choices=["archive", "repo"], metavar="archive|repo", help="Where to get the package: 'archive' = download it from the hub (same as -i), 'repo' = clone it from its git repository. Default: a package published to the hub is an archive, any other comes from git. An archive package has no repository, so --from repo fails for it."))
     add("enable", cmd_enable, "Switch a disabled package back on.",
         "Re-register an installed but disabled package with your AI tools and put its commands back on PATH. Uses the files already on disk, so it works offline. Disabled dependencies are enabled first. 'aihub install' on a disabled package does the same.",
         "Examples:\n  aihub enable my-skill\n  aihub enable --all",
@@ -1396,10 +1503,13 @@ def build_parser():
         arg("-y", "--yes", action="store_true", help="Do not ask before applying; use detected tools."),
         arg("--tool", action="append", metavar="TOOL", help="Register with this tool; repeat to select multiple."))
     add("download", cmd_download, "Download a package archive without installing it.",
-        "Resolve a package version and save its archive in the output folder. Downloads resume from a partial file when possible and verify SHA-256 before the final file is saved. Use name@1.2.0 for an exact version, or comparison constraints such as name>=1.0,<2.",
-        "Examples:\n  aihub download my-skill@1.0.0 -o ./pkgs\n  aihub download \"my-skill>=1.0,<2\"",
+        "Resolve a package version and save it in the output folder: the .tar.gz for a package published to the hub (or with --archive), the unpacked files for a git package (or with --folder). Large archives download in parallel chunks, resume after an interruption and are verified with SHA-256 before the final file is saved. Use name@1.2.0 for an exact version, or comparison constraints such as name>=1.0,<2.",
+        "Examples:\n  aihub download my-skill@1.0.0 -o ./pkgs\n  aihub download \"my-skill>=1.0,<2\"\n  aihub download my-skill --folder",
         arg("name", metavar="PACKAGE[VERSION]", help="Package name, name@1.2.0, or a constraint such as name>=1.0,<2."),
-        arg("-o", "--output", metavar="DIR", help="Folder for the archive (default: current directory)."))
+        arg("-o", "--output", metavar="DIR", help="Folder to save into (default: current directory)."),
+        arg("--archive", action="store_true", help="Save NAME-VERSION.tar.gz (the default for a package published to the hub). For a git package the hub builds it (needs install_indirect)."),
+        arg("--folder", action="store_true", help="Save the unpacked files in NAME-VERSION/ (the default for a git package)."),
+        arg("--from", dest="source", choices=["archive", "repo"], metavar="archive|repo", help="'archive' = through the hub, 'repo' = git only (fails for an archive package)."))
     add("uninstall", cmd_uninstall, "Remove an installed package and undo its changes.",
         "Remove the named installed package, its files and virtual environment, and revert recorded tool registrations and setup changes.",
         "Example:\n  aihub uninstall my-skill",
@@ -1425,7 +1535,7 @@ def build_parser():
         "Print the installed CLI version and compare it with the version the hub distributes.",
         "Example:\n  aihub version")
     add("upgrade", updater.cmd_upgrade, "Upgrade the aihub CLI itself to the hub's version.",
-        "Download the CLI from the configured hub, verify its SHA-256, and replace the running copy. The previous copy is kept so --rollback can restore it. The CLI also checks once a day on its own; turn that off with 'aihub config set auto_update false' or AIHUB_NO_UPDATE=1.",
+        "Download the CLI from the configured hub, verify its SHA-256, and replace the running copy. The previous copy is kept so --rollback can restore it. The CLI also checks the hub on its own (default every 24 h): 'aihub config set auto_update on|notify|off' (notify = only print that a version is available) and 'aihub config set auto_update_hours N' (1..720); AIHUB_NO_UPDATE=1 turns it off. Rolling back makes auto-update skip that version.",
         "Examples:\n  aihub upgrade\n  aihub upgrade --check\n  aihub upgrade --rollback",
         arg("--check", action="store_true", help="Only report whether a newer version exists."),
         arg("--force", action="store_true", help="Reinstall even when already current."),
@@ -1551,10 +1661,11 @@ def build_parser():
         ("build", dev_build, "Validate and build a package archive.",
          "Validate the project, collect files selected by the project's ignore rules, and write a versioned .tar.gz archive under PATH/dist/.",
          "Example:\n  aihub dev build ./my-skill", []),
-        ("publish", dev_publish, "Build and upload a package release.",
-         "Optionally bump the version in aihub.toml, validate and build the package, then upload it to the configured hub. Large packages use resumable chunked uploads; smaller packages use a single upload request.",
-         "Examples:\n  aihub dev publish\n  aihub dev publish --bump patch",
-         [arg("--bump", choices=["major", "minor", "patch"], metavar="PART", help="Increment this version part before building (major/minor/patch; lower parts reset).")]),
+        ("publish", dev_publish, "Publish a package release (git push, or straight to the hub with -i).",
+         "Optionally bump the version in aihub.toml, validate the package and publish it. By default the project is committed and pushed to its git remote and the hub is told. With -i the package is packed and uploaded to the hub, which stores it in its own data folder and lists it: no git repository, remote or git account is needed, and installs download it from the hub. -i needs `aihub login` with an account that may publish.",
+         "Examples:\n  aihub dev publish\n  aihub dev publish --bump patch\n  aihub dev publish -i\n  aihub dev publish -i --bump patch",
+         [arg("--bump", choices=["major", "minor", "patch"], metavar="PART", help="Increment this version part before building (major/minor/patch; lower parts reset)."),
+          arg("-i", "--indirect", action="store_true", help="Upload the package to the hub instead of pushing to git (no git needed; installs get it from the hub).")]),
         ("index", dev_index, "Force the hub to index this project (maintainers).",
          "Ask the hub to read this project's pushed commit and add the version to the package index. Use it when the automatic step after `aihub dev publish` did not happen (lost event, telemetry inbox down). Needs `aihub login` with an account whose role has the 'index' permission. The hub checks aihub.toml at that commit; nothing from your machine is trusted but the repo location.",
          "Examples:\n  aihub dev index\n  aihub dev index --commit 1a2b3c4",
@@ -1618,9 +1729,9 @@ def main(argv=None):
             record_cli_install()
         if a.cmd not in ("hook", "flush", "usage-sync", "credential", "hooks", "self-uninstall", "uninstall"):
             hooks.verify()      # install/use/update/...: make sure our usage hooks are still in place
-        updater.auto(a.cmd)
         policy.auto(a.cmd)
         remote_config.auto(a.cmd)
+        updater.auto(a.cmd, a)          # last: it may swap aihub.pyz under this process
     except (api.ApiError, ValueError, KeyError, OSError) as e:
         ui.error(e, ui.hint_for(e))
         return 1

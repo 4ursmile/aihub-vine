@@ -30,11 +30,24 @@ def _norm(host):
     return (host or "").strip().lower()
 
 
+_hinted = set()           # hosts already told about a missing login (one hint per host per process)
+
+
+def _vault(host):
+    try:
+        from ..cli import credhelper
+        return credhelper.lookup(host)
+    except Exception:
+        return None
+
+
 def login_for(settings, host, urls=()):
     """(user, secret) git should use for `host` (exact 'host' or 'host:port', as git connects), or None (then git's own helpers decide).
-    AIHUB_GIT_TOKEN (+ AIHUB_GIT_USER, default oauth2; or AIHUB_GIT_TOKEN_FILE) applies to EXACTLY the hosts of `urls` and of AIHUB_GIT_HOSTS
+    AIHUB_GIT_TOKEN (+ AIHUB_GIT_USER; or AIHUB_GIT_TOKEN_FILE) applies to EXACTLY the hosts of `urls` and of AIHUB_GIT_HOSTS
     (a host without a port there means the default port): a token meant for git.corp.example is never offered to git.corp.example:9999 or to
-    another server. Then the vault (`aihub vault add`), by the same exact host."""
+    another server. Without AIHUB_GIT_USER the user is the one stored in the vault for that host (hosts with 2FA such as Bitbucket or Gitea
+    want the real account name), else oauth2. Then the vault (`aihub vault add`), by the same exact host. The environment token wins over a
+    vault entry for the same host."""
     host = _norm(host)
     token = _token(settings)
     if token:
@@ -45,12 +58,17 @@ def login_for(settings, host, urls=()):
                 known.add(h[1])
         known |= {_norm(h) for h in settings.env_get("AIHUB_GIT_HOSTS").split(",") if h.strip()}
         if host in known:
-            return settings.env_get("AIHUB_GIT_USER", "oauth2"), token
-    try:
-        from ..cli import credhelper
-        return credhelper.lookup(host)
-    except Exception:
-        return None
+            user = settings.env_get("AIHUB_GIT_USER")
+            if not user:
+                v = _vault(host)
+                user = (v[0] if v else "") or "oauth2"
+            return user, token
+    found = _vault(host)
+    if not found and host and host not in _hinted:
+        _hinted.add(host)
+        log.warning("the hub has no working git login for %s: set AIHUB_GIT_TOKEN (+AIHUB_GIT_USER, AIHUB_GIT_HOSTS=%s) in the server env, "
+                    "or run `aihub vault add https://%s` as the account that runs the server", host, host, host)
+    return found
 
 
 # Switches that tls.py / gitx.py read from os.environ. They are not secrets, so a `.env` value is exported for them (the real environment wins).

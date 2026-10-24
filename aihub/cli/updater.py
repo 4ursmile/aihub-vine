@@ -1,6 +1,8 @@
 """CLI version management: `aihub version`, `aihub upgrade`, and the throttled automatic update check."""
 import hashlib
+import json
 import os
+import subprocess
 import sys
 import time
 import zipfile
@@ -9,7 +11,55 @@ from ..core import version as V
 from ..core.release import VERSION
 from . import api, paths, ui
 
-CHECK_EVERY = 24 * 3600
+CHECK_EVERY = 24 * 3600                 # default auto_update_hours
+RETRY_EVERY = 3600                      # a failed check is retried after min(this, the interval)
+NEVER = ("hook", "flush", "usage-sync", "credential", "upgrade", "version", "self-uninstall", "uninstall")
+
+
+def state():
+    return paths.load("update.json", {})
+
+
+def _state(set=None, drop=()):
+    """Merge into update.json (pyz_version / pyz written by hub_install, skip_version, ...) instead of replacing it."""
+    st = state()
+    if not isinstance(st, dict):
+        st = {}
+    st.update(set or {})
+    for k in drop:
+        st.pop(k, None)
+    try:
+        paths.save("update.json", st)
+    except OSError:
+        pass
+    return st
+
+
+def mode():
+    """'on' | 'notify' | 'off'. AIHUB_NO_UPDATE (any value but 0/false/no/off) > AIHUB_AUTO_UPDATE > config auto_update (default on)."""
+    if str(os.environ.get("AIHUB_NO_UPDATE", "")).strip().lower() not in ("", "0", "false", "no", "off"):
+        return "off"
+    raw = os.environ.get("AIHUB_AUTO_UPDATE")
+    if raw is None or not str(raw).strip():
+        raw = paths.config().get("auto_update", "on")
+    v = str(raw).strip().lower()
+    if v in ("off", "false", "0", "no", "n", "never"):
+        return "off"
+    if v == "notify":
+        return "notify"
+    return "on"
+
+
+def hours():
+    """Check interval in hours, 1..720 (env AIHUB_AUTO_UPDATE_HOURS > config auto_update_hours > 24)."""
+    raw = os.environ.get("AIHUB_AUTO_UPDATE_HOURS")
+    if raw is None or not str(raw).strip():
+        raw = paths.config().get("auto_update_hours", CHECK_EVERY // 3600)
+    try:
+        h = float(str(raw).strip())
+    except ValueError:
+        h = CHECK_EVERY // 3600
+    return int(min(720, max(1, h)))
 
 
 def by_pip():
@@ -27,11 +77,10 @@ def hub_install(info):
     dst = pyz_path()
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     apply(info, dst)
-    paths.save("update.json", {"checked": time.time(), "pyz_version": info["version"], "pyz": dst})
+    _state({"checked": time.time(), "ok": True, "pyz_version": info["version"], "pyz": dst}, ("last_error", "available"))
 
 
 def pip_upgrade():
-    import subprocess
     r = subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "aihub-cli"])
     if r.returncode:
         raise ValueError("pip could not upgrade aihub-cli (exit %d); run: %s -m pip install --upgrade aihub-cli" % (r.returncode, sys.executable))
@@ -60,7 +109,6 @@ def target():
 
 def remote(timeout=5):
     with api._req("GET", paths.config()["hub"].rstrip("/") + "/cli/version", timeout=timeout) as r:
-        import json
         return json.loads(r.read())
 
 
@@ -98,6 +146,17 @@ def apply(info, dst=None):
 
 def cmd_version(a):
     ui.out("  aihub CLI  %s%s" % (VERSION, " (pip)" if by_pip() else ""))
+    m, st = mode(), state()
+    line = "auto-update: %s" % m
+    if m != "off":
+        line += ", every %d h" % hours()
+        if st.get("checked"):
+            line += ", last check %s" % time.strftime("%Y-%m-%d %H:%M", time.localtime(st["checked"]))
+    ui.info(line)
+    if st.get("last_error"):
+        ui.info("last auto-update error: %s" % st["last_error"])
+    if st.get("skip_version"):
+        ui.info("auto-update skips %s (you rolled back from it); `aihub upgrade` clears this" % st["skip_version"])
     try:
         info = remote()
     except Exception:
@@ -111,12 +170,15 @@ def cmd_version(a):
 
 
 def cmd_upgrade(a):
+    if not a.rollback:
+        _state(drop=("skip_version",))                  # a manual upgrade overrides an earlier rollback
     if a.rollback:
         dst = target()
         if not dst or not os.path.exists(dst + ".prev"):
             raise ValueError("no previous version to roll back to")
         os.replace(dst + ".prev", dst)
-        ui.good("rolled back")
+        _state({"skip_version": VERSION})               # auto-update must not put the version you just left back
+        ui.good("rolled back (auto-update will not reinstall %s; a newer version is fine)" % VERSION)
         return
     with ui.Spinner("Checking for a new version") as sp:
         info = remote()
@@ -137,25 +199,59 @@ def cmd_upgrade(a):
             ui.good("pip finished; run `aihub -v` to see the version")
         return
     apply(info)
-    paths.save("update.json", {"checked": time.time()})
+    _state({"checked": time.time(), "ok": True}, ("last_error", "available"))
     ui.celebrate("aihub %s installed (previous kept; undo with: aihub upgrade --rollback)" % info["version"])
 
 
-def auto(cmd):
-    """Called after a command finishes. At most once a day, never for hooks, never fatal."""
-    if cmd in ("hook", "flush", "upgrade", "version") or os.environ.get("AIHUB_NO_UPDATE") or not ui.INTERACTIVE:
-        return
-    if paths.config().get("auto_update", "true") in ("false", "0", "off", False) or not (target() or by_pip()):
-        return
-    st = paths.load("update.json", {})
-    if time.time() - st.get("checked", 0) < CHECK_EVERY:
-        return
+def _say(msg):
+    """Interactive: normal output. Scripts and assistants: one line on stderr, stdout stays clean."""
+    if ui.INTERACTIVE:
+        ui.good(msg) if msg.startswith("updated") else ui.note(msg)
+    else:
+        try:
+            sys.stderr.write("aihub: %s\n" % msg)
+        except Exception:
+            pass
+
+
+def due(st, now=None):
+    now = time.time() if now is None else now
+    wait = hours() * 3600
+    if st.get("ok") is False:
+        wait = min(RETRY_EVERY, wait)
+    return now - st.get("checked", 0) >= wait
+
+
+def auto(cmd, a=None):
+    """Called after a command finishes (last in main(), so the zipapp swap happens after the other tail calls).
+    Mode on = install a newer hub version, notify = only say so, off = nothing. Once per auto_update_hours (a failed check retries
+    after at most an hour). Silent on stdout when not interactive, never for hooks / machine-output commands, never fatal. Imports at
+    module top only: this may replace aihub.pyz under the running process."""
     try:
-        paths.save("update.json", {"checked": time.time()})     # even on failure, so an offline hub is not retried every command
-        info = remote(timeout=3)
-        if V.compare(info["version"], VERSION) > 0:
-            ui.step("updating aihub %s %s %s" % (VERSION, ui.ARROW, info["version"]))
+        if cmd in NEVER or any(getattr(a, k, False) is True for k in ("json", "plain", "name_only")):
+            return
+        m = mode()
+        if m == "off" or not (target() or by_pip()):
+            return
+        st = state()
+        if not due(st):
+            return
+        try:
+            info = remote(timeout=3)
+            new = info["version"]
+            if V.compare(new, VERSION) <= 0:
+                _state({"checked": time.time(), "ok": True}, ("last_error", "available"))
+                return
+            _state({"checked": time.time(), "ok": True, "available": new}, ("last_error",))
+            if new == st.get("skip_version"):
+                return
+            if m == "notify":
+                _say("aihub %s available: run aihub upgrade" % new)
+                return
             hub_install(info) if by_pip() else apply(info)
-            ui.good("updated; takes effect on the next run (disable: aihub config set auto_update false)")
+            _state({"checked": time.time(), "ok": True}, ("last_error", "available"))
+            _say("updated aihub %s -> %s; takes effect on the next run (turn off: aihub config set auto_update off)" % (VERSION, new))
+        except Exception as e:
+            _state({"checked": time.time(), "ok": False, "last_error": str(e)[:300]})
     except Exception:
         pass

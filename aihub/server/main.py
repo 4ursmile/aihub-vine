@@ -17,6 +17,7 @@ from . import basepath, gitauth
 from ..core.release import VERSION
 from .cache import init_cache
 from .sync import Sync
+from .direct import Direct, Uploads
 from .transfer import Transfer
 from .ingest import Ingest
 from .usagebuf import UsageBuffer
@@ -205,7 +206,14 @@ Write-Host ""
 def create_app(settings: Settings = None) -> FastAPI:
     s = settings or Settings.from_env()
     os.makedirs(s.data_dir, exist_ok=True)
-    gitauth.install(s)                      # trusted data folder + stored git login for every git call, also before the sync thread starts
+    _sync = []                              # filled below; the login lookup reads the sync's configured git URLs (index, inbox) from it
+
+    def _git_urls():
+        try:
+            return [_sync[0].index_source()[0], _sync[0].inbox()] if _sync else ()
+        except Exception:
+            return ()
+    gitauth.install(s, _git_urls)           # trusted data folder + git login for every git call (backup, transfer, publish), also when the sync thread never starts
     @contextlib.asynccontextmanager
     async def lifespan(_app):
         logging.getLogger("aihub").info("backends: %s", json.dumps(s.describe()))
@@ -235,6 +243,9 @@ def create_app(settings: Settings = None) -> FastAPI:
     app.state.cache = init_cache(s)
     app.state.events = EventBuffer(app.state.repos, s.event_flush_rows, s.event_flush_secs)
     app.state.sync = Sync(app.state.repos, s, app.state.cache)
+    _sync.append(app.state.sync)
+    app.state.direct = Direct(s.data_dir)
+    app.state.direct_uploads = Uploads(app.state.direct.base)
     app.state.transfer = Transfer(s.data_dir, lambda: app.state.sync.num("transfer_repo_ttl"))
     app.state.ingest = Ingest(app.state.repos, app.state.sync, app.state.cache, os.path.join(s.data_dir, "ingest-journal"))
     app.state.usagebuf = UsageBuffer(app.state.repos, app.state.sync, app.state.cache, os.path.join(s.data_dir, "usage-journal"))

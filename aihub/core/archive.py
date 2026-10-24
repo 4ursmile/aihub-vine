@@ -1,3 +1,4 @@
+import gzip
 import hashlib
 import io
 import os
@@ -16,11 +17,39 @@ def sha256_file(path):
     return h.hexdigest()
 
 
+def _plain(ti):
+    """Only what matters stays: name, content, executable bit. No timestamps or owners, so the same files always give the same bytes."""
+    ti.mtime, ti.uid, ti.gid, ti.uname, ti.gname = 0, 0, 0, "", ""
+    ti.mode = 0o755 if ti.isdir() or ti.mode & 0o111 else 0o644
+    return ti
+
+
 def build(root, files, dest):
-    with tarfile.open(dest, "w:gz") as t:
-        for f in files:
-            t.add(os.path.join(root, f), arcname=f, recursive=False)
+    """A reproducible .tar.gz: sorted members, normalized metadata, gzip header without a timestamp. Packing an unchanged folder twice
+    gives identical files (so a re-publish is recognised as the same release)."""
+    with open(dest, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", mtime=0, filename="", compresslevel=9) as g, \
+            tarfile.open(fileobj=g, mode="w", format=tarfile.GNU_FORMAT) as t:
+        for f in sorted(files):
+            t.add(os.path.join(root, f), arcname=f, recursive=False, filter=_plain)
     return dest
+
+
+def content_digest(path):
+    """Digest of what a .tar.gz CONTAINS (file names, bytes, executable bit, symlink targets), not of how it was packed. Two archives of the
+    same files are equal here even when built on different machines, Python or zlib versions."""
+    h = hashlib.sha256()
+    with tarfile.open(path) as t:
+        for m in sorted((m for m in t.getmembers() if not m.isdir()), key=lambda m: m.name):
+            name = m.name[2:] if m.name.startswith("./") else m.name
+            if m.issym() or m.islnk():
+                body = "L:" + m.linkname
+            else:
+                fh, f = hashlib.sha256(), t.extractfile(m)
+                for b in iter(lambda: f.read(1 << 20), b""):
+                    fh.update(b)
+                body = "F:%s:%d" % (fh.hexdigest(), 1 if m.mode & 0o111 else 0)
+            h.update(("%s\0%s\n" % (name, body)).encode("utf-8", "surrogateescape"))
+    return h.hexdigest()
 
 
 def _names(path):

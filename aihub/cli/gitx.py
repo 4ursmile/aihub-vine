@@ -178,23 +178,109 @@ def run(args, cwd=None, check=True, timeout=None, input=None, extra_env=None):
                            timeout=timeout, input=input, **popen_kw())
     except subprocess.TimeoutExpired:
         if check:
-            raise GitError("git %s timed out after %ss" % (args[0], timeout))
+            msg = "git %s timed out after %ss" % (args[0], timeout)
+            raise GitError(explain(msg, _error_url(list(args), cwd, msg), "net") if args[0] in NETWORK else msg)
         return ""
     if check and r.returncode != 0:
-        raise GitError(explain((r.stderr or r.stdout).strip() or "git %s failed" % args[0]))
+        msg = (r.stderr or r.stdout).strip() or "git %s failed" % args[0]
+        raise GitError(explain(msg, _error_url(list(args), cwd, msg)))
     return r.stdout.strip()
 
 
-def explain(msg):
-    """Add the one-line fix to the git errors people cannot guess from git's own words."""
-    if "dubious ownership" in msg and "aihub hint" not in msg:
+def _error_url(args, cwd, msg):
+    """The remote a failed network command talked to, for the hint: a URL in its arguments, else (only when the message names none) origin."""
+    if not args or args[0] not in NETWORK + ("lfs",):
+        return None
+    hosts = _hosts_in(args)
+    if hosts:
+        return next(a for a in args if _host_of(a))
+    if cwd and not _text_url(msg) and fetch_failure(msg) in ("auth", "net"):
+        try:
+            return subprocess.run(["git", "remote", "get-url", "origin"], cwd=cwd, env=_trusted_env(dict(os.environ), cwd), capture_output=True,
+                                  text=True, encoding="utf-8", errors="replace", timeout=20, **popen_kw()).stdout.strip() or None
+        except (OSError, subprocess.SubprocessError):
+            return None
+    return None
+
+
+HINT = "[aihub hint] "
+
+
+def strip_hints(msg):
+    """The message without our own `[aihub hint]` lines (so a hint can never change how an error is classified)."""
+    return "\n".join(ln for ln in str(msg or "").splitlines() if not ln.startswith(HINT))
+
+
+def host_key(url):
+    """`host[:port]` of an http(s) URL, scheme-less ("git.example.com" counts as https), lowercase, no userinfo, IPv6 bracketed, port as
+    written; '' when there is none. THE key for a stored login (credhelper, vault, server): all three must agree, so they call this."""
+    url = (url or "").strip()
+    h = _host_of(url if "://" in url else "https://" + url)
+    return h[1] if h else ""
+
+
+_URL_IN_TEXT = re.compile(r"https?://[^\s'\"<>]+")
+
+
+def _text_url(msg):
+    """First http(s) URL named in a git message ("unable to access 'https://host/x.git/'"), redacted and without query, or None."""
+    for m in _URL_IN_TEXT.finditer(redact_url(msg or "")):
+        u = m.group(0).split("?")[0].split("#")[0].rstrip(".,;:)")
+        if _host_of(u):
+            return u
+    return None
+
+
+def hint(kind, url=None, msg=""):
+    """The one-line fix for a failure `kind` (auth | net | missing) or None. HOST comes from `url`, else from the URL inside `msg`; always redacted.
+    auth/net need a host (without one the failure is not about a git host); on the server (LOGIN set) the auth text names the server's settings."""
+    if kind == "missing":
+        return (HINT + "the published commit/branch is not on the remote (force-push or branch deleted?). Re-publish: aihub dev publish, "
+                "or install another version: aihub install NAME@VERSION")
+    shown = redact_url(url) if url and _host_of(redact_url(url)) else _text_url(msg)
+    h = _host_of(shown) if shown else None
+    if not h:
+        return None
+    scheme, host = h
+    if kind == "auth":
+        if LOGIN is not None:
+            return (HINT + "the hub has no working git login for %s: set AIHUB_GIT_TOKEN (+AIHUB_GIT_USER, AIHUB_GIT_HOSTS=%s) in the server env, "
+                    "or run `aihub vault add %s://%s` as the account that runs the server" % (host, host, scheme, host))
+        return (HINT + "git login for %s was refused or is missing. Run: aihub vault add %s://%s --user NAME  (2FA accounts: use a personal "
+                "access token, not the password). Check it: aihub vault test %s" % (host, scheme, host, host))
+    if kind == "net":
+        return (HINT + "cannot reach %s (network, proxy or TLS). Check: git ls-remote %s; behind a proxy set AIHUB_GIT_PROXY; "
+                "private CA: AIHUB_CA_BUNDLE=<ca.pem>" % (host, shown if "/" in shown.split("//", 1)[-1] else shown + "/"))
+    return None
+
+
+def explain(msg, url=None, kind=None):
+    """Add the one-line fix to the git errors people cannot guess from git's own words: the original text first, ONE `[aihub hint]` line
+    last, never twice. `kind` forces a class ("missing" for our own "cannot find"); else fetch_failure() decides. `url` names the remote
+    when the message does not."""
+    if HINT in msg:
+        return msg
+    if "dubious ownership" in msg:
         m = re.search(r"repository at '([^']+)'", msg)
-        msg += ("\n[aihub hint] the folder belongs to another account than the one running git. The hub trusts its own data folder automatically; "
-                "for any other: git config --global --add safe.directory %s" % (m.group(1) if m else "<folder>"))
-    return msg
+        return msg + ("\n" + HINT + "the folder belongs to another account than the one running git. The hub trusts its own data folder automatically; "
+                      "for any other: git config --global --add safe.directory %s" % (m.group(1) if m else "<folder>"))
+    h = hint(kind or fetch_failure(msg), url, msg)
+    return msg + "\n" + h if h else msg
 
 
 MISSING = ("couldn't find remote ref", "could not find remote ref")
+
+
+def is_missing(msg):
+    """True for our own "cannot find '<ref>' in <url>" error (the commit/tag does not exist in that repository)."""
+    return "cannot find '" in str(msg)
+
+
+def add_note(msg, note):
+    """Put `note` after the error text but before its single trailing `[aihub hint]` line, which stays last."""
+    msg = str(msg)
+    head, sep, hint = msg.partition("\n" + HINT)
+    return head + "\n" + note + sep + hint
 
 
 def fetch_tip(cwd, remote, branch, ref, depth=None, timeout=120):
@@ -254,13 +340,29 @@ def redact_url(url):
     return re.sub(r"//[^/@]+@", "//", url or "")
 
 
+def _cache_key(url):
+    return re.sub(r"[^A-Za-z0-9]+", "_", redact_url(url)).strip("_")[-80:]
+
+
+def _norm_url(url):
+    """Same repo, same key: host case, a trailing "/" and a trailing ".git" do not matter. Only used for the cache folder name."""
+    u = redact_url(url).strip()
+    m = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*://)([^/]*)(.*)$", u)
+    if m:
+        u = m.group(1).lower() + m.group(2).lower() + m.group(3)
+    u = u.rstrip("/")
+    return u[:-4].rstrip("/") if u.lower().endswith(".git") else u
+
+
 def cache_dir(url, base=None):
-    key = re.sub(r"[^A-Za-z0-9]+", "_", redact_url(url)).strip("_")[-80:]
-    if base:
-        d = os.path.join(base, key)
-        os.makedirs(d, exist_ok=True)
-        return d
-    return paths.ensure("repos", key)
+    key = _cache_key(_norm_url(url))
+    root = base or paths.ensure("repos")
+    d = os.path.join(root, key)
+    old = os.path.join(root, _cache_key(url))
+    if old != d and not os.path.isdir(os.path.join(d, ".git")) and os.path.isdir(os.path.join(old, ".git")):
+        return old                                   # a clone made under the old name keeps being used (it may hold unpushed work)
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
 def rmtree(path):
@@ -361,6 +463,62 @@ def lfs_pointers(root):
     return out
 
 
+_MISSING_REF = ("couldn't find remote ref", "could not find remote ref", "not our ref", "unadvertised object", "no such remote ref",
+                "no such ref", "invalid refspec", "did not match any")
+_AUTH = ("authentication", "invalid username or password", "password authentication is not supported", "access denied", "not allowed to download",
+         "terminal prompts disabled", "could not read username", "could not read password", "permission denied", "publickey", "forbidden",
+         "unauthorized", "could not read from remote", "denied")
+_AUTH_RE = re.compile(r"\b40[13]\b|repository\b.*\bnot found")
+_NET = ("timed out", "could not resolve host", "unable to access", "couldn't connect", "failed to connect", "connection refused",
+        "connection reset", "network is unreachable", "ssl", "certificate", "does not appear to be a git repository")
+
+
+def fetch_failure(msg):
+    """Classify a failed `git fetch`: "missing" (the ref/sha is not offered: GitHub 'not our ref', GitLab 'unadvertised object', 'couldn't find remote ref'),
+    "auth" (login needed or refused, incl. a private repo reported as 'Repository not found'), "net" (unreachable, timeout, TLS) or "other"."""
+    m = strip_hints(msg).lower()
+    if any(w in m for w in _MISSING_REF):
+        return "missing"
+    if any(w in m for w in _AUTH) or _AUTH_RE.search(m):
+        return "auth"
+    if any(w in m for w in _NET):
+        return "net"
+    return "other"
+
+
+NO_SMUDGE = {"GIT_LFS_SKIP_SMUDGE": "1"}       # checkout must not download LFS files (no login env there); lfs_pull does it explicitly
+
+
+def _try_fetch(d, args):
+    """Run a fetch: None when it worked, the GitError when the ref was just not there; auth/network failures are raised as they are."""
+    try:
+        run(["fetch", "-q"] + args, cwd=d)
+    except GitError as e:
+        if fetch_failure(str(e)) in ("auth", "net"):
+            raise
+        return e
+    return None
+
+
+def _resolve(d, want, pinned):
+    for c in ([want, "refs/remotes/origin/" + want] if pinned else [want]):
+        sha = run(["rev-parse", "--verify", "-q", c + "^{commit}"], cwd=d, check=False)
+        if sha:
+            return sha
+    return ""
+
+
+def _deepen(d, rest):
+    """Fetch `rest` with full history (the cache is usually depth-1, which hides every older commit)."""
+    deep = ["--unshallow"] if os.path.exists(os.path.join(d, ".git", "shallow")) else []
+    try:
+        return _try_fetch(d, ["--tags"] + deep + rest)
+    except GitError as e:
+        if deep and "complete repository" in str(e):
+            return _try_fetch(d, ["--tags"] + rest)
+        raise
+
+
 def _fetch(url, branch, ref, base):
     d = cache_dir(url, base)
     if os.path.isdir(os.path.join(d, ".git")) and not _sound(d):
@@ -372,20 +530,33 @@ def _fetch(url, branch, ref, base):
     else:
         run(["remote", "set-url", "origin", url], cwd=d)
     want = ref or branch
-    try:
-        run(["fetch", "-q", "--depth", "1", "origin", want], cwd=d)           # branch, tag, or (if the host allows) a commit
-    except GitError:
-        try:
-            # full history of the branch, then resolve locally. The cache is usually depth-1 from an earlier fetch, so a plain
-            # fetch would keep it shallow and an older pinned commit (hosts refuse a bare sha) could never be found.
-            deep = ["--unshallow"] if os.path.exists(os.path.join(d, ".git", "shallow")) else []
-            run(["fetch", "-q", "--tags"] + deep + ["origin", branch], cwd=d)
-            run(["rev-parse", "--verify", "-q", want + "^{commit}"], cwd=d)
-            run(["checkout", "-q", "--force", want], cwd=d)
+    hexish = bool(ref and re.fullmatch(r"[0-9a-fA-F]{7,40}", ref))
+    if hexish:                                      # a commit never changes: if the cache has it, no network is needed
+        sha = _resolve(d, want, False)
+        if sha:
+            run(["checkout", "-q", "--force", sha], cwd=d, extra_env=NO_SMUDGE)
             return d
-        except GitError:
-            raise GitError("cannot find '%s' in %s" % (want, redact_url(url)))
-    run(["checkout", "-q", "--force", "FETCH_HEAD"], cwd=d)
+    err = _try_fetch(d, ["--depth", "1", "origin", want])           # branch, tag, or (if the host allows) a commit
+    if err is None:
+        run(["checkout", "-q", "--force", "FETCH_HEAD"], cwd=d, extra_env=NO_SMUDGE)
+        return d
+    if not ref and fetch_failure(str(err)) == "other":
+        raise err
+    sha = ""
+    if ref:                                         # pinned: look for it where it can be (a branch is never swapped for another commit)
+        steps = [lambda: _deepen(d, ["origin", branch]),                                            # the manifest branch, full history
+                 lambda: _deepen(d, ["origin", "+refs/heads/*:refs/remotes/origin/*"])]             # any branch (publish pushed another one, or renamed)
+        if hexish:
+            steps.append(lambda: _try_fetch(d, ["origin", want]))                                   # a host that allows a sha, without depth
+        for step in steps:
+            err = step() or err
+            sha = _resolve(d, want, True)
+            if sha:
+                break
+    if not sha:
+        last = (strip_hints(err).strip().splitlines() or [""])[-1]
+        raise GitError(explain("cannot find '%s' in %s%s" % (want, redact_url(url), " (git: %s)" % redact_url(last) if last else ""), url, "missing"))
+    run(["checkout", "-q", "--force", sha], cwd=d, extra_env=NO_SMUDGE)
     return d
 
 

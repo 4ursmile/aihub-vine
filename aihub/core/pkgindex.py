@@ -11,11 +11,16 @@ index.json ({"packages": [...]}) is still read (Legacy) and can be converted wit
 Entry = {"name", "type", "description", "tags", "authors"?, "license"?, "latest_version", "readme"?, "repo": {"url","branch","subdir"?},
          "python"?, "versions": [{"version", "ref"?, "repo"?, "requires"?: {"os","commands","packages"}, "manifest"?}]}
 Empty values are left out. `requires` lives on each version (most have none), never on the entry.
+Entry `repo` = where the LATEST version lives. A version that was published from somewhere else (the package moved to another repo,
+branch or subfolder later) carries its own full `repo` {"url","branch","subdir"} (`subdir` stays "" when the entry's is not), so an old
+`ref` is looked for where it exists. A version that lives where the entry says carries none (entries of packages that never moved
+are byte for byte what they always were). Readers merge: dict(entry["repo"], **version["repo"]).
 """
 import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 
 from . import naming
@@ -33,6 +38,34 @@ def shard(name):
 
 def entry_rel(name):
     return "packages/%s/%s.json" % (shard(name), name)
+
+
+def url_key(url):
+    """Same repository, same key: host case, credentials, a trailing "/" and a trailing ".git" do not matter."""
+    u = re.sub(r"//[^/@]+@", "//", str(url or "")).strip()
+    m = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*://)([^/]*)(.*)$", u)
+    if m:
+        u = m.group(1).lower() + m.group(2).lower() + m.group(3)
+    u = u.rstrip("/")
+    return u[:-4].rstrip("/") if u.lower().endswith(".git") else u
+
+
+def repo_key(r):
+    r = r or {}
+    return (url_key(r.get("url")), str(r.get("branch") or "main"), str(r.get("subdir") or "").strip("/"))
+
+
+def same_repo(a, b):
+    return repo_key(a) == repo_key(b)
+
+
+def location(r):
+    """The three fields that say where a version lives, with defaults filled in (branch "main", subdir "")."""
+    r = r or {}
+    return {"url": r.get("url") or "", "branch": r.get("branch") or "main", "subdir": str(r.get("subdir") or "").strip("/")}
+
+
+_LOC = {"url", "branch", "subdir"}
 
 
 def _clean(v):
@@ -160,11 +193,28 @@ def normalize_entry(e):
         v["requires"] = _requires_of(e, v)
         v.pop("manifest", None)               # planning data only; the aihub.toml in the repo is authoritative at install time
         versions.append(v)
+    er = e.get("repo") if isinstance(e.get("repo"), dict) else {}
+    explicit = []                                  # versions whose own repo keeps an empty subdir (the entry's is not empty)
+    for v in versions:
+        vr = v.get("repo")
+        explicit.append(False)
+        if not isinstance(vr, dict) or not vr:
+            v.pop("repo", None)
+        elif set(vr) <= _LOC and same_repo(dict(er, **vr), er):
+            v.pop("repo")                          # it lives where the entry says: nothing to store
+        elif vr.get("url"):
+            vr = dict(vr, **location(dict(er, **vr)))      # a whole location: old readers merge it over the entry's, so no field may be missing
+            explicit[-1] = vr["subdir"] == "" and bool(str(er.get("subdir") or "").strip("/"))
+            v["repo"] = vr
     e["versions"] = versions
     for k in ("requires", "manifest", "rating"):
         e.pop(k, None)
     e["tags"] = [str(t).lower() for t in e.get("tags") or []]
-    return _clean(e)
+    out = _clean(e)
+    for v, keep in zip(out.get("versions") or [], explicit):
+        if keep and isinstance(v.get("repo"), dict):
+            v["repo"]["subdir"] = ""               # _clean drops "", and an absent subdir would be read as the entry's
+    return out
 
 
 def write_entry(out, entry):
@@ -237,12 +287,24 @@ def add(out, project, url, branch="main", subdir="", ref="", readme=False):
             e = json.load(f)
     except FileNotFoundError:
         e = {}
-    versions = [v for v in e.get("versions", []) if v["version"] != p["version"]]
-    versions.append({"version": p["version"], "ref": ref, "requires": m["requires"]})
+    here = {"url": url, "branch": branch, "subdir": subdir}
+    old = e.get("repo") if isinstance(e.get("repo"), dict) and e["repo"].get("url") else None
+    versions = []
+    for v in e.get("versions", []):
+        if v["version"] == p["version"]:
+            continue
+        v = dict(v)
+        if old and not (isinstance(v.get("repo"), dict) and v["repo"].get("url")):
+            v["repo"] = location(dict(old, **(v.get("repo") or {})))      # it lives where the entry said until now; the entry is about to change
+        versions.append(v)
+    versions.append({"version": p["version"], "ref": ref, "requires": m["requires"], "repo": here})
     versions.sort(key=lambda v: [int(x) if x.isdigit() else 0 for x in v["version"].replace("-", ".").split(".")])
+    latest = V.latest([v["version"] for v in versions])
+    # the entry says where the LATEST version lives (adding an old version again must not move it); normalize_entry drops the
+    # per-version repo of every version that lives there
+    at = next((v for v in versions if v["version"] == latest), versions[-1])
     e.update(name=name, type=p["type"], description=p["description"], tags=p["tags"], authors=p["authors"], license=p["license"],
-             latest_version=V.latest([v["version"] for v in versions]), versions=versions,
-             repo={"url": url, "branch": branch, "subdir": subdir})
+             latest_version=latest, versions=versions, repo=dict(at.get("repo") or here))
     if readme and e["latest_version"] == p["version"]:
         for n in README_NAMES:                       # the README of the newest version, read from the checkout (no web request)
             try:
@@ -255,6 +317,29 @@ def add(out, project, url, branch="main", subdir="", ref="", readme=False):
         e["python"] = m["python"]
     write_entry(out, e)
     return rebuild(out)
+
+
+def set_version_repos(out, repos):
+    """{(name, version): {"url","branch","subdir"}} -> record where those versions really live (repair of entries written before versions
+    carried their own repo). A version that lives where the entry says ends up with none. -> number of entry files changed."""
+    by = {}
+    for (name, ver), loc in repos.items():
+        by.setdefault(naming.normalize(name), {})[str(ver)] = loc
+    changed = 0
+    for name, vs in by.items():
+        path = os.path.join(out, entry_rel(name))
+        try:
+            with open(path, encoding="utf-8") as f:
+                e = json.load(f)
+        except (OSError, ValueError):
+            continue
+        for v in e.get("versions") or []:
+            if str(v.get("version")) in vs:
+                v["repo"] = location(vs[str(v["version"])])
+        changed += bool(_write(path, dumps(normalize_entry(e))))
+    if changed:
+        rebuild(out)
+    return changed
 
 
 def main(argv=None):

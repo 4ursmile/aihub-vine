@@ -21,6 +21,7 @@ import time
 from ..cli import gitx
 from .backup import KEY_TABLES, SKIP, Backup, summary, table_cols, tables
 from .db import init_db
+from .direct import Direct, DirectError
 
 log = logging.getLogger("aihub")
 MODES = ("ask", "local", "remote", "latest", "skip")
@@ -123,7 +124,7 @@ def _safety_copy(s, repos):
         finally:
             dst.close()
     else:
-        Backup(repos, s, None).export(out)                # scrubbed archive: the best a remote database allows
+        Backup(repos, s, None).export(out, archives=False)    # scrubbed archive: the best a remote database allows
     return out
 
 
@@ -198,6 +199,65 @@ def restore(repos, d, idx):
         raise
 
 
+def restore_archives(repos, d, idx, data_dir):
+    """Never raises: a problem with the archives must not stop the server from starting (it is logged, the next start tries again)."""
+    try:
+        return _restore_archives(repos, d, idx, data_dir)
+    except Exception as e:
+        log.warning("recovery: package archives could not be restored: %s", e)
+        return 0, [str(e)]
+
+
+def _restore_archives(repos, d, idx, data_dir):
+    """Put the package archives of the backup (backups/direct, from `aihub dev publish -i`) back into <data>/direct. Only archives of a
+    package version the database lists, and only when the local copy is MISSING: a stored version never changes, so a local file that
+    differs is kept and reported, never overwritten. A backup file whose digest is wrong is not used. -> (restored, problems)"""
+    direct = Direct(data_dir)
+    listed = {(r[0], str(r[1])) for r in repos.db.conn().execute("SELECT p.name, v.version FROM versions v JOIN packages p ON p.id=v.package_id")}
+    done, problems = 0, []
+    for e in idx.get("archives") or []:
+        try:
+            name, ver, sha = str(e["package"]), str(e["version"]), str(e["sha256"])
+            if (name, ver) not in listed:
+                continue
+            have = direct.sha(name, ver)
+            if have == sha:
+                continue
+            if have:
+                problems.append("%s %s: the local archive differs from the backup; kept the local one" % (name, ver))
+                continue
+            rel = os.path.normpath(str(e["path"]))
+            src = os.path.join(d, rel)
+            if not rel.replace(os.sep, "/").startswith("backups/direct/") or not os.path.isfile(src):
+                problems.append("%s %s: not in the backup checkout" % (name, ver))
+                continue
+            tmp = direct.scratch()
+            shutil.copyfile(src, tmp)
+            if _sha_of(tmp) != sha:
+                os.remove(tmp)
+                problems.append("%s %s: the backup copy is damaged (digest mismatch)" % (name, ver))
+                continue
+            direct.put(tmp, name, ver, sha)
+            done += 1
+        except (KeyError, OSError, DirectError) as ex:
+            problems.append("archive %s: %s" % (e.get("path") if isinstance(e, dict) else "?", ex))
+    for p in problems:
+        log.warning("recovery: %s", p)
+    if done:
+        log.info("recovery: restored %d package archive(s) from the git backup", done)
+        print("recovery: restored %d package archive(s) from the git backup" % done)
+    return done, problems
+
+
+def _sha_of(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
 def run(s, mode="ask", interactive=None):
     """Reconcile before serving. Never raises for remote trouble (an unreachable git host must not stop the server).
     -> 'none' | 'local' | 'remote'."""
@@ -230,13 +290,16 @@ def run(s, mode="ask", interactive=None):
             return "none"
         local = summary(repos.db.conn())
         if _covers(local, remote) and not _empty(local):
+            restore_archives(repos, d, remote["index"], s.data_dir)       # database is fine (e.g. Postgres) but the data folder may be new
             return "none"
         pick = choose(local, remote, url, mode, interactive)
         if pick == "local":
             log.info("recovery: keeping the local database")
+            restore_archives(repos, d, remote["index"], s.data_dir)
             return "local"
         keep = _safety_copy(s, repos)
         n = restore(repos, d, remote["index"])
+        restore_archives(repos, d, remote["index"], s.data_dir)
         msg = "recovery: restored %d rows from the git backup (local copy saved in %s)" % (n, keep)
         log.info(msg)
         print(msg)

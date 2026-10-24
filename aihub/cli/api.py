@@ -12,6 +12,9 @@ from concurrent.futures import ThreadPoolExecutor
 from . import paths, tls
 
 SINGLE_MAX = 8 * 1024 * 1024      # at or below this, one request is fine under any sane proxy limit
+UP_WORKERS = 4                    # chunks sent at the same time (`publish -i`)
+DL_WORKERS = 4                    # Range chunks fetched at the same time (`install`, `download`)
+DL_CHUNK = 4 * 1024 * 1024        # bytes per download chunk; a file this small or smaller is one request
 
 
 class ApiError(Exception):
@@ -94,54 +97,158 @@ def _file_sha256(path):
     return h.hexdigest()
 
 
-def upload_package(path, visibility=None, progress=None, workers=3):
-    """Publish an archive. Small files go in one request; larger ones use the resumable chunked API so a reverse proxy's
-    body-size cap cannot reject them. Falls back to the single request when the hub predates chunked uploads."""
-    name, size = os.path.basename(path), os.path.getsize(path)
-    hdr = {"X-Aihub-Filename": name, "Content-Type": "application/octet-stream"}
-    if visibility:
-        hdr["X-Aihub-Visibility"] = visibility
+def _code(e):
+    return str(e).split(" ", 1)[0]
+
+
+def publish_direct(path, progress=None, workers=UP_WORKERS):
+    """`aihub dev publish -i`: send a package .tar.gz to the hub, which stores and indexes it (no git). -> the hub's answer.
+    Small archives go in one request. Bigger ones use the resumable chunk API: chunks are sent in parallel (any order, a chunk again is
+    harmless), an interrupted upload continues where it stopped, and the hub checks the joined file against its sha256.
+    `progress(done_bytes, total_bytes)` is called as chunks finish."""
+    size = os.path.getsize(path)
+    hdr = {"Content-Type": "application/octet-stream"}
 
     def single():
         with open(path, "rb") as f:
-            return call("POST", "/upload", raw=f.read(), headers=hdr, timeout=300)
+            data = f.read()
+        if progress:
+            progress(size, size)
+        return _retry(lambda: call("POST", "/index/direct", raw=data, headers=hdr, timeout=600))
 
-    if size <= SINGLE_MAX:
-        return single()
     try:
-        init = call("POST", "/uploads", {"filename": name, "size": size, "sha256": _file_sha256(path), "visibility": visibility})
-    except ApiError as e:
-        if str(e).split(" ", 1)[0] in ("404", "405"):
+        if size <= SINGLE_MAX:
             return single()
+        try:
+            return _chunked_publish(path, size, progress, workers)
+        except ApiError as e:
+            if _code(e) in ("404", "405"):                       # a hub without the chunk routes: one request, as before
+                return single()
+            raise
+    except ApiError as e:
+        code = _code(e)
+        if code in ("401", "403"):
+            raise ApiError("%s (publishing to the hub needs an account that may publish: aihub login)" % e)
+        if code in ("404", "405"):
+            raise ApiError("%s (this hub is too old for `publish -i`; update the hub)" % e)
+        if code == "413":
+            raise ApiError("%s (the hub or a proxy in front of it refuses archives this big; ask the admin to raise direct_max_mb / the proxy limit)" % e)
         raise
+
+
+def _chunked_publish(path, size, progress, workers):
+    base = "/index/direct/uploads"
+    init = _retry(lambda: call("POST", base, {"size": size, "sha256": _file_sha256(path)}))
     uid, cs = init["upload_id"], init["chunk_size"]
-    have = set(call("GET", "/uploads/" + uid).get("received", []))
+    have = set(call("GET", "%s/%s" % (base, uid)).get("received", init.get("received", [])))
     todo = [n for n in range(init["chunks"]) if n not in have]
-    done = [len(have) * cs]
-    lock = threading.Lock()
+    done, lock = [min(size, len(have) * cs)], threading.Lock()
+    if progress:
+        progress(done[0], size)
 
     def send(n):
         with open(path, "rb") as f:
             f.seek(n * cs)
             data = f.read(cs)
-        _retry(lambda: call("PUT", "/uploads/%s/chunks/%d" % (uid, n), raw=data, timeout=120,
+        _retry(lambda: call("PUT", "%s/%s/chunks/%d" % (base, uid, n), raw=data, timeout=180,
                             headers={"X-Chunk-Sha256": hashlib.sha256(data).hexdigest(), "Content-Type": "application/octet-stream"}))
         with lock:
-            done[0] += len(data)
+            done[0] = min(size, done[0] + len(data))
             if progress:
-                progress(min(done[0], size), size)
+                progress(done[0], size)
 
     try:
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(todo) or 1))) as ex:
             list(ex.map(send, todo))
-        return _retry(lambda: call("POST", "/uploads/%s/complete" % uid, {}, timeout=600))
+        return _retry(lambda: call("POST", "%s/%s/complete" % (base, uid), {}, timeout=900))
     except ApiError as e:
-        if str(e).split(" ", 1)[0] in ("404", "409", "403", "413"):      # session gone or publish refused: don't leave chunks behind
+        if _code(e) in ("403", "409", "413", "422"):             # publish refused: do not leave the chunks behind
             try:
-                call("DELETE", "/uploads/" + uid)
+                call("DELETE", "%s/%s" % (base, uid))
             except ApiError:
                 pass
         raise
+
+
+def download_ranges(path, dest, sha256="", progress=None, workers=DL_WORKERS, chunk=DL_CHUNK):
+    """GET a hub API path into the file `dest` in parallel Range chunks. An interrupted download continues (`dest.part` + `dest.part.json`
+    remember which chunks are done), a chunk that fails is retried, and every chunk must come from the same version of the file (X-Aihub-Rev).
+    Small files, and hubs that ignore Range, are a plain single download. The sha256 (given, else the hub's X-Aihub-Sha256) is checked.
+    -> the response headers of the first request (X-Aihub-Rev, X-Aihub-Cache, ...). `progress(done_bytes, total_bytes)`."""
+    part, meta_path = dest + ".part", dest + ".part.json"
+    with _req("GET", path, headers={"Range": "bytes=0-%d" % (chunk - 1)}, timeout=300) as r:
+        head = r.headers                          # case-insensitive (a server may send x-aihub-rev); stays readable after the response closes
+        first = r.read()
+        status, crange = r.status, r.headers.get("Content-Range") or ""
+    rev = head.get("X-Aihub-Rev") or head.get("ETag") or ""
+    total = len(first)
+    if status == 206 and "/" in crange and crange.rsplit("/", 1)[1].isdigit():
+        total = int(crange.rsplit("/", 1)[1])
+    want = sha256 or head.get("X-Aihub-Sha256") or ""
+    meta = {"rev": rev, "total": total, "chunk": chunk, "done": []}
+    if status == 206 and total > len(first):
+        try:
+            with open(meta_path) as f:
+                old = json.load(f)
+            if old.get("rev") == rev and old.get("total") == total and old.get("chunk") == chunk and os.path.getsize(part) == total:
+                meta["done"] = [int(n) for n in old.get("done", [])]
+        except (OSError, ValueError, TypeError):
+            pass
+        if not meta["done"]:
+            with open(part, "wb") as f:
+                f.truncate(total)
+        n_chunks = -(-total // chunk)
+        lock, state = threading.Lock(), {"done": set(meta["done"]), "bytes": 0}
+
+        def mark(i, data):
+            with lock:
+                with open(part, "r+b") as f:
+                    f.seek(i * chunk)
+                    f.write(data)
+                state["done"].add(i)
+                state["bytes"] += len(data)
+                with open(meta_path, "w") as f:
+                    json.dump(dict(meta, done=sorted(state["done"])), f)
+                if progress:
+                    progress(min(total, sum(min(chunk, total - j * chunk) for j in state["done"])), total)
+
+        if 0 not in state["done"]:
+            mark(0, first)
+        elif progress:
+            progress(min(total, sum(min(chunk, total - j * chunk) for j in state["done"])), total)
+
+        def fetch(i):
+            a, b = i * chunk, min(total, (i + 1) * chunk) - 1
+            def go():
+                hdr = {"Range": "bytes=%d-%d" % (a, b)}
+                if head.get("ETag"):
+                    hdr["If-Range"] = head["ETag"]                # the file changed meanwhile: the hub answers 200 (whole file), which we refuse below
+                with _req("GET", path, headers=hdr, timeout=300) as rr:
+                    if rr.status != 206 or (rr.headers.get("X-Aihub-Rev") or rev) != (head.get("X-Aihub-Rev") or rev):
+                        raise ApiError("409 the package changed on the hub while it was downloading; run the command again")
+                    data = rr.read()
+                if len(data) != b - a + 1:
+                    raise ApiError("502 short chunk %d (%d of %d bytes)" % (i, len(data), b - a + 1))
+                return data
+            mark(i, _retry(go))
+
+        todo = [i for i in range(n_chunks) if i not in state["done"]]
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(todo) or 1))) as ex:
+            list(ex.map(fetch, todo))
+        try:
+            os.remove(meta_path)
+        except OSError:
+            pass
+    else:
+        with open(part, "wb") as f:
+            f.write(first)
+        if progress:
+            progress(total, total)
+    if want and _file_sha256(part) != want:
+        os.remove(part)
+        raise ApiError("sha256 mismatch for download (expected %s)" % want[:12])
+    os.replace(part, dest)
+    return head
 
 
 def download(url, dest, sha256, progress=None):

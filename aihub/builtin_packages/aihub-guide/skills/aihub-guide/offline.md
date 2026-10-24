@@ -45,7 +45,7 @@ Keys and environment variables:
 | `telemetry_url`, `telemetry_inbox_branch` | `AIHUB_TELEMETRY_URL`, `AIHUB_TELEMETRY_INBOX_BRANCH` | Git repo and branch CLIs push usage files to (default: bundled `defaults.json`, then the index repo; branch `telemetry-inbox`) |
 | `telemetry_interval` | `AIHUB_TELEMETRY_INTERVAL` | Seconds per telemetry window (default 15 without a hub, 60 from the hub; allowed 5 to 3600) |
 | `telemetry_via`, `index_via` | `AIHUB_TELEMETRY_VIA`, `AIHUB_INDEX_VIA` | `git` = skip the hub and use git only (default: hub first, git as the fallback) |
-| `auto_update` | `AIHUB_NO_UPDATE=1` | Set `false` to turn off the daily self-update check |
+| `auto_update`, `auto_update_hours` | `AIHUB_AUTO_UPDATE`, `AIHUB_AUTO_UPDATE_HOURS`, `AIHUB_NO_UPDATE=1` | Self-update: `on` (default, installs a newer hub version), `notify` (only says one is available), `off`; check every N hours (default 24, 1..720; a failed check retries within 1 h). Non-interactive runs update silently (stderr only); `aihub upgrade --rollback` makes auto-update skip the version you left |
 
 - `AIHUB_HOME` moves the CLI state directory from `~/.aihub` to another path.
 - Git logins are kept by `aihub credential`, a git credential helper that `aihub setup` registers for the index and telemetry hosts only (macOS Keychain, Windows DPAPI, Linux Secret Service, else a 0600 file). One entry per host; if already configured, setup changes nothing. Check: `git config --global --get-all credential.https://<host>.helper`.
@@ -74,6 +74,8 @@ aihub search [TERM] --plain|--name-only  # bare lines: "name version" or just th
 aihub info <name>                 # metadata and versions (JSON when output is not a terminal)
 aihub install <name>              # resolve from the index, clone at the version ref, install
 aihub install <name> --yes        # skip confirmations
+aihub install <name> --from archive|repo   # archive = from the hub (like -i), repo = from git; a package published with `dev publish -i` is an archive (no repo)
+aihub download <name>[@ver] [-o DIR] [--archive|--folder]   # save NAME-VER.tar.gz (archive packages, parallel resumable chunks, sha256 checked) or the unpacked folder (git packages)
 aihub install <name> -i           # --indirect: get it through the hub instead of git (needs install_indirect; no git fallback, fails with a message). Git LFS files come down too (needs git-lfs where git runs); the CLI says if it was cached
 aihub install a b "c>=1.0"        # several packages at once; one failing never stops the rest
 aihub install -r requirements.txt # pip-style file: one name[<spec>] per line, # comments, nested -r
@@ -114,6 +116,7 @@ aihub knowledge share NOTE --user U|--group G [--write] | unshare | shares NOTE 
 aihub policy                          # guard that blocks agents from destructive calls (db/s3 delete, overwrite): on|off, enable|disable ID, add ID --pattern RE, test 'CMD', judge on|off (AI second opinion via claude -p; failure = allow), update
 aihub vault                           # menu: add/edit/remove git remotes and logins (aihub vault add URL --user NAME; token via prompt or --token-stdin)
 aihub vault test [URL|HOST]           # does the stored login reach the host? (the hub server uses the same lookup; run as its account)
+# older saved logins (keyed user@host) are found and moved automatically; a git failure ends with one '[aihub hint] ...' line naming the fix (aihub vault add / test, AIHUB_GIT_PROXY, AIHUB_CA_BUNDLE, aihub dev publish)
 aihub password                        # change your hub password (prompts; other devices are signed out, this one stays)
 aihub admin users list [Q] | role ROLE USER... [-f FILE] | status active|pending|disabled USER... | reset-password USER... | delete USER... [--yes]   # hub admin; -f FILE = names (one per line or first CSV column, - = stdin); --dry-run, --json
 aihub admin users create FILE [--role R] [--out new-accounts.csv]   # bulk import; passwords written once to --out (0600)
@@ -136,6 +139,7 @@ aihub dev init -w .                            # interactive wizard (terminal on
 aihub dev list . / aihub dev tree .            # packages; tree adds repository and [git] status
 aihub dev validate . / aihub dev build PATH    # a folder of packages is handled package by package
 aihub dev publish . [--only NAME] [--bump patch]
+aihub dev publish -i              # --indirect: upload the package to the hub's own data folder instead of git (no git/remote/[git] needed; needs aihub login + publish permission). In a workspace/monorepo each selected package is sent on its own (`--only NAME`); re-running is safe (same files = already on the hub). Installs then download it from the hub automatically. Versions immutable; POST /api/v1/index/direct (over 8 MB: resumable parallel chunks via /index/direct/uploads)
 aihub dev doctor [PATH] [--check] [--remote <url>]   # set [git] url/branch/subdir from the real repository
 aihub dev tree-solve [PATH] [--nested merge|keep]    # resolve a package folder with its own .git
 aihub dev index / aihub dev stats PATH
@@ -461,7 +465,7 @@ The CLI reads the index from git and clones each package repo at the entry's ref
 | --- | --- |
 | `aihub: command not found` after install | Open a new terminal, or use the full path (section 2) |
 | `Same version pushed twice` | Versions are immutable; bump with `aihub dev publish --bump patch` |
-| `git is not installed` | Install git; `dev publish` needs it |
+| `git is not installed` | Install git, or publish without it: `aihub dev publish -i` (uploads to the hub) |
 | `git-lfs is not installed` (file over 50 MB) | Install git-lfs or shrink the file |
 | `cannot find '<ref>' in <repo>` or `cannot fetch package index` | Index or repo unreachable, or ref missing. Check the URL and git credentials |
 | `git remote origin is X but aihub.toml says Y` | Fix `[git] url` or the remote, then publish again |

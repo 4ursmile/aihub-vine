@@ -3,7 +3,7 @@
 Secrets live in the git credential helper's store (credhelper backends); `~/.aihub/vault.json` only lists non-secret facts
 (host -> scheme, username) so `list` works on every backend. Interactive when URL/user/token are not given on a terminal."""
 import getpass
-import json
+import os
 import re
 import sys
 import urllib.parse
@@ -19,26 +19,22 @@ def _load():
 
 
 def _norm(url):
-    """'git.example.com' or a full URL -> (scheme, host). Raises ValueError when there is no host."""
-    u = urllib.parse.urlsplit(url if "://" in url else "https://" + url)
-    if u.scheme not in ("http", "https") or not u.hostname:
-        raise ValueError("not an http(s) git URL: %s" % urllib.parse.urlsplit(url).hostname)          # never echo a URL that may carry a token
-    host = u.hostname.lower()
-    host = "[%s]" % host if ":" in host else host
-    return u.scheme, host + (":%d" % u.port if u.port else "")           # no userinfo, lowercase: the key git's helper protocol uses
+    """'git.example.com' or a full URL -> (scheme, host). Raises ValueError when there is no host. The host is gitx.host_key (lowercase, no
+    userinfo, IPv6 bracketed, port as written): the key git's helper protocol uses and the one credhelper and the server look up."""
+    from . import gitx
+    url = (url or "").strip()
+    h = gitx._host_of(url if "://" in url else "https://" + url)
+    if not h:
+        shown = urllib.parse.urlsplit(url).hostname or ""                       # never echo a URL that may carry a token
+        raise ValueError("not an http(s) git URL: %s\n%sgive the remote as https://HOST (for example: aihub vault add https://git.example.com --user NAME)"
+                         % (shown, gitx.HINT))
+    return h
 
 
 def _secret(host):
-    """The stored {username,password} for host from the first backend that has one, else None."""
-    for b in credhelper.backends():
-        try:
-            raw = b.get(host)
-            c = json.loads(raw) if raw else None
-        except Exception:
-            continue
-        if c and c.get("password"):
-            return c
-    return None
+    """The stored {username,password} for host from the first backend that has one (older keys such as user@host are found and moved), else None."""
+    c, _ = credhelper._read(host, [(_load().get(host) or {}).get("username", "")])
+    return c
 
 
 def _pick(host):
@@ -67,8 +63,10 @@ def _token(a, prompt, required=True):
 
 
 def _save(scheme, host, user, token):
-    if not remote_config.store_git("%s://%s" % (scheme, host), user, token):
-        raise ValueError("the credential helper refused to store the login for %s" % host)
+    if not remote_config.store_git("%s://%s" % (scheme, host), user, token, quiet=True):
+        from . import gitx
+        raise ValueError("could not store the login for %s in %s, or could not read it back; nothing was saved\n%scheck that ~/.aihub is writable "
+                         "and the keychain is unlocked, then retry; verify with: aihub vault test %s" % (host, credhelper.describe(), gitx.HINT, host))
     d = _load()
     d[host] = {"scheme": scheme, "username": user}
     paths.save(FILE, d, private=True)
@@ -128,8 +126,8 @@ def do_remove(a):
     if ui.INTERACTIVE and not a.yes and not ui.confirm("Remove %s and its stored login?" % host, False):
         return 0
     d = _load()
-    scheme = d.pop(host, {}).get("scheme", "https")
-    credhelper.run("erase", stdin="protocol=%s\nhost=%s\n\n" % (scheme, host))
+    d.pop(host, None)
+    credhelper.forget(host)                   # git's own reject never erases a vault host; only this does
     paths.save(FILE, d, private=True)
     ui.good("removed %s" % host)
     return 0
@@ -170,6 +168,9 @@ def do_test(a):
         got = credhelper.lookup(host)
         if not got:
             ui.bad("%-28s no stored login (aihub vault add %s --user NAME)" % (host, url))
+            if host in _load():
+                ui.info("  listed in vault.json but %s cannot read it in this process (user %s, AIHUB_HOME %s): run this as the account that "
+                        "saved it, or save it again as the account that runs the hub" % (credhelper.describe(), os.environ.get("USER") or os.environ.get("USERNAME") or "?", paths.HOME()))
             bad += 1
             continue
         saved = gitx.LOGIN
@@ -182,6 +183,7 @@ def do_test(a):
             ui.good("%-28s %s: reachable" % (host, got[0]))
         else:
             ui.bad("%-28s %s: stored, but git could not use it (wrong token, no access to %s, or host unreachable)" % (host, got[0], url))
+            ui.info("  " + (gitx.hint("auth", url) or "").replace(gitx.HINT, "hint: "))
             bad += 1
     return 1 if bad else 0
 

@@ -34,8 +34,8 @@ def _front_matter(text):
 
 class BuiltinSkillTest(unittest.TestCase):
     def test_bundled_versions(self):
-        self.assertEqual(M.parse(_read(os.path.join(GUIDE, "aihub.toml")))["package"]["version"], "2.4.1")
-        self.assertEqual(M.parse(_read(os.path.join(PACKAGE, "aihub.toml")))["package"]["version"], "2.2.0")
+        self.assertEqual(M.parse(_read(os.path.join(GUIDE, "aihub.toml")))["package"]["version"], "2.4.4")
+        self.assertEqual(M.parse(_read(os.path.join(PACKAGE, "aihub.toml")))["package"]["version"], "2.2.1")
 
     def test_guide_mentions_and_ships_offline_reference(self):
         text = _read(GUIDE_SKILL)

@@ -42,6 +42,33 @@ const shown = (p) => (p && (p.display_name || p.username)) || "";
 const Avatar = ({ p, size = 32 }) => p && p.avatar_url ? html`<img decoding="async" class="av" src=${p.avatar_url} alt="" width=${size} height=${size} style=${`width:${size}px;height:${size}px`} loading="lazy" />`
   : html`<span class="av" aria-hidden="true" style=${`width:${size}px;height:${size}px;font-size:${Math.round(size * .4)}px;background:hsl(${hue(p && p.username)} 55% 45%)`}>${initials(shown(p))}</span>`;
 const can = (perm) => !!(store.me ? store.me.permissions.includes(perm) : store.brand && (store.brand.anonymous_perms || []).includes(perm));
+// Download through the API in parallel Range chunks (same idea as `aihub download`): the first request tells the size, the rest run 4 at a time.
+async function fetchChunks(url, headers, onProgress, chunk = 4 << 20, workers = 4) {
+  const bad = async (r) => { let m = r.statusText || "Download failed"; try { m = (await r.json()).detail || m; } catch (e) {} return new Error(m); };
+  const first = await fetch(url, { headers: { ...headers, Range: `bytes=0-${chunk - 1}` } });
+  if (!first.ok) throw await bad(first);
+  const part0 = await first.blob(), cr = first.headers.get("Content-Range") || "", rev = first.headers.get("X-Aihub-Rev");
+  const total = first.status === 206 && /\/(\d+)$/.test(cr) ? +cr.split("/")[1] : part0.size;
+  if (first.status !== 206 || total <= part0.size) { onProgress && onProgress(1); return part0; }
+  const n = Math.ceil(total / chunk), parts = new Array(n); parts[0] = part0; let done = part0.size, next = 1;
+  onProgress && onProgress(done / total);
+  const lane = async () => {
+    while (next < n) {
+      const i = next++, a = i * chunk, b = Math.min(total, a + chunk) - 1;
+      for (let t = 0; ; t++) {
+        try {
+          const r = await fetch(url, { headers: { ...headers, Range: `bytes=${a}-${b}` } });
+          if (r.status !== 206) throw await bad(r);
+          if (rev && r.headers.get("X-Aihub-Rev") !== rev) throw new Error("The package changed while downloading; try again");
+          const bl = await r.blob(); if (bl.size !== b - a + 1) throw new Error("Short chunk");
+          parts[i] = bl; done += bl.size; onProgress && onProgress(done / total); break;
+        } catch (e) { if (t >= 3) throw e; await new Promise((s) => setTimeout(s, 400 * 2 ** t)); }
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(workers, n - 1) }, lane));
+  return new Blob(parts, { type: "application/gzip" });
+}
 function saveBlob(blob, name) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }
 const nav = (p) => (location.hash = "#" + p);
 const fmt = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n || 0));
@@ -218,8 +245,16 @@ const Req = ({ req, dl }) => {
   return dl ? html`<dl class="pk-reqs">${body}</dl>` : body;
 };
 function Package({ name }) {
-  const { me } = useStore(); const [tab, setTab] = useState("Overview"); const [tick, setTick] = useState(0);
+  const { me } = useStore(); const [tab, setTab] = useState("Overview"); const [tick, setTick] = useState(0); const [dlp, setDlp] = useState({});
   const p = useLoad(() => api("/packages/" + name), [name, tick]);
+  const download = async (v) => {
+    setDlp((x) => ({ ...x, [v]: 0 }));
+    try {
+      const t = tok(), blob = await fetchChunks(U(`/api/v1/index/packages/${encodeURIComponent(name)}/transfer/${encodeURIComponent(v)}`), t ? { Authorization: "Bearer " + t } : {}, (f) => setDlp((x) => ({ ...x, [v]: f })));
+      saveBlob(blob, `${name}-${v}.tar.gz`);
+    } catch (e) { toast(e.message, 1); }
+    setDlp((x) => { const y = { ...x }; delete y[v]; return y; });
+  };
   const mt = useLoad(() => api("/meta"), []); const meta = mt.d || {};
   if (p.loading) return html`<div class="skel" style="min-height:300px"></div>`;
   if (p.e) return html`<${Err} e=${p.e} />`;
@@ -244,8 +279,8 @@ function Package({ name }) {
           <div class="li"><div class="t"><b>Required commands</b><span>${(req.commands || []).length ? (req.commands || []).map((c) => (c.name || c) + (c.hint ? ` - ${c.hint}` : "")).join(" · ") : "None"}</span></div></div>
           <div class="li"><div class="t"><b>Depends on</b><span>${(req.packages || []).length ? (req.packages || []).map((x) => html`<a href=${"#/package/" + x.split(/[<>=!~]/)[0]} style="margin-right:10px">${x}</a>`) : "No other packages"}</span></div></div>
           <div class="li"><div class="t"><b>Supported systems</b><span>${(req.os || []).length ? req.os.join(", ") : "All"}</span></div></div></div>`}
-        ${tab === "Versions" && html`<div class="list tscroll"><table><thead><tr><th>Version</th><th>Released</th><th>Size</th><th>Downloads</th><th>SHA-256</th>${meta.allow_source_download ? html`<th></th>` : null}</tr></thead><tbody>
-          ${d.versions.map((v) => html`<tr key=${v.version}><td>${v.version} ${v.yanked ? html`<span class="badge red">yanked</span>` : ""}</td><td>${ago(v.created)}</td><td>${(v.size / 1024).toFixed(1)} KB</td><td>${fmt(v.downloads)}</td><td class="mono">${v.sha256.slice(0, 12)}</td>${meta.allow_source_download ? html`<td>${v.source ? html`<a class="btn sec sm" href=${v.source} target="_blank" rel="noopener noreferrer">Source ↗</a>` : null}</td>` : null}</tr>`)}</tbody></table></div>`}
+        ${tab === "Versions" && html`<div class="list tscroll"><table><thead><tr><th>Version</th><th>Released</th><th>Size</th><th>Downloads</th><th>SHA-256</th>${meta.allow_source_download || d.versions.some((v) => v.archive) ? html`<th></th>` : null}</tr></thead><tbody>
+          ${d.versions.map((v) => html`<tr key=${v.version}><td>${v.version} ${v.yanked ? html`<span class="badge red">yanked</span>` : ""}</td><td>${ago(v.created)}</td><td>${(v.size / 1024).toFixed(1)} KB</td><td>${fmt(v.downloads)}</td><td class="mono">${(v.sha256 || "").slice(0, 12)}</td>${v.archive ? html`<td><button class="btn sec sm" disabled=${v.version in dlp} onClick=${() => download(v.version)} title="Download the package archive (.tar.gz) from this hub">${v.version in dlp ? "Downloading " + Math.round(dlp[v.version] * 100) + "%" : "Download"}</button></td>` : meta.allow_source_download ? html`<td>${v.source ? html`<a class="btn sec sm" href=${v.source} target="_blank" rel="noopener noreferrer">Source ↗</a>` : null}</td>` : d.versions.some((x) => x.archive) ? html`<td></td>` : null}</tr>`)}</tbody></table></div>`}
         ${tab === "Usage" && html`<${Usage} name=${name} />`}
         ${tab === "Sharing" && html`<${Sharing} name=${name} pkg=${d} onChange=${() => setTick(tick + 1)} />`}
         ${tab === "Reviews" && html`<${Reviews} name=${name} me=${me} onDone=${() => setTick(tick + 1)} />`}

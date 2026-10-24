@@ -34,17 +34,23 @@ def ensure_helper(urls=()):
         return [], []
 
 
-def store_git(host_url, username, token):
-    """Save a credential the USER typed to their own git credential helper. Never sent by the hub, never kept in our config.
-    Persistent: a helper is ensured first. No duplicate: any older entry for the same host and user is rejected before the new one
-    is approved, so a changed token replaces the stale one instead of living beside it."""
+def store_git(host_url, username, token, quiet=False):
+    """Save a credential the USER typed to the credential store (credhelper), IN THIS PROCESS and then read it back: a git helper
+    run by `git credential approve` fails silently (shim missing, PATH, quoting) while git still exits 0. The helper is registered
+    too, so git finds the login. One entry per host (key = `host[:port]`, no userinfo), so a new token replaces the old one.
+    Returns True only when the stored login reads back identical; otherwise False (and says why unless quiet)."""
+    from . import credhelper
     if not (username and token and host_url):
         return False
-    u = urllib.parse.urlsplit(host_url)
+    host = credhelper.host_of(host_url)
     ensure_helper([host_url])
-    base = "protocol=%s\nhost=%s\n" % (u.scheme or "https", u.netloc)
-    _git("credential", "reject", input=base + "username=%s\n\n" % username)
-    return _git("credential", "approve", input=base + "username=%s\npassword=%s\n\n" % (username, token)).returncode == 0
+    ok = bool(host) and credhelper.save(host, username, token)
+    if ok:
+        ok = credhelper.lookup(host) == (username, token)
+    if not ok and not quiet:
+        ui.bad("could not store the git login for %s in %s (nothing was saved)" % (host or gitx.redact_url(host_url), credhelper.describe()))
+        ui.info(gitx.HINT.strip() + " check that ~/.aihub is writable and the keychain is unlocked, then retry; verify with: aihub vault test %s" % (host or "HOST"))
+    return ok
 
 
 def apply(cfg, index_host=None):
@@ -96,7 +102,7 @@ _AUTH_WORDS = ("authentication", "could not read", "denied", "403", "401", "term
 
 
 def is_auth_error(err):
-    return any(w in str(err).lower() for w in _AUTH_WORDS)
+    return any(w in gitx.strip_hints(str(err)).lower() for w in _AUTH_WORDS)       # our own hint lines never count
 
 
 def with_access(url, fn):
@@ -121,15 +127,33 @@ def ensure_git_access(url):
     if r.returncode in (0, 2):
         return True
     if not is_auth_error(r.stderr):
-        raise gitx.GitError(gitx.redact_url(r.stderr.strip()))
+        raise gitx.GitError(gitx.explain(gitx.redact_url(r.stderr.strip()) or "git ls-remote failed (exit %d)" % r.returncode, url))
     if not ui.INTERACTIVE or not url.startswith("http"):
-        raise gitx.GitError("git credentials are needed for %s; sign in with your git host (for example `git credential approve`, or run this in a terminal and enter them when asked)" % gitx.redact_url(url))
+        raise gitx.GitError(gitx.explain("git credentials are needed for %s" % gitx.redact_url(url), url, "auth"))
     import getpass
-    ui.note("Git needs credentials for %s" % urllib.parse.urlsplit(url).netloc)
-    user = input("username: ").strip()
-    tok = getpass.getpass("token/password: ")
-    store_git(url, user, tok)
-    return subprocess.run(["git", "ls-remote", "--exit-code", "-h", url, "HEAD"], env=env, capture_output=True, **gitx.popen_kw()).returncode in (0, 2)
+    from . import credhelper
+    host = credhelper.host_of(url)
+    ui.note("Git needs credentials for %s" % host)
+    ui.info("If the account uses 2FA, the password is a personal access token, not the account password.")
+    known = paths.load("vault.json", {})
+    last = (known.get(host) or {}).get("username", "") if isinstance(known, dict) else ""
+    for attempt in (0, 1):
+        user = input("username%s: " % (" [%s]" % last if last else "")).strip() or last
+        if not user:
+            user = input("username (required): ").strip()
+        if not user:
+            raise gitx.GitError(gitx.explain("a username is needed for %s (with 2FA: your username and a personal access token)" % host, url, "auth"))
+        tok = getpass.getpass("token/password: ")
+        store_git(url, user, tok)
+        r = subprocess.run(["git", "ls-remote", "--exit-code", "-h", url, "HEAD"], env=env, capture_output=True, text=True, **gitx.popen_kw())
+        if r.returncode in (0, 2):
+            return True
+        if attempt == 0 and is_auth_error(r.stderr):
+            ui.bad("%s rejected that login. With 2FA enabled the host wants a personal access token instead of the account password; try again." % host)
+            last = user
+            continue
+        return False
+    return False
 
 
 def cmd_setup(a):

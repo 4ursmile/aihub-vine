@@ -181,6 +181,47 @@ class Update(Env):
         self.assertIn("LOCAL TAIL", self.read("app.txt"))
         self.assertTrue(any(f.startswith("local-") for f in os.listdir(self.u.dir)))      # and a patch copy is kept
 
+    def test_new_uncommitted_module_is_carried_into_the_candidate(self):
+        """A file of an uncommitted change that is new (untracked) is code the candidate needs: `git diff`/`stash` leave it out."""
+        put(self.hub, "aihub/newmod.py", "X = 1\n")
+        put(self.hub, "notes.log", "not code\n")                           # untracked, outside the code folders: never swept into history
+        put(self.dev, "aihub/core/release.py", version("1.2.0"))
+        self.push()
+        r = self.u.run()
+        self.assertEqual(r["state"], "probation", r["log"])
+        self.assertEqual(self.read("aihub/newmod.py"), "X = 1\n")
+        tracked = git(self.hub, "ls-files").split()
+        self.assertIn("aihub/newmod.py", tracked)
+        self.assertNotIn("notes.log", tracked)
+        self.assertTrue(os.path.isfile(os.path.join(self.hub, "notes.log")))
+        self.assertTrue(any(f.startswith("local-") for f in os.listdir(self.u.dir)))
+
+    def _clash(self, policy):
+        put(self.hub, "aihub/clash.py", "LOCAL\n")                         # untracked here, and the remote adds the same path with other content
+        put(self.dev, "aihub/clash.py", "REMOTE\n")
+        put(self.dev, "aihub/core/release.py", version("1.2.0"))
+        self.push()
+        self.settings(update_conflict=policy)
+        return self.u.run()
+
+    def test_new_module_that_the_remote_also_added_remote_policy(self):
+        r = self._clash("remote")
+        self.assertEqual(r["state"], "probation", r["log"])
+        self.assertEqual(self.read("aihub/clash.py"), "REMOTE\n")
+
+    def test_new_module_that_the_remote_also_added_local_policy(self):
+        r = self._clash("local")
+        self.assertEqual(r["state"], "probation", r["log"])
+        self.assertEqual(self.read("aihub/clash.py"), "LOCAL\n")
+
+    def test_a_failed_update_leaves_untracked_files_and_the_index_alone(self):
+        put(self.hub, "aihub/newmod.py", "X = 1\n")
+        put(self.dev, "aihub/core/release.py", "VERSION = (\n")
+        self.push("broken")
+        self.assertEqual(self.u.run()["state"], "failed")
+        self.assertEqual(git(self.hub, "status", "--porcelain", "--", "aihub/newmod.py"), "?? aihub/newmod.py")    # still untracked, not staged
+        self.assertEqual(self.head(), self.c1)
+
     def test_broken_candidate_is_rejected_and_skipped(self):
         put(self.dev, "aihub/core/release.py", "VERSION = (\n")
         tip = self.push("broken")

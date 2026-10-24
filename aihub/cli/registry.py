@@ -266,12 +266,25 @@ def _repo_of(p, ver):
     return repo
 
 
+def _alts_of(p, ver):
+    """Other places this package is listed in (the entry's repo, then other versions' own repo): where an old commit may be if the
+    package moved after `ver` was published. Distinct, without the one `ver` uses."""
+    from ..core import pkgindex
+    here = _repo_of(p, ver)
+    out, seen = [], {pkgindex.repo_key(here)}
+    for loc in [p.get("repo") or {}] + [dict(p.get("repo") or {}, **v["repo"]) for v in reversed(p.get("versions") or []) if isinstance(v.get("repo"), dict)]:
+        if loc.get("url") and not on_hub(loc) and pkgindex.repo_key(loc) not in seen:
+            seen.add(pkgindex.repo_key(loc))
+            out.append(pkgindex.location(loc))
+    return out
+
+
 def resolve(name, spec=""):
     p = get(name)
     ver = pick(p, spec)
     return {"name": naming.normalize(p["name"]), "version": ver, "manifest": _manifest_of(p, ver),
             "requires": requires_of(p, ver), "type": p.get("type"),
-            "repo": _repo_of(p, ver),
+            "repo": _repo_of(p, ver), "alts": _alts_of(p, ver),
             "sha256": ""}
 
 
@@ -334,7 +347,24 @@ def plan(roots, installed=None):
     return out
 
 
-INDIRECT = False        # `aihub install -i`: the hub fetches from git and sends the package
+INDIRECT = False        # `aihub install -i` / `--from archive`: the hub fetches from git and sends the package
+REPO_ONLY = False       # `aihub install --from repo`: git only; a package that has no repository (an archive on the hub) is an error
+
+
+def on_hub(repo):
+    """The package lives on the hub itself (`aihub dev publish -i`): there is no git repository, the hub sends the archive."""
+    return str((repo or {}).get("url") or "").startswith("hub://")
+
+
+def transfer_path(r):
+    return "/index/packages/%s/transfer/%s" % (r["name"], r["version"])
+
+
+def fetch_archive(r, dest, progress=None):
+    """Save the package's .tar.gz (as the hub holds it, or builds it from git) to the file `dest`, in parallel resumable Range chunks,
+    sha256 checked when the hub knows it. -> {"rev", "how", "sha256"} (sha256 of the saved file)."""
+    head = api.download_ranges(transfer_path(r), dest, progress=progress)
+    return {"rev": head.get("X-Aihub-Rev") or "", "how": head.get("X-Aihub-Cache") or "", "sha256": api._file_sha256(dest)}
 
 
 def _from_hub(r, dest):
@@ -344,16 +374,14 @@ def _from_hub(r, dest):
     tmp = tempfile.mkdtemp()
     try:
         part = os.path.join(tmp, "pkg.tar.gz")
-        with api._req("GET", "/index/packages/%s/transfer/%s" % (r["name"], r["version"]), timeout=300) as resp, open(part, "wb") as f:
-            rev = resp.headers.get("X-Aihub-Rev") or ""
-            how = resp.headers.get("X-Aihub-Cache") or ""
-            shutil.copyfileobj(resp, f)
+        got = fetch_archive(r, part)
+        rev, how = got["rev"], got["how"]
         src = archive.safe_extract(part, os.path.join(tmp, "x"))
         if not os.path.isfile(os.path.join(src, "aihub.toml")):
             raise api.ApiError("%s: the hub sent no aihub.toml" % r["name"])
         shutil.rmtree(dest, ignore_errors=True)
         shutil.copytree(src, dest)
-        ui.info("%s: from the hub (%s)" % (r["name"], {"tar-cache": "hub cache", "repo-cache": "hub cache of the same repo"}.get(how, "fetched by the hub from git")))
+        ui.info("%s: from the hub (%s)" % (r["name"], {"tar-cache": "hub cache", "repo-cache": "hub cache of the same repo", "direct": "published to the hub, no git"}.get(how, "fetched by the hub from git")))
         return rev
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -361,32 +389,63 @@ def _from_hub(r, dest):
 
 def checkout(r, dest):
     """Materialise a resolved package into dest (its subdir of the repo at the requested ref/branch)."""
-    if INDIRECT:
+    if REPO_ONLY and on_hub(r.get("repo")):
+        raise api.ApiError("%s %s is an archive package: it was published to the hub and has no git repository. Install it without --from repo" % (r["name"], r["version"]))
+    if INDIRECT or on_hub(r.get("repo")):
         try:
             return _from_hub(r, dest)
         except (OSError, ValueError, tarfile.TarError) as e:       # the hub is the way now; git is legacy and `-i` never falls back to it
-            raise api.ApiError("hub transfer failed for %s (%s); retry, or install without -i to use git" % (r["name"], e))
+            raise api.ApiError("hub transfer failed for %s (%s); retry%s" % (r["name"], e, "" if on_hub(r.get("repo")) else ", or install without -i to use git"))
     return _checkout_git(r, dest)
 
 
-def _checkout_git(r, dest, src=None):
-    """Git route of checkout. `src` = repo root already fetched by the caller (prefetch of a monorepo): no network at all."""
-    repo = r["repo"]
+def _get_repo(r, repo, src):
+    """Make the checkout of `repo` available -> its root folder. `src` = root already fetched by the caller (no network at all)."""
     url, branch, ref, sub = repo["url"], repo.get("branch") or "main", repo.get("ref"), repo.get("subdir") or ""
-    try:
-        if src is None:
-            src = gitx.current(url, branch, ref)        # same repo already fetched (e.g. a sibling in a monorepo) and unchanged: no download
-            if src:
-                gitx.lfs_pull(src, sub)
-                ui.info("%s: %s is up to date locally, no download" % (r["name"], gitx.redact_url(url)))
-            else:
-                src = remote_config.with_access(url, lambda: gitx.fetch(url, branch, ref, lfs=True, subdir=sub))
-                ui.info("%s: fetched from %s" % (r["name"], gitx.redact_url(url)))
-        else:
+    if src is None:
+        src = gitx.current(url, branch, ref)        # same repo already fetched (e.g. a sibling in a monorepo) and unchanged: no download
+        if src:
             gitx.lfs_pull(src, sub)
-            ui.info("%s: from the %s clone shared with its siblings" % (r["name"], gitx.redact_url(url)))
+            ui.info("%s: %s is up to date locally, no download" % (r["name"], gitx.redact_url(url)))
+        else:
+            src = remote_config.with_access(url, lambda: gitx.fetch(url, branch, ref, lfs=True, subdir=sub))
+            ui.info("%s: fetched from %s" % (r["name"], gitx.redact_url(url)))
+    else:
+        gitx.lfs_pull(src, sub)
+        ui.info("%s: from the %s clone shared with its siblings" % (r["name"], gitx.redact_url(url)))
+    return src
+
+
+def _where(repo):
+    return "%s%s" % (gitx.redact_url(repo.get("url")), " (folder %s)" % repo["subdir"] if repo.get("subdir") else "")
+
+
+def _checkout_git(r, dest, src=None):
+    """Git route of checkout. `src` = repo root already fetched by the caller (prefetch of a monorepo): no network at all.
+    A pinned commit that is not in the repo the index names (the package moved to another repo since that version) is looked for in the
+    other places the index lists for the package before giving up."""
+    repo = r["repo"]
+    try:
+        try:
+            src = _get_repo(r, repo, src)
+        except gitx.GitError as e:
+            if not (repo.get("ref") and r.get("alts") and gitx.is_missing(e)):
+                raise
+            tried = [repo]
+            for alt in r["alts"]:
+                cand = dict(alt, ref=repo["ref"])
+                tried.append(cand)
+                try:
+                    src = _get_repo(r, cand, None)
+                except gitx.GitError:
+                    continue
+                repo = r["repo"] = cand                 # it was found there: install (and record) it from there
+                break
+            else:
+                raise gitx.GitError(gitx.add_note(e, "also tried: " + "; ".join(_where(t) for t in tried[1:])))
     except gitx.GitError as e:
         raise api.ApiError("%s: %s" % (r["name"], e))
+    sub = repo.get("subdir") or ""
     rev = gitx.run(["rev-parse", "HEAD"], cwd=src)
     src = os.path.join(src, sub)
     if not os.path.isfile(os.path.join(src, "aihub.toml")):
@@ -429,21 +488,23 @@ def prefetch(pkgs, base, workers=None):
                     src = remote_config.with_access(url, lambda: gitx.fetch(url, branch, ref, lfs=False, subdir=subs))
                     ui.info("%s: fetched once for %d package(s)" % (gitx.redact_url(url), len(rs)) if len(rs) > 1 else "%s: fetched" % gitx.redact_url(url))
             except Exception as e:
+                if repo.get("ref") and gitx.is_missing(e) and any(x.get("alts") for x in rs):
+                    for r in rs:                       # the commit is not in this repo (the package moved): each one looks in the other places
+                        one(r)
+                    return
                 for r in rs:
                     out[r["name"]] = (None, api.ApiError("%s: %s" % (r["name"], e)) if not isinstance(e, api.ApiError) else e)
                 return
             for r in rs:
                 one(r, src)
 
-    jobs = []
-    if INDIRECT:
-        jobs = [lambda r=r: one(r) for r in pkgs]
-    else:
-        groups = {}
-        for r in pkgs:
+    via_hub = [r for r in pkgs if INDIRECT or on_hub(r.get("repo"))]    # plain parallel downloads; the rest share one clone per git repo
+    groups = {}
+    for r in pkgs:
+        if r not in via_hub:
             repo = r["repo"]
             groups.setdefault((repo["url"], repo.get("branch") or "main", repo.get("ref")), []).append(r)
-        jobs = [lambda rs=rs: group(rs) for rs in groups.values()]
+    jobs = [lambda r=r: one(r) for r in via_hub] + [lambda rs=rs: group(rs) for rs in groups.values()]
     with ThreadPoolExecutor(max_workers=max(1, min(workers or WORKERS, len(jobs)))) as ex:
         list(ex.map(lambda j: j(), jobs))
     return out

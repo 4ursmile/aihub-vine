@@ -395,6 +395,40 @@ class Updater:
         except Exception:
             return ""
 
+    CODE_DIRS = ("aihub", "tests")             # new files here that are not committed yet are part of the local change (a new module is code)
+
+    def _local_tree(self):
+        """The live checkout as it is now, as a git tree: edits to tracked files AND new, not ignored files under CODE_DIRS. Built in a
+        scratch copy of the index, so the real index and files are never touched. -> tree id, or "" when it equals HEAD.
+        (`git diff HEAD` and `stash create` leave untracked files out: a hub running an uncommitted new module would build a candidate
+        without it and the boot test would fail on its import.)"""
+        scratch = os.path.join(self.dir, "index-%d-%d.tmp" % (os.getpid(), threading.get_ident()))
+        env = {"GIT_INDEX_FILE": scratch}
+        os.makedirs(self.dir, exist_ok=True)
+        try:
+            real = self.git("rev-parse", "--path-format=absolute", "--git-path", "index", check=False)
+            if real and os.path.isfile(real):
+                shutil.copyfile(real, scratch)                      # keeps the stat cache: only changed files are hashed again
+            else:
+                gitx.run(["read-tree", "HEAD"], cwd=self.root, extra_env=env)
+            gitx.run(["add", "-u", "--", ".", ":(exclude)*.pyc"], cwd=self.root, extra_env=env)
+            new = [d for d in self.CODE_DIRS if os.path.isdir(os.path.join(self.root, d))]
+            if new:
+                gitx.run(["add", "-A", "--"] + new + [":(exclude)*.pyc"], cwd=self.root, extra_env=env)
+            tree = gitx.run(["write-tree"], cwd=self.root, extra_env=env)
+            return "" if tree == self.git("rev-parse", "HEAD^{tree}") else tree
+        finally:
+            try:
+                os.remove(scratch)
+            except OSError:
+                pass
+
+    def _save_local_patch(self, run, tree):
+        """Keep a copy of the local change (HEAD -> tree) in updates/local-<run>.patch. -> its path."""
+        patch = os.path.join(self.dir, "local-%s.patch" % run.id)
+        self.git("diff", "--binary", "--output=" + patch, "HEAD", tree)
+        return patch
+
     def dirty(self):
         return bool(self.git("status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)*.pyc", check=False))
 
@@ -553,12 +587,11 @@ class Updater:
     def _candidate(self, run, head, tip, ahead, worktrees, resolutions=None):
         if self.cfg("update_conflict") == "manual":
             return self._candidate_manual(run, head, tip, ahead, worktrees, resolutions)
-        patch = os.path.join(self.dir, "local-%s.patch" % run.id)
-        self.git("diff", "HEAD", "--binary", "--output=" + patch, "--", ".", ":(exclude)*.pyc")
-        has_local = os.path.getsize(patch) > 0
+        local = self._local_tree()
+        patch = self._save_local_patch(run, local) if local else ""
+        has_local = bool(local)
         strategy = self.cfg("update_conflict")
         if not ahead and not has_local:
-            os.remove(patch)
             run.info("fast-forward: building the candidate from the remote tip")
             run.merge_note = "fast-forward"
             return self._worktree(tip, worktrees)
@@ -575,8 +608,6 @@ class Updater:
                 if strategy != "remote":
                     raise Failure("local changes do not apply cleanly and the conflict policy is '%s': %s" % (strategy, _clean(e, 200)))
                 run.warn("local changes do not apply cleanly: dropped in favour of the remote (policy 'remote'); they stay in the patch file")
-        else:
-            os.remove(patch)
         self._merge(run, cw, tip, strategy, ident)
         return cw
 
@@ -644,17 +675,12 @@ class Updater:
 
     def _local_commit(self, run, head):
         """HEAD, or a commit (parent HEAD) holding the uncommitted edits of the live checkout, made without touching it."""
-        patch = os.path.join(self.dir, "local-%s.patch" % run.id)
-        self.git("diff", "HEAD", "--binary", "--output=" + patch, "--", ".", ":(exclude)*.pyc")
-        if os.path.getsize(patch) == 0:
-            os.remove(patch)
+        tree = self._local_tree()
+        if not tree:
             return head
+        patch = self._save_local_patch(run, tree)
         run.warn("uncommitted local changes found; a copy is saved in %s" % patch)
         ident = ["-c", "user.name=aihub-updater", "-c", "user.email=aihub-updater@localhost"]
-        snap = self.git(*ident, "stash", "create")
-        if not snap:
-            return head
-        tree = self.git("rev-parse", snap + "^{tree}")
         return self.git(*ident, "commit-tree", tree, "-p", head, "-m", "local changes preserved by the updater")
 
     def _unmerged(self, cw):
@@ -1125,9 +1151,9 @@ class Updater:
         if to == head:
             raise Failure("the hub is already on %s" % to[:8])
         run.info("rolling back from %s to %s (%s)" % (head[:8], to[:8], self.git("log", "-1", "--format=%s", to)))
-        if self.dirty():
-            patch = os.path.join(self.dir, "local-%s.patch" % run.id)
-            self.git("diff", "HEAD", "--binary", "--output=" + patch, "--", ".", ":(exclude)*.pyc")
+        local = self._local_tree()
+        if local:
+            patch = self._save_local_patch(run, local)
             run.warn("uncommitted local changes will be discarded by the rollback; a copy is saved in %s" % patch)
         cw = self._worktree(to, worktrees)
         self._verify(run, cw, head, to)

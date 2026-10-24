@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 from ..cli import gitx
 from ..core import naming, pkgindex, redact, textsafe, version as V
-from . import gitauth, nethost
+from . import direct as direct_mod, gitauth, nethost
 from .gitgate import Deferred, GitGate
 
 log = logging.getLogger("aihub")
@@ -46,7 +46,9 @@ LIMITS = {
     "telemetry_rate_limit": (1200, 0, 100000, "Telemetry requests per minute per client address (0 = unlimited)"),
     "client_telemetry_interval": (60, 5, 3600, "Seconds a CLI gathers events before sending (sent to CLIs with their setup values)"),
     "client_index_ttl": (60, 5, 86400, "Seconds a CLI trusts its copy of the package index before asking the hub again"),
+    "direct_max_mb": (100, 1, 2000, "Largest package archive (MB) the hub accepts from `aihub dev publish -i` (a reverse proxy may have a lower cap of its own)"),
     "transfer_repo_ttl": (120, 0, 86400, "Seconds a git checkout fetched for `aihub install -i` is trusted before the hub asks git again (a monorepo is fetched once for all its packages)"),
+    "backup_direct_max_mb": (90, 1, 2000, "Largest package archive (MB, from `aihub dev publish -i`) copied into the git backup; bigger ones are skipped and listed in backups/index.json (git hosts refuse files over ~100 MB)"),
     "backup_jitter": (10, 0, 50, "Backup start time is moved by up to this percent of the wait"),
     "backup_jitter_max": (600, 0, 3600, "...but never by more than this many seconds"),
 }
@@ -121,6 +123,16 @@ def _os(v):
     return OS_NAMES.get(v) or redact.text(v, 24)
 
 
+def _detail(e):
+    """A publish event keeps WHERE it was published from as its detail (JSON), so the hub can always tell which repo, branch and folder an
+    old version lives in (the index entry only keeps the latest location of a package)."""
+    if e.get("kind") == "publish" and not e.get("detail") and e.get("git_url"):
+        return json.dumps({"git_url": redact.text(e["git_url"], 300), "git_branch": redact.text(e.get("git_branch") or "main", 100),
+                           "git_subdir": redact.text(e.get("git_subdir"), 200), "commit": redact.text(e.get("commit"), 64)},
+                          separators=(",", ":"))     # each value scrubbed on its own: scrubbing the JSON text could cut or break it
+    return redact.text(e.get("detail"), 2200)
+
+
 def to_row(e):
     """One event from a CLI batch -> an events row (None if it is not one of ours). Everything in it is untrusted input."""
     if not isinstance(e, dict):
@@ -147,7 +159,7 @@ def to_row(e):
             "duration": None,
             "source": e.get("source") if e.get("source") in ("claude", "opencode", "codex", "cli") else None,
             "local_user": redact.text(e.get("local_user"), 64),
-            "host": redact.text(e.get("host"), 128), "os": _os(e.get("os")), "detail": redact.text(e.get("detail"), 2200),
+            "host": redact.text(e.get("host"), 128), "os": _os(e.get("os")), "detail": _detail(e),
             "cwd": redact.text(e.get("cwd"), 200), "ip": None, "ext_id": str(e["id"])[:64]}
 
 
@@ -307,6 +319,12 @@ class Sync:
         url, branch, path = self.index_source()
         log.info("sync: usage inbox %s (branch %s, archive %s); package index %s (branch %s, folder %s)",
                  gitx.redact_url(self.inbox()) or "-", self.inbox_branch(), self.archive_branch(), gitx.redact_url(url) or "-", branch, path)
+        try:
+            if self.repos.setting("version_repo_backfill") != "1":
+                self.repair_version_repos()
+                self.repos.set_setting("version_repo_backfill", "1")
+        except Exception as e:                                          # never stops the hub from starting; retried at the next start
+            log.warning("sync: repairing version locations failed: %s", e)
         self.t = threading.Thread(target=self._loop, name="aihub-sync", daemon=True)
         self.t.start()
 
@@ -315,6 +333,7 @@ class Sync:
         self.wake.set()
 
     def _loop(self):
+        self._repair_from_archive()
         while not self.stop.is_set():
             try:
                 self.run_once(scheduled=True)                # each half is gated inside _pass; with both off only local staging happens
@@ -434,23 +453,14 @@ class Sync:
         tip = gitx.fetch_tip(d, "origin", branch, "refs/inbox/archive", depth=1, timeout=300)
         if not tip:
             return 0                                                    # nothing archived yet (or archiving was off)
-        files = []
-        for line in gitx.run(["ls-tree", "-r", tip, "--", "archive/"], cwd=d, check=False).splitlines():
-            meta, _, path = line.partition("\t")
-            if path.endswith(".jsonl"):
-                files.append((path, meta.split()[2]))
-        files.sort()
         total, rows = 0, []
-        for i, (f, blob) in enumerate(files):
-            if i % 200 == 0:
-                texts = gitx.blobs(d, [b for _, b in files[i:i + 200]])
-            for line in texts.get(blob, "").splitlines():
-                try:
-                    r = to_row(json.loads(line))
-                except ValueError:
-                    continue
-                if r:
-                    rows.append(r)
+        for line in self._archive_lines(d, tip):
+            try:
+                r = to_row(json.loads(line))
+            except ValueError:
+                continue
+            if r:
+                rows.append(r)
             if len(rows) >= 1000:
                 total += self._store(rows)
                 rows = []
@@ -459,6 +469,20 @@ class Sync:
             log.info("restored %d event(s) from the %s branch", total, branch)
         self.status["events_total"] += total
         return total
+
+    @staticmethod
+    def _archive_lines(d, tip):
+        """Every raw event line on the archive commit `tip` (blobs read 200 at a time in ONE git process)."""
+        files = []
+        for line in gitx.run(["ls-tree", "-r", tip, "--", "archive/"], cwd=d, check=False).splitlines():
+            meta, _, path = line.partition("\t")
+            if path.endswith(".jsonl"):
+                files.append((path, meta.split()[2]))
+        files.sort()
+        for i, (f, blob) in enumerate(files):
+            if i % 200 == 0:
+                texts = gitx.blobs(d, [b for _, b in files[i:i + 200]])
+            yield from texts.get(blob, "").splitlines()
 
     def _inbox_dir(self, url):
         work = os.path.abspath(os.path.join(self.s.data_dir, "telemetry-repo"))
@@ -842,6 +866,15 @@ class Sync:
                 log.warning("sync: importing the staged index failed: %s", e)
         return changed
 
+    def stage_now(self):
+        """Index the publishes waiting in `pending_pubs` right now (what the sync thread does on its next wake-up), so the caller of a direct
+        publish can answer when the package is really listed. Safe next to the thread: `update_index` runs under `index_lock`."""
+        return self._stage_pending()
+
+    def is_pending(self, name, version):
+        with self.hold:
+            return (naming.normalize(str(name)), str(version)) in self.pending_pubs
+
     def _flush_index_if_due(self):
         with self.hold:
             if not self.staged:
@@ -873,6 +906,68 @@ class Sync:
         self.repos.set_setting("sync_index_dirty", "1")
         self.invalidate_served()
         return changed
+
+    # ----- where each version lives (see Repos.version_repos_backfill)
+    def stamp_index(self, found):
+        """Write where versions really live ({(name, version): {url, branch, subdir}}) into the hub's own index folder, so a later import of
+        that entry (it is re-read whenever the package changes) keeps it. The git mirror is left alone: the database is the truth."""
+        if not found:
+            return 0
+        d = self.index_dir or (None if self.index_git() else self.local_index())
+        if not d:
+            return 0
+        path = self.index_source()[2]
+        folder = os.path.join(d, path[:-5] if path.endswith(".json") else path)
+        if not os.path.isfile(os.path.join(folder, "root.json")):
+            return 0
+        with self.index_lock:
+            n = pkgindex.set_version_repos(folder, found)
+        self.invalidate_served()
+        return n
+
+    def repair_version_repos(self, extra=()):
+        """Give every old version the repo it was published from (publish events; `extra` = events read from the git archive). Safe to
+        repeat. Logs how many versions changed. -> that number."""
+        fixed = self.repos.version_repos_backfill(extra)
+        if fixed:
+            log.info("sync: repaired the git location of %d old package version(s) (e.g. %s %s)", len(fixed), fixed[0][0], fixed[0][1])
+            try:
+                self.stamp_index({(n, v): loc for n, v, loc in fixed})
+            except Exception as e:
+                log.warning("sync: could not record the repaired locations in the index folder: %s", e)
+            self.invalidate_served()
+            if self.cache is not None:
+                try:
+                    self.cache.invalidate("pkg")
+                except Exception:
+                    pass
+        return len(fixed)
+
+    def _repair_from_archive(self):
+        """Once: publish events stored before they carried their location are recovered from the archive branch (needs the legacy git
+        telemetry sync and a reachable inbox repo; a failure is retried at the next start)."""
+        if self.repos.setting("version_repo_archive") == "1" or not (self.telemetry_git() and self.inbox()):
+            return
+        try:
+            url, branch = self.inbox(), self.archive_branch()
+            d = self._inbox_dir(url)
+            tip = gitx.fetch_tip(d, "origin", branch, "refs/inbox/archive", depth=1, timeout=300)
+            found = []
+            for line in self._archive_lines(d, tip) if tip else []:
+                if '"publish"' not in line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(e, dict) and e.get("kind") == "publish" and e.get("git_url") and e.get("version"):
+                    found.insert(0, dict(package=naming.normalize(str(e.get("package") or "")), version=str(e["version"]), git_url=str(e["git_url"]),
+                                         git_branch=str(e.get("git_branch") or "main"), git_subdir=str(e.get("git_subdir") or ""),
+                                         commit=str(e.get("commit") or "")))      # newest first, like publish_locations
+            self.repair_version_repos(found)
+            self.repos.set_setting("version_repo_archive", "1")
+        except Exception as e:
+            log.warning("sync: could not read publish locations from the archive: %s", gitx.redact_url(str(e))[:200])
 
     def unindex(self, name, version=None):
         """Remove a package (or one version) from the hub's index folder, so a later import does not bring it back.
@@ -944,10 +1039,11 @@ class Sync:
             changed += 1
         for m in pubs:
             name, ver, gurl = naming.normalize(str(m["package"])), str(m["version"]), str(m["git_url"])
-            if not gurl.startswith(SCHEMES):
+            direct = gurl == direct_mod.URL                             # published straight to the hub: the archive in <data>/direct is the source
+            if not direct and not gurl.startswith(SCHEMES):
                 results.append((name, ver, "git address not allowed"))
                 continue                                                # no file:// or other odd transports from event data
-            if not m.get("bundle") and not gurl.startswith("file://") and not nethost.allowed(gurl, url):   # a bundle means no fetch from that host
+            if not direct and not m.get("bundle") and not gurl.startswith("file://") and not nethost.allowed(gurl, url):   # a bundle means no fetch from that host
                 log.warning("publish event for %s names a non-public host; ignored", name)
                 results.append((name, ver, "host is not public and not the index host"))
                 continue
@@ -962,7 +1058,13 @@ class Sync:
                 continue
             tmp = None
             try:
-                tmp = self._bundle_dir(m.get("bundle"))                  # aihub.toml + README sent by the CLI: no git contact at all
+                if direct:                                               # nothing from the event is trusted: the stored archive must match its digest
+                    tmp = direct_mod.Direct(self.s.data_dir).manifest_dir(name, ver, ref)
+                    if not tmp:
+                        results.append((name, ver, "no stored archive with that digest"))
+                        continue
+                else:
+                    tmp = self._bundle_dir(m.get("bundle"))              # aihub.toml + README sent by the CLI: no git contact at all
                 if tmp:
                     proj = tmp
                 else:                                                    # old CLI / no bundle: read the package repo at the published commit
@@ -1160,12 +1262,20 @@ class Sync:
             for v in p.get("versions") or ([{"version": p["latest_version"]}] if p.get("latest_version") else []):
                 man = v.get("manifest") or {"package": {"name": name, "version": v["version"], "type": p.get("type")},
                                             "requires": v.get("requires") or p.get("requires") or {}}
-                man["repo"] = dict(p.get("repo") or {}, ref=v.get("ref"))
+                vrepo = v.get("repo") if isinstance(v.get("repo"), dict) else {}
+                man["repo"] = dict(p.get("repo") or {}, **{k: x for k, x in vrepo.items() if k != "ref"}, ref=v.get("ref") or vrepo.get("ref"))   # the version's own location wins
                 meta = man.setdefault("package", {})
                 for k in ("authors", "license"):                       # entry-level (latest) values fill what the version lacks
                     if p.get(k) and not meta.get(k):
                         meta[k] = p[k]
-                self.repos.version_sync(pid, v["version"], man)
+                sha, size = "", 0
+                if direct_mod.is_direct(man.get("repo")):               # an archive version: its digest and size are known exactly
+                    sha = direct_mod.Direct(self.s.data_dir).sha(p["name"], str(v["version"]))
+                    try:
+                        size = os.path.getsize(direct_mod.Direct(self.s.data_dir).path(p["name"], v["version"])) if sha else 0
+                    except (OSError, direct_mod.DirectError):
+                        size = 0
+                self.repos.version_sync(pid, v["version"], man, sha=sha, size=size)
         self.repos.package_hide_missing(names)
         self.repos.set_setting("sync_index_hashes", json.dumps(hashes, separators=(",", ":")))
         if rev is not None:

@@ -94,7 +94,39 @@ def _excluded(rules, rel):
     return _ignored(rules, rel, False)
 
 
-def list_files(root: str):
+def _ancestors(root, upto):
+    """Folders from root's parent up to `upto` (inclusive), nearest first. [] when `upto` is not above root."""
+    root, upto = os.path.realpath(root), os.path.realpath(upto) if upto else None
+    if not upto or root == upto or not root.startswith(upto + os.sep):
+        return []
+    out, d = [], os.path.dirname(root)
+    while True:
+        out.append(d)
+        if d == upto or d == os.path.dirname(d):
+            return out
+        d = os.path.dirname(d)
+
+
+def list_files(root: str, upto=None):
+    """Relative file paths to ship. Honors .gitignore and .aihubignore, plus built-in excludes.
+
+    `upto` = the workspace folder that holds several packages: the ignore files of the folders between the package and `upto` apply too
+    (a workspace-level .aihubignore, and - without git, which would do it itself - a workspace-level .gitignore), each judged on the
+    path relative to ITS folder, as git does.
+
+    Inside a git repo, git decides what .gitignore excludes (including nested and global
+    ignore files); otherwise the root .gitignore is emulated.
+    """
+    files, used_git = _list_files(root)
+    for anc in _ancestors(root, upto):
+        rules = _load(anc, [".aihubignore"] if used_git else [".gitignore", ".aihubignore"])
+        if rules:
+            prefix = os.path.relpath(os.path.realpath(root), os.path.realpath(anc)).replace(os.sep, "/") + "/"
+            files = [f for f in files if not _excluded(rules, prefix + f)]
+    return files
+
+
+def _list_files(root: str):
     """Relative file paths to ship. Honors .gitignore and .aihubignore, plus built-in excludes.
 
     Inside a git repo, git decides what .gitignore excludes (including nested and global
@@ -107,7 +139,7 @@ def list_files(root: str):
         files = [f for f in out if f and os.path.isfile(os.path.join(root, f))]
         if files:
             rules = always + _load(root, [".aihubignore"])
-            return sorted(f for f in files if not _excluded(rules, f))
+            return sorted(f for f in files if not _excluded(rules, f)), True
     except Exception:
         pass
     rules = always + _load(root, [".gitignore", ".aihubignore"])
@@ -120,4 +152,4 @@ def list_files(root: str):
             r = (rel + "/" + f) if rel else f
             if not _excluded(rules, r):
                 res.append(r)
-    return sorted(res)
+    return sorted(res), False

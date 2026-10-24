@@ -71,7 +71,9 @@ aihub dev publish --bump patch builtin          # bump every selected package
 - `tree` reports `own .git`: `aihub dev tree-solve PATH`
 - Overview of the packages and what to fix: `aihub dev tree PATH`
 
-`aihub dev publish` is a wrapper around git. It needs no hub account: access is whatever your git host grants you, and the publish is recorded in the telemetry inbox under your account name, or `~<your-os-username>` when you are not signed in.
+**Without git: `aihub dev publish -i`.** The package is packed and uploaded to the hub, which stores it in its own data folder (`<data>/direct`) and lists it; nothing touches git, so no repository, remote or git login is needed. Sign in first (`aihub login`, role with `publish`). Installs download the archive from the hub (with or without `aihub install -i`). Same rules as git publishing: versions are immutable, `--bump` and `--only` work, several packages are sent independently. The archive lives in the hub's data folder; the hub's git backup (when enabled) copies it to `backups/direct/` and recovery restores it (archives over `backup_direct_max_mb`, default 90 MB, are not backed up, so keep `<data>/direct` in your file-system backup too if you publish big ones). Unpublishing removes the archive.
+
+`aihub dev publish` (without `-i`) is a wrapper around git. It needs no hub account: access is whatever your git host grants you, and the publish is recorded in the telemetry inbox under your account name, or `~<your-os-username>` when you are not signed in.
 
 What it does, in order:
 

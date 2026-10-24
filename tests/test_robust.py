@@ -384,6 +384,44 @@ class GitTrustAndLogin(unittest.TestCase):
             for host in ("evil.example", "git.corp.example:9999", "other.example", "corp.example", "x.git.corp.example"):
                 self.assertIsNone(gitauth.login_for(s, host, urls), host)
 
+    def test_token_user_comes_from_the_vault_when_not_set(self):
+        s = Settings.load(env={"AIHUB_DATA_DIR": tempfile.mkdtemp(), "AIHUB_GIT_TOKEN": "tok"})
+        urls = ["https://bb.example/x/y.git"]
+        with mock.patch.object(credhelper, "lookup", return_value=("alice", "vaultpw")):
+            self.assertEqual(gitauth.login_for(s, "bb.example", urls), ("alice", "tok"))       # real account name, the env token still wins
+        with mock.patch.object(credhelper, "lookup", return_value=None):
+            self.assertEqual(gitauth.login_for(s, "bb.example", urls), ("oauth2", "tok"))
+        with mock.patch.object(credhelper, "lookup", side_effect=RuntimeError("keychain locked")):
+            self.assertEqual(gitauth.login_for(s, "bb.example", urls), ("oauth2", "tok"))
+        s = Settings.load(env={"AIHUB_DATA_DIR": tempfile.mkdtemp(), "AIHUB_GIT_TOKEN": "tok", "AIHUB_GIT_USER": "me"})
+        with mock.patch.object(credhelper, "lookup", return_value=("alice", "vaultpw")):
+            self.assertEqual(gitauth.login_for(s, "bb.example", urls), ("me", "tok"))          # AIHUB_GIT_USER wins
+
+    def test_missing_login_is_hinted_once_per_host(self):
+        s = Settings.load(env={"AIHUB_DATA_DIR": tempfile.mkdtemp(), "AIHUB_GIT_TOKEN": "tok-secret-1"})
+        gitauth._hinted.discard("hint.example")
+        with mock.patch.object(credhelper, "lookup", return_value=None), self.assertLogs("aihub", "WARNING") as cm:
+            self.assertIsNone(gitauth.login_for(s, "hint.example", ["https://other.example/r.git"]))
+            self.assertIsNone(gitauth.login_for(s, "hint.example", []))
+        self.assertEqual(len(cm.records), 1)
+        self.assertIn("AIHUB_GIT_HOSTS=hint.example", cm.output[0])
+        self.assertNotIn("tok-secret-1", cm.output[0])
+
+    def test_app_login_covers_the_index_host_without_sync_start(self):
+        from aihub.server.main import create_app
+        old = (gitx.LOGIN, gitx.BATCH, list(gitx.TRUSTED))
+        self.addCleanup(lambda: (setattr(gitx, "LOGIN", old[0]), setattr(gitx, "BATCH", old[1]), gitx.TRUSTED.__setitem__(slice(None), old[2])))
+        d = tempfile.mkdtemp()
+        s = Settings.load(env={"AIHUB_DATA_DIR": d, "AIHUB_GIT_TOKEN": "tok", "AIHUB_GIT_USER": "me",
+                               "AIHUB_INDEX_URL": "https://idx.example/hub/index.git"}, env_file=os.path.join(d, "none.env"), data_dir=d, sync_enabled=False)
+        app = create_app(s)                                            # sync.start() is never called
+        try:
+            with mock.patch.object(credhelper, "lookup", return_value=None):
+                self.assertEqual(gitx.LOGIN("idx.example"), ("me", "tok"))
+                self.assertIsNone(gitx.LOGIN("elsewhere.example"))
+        finally:
+            app.state.ingest.close()
+
     def test_token_file_and_default_user(self):
         f = os.path.join(tempfile.mkdtemp(), "tok")
         open(f, "w").write("filetok\n")

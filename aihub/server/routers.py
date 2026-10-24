@@ -1,11 +1,13 @@
 import hashlib
 import json
+import logging
 import zlib
 import os
 from typing import Optional
 import re
 import tempfile
 import time
+import uuid
 
 import csv
 import io
@@ -20,16 +22,17 @@ from pydantic import BaseModel
 
 from ..core.release import VERSION
 from ..cli import gitx
-from ..core import archive, manifest as M, naming, redact, version as V
+from ..core import archive, manifest as M, naming, pkgindex, redact, version as V
 from .sync import LIMITS, parse_schedule
 from .transfer import TransferError
-from . import basepath, builtin, image, markdown, nethost, safehtml, sheet
+from . import basepath, builtin, direct as direct_mod, image, markdown, nethost, safehtml, sheet
 from .categories import category_of
 from .db import ALL_PERMS, ANON_LOCKED
-from .deps import can_develop, can_manage, current_user, require_any, require_perm, require_user, viewer_of
+from .deps import can_develop, can_manage, current_user, require_any, require_perm, require_user, user_or_anon, viewer_of
 from .security import hash_password, hash_token, new_token, verify_password
 
 r = APIRouter(prefix="/api/v1")
+log_direct = logging.getLogger("aihub")
 TTL = 20
 
 
@@ -285,7 +288,8 @@ def _ser(request, p, detail=False):
         out["license"] = meta.get("license") or ""
         out["maintainers"] = [_public(m) | {"role": m["role"]} for m in repos.maintainers(p["id"])]
         out["versions"] = [{k: v[k] for k in ("version", "sha256", "size", "downloads", "yanked", "created")}
-                           | {"source": source_url((v["manifest"] or {}).get("repo"))} for v in vs]
+                           | {"source": source_url((v["manifest"] or {}).get("repo")),
+                              "archive": direct_mod.is_direct((v["manifest"] or {}).get("repo"))} for v in vs]
     return out
 
 
@@ -680,6 +684,7 @@ def unpublish(name: str, request: Request, version: str = "", u=Depends(require_
     else:
         repos.package_delete(p["id"])
     request.app.state.sync.unindex(p["name"], version or None)
+    request.app.state.direct.remove(p["name"], version or None)        # archives of packages published with `aihub dev publish -i`
     repos.audit(u["username"], "unpublish", p["name"], version)
     C(request).invalidate("pkg")
     return {"ok": True}
@@ -1858,6 +1863,173 @@ def index_package(body: dict, request: Request, u=Depends(require_perm("index"))
     return {"package": name, "version": ver, "status": status, "index_changed": bool(changed)}
 
 
+def _direct_user(u):
+    if not u.get("id"):
+        raise HTTPException(401, "sign in first: aihub login")
+
+
+def _direct_limit(request):
+    return request.app.state.sync.num("direct_max_mb") * 1024 * 1024
+
+
+@r.post("/index/direct/uploads")
+def direct_upload_start(body: dict, request: Request, u=Depends(require_perm("publish"))):
+    """Open (or resume) a chunked upload of a package archive: {size, sha256} -> {upload_id, chunk_size, chunks, received}.
+    For archives bigger than a proxy lets through in one request; chunks may be sent in parallel."""
+    _direct_user(u)
+    try:
+        return request.app.state.direct_uploads.start(u["username"], body.get("size"), str(body.get("sha256") or "").lower(), _direct_limit(request))
+    except direct_mod.DirectError as e:
+        raise HTTPException(e.code, str(e))
+
+
+@r.get("/index/direct/uploads/{uid}")
+def direct_upload_status(uid: str, request: Request, u=Depends(require_perm("publish"))):
+    _direct_user(u)
+    try:
+        return request.app.state.direct_uploads.info(u["username"], uid)
+    except direct_mod.DirectError as e:
+        raise HTTPException(e.code, str(e))
+
+
+@r.put("/index/direct/uploads/{uid}/chunks/{n}")
+async def direct_upload_chunk(uid: str, n: int, request: Request, u=Depends(require_perm("publish"))):
+    """One chunk of exactly `chunk_size` bytes (the last one is shorter). `X-Chunk-Sha256` is checked when sent. Sending a chunk again is fine."""
+    _direct_user(u)
+    ups = request.app.state.direct_uploads
+    data, cap = bytearray(), ups.chunk_size + 1
+    async for part in request.stream():
+        data += part
+        if len(data) > cap:
+            raise HTTPException(413, "chunk too large")
+    try:
+        await run_in_threadpool(ups.put, u["username"], uid, n, bytes(data), request.headers.get("x-chunk-sha256", ""))
+    except direct_mod.DirectError as e:
+        raise HTTPException(e.code, str(e))
+    except OSError as e:
+        raise HTTPException(503, "cannot store the chunk: %s" % e, headers={"Retry-After": "10"})
+    return {"ok": True, "chunk": n}
+
+
+@r.post("/index/direct/uploads/{uid}/complete")
+async def direct_upload_complete(uid: str, request: Request, u=Depends(require_perm("publish"))):
+    """Join the chunks, check size and sha256, then publish exactly like `POST /index/direct`. The session is removed unless the hub was
+    only temporarily unable (5xx), so a retry of `complete` is possible."""
+    _direct_user(u)
+    ups, direct = request.app.state.direct_uploads, request.app.state.direct
+    try:
+        tmp = direct.scratch()
+    except OSError as e:
+        raise HTTPException(503, "cannot store the upload: %s" % e, headers={"Retry-After": "30"})
+    try:
+        try:
+            await run_in_threadpool(ups.assemble, u["username"], uid, tmp)
+        except direct_mod.DirectError as e:
+            raise HTTPException(e.code, str(e))
+        try:
+            res = await run_in_threadpool(_publish_direct, request, u, tmp)
+        except HTTPException as e:
+            if e.status_code < 500:
+                ups.drop(u["username"], uid)
+            raise
+        ups.drop(u["username"], uid)
+        return res
+    except OSError as e:
+        raise HTTPException(503, "cannot store the upload: %s" % e, headers={"Retry-After": "30"})
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+@r.delete("/index/direct/uploads/{uid}")
+def direct_upload_cancel(uid: str, request: Request, u=Depends(require_perm("publish"))):
+    _direct_user(u)
+    request.app.state.direct_uploads.drop(u["username"], uid)
+    return {"ok": True}
+
+
+@r.post("/index/direct")
+async def publish_direct(request: Request, u=Depends(require_perm("publish"))):
+    """`aihub dev publish -i`: the body is the package as a .tar.gz (aihub.toml at its top). The hub keeps it in its data folder
+    (`<data>/direct`), lists it in the index with the repository `hub://direct` and records a `publish` event. No git, no git account:
+    installs download the archive from the hub. A new package belongs to the publisher; an existing one only to those who manage it."""
+    _direct_user(u)
+    direct = request.app.state.direct
+    limit = _direct_limit(request)
+    n = request.headers.get("content-length")
+    if n and n.isdigit() and int(n) > limit:
+        raise HTTPException(413, "archive too large (limit %d MB, admin setting direct_max_mb)" % (limit >> 20))
+    try:
+        tmp = direct.scratch()
+    except OSError as e:
+        raise HTTPException(503, "cannot store the upload: %s" % e, headers={"Retry-After": "30"})
+    try:
+        size = 0
+        with open(tmp, "wb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > limit:
+                    raise HTTPException(413, "archive too large (limit %d MB, admin setting direct_max_mb)" % (limit >> 20))
+                await run_in_threadpool(f.write, chunk)
+        return await run_in_threadpool(_publish_direct, request, u, tmp)
+    except OSError as e:
+        raise HTTPException(503, "cannot store the upload: %s" % e, headers={"Retry-After": "30"})
+    finally:
+        try:
+            os.remove(tmp)                                            # moved away when stored; this is only the leftover of a refusal
+        except OSError:
+            pass
+
+
+def _publish_direct(request, u, tmp):
+    repos, direct, sy = R(request), request.app.state.direct, request.app.state.sync
+    try:
+        pkg, sha, size, _ = direct.inspect(tmp)
+    except direct_mod.DirectError as e:
+        raise HTTPException(e.code, str(e))
+    name, ver = pkg["name"], str(pkg["version"])
+    stored = direct.sha(name, ver)
+    if stored and stored != sha and direct.same_content(name, ver, tmp):
+        sha = stored                      # the same files packed again (other timestamps, tool or zlib): the same release, keep the stored archive
+    p = repos.package(name)
+    listed = False
+    if p:
+        if not can_manage(repos, u, p):
+            raise HTTPException(403, "%s belongs to someone else: only its maintainers or an admin may publish a new version" % name)
+        listed = any(v["version"] == ver for v in repos.versions(p["id"]))
+        if listed and direct.sha(name, ver) != sha:
+            raise HTTPException(409, "%s %s is already published (%s); bump the version" % (
+                name, ver, "with different content" if direct.sha(name, ver) else "from git"))
+    try:
+        fresh = direct.put(tmp, name, ver, sha) if sha != stored else False       # an identical re-publish stores nothing
+    except direct_mod.DirectError as e:
+        raise HTTPException(e.code, str(e))
+    if fresh or not listed:
+        ev = {"id": uuid.uuid4().hex, "kind": "publish", "package": name, "version": ver, "ts": time.time(), "client_id": "hub-direct",
+              "git_url": direct_mod.URL, "git_branch": "main", "git_subdir": "", "commit": sha, "type": pkg["type"],
+              "description": pkg["description"], "tags": pkg["tags"], "user": u["username"]}
+        sy.accept([], [ev])                                           # queue it for the index HERE: the ingest flusher may be mid-write, so its own
+                                                                      # hand-over to Sync.accept could still be pending when we answer
+        try:
+            request.app.state.ingest.add([ev], u["username"])         # audit trail + live feed (the same event reaching accept() again is a no-op)
+            request.app.state.ingest.flush()
+        except OSError:
+            raise HTTPException(503, "cannot record the publish right now", headers={"Retry-After": "30"})
+        try:
+            sy.stage_now()
+        except Exception as e:                                         # stays pending and is retried by the sync thread
+            log_direct.warning("direct publish of %s %s is not indexed yet: %s", name, ver, e)
+    queued = sy.is_pending(name, ver)
+    p = repos.package(name)
+    if p and not repos.maintainers(p["id"]):
+        repos.maintainer_add(p["id"], u["id"], "owner")               # first direct publish of a new package: the publisher owns it
+    repos.audit(u["username"], "publish.direct", name, ver)
+    request.app.state.cache.invalidate("pkg")
+    return {"package": name, "version": ver, "sha256": sha, "size": size, "status": "queued" if queued else ("published" if fresh else "already published")}
+
+
 # ---------------- telemetry intake (CLI -> hub; git is the CLI's fallback)
 MAX_TELEMETRY_BYTES = 4 * 1024 * 1024
 MAX_TELEMETRY_EVENTS = 5000
@@ -2163,9 +2335,51 @@ def index_entry(name: str, request: Request, u=Depends(current_user)):
     return JSONResponse(view["entries"][name], headers=hdr)
 
 
+MAX_ELSEWHERE = 5          # other locations tried for an old commit that is not where the index says (git hosts are rate limited)
+
+
+def found_error(e):
+    return getattr(e, "tried_note", None) or str(e)
+
+
+def _transfer_elsewhere(request, name, version, repo, err):
+    """The commit of an old version is not in the repo the index names (the package moved since). Try the other places this package was
+    ever published from, newest first. On success the place is recorded for that version (next time it is direct, and the index the
+    CLIs read shows it). -> (tar path, rev, how) or None; `err.tried_note` then names what was tried."""
+    repos = R(request)
+    tr = request.app.state.transfer
+    tried = [repo]
+    for loc in repos.known_locations(name):
+        if len(tried) > MAX_ELSEWHERE:
+            break
+        if any(pkgindex.same_repo(loc, t) for t in tried) or direct_mod.is_direct(loc):
+            continue
+        cand = dict(loc, ref=repo["ref"])
+        tried.append(cand)
+        try:
+            got = tr.lookup(cand)
+        except TransferError:
+            continue
+        if repos.version_set_repo(name, version, loc):
+            sy = request.app.state.sync
+            try:
+                sy.stamp_index({(name, version): loc})
+            except Exception:
+                pass
+            sy.invalidate_served()
+            request.app.state.cache.invalidate("pkg")
+        return got
+    if len(tried) > 1:
+        err.tried_note = gitx.add_note(str(err), "also tried: " + "; ".join(
+            "%s%s" % (gitx.redact_url(t.get("url")), " (folder %s)" % t["subdir"] if t.get("subdir") else "") for t in tried[1:]))
+    return None
+
+
 @r.get("/index/packages/{name}/transfer/{version}")
-def index_transfer(name: str, version: str, request: Request, u=Depends(require_perm("install_indirect"))):
-    """`aihub install -i`: the hub fetches the package from git (cached; a monorepo once for all its packages) and sends a tar.gz."""
+def index_transfer(name: str, version: str, request: Request, u=Depends(user_or_anon)):
+    """`aihub install -i`: the hub fetches the package from git (cached; a monorepo once for all its packages) and sends a tar.gz.
+    A package published with `aihub dev publish -i` has no git at all: its stored archive is sent, to everyone who may see it (git was never
+    needed to install a public package, so neither is a permission here). Everything else needs the `install_indirect` permission."""
     name = naming.normalize(name)
     entry = _index_view(request, u)["entries"].get(name)
     if not entry:
@@ -2176,11 +2390,23 @@ def index_transfer(name: str, version: str, request: Request, u=Depends(require_
     repo = dict(entry.get("repo") or {}, **(v.get("repo") or {}))
     if v.get("ref"):
         repo["ref"] = v["ref"]
+    if direct_mod.is_direct(repo):
+        d = request.app.state.direct
+        sha = d.sha(name, version)
+        if not sha:
+            raise HTTPException(404, "the hub no longer holds the archive of %s %s" % (name, version))
+        return FileResponse(d.path(name, version), media_type="application/gzip", filename="%s-%s.tar.gz" % (name, version),
+                            headers={"X-Aihub-Rev": sha, "X-Aihub-Cache": "direct", "X-Aihub-Sha256": sha, "ETag": '"%s"' % sha})
+    if "install_indirect" not in R(request).perms(u["role"]):
+        raise HTTPException(401 if u["role"] == "anonymous" else 403, "authentication required" if u["role"] == "anonymous" else "missing permission: install_indirect")
     tr = request.app.state.transfer
     try:
         path, rev, how = tr.lookup(repo)
     except TransferError as e:
-        raise HTTPException(502, "cannot fetch %s: %s" % (name, e), headers={"Retry-After": "30"})
+        found = _transfer_elsewhere(request, name, version, repo, e) if repo.get("ref") and gitx.is_missing(e) else None
+        if not found:
+            raise HTTPException(502, "cannot fetch %s: %s" % (name, found_error(e)), headers={"Retry-After": "30"})
+        path, rev, how = found
     return FileResponse(path, media_type="application/gzip", filename="%s-%s.tar.gz" % (name, version), headers={"X-Aihub-Rev": rev, "X-Aihub-Cache": how, "ETag": '"%s"' % rev})
 
 

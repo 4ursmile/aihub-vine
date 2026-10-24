@@ -398,7 +398,7 @@ def _install_one(r, assume_yes, tools, requested, archive_path=None):
         if archive_path:
             src = archive_path
         else:
-            with ui.Spinner("Fetching %s %s" % (name, "through the hub" if registry.INDIRECT else "from git")):
+            with ui.Spinner("Fetching %s %s" % (name, "through the hub" if registry.INDIRECT or registry.on_hub(r.get("repo")) else "from git")):
                 src = _fetch(r, td)
         toml = os.path.join(src, "aihub.toml")          # the repo's aihub.toml is authoritative
         m = M.normalize(M.parse(open(toml, encoding="utf-8").read()))
