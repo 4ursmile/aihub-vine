@@ -107,6 +107,7 @@ def _public(u):
 class Cred(BaseModel):
     username: str
     password: str
+    remember: bool = True          # False (web "Remember me" off): the session ends after Repos.SHORT_SESSION
 
 
 class PwChange(BaseModel):
@@ -141,13 +142,14 @@ def register(c: Cred, request: Request):
 @r.post("/auth/login")
 def login(c: Cred, request: Request):
     repos = R(request)
-    key = (request.client.host if request.client else "?", c.username.lower())
+    name = login_name(repos, c.username)
+    key = (request.client.host if request.client else "?", name.lower())       # abc and abc@gmail.com share one attempt counter
     n, first = _fails.get(key, (0, time.time()))
     if n >= 8 and time.time() - first < 300:
         raise HTTPException(429, "too many attempts; try again in a few minutes")
     if time.time() - first >= 300:
         n, first = 0, time.time()
-    u = repos.user_by_name(c.username)
+    u = repos.user_by_name(name)
     if not u or not verify_password(c.password, u["password_hash"] or ""):
         _fails[key] = (n + 1, first)
         raise HTTPException(401, "bad credentials")
@@ -155,7 +157,7 @@ def login(c: Cred, request: Request):
     if u["status"] != "active":
         raise HTTPException(403, "account " + u["status"])
     t = new_token()
-    repos.token_add(hash_token(t), u["id"], "session")
+    repos.token_add(hash_token(t), u["id"], "session" if c.remember else "session-short")
     return {"token": t, "username": u["username"], "role": u["role"]}
 
 
@@ -993,6 +995,7 @@ TEXT_SETTINGS = {
     "contact_email": (120, "email", "Contact email", "Shown in the footer as a mail link"),
     "contact_url": (200, "url", "Support link", "Help desk, chat or wiki address (http:// or https://)"),
     "contact_phone": (40, "text", "Contact phone", "Optional"),
+    "login_domains": (500, "domains", "Sign-in email domains", "Comma list such as gmail.com, yahoo.com: the account abc can also sign in (web and `aihub login`) as abc@gmail.com or abc@yahoo.com. Blank = only the exact user name"),
     "announcement": (2000, "html", "Announcement banner", "Shown as a banner above the header on every page. Basic HTML is kept (a, b, strong, i, em, u, s, br, span, code, small, mark; links must be http/https/mailto); everything else is removed. Blank = hidden"),
 }
 _EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
@@ -1003,11 +1006,44 @@ def _check_text(k, v):
     if kind == "html":
         return safehtml.clean(v, n)
     v = _clean(v, n)
+    if kind == "domains":
+        return ", ".join(_domains(v, strict=True))
     if v and kind == "email" and not _EMAIL_RE.match(v):
         raise HTTPException(400, "%s is not a valid email address" % k)
     if v and kind == "url" and not re.match(r"^https?://[^\s]+$", v, re.I):
         raise HTTPException(400, "%s must start with http:// or https://" % k)
     return v
+
+
+_DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+
+
+def _domains(v, strict=False):
+    """`login_domains` as a list of lowercase domains ("@gmail.com" and "gmail.com" both accepted)."""
+    out = []
+    for d in re.split(r"[,\s;]+", str(v or "").lower()):
+        d = d.strip().lstrip("@").rstrip(".")
+        if not d:
+            continue
+        if not _DOMAIN_RE.match(d):
+            if strict:
+                raise HTTPException(400, "login_domains: %r is not a domain such as gmail.com" % d)
+            continue
+        if d not in out:
+            out.append(d)
+    return out
+
+
+def login_name(repos, name):
+    """The user name `name` signs in as: `abc@domain` -> `abc` when domain is in the admin setting login_domains and no account is literally
+    called `abc@domain`; otherwise `name` as typed."""
+    name = str(name or "")
+    if "@" not in name or repos.user_by_name(name):
+        return name
+    local, dom = name.rsplit("@", 1)
+    if local and dom.strip().lower().rstrip(".") in _domains(repos.setting("login_domains") or ""):
+        return local
+    return name
 
 
 def probe_hub(url, timeout=6):
@@ -1696,6 +1732,69 @@ def backup_run(request: Request, u=admin):
         raise HTTPException(502, "backup failed: %s" % str(e)[:300])
     R(request).audit(u["username"], "backup.run", "", "")
     return _backup_view(request, u)
+
+
+def _git_logins(request):
+    from . import gitlogin
+    st = gitlogin.store(request.app.state.settings)
+    sy = request.app.state.sync
+    hosts = [gitlogin.clean_host(u) for u in (sy.index_source()[0], sy.inbox())]
+    return {"logins": st.list(), "error": st.error, "suggest": [h for h in dict.fromkeys(hosts) if h]}
+
+
+@r.get("/admin/git-login")
+def git_login_list(request: Request, u=admin):
+    """Git logins saved for the server's git (fallback after AIHUB_GIT_TOKEN / vault). Secrets are never returned."""
+    return _git_logins(request)
+
+
+@r.put("/admin/git-login")
+def git_login_put(body: dict, request: Request, u=admin):
+    from . import gitlogin
+    try:
+        host = gitlogin.store(request.app.state.settings).put(body.get("host"), body.get("user"), body.get("secret"), u["username"])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    R(request).audit(u["username"], "git_login.set", host, "")
+    return _git_logins(request)
+
+
+@r.delete("/admin/git-login/{host}")
+def git_login_delete(host: str, request: Request, u=admin):
+    from . import gitlogin
+    if not gitlogin.store(request.app.state.settings).remove(host):
+        raise HTTPException(404, "no saved login for that host")
+    R(request).audit(u["username"], "git_login.remove", host, "")
+    return _git_logins(request)
+
+
+@r.post("/admin/git-login/test")
+def git_login_test(body: dict, request: Request, u=admin):
+    """ls-remote of the backup repo with only the saved login (nothing else is tried)."""
+    from . import gitlogin
+    url = request.app.state.sync.index_source()[0]
+    ok, msg = gitlogin.check(gitlogin.store(request.app.state.settings), url, gitlogin.clean_host((body or {}).get("host")))
+    return {"ok": ok, "message": msg}
+
+
+@r.get("/admin/logs")
+def logs_read(request: Request, after: int = 0, u=admin):
+    """Lines of the server log after sequence `after` (only while listening; see loglisten)."""
+    from .loglisten import TAP
+    return TAP.read(max(0, after))
+
+
+@r.post("/admin/logs/listen")
+def logs_listen(body: dict, request: Request, u=admin):
+    """{"on": true|false, "clear": bool}: start or stop listening to the server log."""
+    from .loglisten import TAP
+    if (body or {}).get("clear"):
+        TAP.clear()
+    if (body or {}).get("on"):
+        TAP.start(u["username"])
+    elif "on" in (body or {}):
+        TAP.stop()
+    return TAP.read(int((body or {}).get("after") or 0))
 
 
 def _updater(request):

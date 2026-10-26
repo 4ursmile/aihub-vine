@@ -887,3 +887,57 @@ class SettingsFileSafe(unittest.TestCase):
             self.assertFalse(have)                                                   # gave up waiting, did not hang
         self.assertLess(time.time() - t0, 1.5, "a hook waited too long for a held lock")
         os.remove(lock)
+
+
+class Reinstall(HubBase):
+    """Uninstall + install gives the CLI a new client_id and it re-uploads its whole log history: that must not count twice."""
+    busy = lambda self, day, **k: row(day, req=8, **k)
+
+    def test_reinstalled_client_is_folded_and_its_history_kept(self):
+        self.up("ann", [self.busy(D(3), out=900), self.busy(D(1)), self.busy(D(0), out=100)], client="old")
+        # reinstall: D(3) logs were pruned meanwhile, the rest is the same, today has grown
+        self.up("ann", [self.busy(D(1)), self.busy(D(0), out=400)], client="new")
+        t = self.get("ann").json()["totals"]
+        self.assertEqual(t["outp"], 900 + 100 + 400)
+        clients = {r[0] for r in self.c.app.state.repos.db.conn().execute("SELECT DISTINCT client_id FROM usage_daily")}
+        self.assertEqual(clients, {"new"})
+
+    def test_two_real_devices_still_add_and_quiet_identical_days_are_not_merged(self):
+        self.up("ann", [self.busy(D(0), out=100)], client="mac")
+        self.up("ann", [self.busy(D(0), out=150)], client="pc")             # different numbers = another machine
+        self.up("ann", [row(D(1), req=2)], client="mac")
+        self.up("ann", [row(D(1), req=2)], client="pc")                      # identical but tiny: could be a coincidence, kept apart
+        self.up("bob", [self.busy(D(0), out=100)], client="bobs")            # same numbers, another person: never merged
+        self.assertEqual(self.get("ann").json()["totals"]["outp"], 100 + 150 + 100 + 100)
+        self.assertEqual(self.get("bob").json()["totals"]["outp"], 100)
+
+    def test_start_repair_folds_rows_doubled_before_the_fix_once(self):
+        repos = self.c.app.state.repos
+        self.up("ann", [self.busy(D(0))], client="a")
+        self.c.app.state.usagebuf.flush()
+        uid = repos.db.conn().execute("SELECT user_id FROM usage_daily").fetchone()[0]
+        c = repos.db.conn()
+        ins = "INSERT INTO usage_daily(user_id,client_id,day,tool,model,requests,inp,outp,cache_write,cache_read,cost,unpriced,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        for cl, day, out, ts in (("a", D(1), 70, 1), ("b", D(0), 100, 2), ("b", D(1), 70, 2), ("c", D(1), 70, 3), ("c", D(2), 5, 3)):
+            c.execute(ins, (uid, cl, day, "claude", "claude-opus-5", 8, 10, out, 5, 20, 1.0, 0, ts))
+        c.execute("UPDATE usage_daily SET updated=0 WHERE client_id='a'")
+        c.commit()
+        self.c.app.state.repos.set_setting("usage_dedupe_v1", "")
+        self.assertEqual(repos.usage_dedupe(), 2)
+        rows = sorted((r[0], r[1], r[2]) for r in c.execute("SELECT client_id,day,outp FROM usage_daily"))
+        self.assertEqual(rows, sorted([("c", D(0), 100), ("c", D(1), 70), ("c", D(2), 5)]))
+        self.assertEqual(repos.usage_dedupe(), 0)                            # marker: once
+
+
+class StableClientId(unittest.TestCase):
+    def test_new_install_reuses_the_id_and_an_existing_id_is_kept(self):
+        home = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"AIHUB_HOME": home}), mock.patch.object(hooks, "_machine_id", return_value="m-1"):
+            first = hooks.client_id()
+            os.remove(os.path.join(home, "config.json"))                    # self-uninstall wipes ~/.aihub
+            self.assertEqual(hooks.client_id(), first)
+            with open(os.path.join(home, "config.json"), "w") as f:
+                json.dump({"client_id": "legacy"}, f)
+            self.assertEqual(hooks.client_id(), "legacy")                   # old installs keep theirs
+        with mock.patch.dict(os.environ, {"AIHUB_HOME": tempfile.mkdtemp()}), mock.patch.object(hooks, "_machine_id", return_value=""):
+            self.assertEqual(len(hooks.client_id()), 32)                    # unknown machine: random, as before

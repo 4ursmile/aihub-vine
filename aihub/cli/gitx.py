@@ -17,6 +17,9 @@ NETWORK_TIMEOUT = 300   # seconds; in BATCH mode a network command never runs wi
 
 
 LOGIN = None            # server: fn(host) -> (user, secret) or None, set by Sync.start; consulted for git calls that need a login
+FALLBACK = None         # server: fn(host) -> (user, secret) or None: the login an admin saved (Admin > Backup), tried only when the normal one fails
+FALLBACK_STICKY = 3600  # seconds a host whose normal login was refused tries the fallback first (saves one failed call per git command)
+_fallback_first = {}    # host -> time until which the fallback goes first
 TRUSTED = []            # server: folders git may open although another account owns them (see trust())
 
 
@@ -76,26 +79,26 @@ _HELPER = ('!f() { test "$1" = get || exit 0; p=; h=; while IFS== read -r k v; d
            "printf 'username=%s\\npassword=%s\\n' \"$AIHUB_GIT_USER\" \"$AIHUB_GIT_SECRET\"; }; f")
 
 
-def _login_env(env, cwd, args):
-    """Give git the stored login for the host this call talks to, without touching disk or git config and without the secret appearing in a
-    command line: user and secret go in the environment of this one child, and the inline helper (see _HELPER) prints them only for exactly
-    the scheme and host[:port] they were issued for. Only when LOGIN is set (the server), the call can reach a network and the URL has no
-    login of its own. A redirect is followed for the first request only (git's own default), and the helper still refuses any other host. https only, unless AIHUB_GIT_ALLOW_HTTP=1."""
-    if LOGIN is None or not args or args[0] not in NETWORK + ("lfs",):
-        return env
+def _call_hosts(cwd, args):
+    """[(scheme, host)] this network call talks to: the URLs in its arguments, else origin of `cwd`."""
     hosts = _hosts_in(args)
     if not hosts and cwd:
         try:
             url = subprocess.run(["git", "remote", "get-url", "origin"], cwd=cwd, env=_trusted_env(dict(os.environ), cwd), capture_output=True,
                                  text=True, encoding="utf-8", errors="replace", timeout=20, **popen_kw()).stdout.strip()
         except (OSError, subprocess.SubprocessError):
-            return env
+            return []
         hosts = _hosts_in([url])
+    return hosts
+
+
+def _apply_login(env, hosts, login):
+    """Put the login `login(host)` gives for the first matching host into env (see _login_env). -> that host, or None."""
     for scheme, host in hosts:
         if scheme != "https" and not os.environ.get("AIHUB_GIT_ALLOW_HTTP"):
             continue                                                   # a token is never offered over plain http by default
         try:
-            got = LOGIN(host)
+            got = login(host)
         except Exception:
             got = None
         if got and got[0] and got[1]:
@@ -108,8 +111,52 @@ def _login_env(env, cwd, args):
             env["AIHUB_GIT_PROTO"], env["AIHUB_GIT_HOST"] = scheme, host
             env["AIHUB_GIT_USER"], env["AIHUB_GIT_SECRET"] = got
             _warn_unverified(scheme, host)
-            break
+            return host
+    return None
+
+
+def _login_env(env, cwd, args):
+    """Give git the stored login for the host this call talks to, without touching disk or git config and without the secret appearing in a
+    command line: user and secret go in the environment of this one child, and the inline helper (see _HELPER) prints them only for exactly
+    the scheme and host[:port] they were issued for. Only when LOGIN is set (the server), the call can reach a network and the URL has no
+    login of its own. A redirect is followed for the first request only (git's own default), and the helper still refuses any other host. https only, unless AIHUB_GIT_ALLOW_HTTP=1."""
+    if LOGIN is None or not args or args[0] not in NETWORK + ("lfs",):
+        return env
+    _apply_login(env, _call_hosts(cwd, args), LOGIN)
     return env
+
+
+def _attempts(env, cwd, args):
+    """[(env, fallback_host)] to try in order. Normally one: the usual login (_login_env). When an admin saved a login for this host
+    (FALLBACK) that differs from the usual one, it is a second try, used only after an auth failure; a host where that already happened
+    tries it first for FALLBACK_STICKY s. Without a saved login nothing changes."""
+    if FALLBACK is None or not args or args[0] not in NETWORK + ("lfs",):
+        return [(_login_env(env, cwd, args), None)]
+    hosts = _call_hosts(cwd, args)
+    normal = dict(env)
+    if LOGIN is not None:
+        _apply_login(normal, hosts, LOGIN)
+    fb = dict(env)
+    h = _apply_login(fb, hosts, FALLBACK)
+    if not h or (fb.get("AIHUB_GIT_HOST"), fb.get("AIHUB_GIT_USER"), fb.get("AIHUB_GIT_SECRET")) == \
+            (normal.get("AIHUB_GIT_HOST"), normal.get("AIHUB_GIT_USER"), normal.get("AIHUB_GIT_SECRET")):
+        return [(normal, None)]
+    import time
+    if _fallback_first.get(h, 0) > time.time():
+        return [(fb, h), (normal, None)]
+    return [(normal, None), (fb, h)]
+
+
+def _note_attempt(host, ok, first):
+    """Remember how a fallback try went (host = the fallback was used)."""
+    import time
+    import logging
+    if host and ok and not first:
+        if _fallback_first.get(host, 0) <= time.time():
+            logging.getLogger("aihub").warning("git login for %s was refused; the login saved in Admin > Backup worked and is used first for now", host)
+        _fallback_first[host] = time.time() + FALLBACK_STICKY
+    elif host and not ok:
+        _fallback_first.pop(host, None)
 
 
 _warned_tls = set()
@@ -167,16 +214,28 @@ def _env(extra_env=None, cwd=None):
     return _trusted_env(env, cwd)
 
 
+def _tried(attempts, call):
+    """Run call(env) for each attempt until one does not fail on its login. -> the last CompletedProcess (None = timeout)."""
+    r = None
+    for i, (env, fb) in enumerate(attempts):
+        r = call(env)
+        bad = r is not None and r.returncode != 0 and fetch_failure((r.stderr or "") + "\n" + (r.stdout or "")) == "auth"
+        if len(attempts) > 1:
+            _note_attempt(fb, r is not None and r.returncode == 0, i == 0)
+        if not bad:
+            break
+    return r
+
+
 def run(args, cwd=None, check=True, timeout=None, input=None, extra_env=None):
-    env = _login_env(_env(extra_env, cwd), cwd, list(args))
+    args = list(args)
+    attempts = _attempts(_env(extra_env, cwd), cwd, args)
     if timeout is None and BATCH and args and args[0] in NETWORK:
         timeout = NETWORK_TIMEOUT
     if isinstance(input, str):
         input = textsafe.clean(input)              # a path or message with a non-UTF-8 byte must not fail the encode of git's stdin
-    try:
-        r = subprocess.run(["git"] + list(args), cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=timeout, input=input, **popen_kw())
-    except subprocess.TimeoutExpired:
+    r = _tried(attempts, lambda env: _git(args, cwd, env, timeout, input))
+    if r is None:
         if check:
             msg = "git %s timed out after %ss" % (args[0], timeout)
             raise GitError(explain(msg, _error_url(list(args), cwd, msg), "net") if args[0] in NETWORK else msg)
@@ -579,9 +638,14 @@ def remote_head(url, branch, timeout=60):
 def _ls(url, timeout=60):
     """`git ls-remote url` with the same environment as every other call (trusted folders, stored login). -> CompletedProcess or None on timeout."""
     args = ["ls-remote", url]
+    return _tried(_attempts(_env(), None, args), lambda env: _git(args, None, env, timeout))
+
+
+def _git(args, cwd, env, timeout, input=None):
+    """One git child. -> CompletedProcess, or None when it timed out."""
     try:
-        return subprocess.run(["git"] + args, env=_login_env(_env(), None, args), capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=timeout, **popen_kw())
+        return subprocess.run(["git"] + args, cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=timeout, input=input, **popen_kw())
     except subprocess.TimeoutExpired:
         return None
 

@@ -3,12 +3,14 @@
 The server runs git without a person to answer a prompt (`gitx.BATCH`), so a missing login used to end as "terminal prompts disabled" and a
 data folder owned by another account as "detected dubious ownership". `install()` fixes both for every later git call:
   - the data folder is trusted (`gitx.trust`);
-  - a login is looked up per host (`gitx.LOGIN`): AIHUB_GIT_TOKEN, else the aihub vault of the account that runs the server.
-Nothing here writes a credential to disk, to git config or to a command line."""
+  - a login is looked up per host (`gitx.LOGIN`): AIHUB_GIT_TOKEN, else the aihub vault of the account that runs the server;
+  - a login an admin saved in the web UI (`gitlogin`, encrypted in the data folder) is the fallback (`gitx.FALLBACK`) for a refused or missing one.
+Nothing here writes a credential to git config or to a command line."""
 import logging
 import os
 
 from ..cli import gitx
+from . import gitlogin
 from .config import parse_env_file
 
 log = logging.getLogger("aihub")
@@ -64,10 +66,10 @@ def login_for(settings, host, urls=()):
                 user = (v[0] if v else "") or "oauth2"
             return user, token
     found = _vault(host)
-    if not found and host and host not in _hinted:
+    if not found and host and host not in _hinted and not gitlogin.store(settings).get(host):
         _hinted.add(host)
         log.warning("the hub has no working git login for %s: set AIHUB_GIT_TOKEN (+AIHUB_GIT_USER, AIHUB_GIT_HOSTS=%s) in the server env, "
-                    "or run `aihub vault add https://%s` as the account that runs the server", host, host, host)
+                    "run `aihub vault add https://%s` as the account that runs the server, or save one in Admin > Backup > Git login", host, host, host)
     return found
 
 
@@ -97,3 +99,4 @@ def install(settings, urls=lambda: ()):
     gitx.BATCH = True
     gitx.trust(settings.data_dir)
     gitx.LOGIN = lambda host: login_for(settings, host, [u for u in urls() if u])
+    gitx.FALLBACK = gitlogin.store(settings).get

@@ -20,7 +20,7 @@ This is a bundled snapshot, condensed from the hub docs (cli, manifest, publishi
 
 ```sh
 aihub config set hub https://<hub>
-aihub register          # prompts for username and password; signup policy applies
+aihub register          # prompts for username and the password twice; signup policy applies
 aihub login             # prompts for username if omitted; password is not echoed
 ```
 

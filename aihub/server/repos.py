@@ -258,9 +258,12 @@ class Repos:
             c.execute("INSERT INTO tokens VALUES(?,?,?,?,?)", (h, user_id, kind, name, time.time()))
             c.commit()
 
+    SHORT_SESSION = 12 * 3600          # a web sign-in without "Remember me" (token kind 'session-short') ends after this many seconds
+
     def token_user(self, h):
         r = self.db.conn().execute(
-            "SELECT u.* FROM tokens t JOIN users u ON u.id=t.user_id WHERE t.hash=?", (h,)).fetchone()
+            "SELECT u.* FROM tokens t JOIN users u ON u.id=t.user_id WHERE t.hash=? AND NOT (t.kind='session-short' AND t.created<?)",
+            (h, time.time() - self.SHORT_SESSION)).fetchone()
         return dict(r) if r else None
 
     def tokens(self, user_id):
@@ -1034,6 +1037,9 @@ class Repos:
                     data.sort(key=lambda t: (t[0], t[1], t[2], t[3], t[4]))      # one fixed lock order: two workers can never deadlock on Postgres
                     c.executemany("INSERT OR REPLACE INTO usage_daily(user_id,client_id,day,tool,model,requests,inp,outp,cache_write,cache_read,cost,unpriced,updated) "
                                   "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", data)
+                for (uid, client), rows in by.items():                      # after the insert (sees a twin of this same batch); arrival order: the latest client keeps the rows
+                    if rows:
+                        self._usage_fold(c, uid, client, rows)
                 c.commit()
                 return len(data)
             except Exception:
@@ -1042,6 +1048,83 @@ class Repos:
                 except Exception:
                     pass
                 raise
+
+    DUP_MIN_REQUESTS = 5      # a day this busy reported identically by two clients = the same logs (a reinstall), not two devices
+    _DUP_COLS = "day,tool,model,requests,inp,outp,cache_write,cache_read"
+
+    def _usage_fold(self, c, uid, client, rows):
+        """A reinstalled CLI has a new client_id and re-uploads every day its logs still hold, which would count those days twice (clients
+        add up). Another client of this person reporting a busy day (>= DUP_MIN_REQUESTS requests) with exactly the same numbers is the
+        same machine: it is folded into `client`. -> clients folded."""
+        mine = {(r["day"], r["tool"], r["model"], r["requests"], r["inp"], r["outp"], r["cache_write"], r["cache_read"])
+                for r in rows if r["requests"] >= self.DUP_MIN_REQUESTS}
+        if not mine:
+            return 0
+        days, dup = sorted({k[0] for k in mine}), set()
+        for i in range(0, len(days), 400):
+            part = days[i:i + 400]
+            for x in c.execute("SELECT client_id,%s FROM usage_daily WHERE user_id=? AND client_id<>? AND requests>=? AND day IN (%s)"
+                               % (self._DUP_COLS, ",".join("?" * len(part))), [uid, client, self.DUP_MIN_REQUESTS] + part):
+                if tuple(x[i] for i in range(1, 9)) in mine:
+                    dup.add(x[0])
+        for old in sorted(dup):
+            self._usage_move(c, uid, old, client)
+        return len(dup)
+
+    def _usage_move(self, c, uid, src, dst):
+        """Rows of client `src` go to `dst` where they hold more tokens than `dst` has for that day (history of pruned logs is kept), then
+        `src` is gone."""
+        have = {(x[0], x[1], x[2]): x[3] for x in c.execute("SELECT day,tool,model,inp+outp+cache_write+cache_read FROM usage_daily "
+                                                             "WHERE user_id=? AND client_id=?", (uid, dst))}
+        data = [(uid, dst) + tuple(x[i] for i in range(11)) for x in c.execute(
+            "SELECT %s,cost,unpriced,updated FROM usage_daily WHERE user_id=? AND client_id=?" % self._DUP_COLS, (uid, src))
+            if x[4] + x[5] + x[6] + x[7] > have.get((x[0], x[1], x[2]), -1)]
+        if data:
+            data.sort(key=lambda t: (t[2], t[3], t[4]))
+            c.executemany("INSERT OR REPLACE INTO usage_daily(user_id,client_id,day,tool,model,requests,inp,outp,cache_write,cache_read,cost,unpriced,updated) "
+                          "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", data)
+        c.execute("DELETE FROM usage_daily WHERE user_id=? AND client_id=?", (uid, src))
+
+    def usage_dedupe(self):
+        """One-time repair of days doubled before `_usage_fold` existed (marker `usage_dedupe_v1`): per person, clients sharing an identical
+        busy day are one machine, folded into the one updated last. -> clients folded."""
+        if self.setting("usage_dedupe_v1") == "1":
+            return 0
+        n = 0
+        with self.lock:
+            c = self.db.conn()
+            try:
+                first, parent, last = {}, {}, {}
+
+                def root(k):
+                    while parent.get(k, k) != k:
+                        k = parent[k]
+                    return k
+                for x in c.execute("SELECT user_id,client_id,%s,updated FROM usage_daily WHERE requests>=?" % self._DUP_COLS, (self.DUP_MIN_REQUESTS,)):
+                    k, sig = (x[0], x[1]), (x[0],) + tuple(x[i] for i in range(2, 10))
+                    last[k] = max(last.get(k, 0), x[10] or 0)
+                    if sig in first and root(first[sig]) != root(k):
+                        parent[root(k)] = root(first[sig])
+                    first.setdefault(sig, k)
+                groups = {}
+                for k in last:
+                    groups.setdefault(root(k), []).append(k)
+                for ks in groups.values():
+                    if len(ks) < 2:
+                        continue
+                    ks.sort(key=lambda k: (last[k], k[1]))
+                    for uid, src in ks[:-1]:
+                        self._usage_move(c, uid, src, ks[-1][1])
+                        n += 1
+                c.commit()
+            except Exception:
+                try:
+                    c.rollback()
+                except Exception:
+                    pass
+                raise
+        self.set_setting("usage_dedupe_v1", "1")
+        return n
 
     SESSION_COLS = ("tool", "model", "day", "started", "ended", "requests", "inp", "outp", "cache_write", "cache_read", "cost", "unpriced",
                     "peak", "cold", "compact", "big", "light")

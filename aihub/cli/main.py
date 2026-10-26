@@ -28,6 +28,7 @@ def cmd_config(a):
 def cmd_login(a):
     u = a.username or input("username: ")
     r = api.call("POST", "/auth/login", {"username": u, "password": getpass.getpass("password: ")})
+    u = r.get("username") or u                               # the hub may map abc@gmail.com to the account abc (allowed sign-in domains)
     paths.save("credentials.json", {"token": r["token"], "username": u}, private=True)
     ui.celebrate("Welcome back, %s" % u)
     from . import hooks, usagesync
@@ -70,7 +71,10 @@ def cmd_admin(a):
 
 def cmd_register(a):
     u = input("username: ")
-    api.call("POST", "/auth/register", {"username": u, "password": getpass.getpass("password: ")})
+    pw = getpass.getpass("password: ")
+    if getpass.getpass("re-enter password: ") != pw:
+        raise SystemExit("aihub: the two passwords do not match; nothing was created")
+    api.call("POST", "/auth/register", {"username": u, "password": pw})
     ui.good("Account created for %s" % u)
     ui.info("next: aihub login   (new accounts may need admin approval first)")
 

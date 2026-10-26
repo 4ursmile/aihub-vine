@@ -4,7 +4,8 @@ const { html, render, useState, useEffect, useRef, useCallback } = window.htmPre
 // ---------- api / state
 const BASE = ((document.getElementById("base") || {}).content || "").replace(/\/+$/, ""); // path prefix behind a reverse proxy ("" when served at the root)
 const U = (p) => BASE + p;
-const tok = () => { try { return localStorage.getItem("aihub_token"); } catch { return null; } };
+const tok = () => { try { return localStorage.getItem("aihub_token") || sessionStorage.getItem("aihub_token"); } catch { return null; } };
+const keepToken = (t, remember) => { try { sessionStorage.removeItem("aihub_token"); localStorage.removeItem("aihub_token"); (remember ? localStorage : sessionStorage).setItem("aihub_token", t); } catch {} };
 async function api(path, opt = {}) {
   const h = { "Content-Type": "application/json" };
   if (tok()) h.Authorization = "Bearer " + tok();
@@ -403,17 +404,58 @@ function Start() {
     ${step(4, "Publish your own", "Scaffold a manifest, then publish. aihub commits and pushes to your git repo for you.", "aihub dev init && aihub dev publish")}</div>`;
 }
 
+const pwScore = (p) => !p ? 0 : Math.min(4, (p.length >= 6) + (p.length >= 10) + (/[a-z]/.test(p) && /[A-Z]/.test(p)) + (/\d/.test(p) && /[^\w\s]/.test(p)));
+const PW_WORD = ["", "Weak", "Fair", "Good", "Strong"];
+const EyeIcon = ({ off }) => html`<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" />${off && html`<path d="M4 4l16 16" />`}</svg>`;
+// one floating-label field; `children` = trailing control (show/hide button)
+function AuField({ id, label, value, set, type = "text", invalid, children, ...rest }) {
+  return html`<div class=${"au-f" + (invalid ? " bad" : "")}><input id=${id} class="au-in" type=${type} placeholder=" " value=${value} onInput=${(e) => set(e.target.value)} aria-invalid=${invalid ? "true" : "false"} ...${rest} />
+    <label for=${id}>${label}</label>${children}</div>`;
+}
 function Auth({ mode }) {
-  const [u, setU] = useState(""); const [p, setP] = useState(""); const [e, setE] = useState(""); const [busy, setBusy] = useState(false); const reg = mode === "register";
-  const go = async (ev) => { ev.preventDefault(); setBusy(true); setE("");
+  const [u, setU] = useState(""); const [p, setP] = useState(""); const [p2, setP2] = useState(""); const [rem, setRem] = useState(true); const [e, setE] = useState(""); const [busy, setBusy] = useState(false);
+  const [show, setShow] = useState(false); const [caps, setCaps] = useState(false); const [done, setDone] = useState(false); const [shakes, setShakes] = useState(0);
+  const reg = mode === "register", br = store.brand || {}, card = useRef(null);
+  const mismatch = reg && p2 && p !== p2, score = pwScore(p);
+  useEffect(() => { setE(""); setP2(""); }, [mode]);
+  const fail = (m) => { setE(m); setShakes((n) => n + 1); };
+  // specular light + slight tilt follow the pointer (fine pointers only; no re-render, CSS vars on the card)
+  const still = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce), (pointer: coarse)").matches;
+  const move = (ev) => { const c = card.current; if (!c || still) return; const r = c.getBoundingClientRect(), x = (ev.clientX - r.left) / r.width, y = (ev.clientY - r.top) / r.height;
+    c.style.setProperty("--mx", (x * 100).toFixed(1) + "%"); c.style.setProperty("--my", (y * 100).toFixed(1) + "%");
+    c.style.setProperty("--rx", (Math.max(-1, Math.min(1, 0.5 - y)) * 4).toFixed(2) + "deg"); c.style.setProperty("--ry", (Math.max(-1, Math.min(1, x - 0.5)) * 5).toFixed(2) + "deg"); };
+  const leave = () => { const c = card.current; if (c) { c.style.setProperty("--rx", "0deg"); c.style.setProperty("--ry", "0deg"); } };
+  const go = async (ev) => { ev.preventDefault(); if (busy || done) return; if (reg && p !== p2) return fail("The two passwords do not match"); setBusy(true); setE("");
     try { if (reg) { const r = await api("/auth/register", { method: "POST", body: { username: u, password: p } }); if (r.status === "pending") { toast("Account created - awaiting admin approval"); return nav("/login"); } }
-      const r = await api("/auth/login", { method: "POST", body: { username: u, password: p } }); localStorage.setItem("aihub_token", r.token); await loadMe(); nav("/"); }
-    catch (x) { setE(x.message); } finally { setBusy(false); } };
-  return html`<form class="form" onSubmit=${go}><h2>${reg ? "Create your account" : "Sign in"}</h2>
-    <input class="field" placeholder="Username" autocomplete="username" value=${u} onInput=${(x) => setU(x.target.value)} required />
-    <input class="field" type="password" placeholder="Password" autocomplete=${reg ? "new-password" : "current-password"} value=${p} onInput=${(x) => setP(x.target.value)} required minlength="6" />
-    <button class="btn" style="width:100%;margin-top:16px" disabled=${busy}>${busy ? "…" : reg ? "Create account" : "Sign in"}</button><div class="msg" role="alert">${e}</div>
-    <p class="center mut sm" style="text-align:center;margin-top:8px">${reg ? html`Have an account? <a href="#/login">Sign in</a>` : html`New here? <a href="#/register">Create an account</a>`}</p></form>`;
+      const r = await api("/auth/login", { method: "POST", body: { username: u, password: p, remember: rem } }); keepToken(r.token, rem); setDone(true);
+      await Promise.all([loadMe(), new Promise((ok) => setTimeout(ok, 520))]); nav("/"); }
+    catch (x) { fail(x.message); } finally { setBusy(false); } };
+  const capsKey = (ev) => ev.getModifierState && setCaps(ev.getModifierState("CapsLock"));
+  const eye = html`<button type="button" class="au-eye" onClick=${() => setShow(!show)} aria-label=${show ? "Hide password" : "Show password"} aria-pressed=${show}><${EyeIcon} off=${show} /></button>`;
+  return html`<section class="au" onPointerMove=${move} onPointerLeave=${leave}>
+    <div class="au-orbs" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+    <form ref=${card} class=${"au-card" + (done ? " ok" : "")} style=${shakes ? `animation-name:au-shake${shakes % 2}` : ""} onSubmit=${go}>
+      <span class="au-sheen" aria-hidden="true"></span><span class="au-ring" aria-hidden="true"></span>
+      <div class="au-brand">${br.logo_url ? html`<img decoding="async" class="logo" src=${br.logo_url} alt="" />` : html`<span class="au-mark" aria-hidden="true"></span>`}<span>${br.name || "AI Hub"}</span></div>
+      <div class=${"au-seg" + (reg ? " r" : "")} role="tablist" aria-label="Account"><i class="au-pill" aria-hidden="true"></i>
+        <a role="tab" href="#/login" aria-selected=${!reg}>Sign in</a><a role="tab" href="#/register" aria-selected=${reg}>Create account</a></div>
+      <div class="au-head" key=${mode}><h1>${reg ? "Create your account" : "Welcome back"}</h1>
+        <p class="mut">${reg ? "Publish and install skills, agents and MCP servers with your team." : "Sign in to install, publish and track your packages."}</p></div>
+      <div class="au-fields">
+        <${AuField} id="au-u" label="Username" value=${u} set=${setU} autocomplete="username" autocapitalize="none" spellcheck="false" required />
+        <${AuField} id="au-p" label="Password" value=${p} set=${setP} type=${show ? "text" : "password"} autocomplete=${reg ? "new-password" : "current-password"} required minlength="6" onKeyUp=${capsKey} onKeyDown=${capsKey}>${eye}<//>
+        <div class=${"au-more" + (reg ? " open" : "")} aria-hidden=${!reg}><div>
+          <div class="au-meter" data-s=${score} aria-live="polite"><span><i></i><i></i><i></i><i></i></span><b class="xs">${p ? PW_WORD[score] : "At least 6 characters"}</b></div>
+          <${AuField} id="au-p2" label="Re-enter password" value=${p2} set=${setP2} type=${show ? "text" : "password"} autocomplete="new-password" required=${reg} minlength="6" invalid=${mismatch} tabindex=${reg ? 0 : -1} disabled=${!reg}>
+            ${reg && p2 && html`<span class=${"au-tick" + (mismatch ? " no" : "")} aria-hidden="true">${mismatch ? "✕" : "✓"}</span>`}<//>
+        </div></div>
+      </div>
+      <div class="au-row">${caps ? html`<span class="au-caps xs">⇪ Caps Lock is on</span>` : html`<span></span>`}
+        <label class="au-rem"><input type="checkbox" checked=${rem} onChange=${(x) => setRem(x.target.checked)} /><i aria-hidden="true"></i>Remember me</label></div>
+      <button class=${"au-go" + (busy ? " busy" : "") + (done ? " done" : "")} disabled=${busy || mismatch || done}><span class="au-go-t">${reg ? "Create account" : "Sign in"}</span><span class="au-spin" aria-hidden="true"></span><span class="au-ok" aria-hidden="true">✓</span></button>
+      <div class="msg" role="alert">${e}</div>
+      <p class="au-alt sm mut">${reg ? html`Already have an account? <a href="#/login">Sign in</a>` : html`New here? <a href="#/register">Create an account</a>`}</p>
+    </form></section>`;
 }
 
 async function toAvatarBlob(file) {
@@ -478,13 +520,40 @@ function Account() {
     <h2 class="gap">My packages</h2>${mine.d && mine.d.packages.length ? html`<div class="list">${mine.d.packages.map((x) => html`<a class="li" href=${"#/package/" + x.name} key=${x.name}><div class="t"><b>${x.name}</b><span>${x.type} · v${x.latest_version}</span></div></a>`)}</div>` : html`<p class="mut">You haven’t published anything yet.</p>`}</div>`;
 }
 
+const LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"];
+function AdminListen() {
+  const [st, setSt] = useState({ listening: false, lines: [], seq: 0 }); const [busy, setBusy] = useState(false); const [lvl, setLvl] = useState("INFO"); const [q, setQ] = useState(""); const [follow, setFollow] = useState(true); const [paused, setPaused] = useState(false);
+  const box = useRef(null); const seq = useRef(0); const lines = useRef([]);
+  const merge = (r) => { if (r.seq < seq.current) { lines.current = []; seq.current = 0; } lines.current = lines.current.concat(r.lines).slice(-2000); seq.current = Math.max(seq.current, r.seq); setSt({ listening: r.listening, since: r.since, by: r.by, lines: lines.current, seq: r.seq }); };
+  const poll = async () => { try { merge(await api("/admin/logs?after=" + seq.current)); } catch (e) { setSt((x) => ({ ...x, error: e.message })); } };
+  useEffect(() => { poll(); }, []);
+  useEffect(() => { if (!st.listening || paused) return; const t = setInterval(poll, 1500); return () => clearInterval(t); }, [st.listening, paused]);
+  useEffect(() => { if (follow && box.current) box.current.scrollTop = box.current.scrollHeight; }, [st.lines.length, follow]);
+  const toggle = async (on) => { setBusy(true); try { merge(await api("/admin/logs/listen", { method: "POST", body: { on, after: seq.current } })); setPaused(false); } catch (e) { toast(e.message, 1); } finally { setBusy(false); } };
+  const clear = async () => { try { await api("/admin/logs/listen", { method: "POST", body: { clear: true } }); } catch {} lines.current = []; setSt((x) => ({ ...x, lines: [] })); };
+  const min = LOG_LEVELS.indexOf(lvl), f = q.trim().toLowerCase();
+  const shown = st.lines.filter((l) => Math.max(0, LOG_LEVELS.indexOf(l.level)) >= min && (!f || (l.name + " " + l.msg).toLowerCase().includes(f)));
+  const col = (l) => l.level === "ERROR" || l.level === "CRITICAL" ? "var(--red)" : l.level === "WARNING" ? "var(--orange)" : l.level === "DEBUG" ? "var(--fg-3)" : "inherit";
+  const t = (ts) => new Date(ts * 1000).toLocaleTimeString();
+  return html`<div class="stack"><div class="card stack"><div class="row" style="flex-wrap:wrap"><h3>Server log</h3><span class=${"badge " + (st.listening ? "green" : "")}>${st.listening ? (paused ? "paused" : "listening") : "off"}</span><span class="sp"></span>
+      ${st.listening ? html`<button class="btn sec sm" onClick=${() => setPaused(!paused)}>${paused ? "Resume" : "Pause"}</button><button class="btn sm danger" disabled=${busy} onClick=${() => toggle(false)}>Stop listening</button>` : html`<button class="btn sm" disabled=${busy} onClick=${() => toggle(true)}>Start listening</button>`}
+      <button class="btn sec sm" onClick=${clear}>Clear</button></div>
+    <p class="mut sm">Shows what the server logs from the moment you start (sync, backup, git, updates, requests). Secrets are masked. Nothing is stored on disk; the last 2000 lines are kept in memory, and listening stops by itself 2 minutes after the last viewer leaves.${st.listening && st.by ? " Started by " + st.by + "." : ""}</p>
+    <div class="row" style="flex-wrap:wrap"><div class="seg">${LOG_LEVELS.map((x) => html`<button key=${x} class=${lvl === x ? "on" : ""} onClick=${() => setLvl(x)}>${x === "DEBUG" ? "All" : x === "INFO" ? "Info+" : x === "WARNING" ? "Warnings+" : "Errors"}</button>`)}</div>
+      <input class="field" style="flex:1;min-width:160px" placeholder="Filter text" aria-label="Filter log lines" value=${q} onInput=${(e) => setQ(e.target.value)} />
+      <label class="row sm" style="gap:6px"><input type="checkbox" checked=${follow} onChange=${(e) => setFollow(e.target.checked)} /> Follow</label></div>
+    ${st.error && html`<p class="sm" role="alert" style="color:var(--red)">${st.error}</p>`}
+    <div ref=${box} class="mono xs vscroll" tabindex="0" role="log" aria-live="polite" aria-label="Server log" style="max-height:60vh;min-height:12rem;overflow:auto;white-space:pre-wrap;word-break:break-word;padding:8px;border-radius:8px;background:var(--fill)">
+      ${shown.length ? shown.map((l) => html`<div key=${l.seq} style=${"color:" + col(l)}><span class="mut3">${t(l.ts)}</span> <b>${l.level}</b> <span class="mut3">${l.name}</span> ${l.msg}</div>`) : html`<span class="mut">${st.listening ? "Waiting for log lines…" : "Not listening. Press Start listening."}</span>`}</div>
+    <p class="xs mut3">${shown.length} of ${st.lines.length} lines shown</p></div></div>`;
+}
 function Admin() {
   const { me } = useStore(); const [tab, setTab] = useState("People"); const [tick, setTick] = useState(0); const bump = () => setTick((x) => x + 1);
   if (!can("admin") && !can("reset_password")) return html`<${Empty} t="Admins only" d="You don’t have access to this page." />`;
-  const tabs = can("admin") ? ["People", "Roles", "Sync", "Backup", "Updates", "Settings"] : ["People"];
+  const tabs = can("admin") ? ["People", "Roles", "Sync", "Backup", "Updates", "Listen", "Settings"] : ["People"];
   return html`<div class="stack"><h1>Admin</h1>${tabs.length > 1 && html`<div class="seg">${tabs.map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} aria-pressed=${tab === t} onClick=${() => setTab(t)}>${t}</button>`)}</div>`}
     ${tab === "People" && html`<${People} me=${me} tick=${tick} bump=${bump} />`}${tab === "Roles" && can("admin") && html`<${Roles} tick=${tick} bump=${bump} />`}
-    ${tab === "Sync" && can("admin") && html`<${AdminSync} />`}${tab === "Backup" && can("admin") && html`<${AdminBackup} />`}${tab === "Updates" && can("admin") && html`<${AdminUpdates} />`}${tab === "Settings" && can("admin") && html`<${AdminSettings} />`}</div>`;
+    ${tab === "Sync" && can("admin") && html`<${AdminSync} />`}${tab === "Backup" && can("admin") && html`<${AdminBackup} />`}${tab === "Updates" && can("admin") && html`<${AdminUpdates} />`}${tab === "Listen" && can("admin") && html`<${AdminListen} />`}${tab === "Settings" && can("admin") && html`<${AdminSettings} />`}</div>`;
 }
 const SC = { active: "green", pending: "orange", disabled: "red" };
 function People({ me, tick, bump }) {
@@ -592,7 +661,7 @@ function AdminSettings() {
   const f = useFolds("settings", { Site: true, Access: true, Repositories: false, Groups: false });
   if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
   const set1 = async (k, v) => { setBusy(k); if (k === "cli_endpoint" && v) toast("Checking endpoint…"); try { await api("/admin/settings", { method: "PUT", body: { [k]: v } }); toast("Saved"); if (k === "theme_color") loadBrand(); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
-  const sections = [["Site", ["site_name", "theme_color", "cli_endpoint", "contact_name", "contact_email", "contact_url", "contact_phone", "announcement"]], ["Access", ["signup", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility"]], ["Groups", ["allow_group_creation"]]];
+  const sections = [["Site", ["site_name", "theme_color", "cli_endpoint", "contact_name", "contact_email", "contact_url", "contact_phone", "announcement"]], ["Access", ["signup", "login_domains", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility"]], ["Groups", ["allow_group_creation"]]];
   const by = Object.fromEntries(d.d.schema.map((x) => [x.key, x]));
   const warn = d.d.values.public_install === "1";
   return html`<div class="stack"><div class="card row"><b>Server version</b><span class="mono">v${d.d.server_version}</span><span class="sp"></span><span class="xs mut3">CLIs on this hub self-update to this version (<code>aihub upgrade</code>)</span></div><${FoldBar} f=${f} />${sections.map(([title, keys]) => html`<${Fold} key=${title} f=${f} k=${title} title=${title} badge=${keys.filter((k) => by[k]).length}><div class="list">${title === "Site" && html`<${LogoSetting} url=${d.d.logo_url} bump=${() => setTick(tick + 1)} />`}${keys.filter((k) => by[k]).map((k) => { const x = by[k], v = d.d.values[k]; if (x.type === "text") return html`<${TextSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; if (x.type === "number") return html`<${NumSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; const onoff = x.options.length === 2 && x.options[0] === "0";
@@ -774,6 +843,25 @@ function AdminUpdates() {
 }
 
 const BACKUP_SCHEDULES = [["Hourly", "0 * * * *"], ["Every 6 hours", "0 */6 * * *"], ["Daily 03:00", "0 3 * * *"], ["Weekly (Sun 03:00)", "0 3 * * 0"]];
+function GitLogins() {
+  const [tick, setTick] = useState(0); const d = useLoad(() => api("/admin/git-login"), [tick]); const [busy, setBusy] = useState(""); const [f, setF] = useState({ host: "", user: "", secret: "" });
+  if (d.loading && !d.d) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
+  const { logins, error, suggest } = d.d; const host = f.host || (suggest && suggest[0]) || "";
+  const call = async (k, fn, ok) => { setBusy(k); try { const r = await fn(); if (r && r.message) toast(r.message, r.ok ? 0 : 1); else if (ok) toast(ok); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
+  const save = () => call("save", () => api("/admin/git-login", { method: "PUT", body: { host, user: f.user, secret: f.secret } }).then(() => setF({ host: "", user: "", secret: "" })), "Git login saved");
+  const when = (t) => t ? new Date(t * 1000).toLocaleString() : "";
+  return html`<div class="stack"><h3>Git login (fallback)</h3>
+    <p class="mut sm">Used by backup, sync and installs only when the server’s usual git login (AIHUB_GIT_TOKEN, the vault, git’s own helpers) is missing or refused, so nothing changes while that works. Stored encrypted in the data folder, never in the database or a backup, and never shown again. Use a personal access token with read and write access to the backup repo.</p>
+    ${error && html`<p class="sm" role="alert" style="color:var(--red)">Saved logins cannot be read: ${error}. Remove them and save again.</p>`}
+    <div class="list">${logins.map((l) => html`<div class="li" key=${l.host}><div class="t"><b>${l.host}</b><span>user <code>${l.user}</code> · token saved${l.by ? " by " + l.by : ""}${l.ts ? " · " + when(l.ts) : ""}</span></div>
+        <div class="row"><button class="btn sec sm" disabled=${!!busy} onClick=${() => call("test" + l.host, () => api("/admin/git-login/test", { method: "POST", body: { host: l.host } }))}>Test</button>
+        <button class="btn sec sm" disabled=${!!busy} onClick=${() => call("rm" + l.host, () => api("/admin/git-login/" + encodeURIComponent(l.host), { method: "DELETE" }), "Removed")}>Remove</button></div></div>`)}
+      <form class="li" onSubmit=${(e) => { e.preventDefault(); if (host && f.secret) save(); }}><div class="t"><b>${logins.some((l) => l.host === host) ? "Replace login" : "Add login"}</b><span>Host (or repo URL), user name (blank = oauth2; Bitbucket/Gitea want the real account), token.</span></div>
+        <div class="row" style="flex-wrap:wrap"><input class="field" aria-label="Git host" placeholder="git.example.com" value=${host} onInput=${(e) => setF({ ...f, host: e.target.value })} style="width:13rem" />
+          <input class="field" aria-label="User name" placeholder="user (optional)" autocomplete="off" value=${f.user} onInput=${(e) => setF({ ...f, user: e.target.value })} style="width:9rem" />
+          <input class="field" type="password" aria-label="Token" placeholder="token" autocomplete="new-password" value=${f.secret} onInput=${(e) => setF({ ...f, secret: e.target.value })} style="width:13rem" />
+          <button class="btn sm" type="submit" disabled=${busy === "save" || !host || !f.secret}>Save</button></div></form></div></div>`;
+}
 function AdminBackup() {
   const [tick, setTick] = useState(0); const d = useLoad(() => api("/admin/backup"), [tick]); const [busy, setBusy] = useState("");
   if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
@@ -797,7 +885,8 @@ function AdminBackup() {
       <${TextSetting} x=${{ label: "Rows per file", help: "Events and audit log are split into files of this many rows (1000-1000000, default 20000). Smaller files make smaller git diffs.", kind: "text", max: 7 }} v=${c.backup_events_chunk} busy=${busy === "backup_events_chunk"} save=${(n) => save("backup_events_chunk", n)} />
       <${TextSetting} x=${{ label: "Start time spread (%)", help: "Each run starts up to this percent of the wait earlier or later at random (0-50, default 10), so backups never form a fixed pattern on the git host.", kind: "text", max: 3 }} v=${c.backup_jitter} busy=${busy === "backup_jitter"} save=${(n) => save("backup_jitter", n)} />
       <${TextSetting} x=${{ label: "Spread limit (seconds)", help: "...but never by more than this (0-3600, default 600).", kind: "text", max: 5 }} v=${c.backup_jitter_max} busy=${busy === "backup_jitter_max"} save=${(n) => save("backup_jitter_max", n)} />
-      <div class="li"><div class="t"><b>Gap between sync and backup</b><span>The backup and the event sync never use git within the set time of each other (Sync > Throughput and git load, “Minimum seconds between git work”). A job that has to wait just waits.${st.waiting ? " A backup is waiting for it right now." : ""}</span></div></div></div></div></div>`;
+      <div class="li"><div class="t"><b>Gap between sync and backup</b><span>The backup and the event sync never use git within the set time of each other (Sync > Throughput and git load, “Minimum seconds between git work”). A job that has to wait just waits.${st.waiting ? " A backup is waiting for it right now." : ""}</span></div></div></div></div>
+    <${GitLogins} /></div>`;
 }
 const plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
 function Groups() {
@@ -1250,7 +1339,7 @@ function App() {
     return () => cancelAnimationFrame(t);
   }, [path]);
   useEffect(() => { addEventListener("resize", place); return () => removeEventListener("resize", place); }, []);
-  const logout = async () => { try { await api("/auth/logout", { method: "POST" }); } catch {} try { localStorage.removeItem("aihub_token"); } catch {} set({ me: null }); nav("/"); };
+  const logout = async () => { try { await api("/auth/logout", { method: "POST" }); } catch {} try { localStorage.removeItem("aihub_token"); sessionStorage.removeItem("aihub_token"); } catch {} set({ me: null }); nav("/"); };
   const on = (k) => (seg[0] === k ? "on" : "");
   const nl = (k, label) => ({ k, label, href: "#/" + k, on: seg[0] === k });
   const ws = s.me ? [nl("knowledge", "Knowledge"), can("view_usage") && nl("usage", "Usage"), s.showGroups && nl("groups", "Groups")].filter(Boolean) : [];
@@ -1264,7 +1353,7 @@ function App() {
     <div id="menu" class=${"menu" + (menu ? " open" : "")} onClick=${(e) => { if (e.target.closest && e.target.closest("a")) setMenu(false); }}><nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
     <div class="r">${s.me ? html`${navGroup("Workspace", ws)}${navGroup("Manage", mg)}<${NavMenu} label=${shown(s.me)} lead=${html`<${Avatar} p=${s.me} size=${22} />`} items=${[{ k: "account", label: "Account", href: "#/account", on: seg[0] === "account" }, { k: "out", label: "Sign out", href: "#/", onClick: logout }]} />` :
       html`${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}<a href="#/login">Sign in</a>`}</div></div></div></header>
-    <main id="main" tabindex="-1"><div class="page" key=${path}>${page}</div></main>
+    <main id="main" tabindex="-1">${seg[0] === "login" || seg[0] === "register" ? html`<div class="page au-page" key="auth">${page}</div>` : html`<div class="page" key=${path}>${page}</div>`}</main>
     <footer class="foot"><b class="glow">${br.logo_url && html`<img decoding="async" class="logo sm" src=${br.logo_url} alt="" />`}${br.name || "AI Hub"}</b><span>Skills, agents and MCP servers for your team.</span>
       ${(ct.name || ct.email || ct.url || ct.phone) && html`<span class="contact" aria-label="Contact">${ct.name && html`<span>${ct.name}</span>`}${ct.email && html`<a href=${"mailto:" + ct.email}>${ct.email}</a>`}${ct.phone && html`<span>${ct.phone}</span>`}${ct.url && /^https?:\/\//i.test(ct.url) && html`<a href=${ct.url} target="_blank" rel="noopener noreferrer">Support</a>`}</span>`}<nav aria-label="Footer"><a href="#/browse">Browse</a><a href="#/rankings">Rankings</a><a href="#/start">Get started</a><a href="#/docs">Docs</a></nav>${br.server_version && html`<span class="ver xs">v${br.server_version}</span>`}</footer>
     ${s.toast && html`<div class=${"toast " + (s.toast.err ? "err" : "")} role="status">${s.toast.m}</div>`}</div>`;

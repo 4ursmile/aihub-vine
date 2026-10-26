@@ -240,6 +240,11 @@ def create_app(settings: Settings = None) -> FastAPI:
     app.state.settings = s
     app.state.repos = Repos(db)
     app.state.repos.backfill_actors()
+    try:
+        if app.state.repos.usage_dedupe():
+            logging.getLogger("aihub").info("usage: folded duplicate clients (reinstalled CLIs) into one per machine")
+    except Exception as ex:
+        logging.getLogger("aihub").warning("usage: duplicate client repair failed: %s", ex)
     app.state.cache = init_cache(s)
     app.state.events = EventBuffer(app.state.repos, s.event_flush_rows, s.event_flush_secs)
     app.state.sync = Sync(app.state.repos, s, app.state.cache)

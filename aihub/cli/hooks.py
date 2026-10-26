@@ -235,10 +235,37 @@ def _usage(stdin_text, source="claude"):
         pass
 
 
+def _machine_id():
+    """This computer's own stable id (read, never written by us), '' when unknown."""
+    try:
+        if sys.platform == "darwin":
+            import subprocess
+            out = subprocess.run(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], capture_output=True, text=True, timeout=3).stdout
+            m = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', out)
+            return m.group(1) if m else ""
+        if os.name == "nt":
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography", 0,
+                                winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0)) as k:
+                return str(winreg.QueryValueEx(k, "MachineGuid")[0]).strip()
+        for f in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+            if os.path.isfile(f):
+                with open(f) as fh:
+                    v = fh.read().strip()
+                if v:
+                    return v
+    except Exception:
+        pass
+    return ""
+
+
 def client_id():
+    """A new install derives its id from the machine + aihub home (hashed), so uninstall + install gives the SAME id and the hub does not
+    count the re-uploaded usage history as a second device. An id already in config.json is kept as is (old installs do not change)."""
     c = paths.load("config.json", {})
     if "client_id" not in c:
         import uuid
-        c["client_id"] = uuid.uuid4().hex
+        mid = _machine_id()
+        c["client_id"] = uuid.uuid5(uuid.NAMESPACE_URL, "aihub-client:%s|%s" % (mid, os.path.abspath(paths.HOME()))).hex if mid else uuid.uuid4().hex
         paths.save("config.json", c)
     return c["client_id"]
