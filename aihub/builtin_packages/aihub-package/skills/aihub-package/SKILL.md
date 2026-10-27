@@ -43,7 +43,7 @@ Do the five steps of "Assistant packaging workflow": detect the situation, choos
 
 **type = bot (chat bot).** Create it with `aihub dev init . --type bot --name <name>`. It needs `[bot] run = "bot/run.py"` (a file inside the package that `aihub run` starts), optional `title`, and one `[[bot.env]]` entry per setting (`name`, `hint`, `required`, `secret`, `default`). Optional: `[[mcp_servers]]` (used only by the bot), `[python] requires`, install scripts. Never put keys in the package; users fill `~/.aihub/bots/<name>/.env`. Full guide (layout, memory, harnesses, cron, tests): the `bots` doc on the hub.
 
-**type = service (long-running program).** `aihub dev init . --type service --name <name>`. Same shape as a bot, table `[service]`: `run` (required), `title`, `onboard`, `[[service.env]]`, plus `restart` (no|on-failure|always, default always) and optional `schedule`. Settings go in `~/.aihub/services/<name>/.env`; `aihub run <name>` starts and supervises it.
+**type = service (long-running program).** `aihub dev init . --type service --name <name>`. Same shape as a bot, table `[service]`: `run` (required), `title`, `onboard`, `[[service.env]]`, plus `restart` (no|on-failure|always, default always), optional `schedule` and `unique = true` (only one run of it at a time; also valid in `[bot]`). Settings go in `~/.aihub/services/<name>/.env`; `aihub run <name>` starts and supervises it.
 
 **Interactive wizard.** `aihub dev init -w [path]` (terminal only) asks whether the folder becomes one package, a monorepo (and which existing sub folders become packages), or gets one more package in a workspace. Suggest it to a user who is unsure; as an assistant without a terminal use the flags below (`--mono`, `--sub`, `--name`, `--type`) instead.
 

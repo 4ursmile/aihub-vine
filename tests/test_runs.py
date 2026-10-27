@@ -318,3 +318,26 @@ class ServiceType(unittest.TestCase):
         with mock.patch.object(runs, "launch", side_effect=lambda r, fg=False: r) as launch:
             runs.start("web-svc", [], a)
         self.assertEqual(launch.call_args[0][0]["restart"], "always")   # the [service] default
+
+    def test_unique_allows_one_run_at_a_time(self):
+        from aihub.core import manifest as M
+        self.assertIs(M.parse('[package]\nname="s"\nversion="1.0.0"\ntype="service"\n[service]\nrun="r.py"\nunique=true\n')["service"]["unique"], True)
+        self.assertIs(M.parse('[package]\nname="s"\nversion="1.0.0"\ntype="service"\n[service]\nrun="r.py"\nunique="yes"\n')["service"]["unique"], False)
+        pkg = os.path.join(self.home, "packages", "one-svc")
+        os.makedirs(pkg)
+        open(os.path.join(pkg, "aihub.toml"), "w").write('[package]\nname="one-svc"\nversion="1.0.0"\ntype="service"\n[service]\nrun="run.py"\nunique=true\n')
+        open(os.path.join(pkg, "run.py"), "w").write("print('up')\n")
+        with open(os.path.join(self.home, "state.json"), "w") as f:
+            json.dump({"packages": {"one-svc": {"path": pkg, "version": "1.0.0", "components": ["service:one-svc"],
+                                                 "bot_home": os.path.join(self.home, "services", "one-svc")}}}, f)
+        first = runs.new_spec("one-svc", "one-svc", "one-svc", [], "", "always", False)
+        runs._save(dict(first, sup_pid=os.getpid(), beat=time.time(), status="running"))
+        a = mock.Mock(fg=False, schedule=None, restart=None, no_hub=True)
+        a.name = "second"
+        with mock.patch.object(runs, "launch", side_effect=lambda r, fg=False: 0) as launch:
+            with self.assertRaises(runs.api.ApiError) as e:
+                runs.start("one-svc", [], a)
+            self.assertIn("only one run", str(e.exception))
+            runs._save(dict(first, sup_pid=None, beat=0, status="stopped"))      # the first one ended: a second name is fine now
+            runs.start("one-svc", [], a)
+        self.assertEqual(launch.call_count, 1)

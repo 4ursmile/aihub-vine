@@ -265,7 +265,7 @@ while True:
 """
 
 TEMPLATES["service"] = {
-    "manifest": HEAD + '\n[service]\nrun = "service/run.py"\ntitle = "{title}"\nrestart = "always"         # no | on-failure | always\n# schedule = "5m"          # optional: run on a schedule instead (seconds, 30s/5m/2h/1d or cron)\n\n[[service.env]]\nname = "PORT"\nhint = "port to listen on"\ndefault = "8080"\nrequired = false\n',
+    "manifest": HEAD + '\n[service]\nrun = "service/run.py"\ntitle = "{title}"\nrestart = "always"         # no | on-failure | always\n# schedule = "5m"          # optional: run on a schedule instead (seconds, 30s/5m/2h/1d or cron)\n# unique = true            # optional: only one run of this service at a time (no second --name)\n\n[[service.env]]\nname = "PORT"\nhint = "port to listen on"\ndefault = "8080"\nrequired = false\n',
     "files": {"service/run.py": SERVICE_RUN, "README.md": README, ".gitignore": BOT_IGNORE},
 }
 EXEC.add("service/run.py")

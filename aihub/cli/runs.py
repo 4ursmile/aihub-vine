@@ -611,6 +611,11 @@ def start(target, args, a, resume=False):
     else:
         installer.bot_command(target)      # the usual "not an installed bot" error
         return 1
+    if M.runnable(found[bot][1]).get("unique"):
+        other = next((x for x in all_runs() if x.get("bot") == bot and x["id"] != rid and alive(x)), None)
+        if other:
+            raise api.ApiError("%s allows only one run at a time (unique = true) and %s is it. Use: aihub run restart %s | stop %s"
+                               % (bot, other["id"], other["id"], other["id"]))
     if old and alive(old):
         if a.fg:
             raise api.ApiError("%s is already running in the background (aihub run stop %s first, or --name OTHER)" % (rid, rid))

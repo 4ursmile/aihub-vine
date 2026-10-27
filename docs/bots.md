@@ -160,7 +160,7 @@ Install behavior for `[[bot.env]]`: `.env` is created once. It holds one `NAME=v
 
 A **service** is a long-running program (web server, worker, sync daemon) started the same way: `aihub install NAME`, then `aihub run NAME`. It uses the bot machinery with three differences:
 
-- the table is `[service]` (same keys as `[bot]`: `run`, `title`, `onboard`, `[[service.env]]`) plus two run defaults: `restart = "no" | "on-failure" | "always"` (default **always**; an invalid value is ignored) and `schedule = "5m"` (seconds, 30s/5m/2h/1d or cron; empty = keep it up). `[bot]` takes the same two keys (bot default stays on-failure). Flags (`--restart`, `--schedule`, `--fg`) always win;
+- the table is `[service]` (same keys as `[bot]`: `run`, `title`, `onboard`, `[[service.env]]`) plus two run defaults: `restart = "no" | "on-failure" | "always"` (default **always**; an invalid value is ignored) and `schedule = "5m"` (seconds, 30s/5m/2h/1d or cron; empty = keep it up). `[bot]` takes the same two keys (bot default stays on-failure). `unique = true` (bot or service) allows only ONE run of the package at a time on a machine: while one run's supervisor is alive (running, waiting or paused), `aihub run NAME --name OTHER` is refused; restart or stop the existing one instead. Only the literal `true` counts. Flags (`--restart`, `--schedule`, `--fg`) always win;
 - settings live in `~/.aihub/services/NAME/.env` (+ `mcp.json`); the component is `service:NAME`;
 - the process gets `AIHUB_SERVICE`, `AIHUB_SERVICE_DIR`, `AIHUB_SERVICE_HOME`, `AIHUB_SERVICE_ENV` in addition to the usual `AIHUB_BOT_*` set.
 

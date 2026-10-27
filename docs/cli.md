@@ -299,7 +299,7 @@ variables, e.g. `curl -kfsSL https://hub/install.sh | AIHUB_INSECURE=1 sh` (Powe
 
 ```sh
 aihub install aihub-bot          # prints: source folder, settings file (.env), how to run
-aihub run BOT [-- ARGS]          # start an installed bot or service (type = "bot" | "service") IN THE BACKGROUND; with one the name is optional; a service restarts always by default ([service] restart/schedule)
+aihub run BOT [-- ARGS]          # start an installed bot or service (type = "bot" | "service") IN THE BACKGROUND; with one the name is optional; a service restarts always by default ([service] restart/schedule); `unique = true` = one run of it at a time
 aihub run BOT --fg               # in this terminal instead (needed for an interactive chat); Ctrl-C stops it
 aihub run BOT --name N --schedule '0 8 * * 1-5' --restart no -- --once "digest"
 aihub run list | status N        # every run on this machine (--json)

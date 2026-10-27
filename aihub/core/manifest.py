@@ -106,7 +106,8 @@ def runnable(m: dict) -> dict:
 
 
 def _bot(b, restart="") -> dict:
-    """[bot] / [service] run = "bot.py", title, onboard, env = [{name, hint, required, secret}], restart, schedule (run defaults).
+    """[bot] / [service] run = "bot.py", title, onboard, env = [{name, hint, required, secret}], restart, schedule (run defaults),
+    unique (true: `aihub run` allows only one run of the package at a time on a machine).
     Display fields never raise: a bad entry is dropped."""
     if not isinstance(b, dict):
         b = {}
@@ -119,7 +120,7 @@ def _bot(b, restart="") -> dict:
                         "secret": bool(e.get("secret", False)), "default": str(e.get("default", ""))})
     r = str(b.get("restart", "")).strip()
     return {"run": str(b.get("run", "")).strip(), "title": str(b.get("title", "")), "onboard": str(b.get("onboard", "")).strip(), "env": env,
-            "restart": r if r in RESTARTS else restart, "schedule": str(b.get("schedule", "")).strip()}
+            "restart": r if r in RESTARTS else restart, "schedule": str(b.get("schedule", "")).strip(), "unique": b.get("unique") is True}
 
 
 def normalize(d: dict) -> dict:
