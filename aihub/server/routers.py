@@ -47,7 +47,7 @@ CLI_GIT_ENV = {"cli_git_url": "AIHUB_CLI_GIT_URL", "cli_git_branch": "AIHUB_CLI_
 SYNC_ENV = dict(CLI_GIT_ENV, telemetry_url="AIHUB_TELEMETRY_URL", telemetry_branch="AIHUB_TELEMETRY_BRANCH", telemetry_inbox_branch="AIHUB_TELEMETRY_INBOX_BRANCH", index_url="AIHUB_INDEX_URL", index_branch="AIHUB_INDEX_BRANCH",
                 index_path="AIHUB_INDEX_PATH")
 SETTING_DEFAULTS = {"public_browse": "1", "public_install": "0", "default_visibility": "public", "allow_private": "1", "allow_source_download": "1",
-                    "signup": None}
+                    "home_highlight": "slides", "signup": None}
 
 
 def setting(request, key):
@@ -426,6 +426,29 @@ def activity(request: Request, u=Depends(current_user)):
     v = viewer(request, u)
     key = "pkg:activity:" + _cache_scope(v)
     return C(request).get_or_set(key, 5, lambda: {"items": R(request).recent_activity(v, 15)})
+
+
+@r.get("/highlights")
+def highlights(request: Request, u=Depends(current_user)):
+    """Featured packages for the home page: the admin's pinned list in its order, else the most downloaded. Only packages the caller may see."""
+    need_login_unless(request, u, "public_browse")
+    style = setting(request, "home_highlight")
+    if style not in SETTINGS["home_highlight"][0]:
+        style = SETTING_DEFAULTS["home_highlight"]
+    if style == "off":
+        return {"style": style, "pinned": False, "items": []}
+    v = viewer(request, u)
+    def build():
+        repos, items = R(request), []
+        for n in _pinned(repos.setting("home_pinned")):
+            p = repos.package(n)
+            if p and not p["hidden"] and repos.access_level(p["id"], v):
+                items.append(_ser(request, p))
+        if items:
+            return {"pinned": True, "items": items}
+        _, rows = repos.packages("", None, None, "downloads", 1, 5, viewer=v)
+        return {"pinned": False, "items": [_ser(request, p) for p in rows]}
+    return dict(C(request).get_or_set("pkg:hl:" + _cache_scope(v), TTL, build), style=style)
 
 
 @r.get("/packages/{name}/versions")
@@ -979,6 +1002,7 @@ SETTINGS = {
     "allow_source_download": (("0", "1"), "Show source links", "Show a Source link for each version that points at its exact commit in the package's git repository"),
     "allow_group_creation": (("0", "1"), "Let members create groups", "People with the 'create groups' permission can make their own"),
     "theme_color": (THEME_COLORS, "Accent color", "Color of buttons, links and highlights across the site"),
+    "home_highlight": (("slides", "cards", "off"), "Home page highlights", "How the featured packages show on the home page: a sliding carousel, a row of cards, or hidden"),
 }
 
 
@@ -996,6 +1020,7 @@ TEXT_SETTINGS = {
     "contact_url": (200, "url", "Support link", "Help desk, chat or wiki address (http:// or https://)"),
     "contact_phone": (40, "text", "Contact phone", "Optional"),
     "login_domains": (500, "domains", "Sign-in email domains", "Comma list such as gmail.com, yahoo.com: the account abc can also sign in (web and `aihub login`) as abc@gmail.com or abc@yahoo.com. Blank = only the exact user name"),
+    "home_pinned": (1000, "packages", "Pinned packages", "Packages featured on the home page, in this order (up to 12). Names a visitor cannot see or that do not exist yet are skipped. Blank = the most downloaded"),
     "announcement": (2000, "html", "Announcement banner", "Shown as a banner above the header on every page. Basic HTML is kept (a, b, strong, i, em, u, s, br, span, code, small, mark; links must be http/https/mailto); everything else is removed. Blank = hidden"),
 }
 _EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
@@ -1008,6 +1033,8 @@ def _check_text(k, v):
     v = _clean(v, n)
     if kind == "domains":
         return ", ".join(_domains(v, strict=True))
+    if kind == "packages":
+        return ", ".join(_pinned(v, strict=True))
     if v and kind == "email" and not _EMAIL_RE.match(v):
         raise HTTPException(400, "%s is not a valid email address" % k)
     if v and kind == "url" and not re.match(r"^https?://[^\s]+$", v, re.I):
@@ -1032,6 +1059,28 @@ def _domains(v, strict=False):
         if d not in out:
             out.append(d)
     return out
+
+
+PINNED_MAX = 12
+
+
+def _pinned(v, strict=False):
+    """`home_pinned` as a list of normalized package names, in order, without repeats (at most PINNED_MAX)."""
+    out = []
+    for n in re.split(r"[,\s;]+", str(v or "")):
+        if not n.strip():
+            continue
+        try:
+            n = naming.validate(n)
+        except ValueError:
+            if strict:
+                raise HTTPException(400, "home_pinned: %r is not a package name" % n)
+            continue
+        if n not in out:
+            out.append(n)
+    if strict and len(out) > PINNED_MAX:
+        raise HTTPException(400, "home_pinned: at most %d packages" % PINNED_MAX)
+    return out[:PINNED_MAX]
 
 
 def login_name(repos, name):

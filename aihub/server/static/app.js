@@ -113,37 +113,22 @@ const revealIO = "IntersectionObserver" in window && !reduced ? new Intersection
 const useReveal = () => useEffect(() => { document.querySelectorAll(".rv:not(.in)").forEach((el) => (revealIO ? revealIO.observe(el) : el.classList.add("in"))); });
 
 function Count({ to }) {
-  const ref = useRef();
+  const ref = useRef(), shown = useRef(null);       // shown = number on screen once revealed: a later change rolls from it, not from 0
   useEffect(() => {
     const el = ref.current, n = Number(to) || 0; if (!el) return;
-    if (reduced || !("IntersectionObserver" in window)) { el.textContent = fmt(n); return; }
-    let raf; const ob = new IntersectionObserver((es) => { if (!es[0].isIntersecting) return; ob.disconnect(); const t0 = performance.now();
-      const step = (t) => { const k = Math.min(1, (t - t0) / 900); el.textContent = fmt(Math.round(n * (1 - Math.pow(1 - k, 3)))); if (k < 1) raf = requestAnimationFrame(step); }; raf = requestAnimationFrame(step); });
+    if (reduced || !("IntersectionObserver" in window)) { el.textContent = fmt(n); shown.current = n; return; }
+    let raf; const roll = (a, ms) => { const t0 = performance.now(); el.classList.remove("bump"); if (shown.current !== null && n !== a) { void el.offsetWidth; el.classList.add("bump"); }
+      const step = (t) => { const k = Math.min(1, (t - t0) / ms), x = Math.round(a + (n - a) * (1 - Math.pow(1 - k, 3))); el.textContent = fmt(x); shown.current = x; if (k < 1) raf = requestAnimationFrame(step); }; raf = requestAnimationFrame(step); };
+    if (shown.current !== null) { roll(shown.current, 700); return () => cancelAnimationFrame(raf); }
+    const ob = new IntersectionObserver((es) => { if (!es[0].isIntersecting) return; ob.disconnect(); roll(0, 900); });
     el.textContent = fmt(0); ob.observe(el); return () => { ob.disconnect(); cancelAnimationFrame(raf); };
   }, [to]);
   return html`<span ref=${ref}></span>`;           // no vdom children: the effect owns the text, so a re-render (e.g. the Copy toast) cannot touch it
 }
 
-// types real package names after "aihub install"; the full name is kept in data-full so Copy always gets the whole command
-function Typer({ words }) {
-  const ref = useRef(), key = words.join();
-  useEffect(() => {
-    const el = ref.current; if (!el || !words.length) return;
-    el.dataset.full = words[0]; if (reduced) { el.textContent = words[0]; return; }
-    let i = 0, j = 0, dir = 1, t;
-    let tick = () => { const w = words[i]; el.dataset.full = w; j += dir; el.textContent = w.slice(0, j); let d = dir > 0 ? 70 : 32;
-      if (dir > 0 && j >= w.length) { dir = -1; d = 2000; } else if (dir < 0 && j <= 0) { dir = 1; i = (i + 1) % words.length; d = 380; } t = setTimeout(tick, d); };
-    let vis = true; const io = "IntersectionObserver" in window ? new IntersectionObserver(([e]) => { const was = vis; vis = e.isIntersecting; if (vis && !was) { clearTimeout(t); tick(); } }) : null; if (io) io.observe(el);
-    const run = tick; tick = () => { if (!vis || document.hidden) return; run(); };
-    const wake = () => { if (!document.hidden && vis) { clearTimeout(t); tick(); } }; document.addEventListener("visibilitychange", wake);
-    tick(); return () => { clearTimeout(t); document.removeEventListener("visibilitychange", wake); if (io) io.disconnect(); };
-  }, [key]);
-  return html`<span class="typed" ref=${ref}>${words[0] || "package-name"}</span>`;
-}
-
 const since = (t) => { const s = Date.now() / 1000 - t; return s < 45 ? "just now" : ago(t); };
 const VERB = { install: "installed", use: "used", update: "updated", publish: "published" };
-function Activity() {
+function Activity({ onNew }) {
   const [items, setItems] = useState(null), [err, setErr] = useState(null), [, tick] = useState(0); const seen = useRef(new Set());
   useEffect(() => {
     let on = 1;
@@ -151,7 +136,8 @@ function Activity() {
       if (document.hidden) return;
       try { const r = await api("/activity"); if (!on) return;
         const rows = r.items.map((i) => ({ ...i, k: i.package + i.kind + i.ts })); const first = seen.current.size === 0;
-        setItems(rows.map((x) => ({ ...x, fresh: !first && !seen.current.has(x.k) }))); rows.forEach((x) => seen.current.add(x.k)); setErr(null);
+        const marked = rows.map((x) => ({ ...x, fresh: !first && !seen.current.has(x.k) })); setItems(marked); rows.forEach((x) => seen.current.add(x.k)); setErr(null);
+        if (onNew && marked.some((x) => x.fresh)) onNew();
       } catch (e) { if (on) setErr(e.message); }
     };
     load(); const poll = setInterval(load, 20000), clock = setInterval(() => !document.hidden && tick((n) => n + 1), 30000);
@@ -161,8 +147,59 @@ function Activity() {
   return html`<aside class="feed" aria-label="Live activity"><div class="feed-h"><h3>Happening now</h3><span class="live" title="Refreshes while this tab is open">live</span></div>
     ${err ? html`<p class="mut sm feed-e">Activity is unavailable right now.</p>` : !items ? html`<div class="feed-l">${[0, 1, 2, 3, 4].map((i) => html`<div class="skel line" key=${i}></div>`)}</div>` :
       !items.length ? html`<p class="mut sm feed-e">Nothing yet. Publishes, installs and usage show up here as they happen.</p>` :
-      html`<ul class="feed-l">${items.slice(0, 7).map((x, n) => html`<li key=${x.k} class=${x.fresh ? "fresh" : ""} style=${"--i:" + n}>
+      html`<ul class="feed-l">${items.slice(0, 6).map((x, n) => html`<li key=${x.k} class=${x.fresh ? "fresh" : ""} style=${"--i:" + n}>
         <span class=${"badge " + (TYPE[x.type] || "")}>${x.type}</span><a href=${"#/package/" + x.package}>${x.package}</a><span class="v">${VERB[x.kind] || x.kind}${x.kind === "publish" && x.version ? " " + x.version : ""}</span><time class="mut3">${since(x.ts)}</time></li>`)}</ul>`}</aside>`;
+}
+
+// pointer light on the carousel (fine pointers only): ONE listener, rAF-throttled, writes two CSS vars on the hovered .sheen
+const fine = !reduced && matchMedia("(hover: hover) and (pointer: fine)").matches;
+function useSheen() {
+  const fn = useRef(null);
+  if (fine && !fn.current) { let raf = 0, ev = null;
+    fn.current = (e) => { ev = e; if (raf) return; raf = requestAnimationFrame(() => { raf = 0; const el = ev.target.closest && ev.target.closest(".sheen"); if (!el) return;
+      const r = el.getBoundingClientRect(); el.style.setProperty("--mx", ((ev.clientX - r.left) / r.width * 100).toFixed(1) + "%"); el.style.setProperty("--my", ((ev.clientY - r.top) / r.height * 100).toFixed(1) + "%"); }); }; }
+  return fn.current;
+}
+const TINT = { skill: "var(--blue)", agent: "var(--green)", mcp: "var(--orange)", tool: "var(--tint-d)", setup: "var(--red)", bot: "var(--tint-a)", service: "var(--tint-b)" };
+const Glyph = ({ p, big }) => html`<span class=${"ft-ico" + (big ? " big" : "")} style=${"--tc:" + (TINT[p.type] || "var(--blue)")} aria-hidden="true">${(p.name || "?").replace(/^aihub-/, "").charAt(0).toUpperCase()}</span>`;
+const FT_MS = 7000;
+// featured packages (Admin > Settings > Home page): a snap-scroll carousel that advances when the active dot's fill animation ends,
+// so pausing (hover, focus, hidden tab, off screen) is just animation-play-state; no timers. Older hubs without /highlights: nothing shown.
+function Highlights() {
+  const h = useLoad(() => api("/highlights").catch(() => null), []);
+  const d = h.d, items = (d && d.items) || [];
+  if (!items.length || d.style === "off") return null;
+  const head = html`<div class="gap row rv"><h2>${d.pinned ? "Featured" : "Popular right now"}</h2><span class="sp"></span>${!d.pinned && html`<a href="#/browse?sort=downloads">See all</a>`}</div>`;
+  if (d.style === "cards") return html`${head}<div class="ft-cards rv">${items.map((p, i) => html`<a key=${p.name} class="ft-card sheen" style=${"--i:" + i} href=${"#/package/" + p.name}>
+    <${Glyph} p=${p} /><div class="ft-t"><b>${p.name}</b><span>${p.description || "No description"}</span></div><span class="mut3 xs">v${p.latest_version || "–"}</span></a>`)}</div>`;
+  return html`${head}<${Slides} items=${items} />`;
+}
+function Slides({ items }) {
+  const track = useRef(), box = useRef(), aim = useRef(-1); const [at, setAt] = useState(0), [hold, setHold] = useState(false), [off, setOff] = useState(false), [hid, setHid] = useState(document.hidden);
+  const go = (i) => { const t = track.current; if (!t) return; const n = (i + items.length) % items.length, el = t.children[n]; if (el) { aim.current = n; t.scrollTo({ left: el.offsetLeft, behavior: reduced ? "auto" : "smooth" }); } setAt(n); };
+  useEffect(() => {
+    const t = track.current, b = box.current; if (!t || !("IntersectionObserver" in window)) return;
+    // slides passed on the way to a target (go) are ignored until the target arrives; a swipe (no target) is followed as is
+    const io = new IntersectionObserver((es) => es.forEach((e) => { if (!e.isIntersecting) return; const i = +e.target.dataset.i;
+      if (aim.current < 0 || aim.current === i) { aim.current = -1; setAt(i); } }), { root: t, threshold: 0.6 });
+    [...t.children].forEach((c) => io.observe(c));
+    const vis = new IntersectionObserver(([e]) => setOff(!e.isIntersecting)); vis.observe(b);
+    const tab = () => setHid(document.hidden); tab(); document.addEventListener("visibilitychange", tab);
+    return () => { io.disconnect(); vis.disconnect(); document.removeEventListener("visibilitychange", tab); };
+  }, [items.length]);
+  const key = (e) => { if (e.key === "ArrowRight") { e.preventDefault(); go(at + 1); } else if (e.key === "ArrowLeft") { e.preventDefault(); go(at - 1); } };
+  const paused = hold || off || hid || items.length < 2, sheen = useSheen();
+  return html`<section ref=${box} class="ft rv" data-paused=${paused ? "1" : null} role="region" aria-roledescription="carousel" aria-label="Featured packages" tabindex="0" onKeyDown=${key} onPointerMove=${sheen}
+      onPointerEnter=${() => setHold(true)} onPointerLeave=${() => setHold(false)} onFocusIn=${() => setHold(true)} onFocusOut=${(e) => !e.currentTarget.contains(e.relatedTarget) && setHold(false)}>
+    <div class="ft-track" ref=${track} onPointerDown=${() => (aim.current = -1)} onWheel=${() => (aim.current = -1)} onTouchStart=${() => (aim.current = -1)}>${items.map((p, i) => html`<article key=${p.name} class=${"ft-slide sheen" + (i === at ? " on" : "")} data-i=${i} style=${"--tc:" + (TINT[p.type] || "var(--blue)")} aria-roledescription="slide" aria-label=${(i + 1) + " of " + items.length + ": " + p.name} inert=${i !== at}>
+      <div class="ft-copy"><div class="row ft-eye"><span class=${"badge " + (TYPE[p.type] || "")}>${p.type}</span>${p.category && html`<span class="mut3 xs">${p.category}</span>`}</div>
+        <h3><a href=${"#/package/" + p.name}>${p.name}</a></h3><p>${p.description || "No description"}</p>
+        <div class="meta"><span>v${p.latest_version || "–"}</span><span>↓ ${fmt(p.downloads)}</span><${Stars} r=${p.rating && p.rating.avg} />${p.updated && html`<span>updated ${ago(p.updated)}</span>`}</div>
+        <div class="ft-cmd"><${Cmd} text=${"aihub install " + p.name} /></div></div>
+      <${Glyph} p=${p} big=${1} /></article>`)}</div>
+    ${items.length > 1 && html`<div class="ft-bar"><button class="ft-arw" aria-label="Previous" onClick=${() => go(at - 1)}><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 2 4 7l5 5"/></svg></button>
+      <div class="ft-dots" role="group" aria-label="Choose slide">${items.map((p, i) => html`<button key=${p.name} class=${i === at ? "on" : ""} aria-label=${"Show " + p.name} aria-current=${i === at} onClick=${() => go(i)}>${i === at && html`<i style=${"animation-duration:" + FT_MS + "ms"} onAnimationEnd=${() => go(at + 1)}></i>`}</button>`)}</div>
+      <button class="ft-arw" aria-label="Next" onClick=${() => go(at + 1)}><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m5 2 5 5-5 5"/></svg></button></div>`}</section>`;
 }
 
 const catClass = (n) => ["a", "b", "c", "d", "e", "f"][n] || "x";
@@ -172,15 +209,17 @@ function Home() {
   const top = useLoad(() => api("/packages?sort=downloads&per_page=6"), []);
   const recent = useLoad(() => api("/packages?sort=updated&per_page=8"), []);
   const f = useLoad(() => api("/facets"), []);
-  const o = (m.d && m.d.overview) || {}; const cats = (f.d && f.d.categories) || [];
-  const names = ((top.d && top.d.items) || []).map((p) => p.name);
+  const [bump, setBump] = useState(0);            // new events in the feed -> refresh the numbers (at most once per feed poll)
+  const ov = useLoad(() => bump ? api("/stats/overview").catch(() => null) : Promise.resolve(null), [bump]);
+  const o = ov.d || (m.d && m.d.overview) || {}; const cats = (f.d && f.d.categories) || [];
+  const onNew = useCallback(() => setBump((n) => n + 1), []);
   useReveal();
   return html`<div class="home">
     <section class="hero"><div class="hero-copy"><h1>Install what your AI needs.</h1>
       <p class="lead">Find skills, agents and MCP servers for Claude Code, Codex and OpenCode, then install them with one command.</p>
-      <form class="search" onSubmit=${(e) => { e.preventDefault(); nav("/browse?q=" + encodeURIComponent(q)); }}><${Search} value=${q} onInput=${setQ} /></form>
-      <div class="cmd hero-cmd"><code>aihub install <${Typer} words=${names} /></code><button class="btn sec sm" onClick=${() => { const t = document.querySelector(".typed"); copy("aihub install " + ((t && t.dataset.full) || "<package>")); }}>Copy</button></div></div>
-      <${Activity} /></section>
+      <form class="search" onSubmit=${(e) => { e.preventDefault(); nav("/browse?q=" + encodeURIComponent(q)); }}><${Search} value=${q} onInput=${setQ} /></form></div>
+      <${Activity} onNew=${onNew} /></section>
+    <${Highlights} />
     <div class="stats3 rv"><div class="stat" style=${"--n:"+Math.max(3,fmt(Number(o.packages)||0).length)}><b><${Count} to=${o.packages} /></b><span>Packages</span></div><div class="stat" style=${"--n:"+Math.max(3,fmt(Number(o.versions)||0).length)}><b><${Count} to=${o.versions} /></b><span>Releases</span></div>
       <div class="stat" style=${"--n:"+Math.max(3,fmt(Number(o.downloads)||0).length)}><b><${Count} to=${o.downloads} /></b><span>Downloads</span></div><div class="stat" style=${"--n:"+Math.max(3,fmt(Number(o.users)||0).length)}><b><${Count} to=${o.users} /></b><span>People</span></div></div>
     <div class="gap rv"><h2>Browse by category</h2></div>
@@ -739,6 +778,24 @@ function TextSetting({ x, v, busy, save, fromEnv, envName }) {
     <div class="row">${x.kind === "html" ? html`<textarea class="field" rows="3" maxlength=${x.max} value=${t} aria-label=${x.label} style="width:min(32rem,100%)" onInput=${(e) => setT(e.target.value)} />` : html`<input class="field" type=${x.kind === "email" ? "email" : x.kind === "url" ? "url" : "text"} maxlength=${x.max} value=${t} aria-label=${x.label} style="width:min(16rem,100%)" onInput=${(e) => setT(e.target.value)} />`}
     <button class="btn sm" disabled=${busy || t.trim() === (v || "")} onClick=${() => save(t.trim())}>Save</button></div></div>`;
 }
+// Settings > Home page: ordered pinned list (saved as the comma text setting home_pinned), add by search
+function PinnedSetting({ x, v, busy, save }) {
+  const start = (v || "").split(/[,\s]+/).filter(Boolean); const [list, setList] = useState(start), [q, setQ] = useState(""); const dq = debounced(q);
+  const r = useLoad(() => dq.trim() ? api("/packages?per_page=8&q=" + encodeURIComponent(dq.trim())) : Promise.resolve(null), [dq]);
+  const opts = ((r.d && r.d.items) || []).filter((p) => !list.includes(p.name));
+  const add = (n) => { n = (n || "").trim().toLowerCase(); if (n && !list.includes(n) && list.length < 12) setList([...list, n]); setQ(""); };
+  const move = (i, d) => { const l = [...list], j = i + d; if (j < 0 || j >= l.length) return; [l[i], l[j]] = [l[j], l[i]]; setList(l); };
+  const dirty = list.join(",") !== start.join(",");
+  return html`<div class="li pin-set"><div class="t"><b>${x.label}</b><span>${x.help}</span></div>
+    ${list.length ? html`<ol class="pin-l">${list.map((n, i) => html`<li key=${n}><span class="mut3 xs">${i + 1}</span><b>${n}</b><span class="sp"></span>
+      <button class="btn sec sm" aria-label=${"Move " + n + " up"} disabled=${i === 0} onClick=${() => move(i, -1)}>↑</button><button class="btn sec sm" aria-label=${"Move " + n + " down"} disabled=${i === list.length - 1} onClick=${() => move(i, 1)}>↓</button>
+      <button class="btn sec sm" aria-label=${"Remove " + n} onClick=${() => setList(list.filter((y) => y !== n))}>Remove</button></li>`)}</ol>` : html`<p class="mut sm">Nothing pinned: the home page shows the most downloaded packages.</p>`}
+    <div class="row"><input class="field" list="pin-opts" placeholder="Add a package…" value=${q} aria-label="Add a pinned package" style="width:min(16rem,100%)" disabled=${list.length >= 12}
+        onInput=${(e) => setQ(e.target.value)} onKeyDown=${(e) => { if (e.key === "Enter") { e.preventDefault(); add(q); } }} />
+      <datalist id="pin-opts">${opts.map((p) => html`<option key=${p.name} value=${p.name}>${p.description || ""}</option>`)}</datalist>
+      <button class="btn sec sm" disabled=${!q.trim()} onClick=${() => add(q)}>Add</button><span class="sp"></span>
+      <button class="btn sm" disabled=${busy || !dirty} onClick=${() => save(list.join(", "))}>Save</button></div></div>`;
+}
 const ENV_NAME = { cli_git_url: "AIHUB_CLI_GIT_URL", cli_git_branch: "AIHUB_CLI_GIT_BRANCH", cli_git_subdir: "AIHUB_CLI_GIT_SUBDIR", telemetry_url: "AIHUB_TELEMETRY_URL", telemetry_branch: "AIHUB_TELEMETRY_BRANCH", telemetry_inbox_branch: "AIHUB_TELEMETRY_INBOX_BRANCH",
   index_url: "AIHUB_INDEX_URL", index_branch: "AIHUB_INDEX_BRANCH", index_path: "AIHUB_INDEX_PATH" };
 function LogoSetting({ url, bump }) {
@@ -754,13 +811,13 @@ function LogoSetting({ url, bump }) {
 }
 function AdminSettings() {
   const [tick, setTick] = useState(0); const d = useLoad(() => api("/admin/settings"), [tick]); const [busy, setBusy] = useState("");
-  const f = useFolds("settings", { Site: true, Access: true, Repositories: false, Groups: false });
-  if (d.loading) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
+  const f = useFolds("settings", { Site: true, "Home page": false, Access: true, Repositories: false, Groups: false });
+  if (d.loading && !d.d) return html`<div class="skel"></div>`; if (d.e) return html`<${Err} e=${d.e} />`;
   const set1 = async (k, v) => { setBusy(k); if (k === "cli_endpoint" && v) toast("Checking endpoint…"); try { await api("/admin/settings", { method: "PUT", body: { [k]: v } }); toast("Saved"); if (k === "theme_color") loadBrand(); setTick(tick + 1); } catch (e) { toast(e.message, 1); } finally { setBusy(""); } };
-  const sections = [["Site", ["site_name", "theme_color", "cli_endpoint", "contact_name", "contact_email", "contact_url", "contact_phone", "announcement"]], ["Access", ["signup", "login_domains", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility"]], ["Groups", ["allow_group_creation"]]];
+  const sections = [["Site", ["site_name", "theme_color", "cli_endpoint", "contact_name", "contact_email", "contact_url", "contact_phone", "announcement"]], ["Home page", ["home_highlight", "home_pinned"]], ["Access", ["signup", "login_domains", "public_browse", "public_install"]], ["Repositories", ["allow_private", "default_visibility"]], ["Groups", ["allow_group_creation"]]];
   const by = Object.fromEntries(d.d.schema.map((x) => [x.key, x]));
   const warn = d.d.values.public_install === "1";
-  return html`<div class="stack"><div class="card row"><b>Server version</b><span class="mono">v${d.d.server_version}</span><span class="sp"></span><span class="xs mut3">CLIs on this hub self-update to this version (<code>aihub upgrade</code>)</span></div><${FoldBar} f=${f} />${sections.map(([title, keys]) => html`<${Fold} key=${title} f=${f} k=${title} title=${title} badge=${keys.filter((k) => by[k]).length}><div class="list">${title === "Site" && html`<${LogoSetting} url=${d.d.logo_url} bump=${() => setTick(tick + 1)} />`}${keys.filter((k) => by[k]).map((k) => { const x = by[k], v = d.d.values[k]; if (x.type === "text") return html`<${TextSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; if (x.type === "number") return html`<${NumSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; const onoff = x.options.length === 2 && x.options[0] === "0";
+  return html`<div class="stack"><div class="card row"><b>Server version</b><span class="mono">v${d.d.server_version}</span><span class="sp"></span><span class="xs mut3">CLIs on this hub self-update to this version (<code>aihub upgrade</code>)</span></div><${FoldBar} f=${f} />${sections.map(([title, keys]) => html`<${Fold} key=${title} f=${f} k=${title} title=${title} badge=${keys.filter((k) => by[k]).length}><div class="list">${title === "Site" && html`<${LogoSetting} url=${d.d.logo_url} bump=${() => setTick(tick + 1)} />`}${keys.filter((k) => by[k]).map((k) => { const x = by[k], v = d.d.values[k]; if (k === "home_pinned") return html`<${PinnedSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; if (x.type === "text") return html`<${TextSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; if (x.type === "number") return html`<${NumSetting} key=${k} x=${x} v=${v} busy=${busy === k} save=${(n) => set1(k, n)} />`; const onoff = x.options.length === 2 && x.options[0] === "0";
       return html`<div class="li" key=${k}><div class="t"><b>${x.label}</b><span>${x.help}</span></div>
         ${onoff ? html`<label class="switch"><input type="checkbox" role="switch" checked=${v === "1"} disabled=${busy === k} onChange=${(e) => set1(k, e.target.checked ? "1" : "0")} aria-label=${x.label} /><i></i></label>`
         : html`<div class="seg">${x.options.map((o) => html`<button key=${o} class=${v === o ? "on" : ""} disabled=${busy === k} onClick=${() => v !== o && set1(k, o)}>${o}</button>`)}</div>`}</div>`; })}</div><//>`)}

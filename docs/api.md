@@ -30,6 +30,7 @@ Routes marked **No** are public. **User** means an active account token is requi
 | GET | `/api/v1/healthz` | No | Health check; returns `{ "ok": true }`. |
 | GET | `/api/v1/packages` | No | Search/list packages. Query options: `q`, `type`, `tag`, `category`, `sort`, `page`, `per_page`, `mine`. `per_page` is clamped to 1–100. |
 | GET | `/api/v1/facets` | No | Package type and tag counts. |
+| GET | `/api/v1/highlights` | Per `public_browse` | Home page featured packages: `{style, pinned, items}`. `style` = admin setting `home_highlight` (`slides`, `cards`, `off`); `items` = the admin's `home_pinned` list in order (only packages the caller may see), else the 5 most downloaded (`pinned: false`). |
 | GET | `/api/v1/packages/{name}` | No | Package metadata, manifest, maintainers, and version information. The response includes `authors` (list of `{name, email?, url?}` from the latest manifest) and `license` (string, empty if unset). |
 | GET | `/api/v1/packages/{name}/versions` | No | List package versions with `version`, `sha256`, `size`, `downloads`, `yanked`, `created`, and `source`, a web link to the version's exact commit and subfolder (empty if the repo URL is not http(s)). |
 | GET | `/api/v1/packages/{name}/readme` | No | Return the stored README (from the index). If none is stored, fetch it raw from a non-yanked version's repo (public hosts only; GitHub or GitLab-style). Response has `markdown` and `html`. |
