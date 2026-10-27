@@ -107,6 +107,16 @@ aihub upgrade
 
 During installation, missing required commands are reported with any manifest hint. Package dependencies are recursively installed. Python dependencies in `[python]` are installed into a package-specific virtual environment. With `[python] install = true` the package also installs itself (`pip install` of its folder, see [Requirements and Python dependencies](manifest.md#requirements-and-python-dependencies)), and its console scripts are linked into `bin/`. Installation asks before running the platform install script and before registering components; `--yes` skips these prompts. When stdin is closed (non-interactive), those prompts count as "no".
 
+## JSON output (for UIs, scripts and agents)
+
+Every command takes `--json` (or put `--json` before the command, or set `AIHUB_JSON=1`) and then prints ONE JSON document on stdout: `{schema, ok, command, exit, error, hint, data, output, messages, changes, context}`. Child processes write to stderr, nothing prompts (pass `--yes` yourself; it is never implied), a bad command line is a document with `exit: 2`, and no token or password is ever in it (secret-looking config keys read `"set"`, the vault says `stored`). Secrets go in on stdin: `login USER --password-stdin`, `register USER --password-stdin`, `password --password-stdin` (current and new on two lines), `vault add URL --user U --token-stdin`. A tool that calls the CLI shares its sign-in, vault and installed packages with the terminal. Without `--json` all output is unchanged (`aihub usage --json` keeps its own shape). The full contract, `data` per command and how to build a UI or web terminal on top: [Building on aihub](extending.md).
+
+```sh
+aihub --json search sql
+aihub install my-skill --yes --json
+printf '%s\n' "$PW" | aihub login sam --password-stdin --json
+```
+
 ## Hub administration (`aihub admin`)
 
 Needs `aihub login` as an account with the `admin` permission (group actions also work for the owner and the managers of a group; deleting a group only for an admin or the owner). Every action is one call, or a loop of calls, to an existing `/api/v1` route; the hub does the permission checks and audit logging. Each item is tried; failures are listed at the end and the exit status is 1. `--dry-run` shows what would change, `--json` prints list/show output as JSON.
@@ -245,13 +255,14 @@ The release number lives in `aihub/core/release.py` and is shared by the server,
 
 - `aihub version` shows the installed CLI version and the version the hub offers.
 - `aihub upgrade` downloads the CLI from the hub, verifies its SHA-256, and swaps it in. The old copy is kept as `aihub.pyz.prev`. `--check` only reports, `--force` reinstalls, `--rollback` restores the previous copy.
-- Auto-update runs after a command finishes, at most once per interval, and is never fatal:
-  - `aihub config set auto_update on|notify|off` (default `on`; `true/1/yes` and `false/0/no` work, any case). `on` downloads and installs a newer hub version; `notify` only prints `aihub X available: run aihub upgrade`; `off` does nothing. Env `AIHUB_AUTO_UPDATE` overrides the config; `AIHUB_NO_UPDATE=1` always means off.
-  - `aihub config set auto_update_hours N` (default 24, clamped to 1..720; env `AIHUB_AUTO_UPDATE_HOURS`). A failed check (hub unreachable, bad download, checksum mismatch) is retried after at most 1 hour, not the whole interval. The version check times out after 3 s.
-  - Without a terminal (scripts, assistants) it still updates, but writes one line to stderr and nothing to stdout. It never runs for `hook`, `flush`, `usage-sync`, `credential`, `upgrade`, `version`, `uninstall`, `self-uninstall`, nor when the command was given `--json`, `--plain` or `--name-only`.
-  - State is in `~/.aihub/update.json` (`checked`, `ok`, `last_error`, `available`, `skip_version`, plus the `pyz_version`/`pyz` keys of a pip install). `aihub version` shows the mode, interval, last check and last error.
+- Auto-update checks after every command and never makes the command wait, nor slows Claude Code (hooks never check):
+  - The command itself only reads `~/.aihub/update.json`; when a check is due it starts ONE detached, low-priority worker (`aihub auto-update --background`, lock `~/.aihub/queue/update.lock`, so a burst of commands starts one). The worker asks the hub (`/cli/version`, 10 s timeout), downloads and verifies the new zipapp and swaps it in (old copy kept as `aihub.pyz.prev`). The NEXT command runs the new version and prints `updated aihub A -> B` once.
+  - `aihub config set auto_update on|notify|off` (default `on`; `true/1/yes` and `false/0/no` work, any case). `on` installs a newer hub version; `notify` only prints `aihub X available: run aihub upgrade` (at most once a day per version); `off` does nothing. Env `AIHUB_AUTO_UPDATE` overrides the config; `AIHUB_NO_UPDATE=1` always means off.
+  - `aihub config set auto_update_minutes N` = least time between two checks (default 1, clamped to 1..43200; env `AIHUB_AUTO_UPDATE_MINUTES`). The older `auto_update_hours` / `AIHUB_AUTO_UPDATE_HOURS` still work when no minutes value is set. A failed check (hub unreachable, bad download, checksum mismatch) backs off 1, 2, 4 ... minutes up to 1 hour.
+  - `aihub auto-update` runs the same check in the foreground now.
+  - Without a terminal (scripts, assistants) the message goes to stderr, nothing to stdout. No check is started for `hook`, `flush`, `usage-sync`, `credential`, `upgrade`, `version`, `uninstall`, `self-uninstall`, `auto-update`, nor when the command was given `--json`, `--plain` or `--name-only`.
+  - State is in `~/.aihub/update.json` (`checked`, `ok`, `fails`, `last_error`, `available`, `announce`, `notified`, `skip_version`, plus the `pyz_version`/`pyz` keys of a pip install). `aihub version` shows the mode, gap, last check and last error.
   - `aihub upgrade --rollback` records the version you left as `skip_version`: auto-update will not reinstall it (a newer one is fine). A manual `aihub upgrade` ignores and clears the skip.
-  - After an update it prints `updated aihub A -> B; takes effect on the next run`.
 
 To ship a new CLI, bump `VERSION` in `aihub/core/release.py` and restart the server.
 
@@ -288,7 +299,15 @@ variables, e.g. `curl -kfsSL https://hub/install.sh | AIHUB_INSECURE=1 sh` (Powe
 
 ```sh
 aihub install aihub-bot          # prints: source folder, settings file (.env), how to run
-aihub run [BOT] [-- ARGS]        # start an installed bot (type = "bot"); with one bot the name is optional
+aihub run BOT [-- ARGS]          # start an installed bot or service (type = "bot" | "service") IN THE BACKGROUND; with one the name is optional; a service restarts always by default ([service] restart/schedule)
+aihub run BOT --fg               # in this terminal instead (needed for an interactive chat); Ctrl-C stops it
+aihub run BOT --name N --schedule '0 8 * * 1-5' --restart no -- --once "digest"
+aihub run list | status N        # every run on this machine (--json)
+aihub run logs N [-f] [-n 40]    # its output; `listen N` = logs -f
+aihub run stop N | --all         # end it (and its supervisor);  pause N = stop the bot, keep the supervisor
+aihub run start N | restart N    # start a saved run again with its saved settings
+aihub run set N --schedule 2h --restart on-failure [-- NEW ARGS] | --clear-args
+aihub run rm N [--force]
 aihub knowledge list|pull|push [NOTE]|edit NOTE|rm NOTE|path
 aihub knowledge get NOTE         # print the note body to stdout (hub first, local copy as fallback); OWNER/NOTE for a shared one
 aihub soul                       # shortcut for: aihub knowledge get soul
@@ -300,6 +319,8 @@ aihub knowledge push-shared OWNER/NOTE   # save my edit of a write-shared note
 ```
 
 `aihub run` loads `~/.aihub/bots/NAME/.env`, refuses to start when a required `[[bot.env]]` value is empty (and prints the file to edit) and gives the bot its knowledge folder, skill folders and own MCP list. Notes live on the hub (web page **Knowledge**, where you can also share a note with a user or group and open notes shared with you; `GET/PUT/DELETE /api/v1/me/knowledge/{name}`) and in `~/.aihub/knowledge`. Shared notes (`GET /knowledge/shared`, `PUT/GET /knowledge/shared/{owner}/{name}`, `PUT/DELETE/GET /me/knowledge/{name}/shares` with `{"user"|"group", "access"}`) are copied by `pull` to `~/.aihub/knowledge/shared/<owner>/`. The built-in skill package `aihub-knowledge` teaches assistants to use them. Every `aihub install` ends with `source:` (package folder) and, for bots, `settings:`.
+
+**Background runs.** Every start goes through a small supervisor (`aihub run _supervise ID`, detached; `--fg` runs it in the terminal) that keeps `~/.aihub/runs/ID.json` (state + heartbeat), writes all output to `ID.log` (rotated at 5 MB) and reads requests from `ID.ctl`. `--restart`: `on-failure` (default; 2 s backoff doubling to 5 min, reset after a minute of uptime), `always`, `no` (default with `--schedule` or `--fg`). `--schedule`: seconds, `30s`/`5m`/`2h`/`1d` (10 s to 7 days) or a 5-field cron expression in the machine's local time; an interval runs at once and then every N, cron waits for its first tick, a tick while the bot still runs is skipped. `.env` and the bot command are read again at every start. A bot that ends within a second of `aihub run` prints its last log lines (a chat bot in the background: use `--fg`). Signed in to a hub (`aihub login`), each run reports to `POST /api/v1/runs/report` every 15 s (2 s while someone has it open on the hub) and shows on the web page **Running** (Workspace menu), where it can be stopped (supervisor stays, so it can be started again), started, restarted, ended, and its schedule, restart policy and (owner only) arguments changed; the log tail is visible there too. Turn it off with `aihub config set run_report off`, `AIHUB_RUN_REPORT=off` or `--no-hub`. A finished run whose supervisor reports to a hub waits 10 minutes for a restart from the web before it exits. `self-uninstall` stops every run.
 
 Bot flags go after `--`: `-- --info` (what the bot sees), `-- --once "question"`, `-- --memory` (what it remembers), `-- --cron` (run scheduled prompts). `BOT_HARNESS` in `.env` picks the engine: `builtin` (default), `claude`, `codex`, `command` or an extension harness. Full guide: `docs/bots.md`.
 

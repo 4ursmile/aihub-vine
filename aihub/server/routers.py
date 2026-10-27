@@ -2534,3 +2534,141 @@ def client_config(request: Request):
                    "index_ttl": request.app.state.sync.num("client_index_ttl")}}
     from fastapi.responses import JSONResponse
     return JSONResponse(out, headers={"Cache-Control": "no-store"})
+
+
+# ---------------------------------------------------------------------------------------------- `aihub run` (Running page)
+# The CLI's run supervisors report their state + new log lines; the reply carries the commands people queued here. The hub never
+# connects to a machine: a command waits until the run's next report (2 s while someone is watching, else 15 s).
+RUN_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,59}$")
+CLIENT_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+RUN_ACTIONS = ("start", "stop", "restart", "quit", "set")
+RUN_ONLINE = 60          # a run whose last report is older than this is "offline"
+
+
+def _live(request):
+    st = request.app.state
+    if not hasattr(st, "runlive"):
+        from .runlive import RunLive
+        st.runlive = RunLive()
+    return st.runlive
+
+
+def _run_clean(run):
+    from ..core import textsafe
+    t = lambda v, n: textsafe.clean(str(v))[:n] if v is not None else None
+    num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    args = run.get("args") if isinstance(run.get("args"), list) else []
+    return {"id": run["id"], "name": t(run.get("name") or run["id"], 60), "bot": t(run.get("bot") or "", 100), "args": [t(a, 500) for a in args[:40]],
+            "schedule": t(run.get("schedule") or "", 100), "restart": run.get("restart") if run.get("restart") in ("no", "on-failure", "always") else "no",
+            "status": t(run.get("status") or "", 20), "error": t(run.get("error") or "", 500), "mode": "fg" if run.get("mode") == "fg" else "bg",
+            "alive": bool(run.get("alive", True)), "paused": bool(run.get("paused")),
+            **{k: num(run.get(k)) for k in ("pid", "runs", "last_exit", "last_start", "last_end", "created", "started", "next_at")}}
+
+
+@r.post("/runs/report")
+def runs_report(body: dict, request: Request, u=Depends(require_user)):
+    """{"client_id", "host", "os", "cli_version", "run": {...}, "log": [{seq, ts, line}], "done": [tokens of the commands it applied]}
+    -> {"commands": [{id, action, ...}], "next": seconds until the next report}."""
+    run = body.get("run")
+    cid = str(body.get("client_id") or "")
+    if not isinstance(run, dict) or not RUN_ID.match(str(run.get("id") or "")) or not CLIENT_ID.match(cid):
+        raise HTTPException(400, "bad run report")
+    from ..core import textsafe
+    from .sync import _os
+    run = _run_clean(run)
+    done = [t for t in body.get("done") or [] if isinstance(t, str) and re.match(r"^[0-9a-f]{16}$", t)] if isinstance(body.get("done"), list) else []
+    cmds = R(request).run_report(u["id"], cid, textsafe.clean(str(body.get("host") or ""))[:100], _os(body.get("os")) or "", run, done)
+    log = [x for x in (body.get("log") or [])[-1000:] if isinstance(x, dict) and isinstance(x.get("seq"), int)]
+    key = (u["id"], cid, run["id"])
+    live = _live(request)
+    live.add(key, run.get("started"), [{"seq": x["seq"], "ts": x.get("ts") if isinstance(x.get("ts"), (int, float)) else time.time(),
+                                        "line": textsafe.clean(str(x.get("line") or ""))[:2000]} for x in log])
+    return {"commands": cmds, "next": live.next(key, busy=bool(cmds))}
+
+
+def _run_view(x, live, now, me=None):
+    sp = x["spec"]
+    online = now - (x["seen"] or 0) < RUN_ONLINE and sp.get("alive", True)
+    return {"key": "%s/%s/%s" % (x["user_id"], x["client_id"], x["rid"]), "owner": x["owner"], "host": x["host"], "os": x["os"],
+            "name": x["name"], "bot": x["bot"], "status": x["status"] if online else ("offline" if sp.get("alive", True) else x["status"] or "ended"),
+            "online": online, "seen": x["seen"], "pending": x["pending"], **{k: sp.get(k) for k in (
+                "args", "schedule", "restart", "pid", "runs", "last_exit", "last_start", "last_end", "next_at", "started", "error", "mode", "paused")},
+            "watched": live.watched((x["user_id"], x["client_id"], x["rid"])), "mine": x["user_id"] == me}
+
+
+def _run_of(request, u, uid, cid, rid):
+    """The run, if it is the caller's or the caller is an admin; 404 otherwise (never tells whether another person's run exists)."""
+    if uid != u["id"] and "admin" not in R(request).perms(u["role"]):
+        raise HTTPException(404, "no such run")
+    x = R(request).run_get(uid, cid, rid)
+    if not x:
+        raise HTTPException(404, "no such run")
+    return x
+
+
+@r.get("/runs")
+def runs_list(request: Request, scope: str = "mine", u=Depends(require_user)):
+    """Runs reported by the caller's machines; scope=all = everybody's (admins). Looking marks them watched, so they report every 2 s."""
+    admin = "admin" in R(request).perms(u["role"])
+    rows = R(request).runs_list(None if scope == "all" and admin else u["id"])
+    live, now = _live(request), time.time()
+    live.look([(x["user_id"], x["client_id"], x["rid"]) for x in rows])
+    return {"items": [_run_view(x, live, now, u["id"]) for x in rows], "is_admin": admin, "scope": "all" if scope == "all" and admin else "mine",
+            "online_secs": RUN_ONLINE}
+
+
+@r.get("/runs/{uid}/{cid}/{rid}/log")
+def runs_log(uid: int, cid: str, rid: str, request: Request, after: int = 0, u=Depends(require_user)):
+    _run_of(request, u, uid, cid, rid)
+    live = _live(request)
+    live.look([(uid, cid, rid)])
+    return live.get((uid, cid, rid), after)
+
+
+@r.post("/runs/{uid}/{cid}/{rid}/command")
+def runs_command(uid: int, cid: str, rid: str, body: dict, request: Request, u=Depends(require_user)):
+    """{"action": start|stop|restart|quit|set, set: "schedule", "restart", "args"}. Queued for the run's next report."""
+    x = _run_of(request, u, uid, cid, rid)
+    a = body.get("action")
+    if a not in RUN_ACTIONS:
+        raise HTTPException(400, "action: " + ", ".join(RUN_ACTIONS))
+    if not _run_view(x, _live(request), time.time())["online"]:
+        raise HTTPException(409, "this run is not connected; start it on its machine: aihub run start %s" % rid)
+    data = {}
+    if a == "set":
+        from ..core.schedule import parse_schedule
+        if "schedule" in body:
+            sc = str(body.get("schedule") or "").strip()
+            if sc:
+                try:
+                    parse_schedule(sc, 10, 7 * 86400)
+                except ValueError as e:
+                    raise HTTPException(400, "schedule: %s" % e)
+            data["schedule"] = sc
+        if "restart" in body:
+            if body["restart"] not in ("no", "on-failure", "always"):
+                raise HTTPException(400, "restart: no, on-failure or always")
+            data["restart"] = body["restart"]
+        if "args" in body:
+            if uid != u["id"]:          # new arguments = new instructions for a program on THEIR machine: only the owner decides
+                raise HTTPException(403, "only the owner of a run can change its arguments")
+            args = body["args"]
+            if not isinstance(args, list) or len(args) > 40 or any(not isinstance(v, str) or len(v) > 500 for v in args):
+                raise HTTPException(400, "args: a list of at most 40 strings")
+            data["args"] = args
+        if not data:
+            raise HTTPException(400, "nothing to change")
+    cid_ = R(request).run_command_add(uid, cid, rid, a, data, u["username"])
+    _live(request).look([(uid, cid, rid)])
+    if uid != u["id"]:
+        R(request).audit(u["username"], "run_" + a, "%s@%s/%s" % (x["owner"], x["host"], rid), json.dumps(data) if data else "")
+    return {"ok": True, "id": cid_, "queued": a}
+
+
+@r.delete("/runs/{uid}/{cid}/{rid}")
+def runs_forget(uid: int, cid: str, rid: str, request: Request, u=Depends(require_user)):
+    """Remove a run from the list. A live run that reports again comes back; end it first (action quit)."""
+    _run_of(request, u, uid, cid, rid)
+    R(request).run_delete(uid, cid, rid)
+    _live(request).drop((uid, cid, rid))
+    return {"ok": True}

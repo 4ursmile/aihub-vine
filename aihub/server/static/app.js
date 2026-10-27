@@ -99,7 +99,7 @@ const Empty = ({ t, d }) => html`<div class="empty"><h3>${t}</h3><p>${d}</p></di
 const Err = ({ e }) => html`<${Empty} t="Something went wrong" d=${e} />`;
 const Skels = ({ n = 6 }) => html`<div class="grid">${Array.from({ length: n }, (_, i) => html`<div class="skel" key=${i}></div>`)}</div>`;
 const Stars = ({ r }) => r ? html`<span>★ ${r}</span>` : null;
-const TYPE = { skill: "blue", agent: "green", mcp: "orange", tool: "", setup: "red", bot: "blue" };
+const TYPE = { skill: "blue", agent: "green", mcp: "orange", tool: "", setup: "red", bot: "blue", service: "green" };
 const Pkg = ({ p, i = 0 }) => html`<a class="card pkg" style=${"--i:" + Math.min(i, 12)} href=${"#/package/" + p.name}>
   <div class="row"><h3>${p.name}</h3><span class="sp"></span>${p.visibility === "private" && html`<span class="badge orange" title="Only people you share it with can see this">private</span>`}<span class=${"badge " + (TYPE[p.type] || "")}>${p.type}</span></div>
   <p>${p.description || "No description"}</p>
@@ -226,7 +226,7 @@ function Related({ name }) {
   return html`<section class="rv related"><h2 class="gap">Related</h2><div class="grid" style="margin-top:20px">${r.d.items.map((p, i) => html`<${Pkg} p=${p} i=${i} key=${p.name} />`)}</div></section>`;
 }
 
-const PKT = { skill: "var(--blue)", agent: "var(--green)", mcp: "var(--orange)", tool: "var(--fg-2)", setup: "var(--red)", bot: "var(--tint-d)" };
+const PKT = { skill: "var(--blue)", agent: "var(--green)", mcp: "var(--orange)", tool: "var(--fg-2)", setup: "var(--red)", bot: "var(--tint-d)", service: "var(--green)" };
 const PKG_GLYPH = {
   skill: '<path d="M12 3l1.9 5.6L19.5 10.5l-5.6 1.9L12 18l-1.9-5.6L4.5 10.5l5.6-1.9z"/><path d="M19 3v4M17 5h4"/>',
   agent: '<circle cx="12" cy="8" r="3.5"/><path d="M5 20c0-3.9 3.1-6.5 7-6.5s7 2.6 7 6.5"/>',
@@ -234,6 +234,7 @@ const PKG_GLYPH = {
   tool: '<path d="M14.5 6.5a4 4 0 0 0 5 5L13 18l-3-3 6.5-6.5"/><path d="M10 15l-5 5"/>',
   setup: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>',
   bot: '<rect x="4.5" y="8" width="15" height="11" rx="3"/><path d="M12 4v4"/><circle cx="9" cy="13.5" r="1"/><circle cx="15" cy="13.5" r="1"/>',
+  service: '<rect x="4" y="4" width="16" height="6" rx="2"/><rect x="4" y="14" width="16" height="6" rx="2"/><path d="M8 7h.01M8 17h.01"/>',
 };
 const PkgTile = ({ type, size = 72 }) => html`<span class="pk-tile" aria-hidden="true" style=${`--gt:${PKT[type] || "var(--blue)"};width:${size}px;height:${size}px`}><svg viewBox="0 0 24 24" width=${Math.round(size * 0.54)} height=${Math.round(size * 0.54)} fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" dangerouslySetInnerHTML=${{ __html: PKG_GLYPH[type] || PKG_GLYPH.skill }}></svg></span>`;
 const Authors = ({ list }) => list.map((a, i) => html`<span key=${i}>${i ? ", " : ""}${a.url && /^https?:\/\//i.test(a.url) ? html`<a href=${a.url} target="_blank" rel="noopener noreferrer">${a.name || a.email}</a>` : a.email ? html`<a href=${"mailto:" + a.email}>${a.name || a.email}</a>` : a.name}</span>`);
@@ -547,13 +548,108 @@ function AdminListen() {
       ${shown.length ? shown.map((l) => html`<div key=${l.seq} style=${"color:" + col(l)}><span class="mut3">${t(l.ts)}</span> <b>${l.level}</b> <span class="mut3">${l.name}</span> ${l.msg}</div>`) : html`<span class="mut">${st.listening ? "Waiting for log lines…" : "Not listening. Press Start listening."}</span>`}</div>
     <p class="xs mut3">${shown.length} of ${st.lines.length} lines shown</p></div></div>`;
 }
+// Admin: a side nav with every tab; under the open tab, its sections (collapsible Folds, else card headings) to jump to.
+const ADMIN_TABS = [["People", "Accounts, roles, passwords"], ["Roles", "Permission matrix"], ["Sync", "Index, inbox, load limits"], ["Backup", "Git backup, git login"], ["Updates", "Self-update, rollback"], ["Listen", "Live server log"], ["Settings", "Site, access, repositories"]];
+function useAdminSections(box, tab) {
+  const [secs, setSecs] = useState([]); const [cur, setCur] = useState("");
+  useEffect(() => {
+    const el = box.current; if (!el) return;
+    const scan = () => {
+      let found = [...el.querySelectorAll("section.fold[data-fold]")].map((x) => ({ id: x.id, t: x.dataset.fold, open: x.classList.contains("open") }));
+      if (!found.length) found = [...el.querySelectorAll(".card h2, .card h3, :scope > div > h2")].filter((h) => h.textContent.trim()).slice(0, 12).map((h, i) => { if (!h.id) h.id = "adm-h-" + i; return { id: h.id, t: h.textContent.trim().slice(0, 40), open: true }; });
+      setSecs((p) => (JSON.stringify(p) === JSON.stringify(found) ? p : found));
+    };
+    scan(); const mo = new MutationObserver(scan); mo.observe(el, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+    return () => mo.disconnect();
+  }, [tab]);
+  useEffect(() => {
+    if (!secs.length || !("IntersectionObserver" in window)) return;
+    const io = new IntersectionObserver((es) => { const v = es.filter((e) => e.isIntersecting).sort((x, y) => x.boundingClientRect.top - y.boundingClientRect.top)[0]; if (v) setCur(v.target.id); }, { rootMargin: "-80px 0px -60% 0px" });
+    secs.forEach((x) => { const n = document.getElementById(x.id); if (n) io.observe(n); }); return () => io.disconnect();
+  }, [secs]);
+  const go = (id) => { const n = document.getElementById(id); if (!n) return; if (n.matches("section.fold:not(.open)")) { const b = n.querySelector(".fold-h button"); if (b) b.click(); }
+    setCur(id); requestAnimationFrame(() => n.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" })); };
+  return { secs, cur, go };
+}
 function Admin() {
-  const { me } = useStore(); const [tab, setTab] = useState("People"); const [tick, setTick] = useState(0); const bump = () => setTick((x) => x + 1);
+  const { me } = useStore(); const [tick, setTick] = useState(0); const bump = () => setTick((x) => x + 1);
+  const tabs = can("admin") ? ADMIN_TABS.map((x) => x[0]) : ["People"];
+  const [tab0, setTab0] = useState(() => { try { return localStorage.getItem("aihub_admin_tab") || "People"; } catch { return "People"; } });
+  const tab = tabs.includes(tab0) ? tab0 : "People";        // permissions arrive after the first render: keep the remembered tab until then
+  const setTab = (t) => { setTab0(t); try { localStorage.setItem("aihub_admin_tab", t); } catch {} window.scrollTo({ top: 0 }); };
+  const box = useRef(null); const sec = useAdminSections(box, tab);
   if (!can("admin") && !can("reset_password")) return html`<${Empty} t="Admins only" d="You don’t have access to this page." />`;
-  const tabs = can("admin") ? ["People", "Roles", "Sync", "Backup", "Updates", "Listen", "Settings"] : ["People"];
-  return html`<div class="stack"><h1>Admin</h1>${tabs.length > 1 && html`<div class="seg">${tabs.map((t) => html`<button key=${t} class=${tab === t ? "on" : ""} aria-pressed=${tab === t} onClick=${() => setTab(t)}>${t}</button>`)}</div>`}
-    ${tab === "People" && html`<${People} me=${me} tick=${tick} bump=${bump} />`}${tab === "Roles" && can("admin") && html`<${Roles} tick=${tick} bump=${bump} />`}
-    ${tab === "Sync" && can("admin") && html`<${AdminSync} />`}${tab === "Backup" && can("admin") && html`<${AdminBackup} />`}${tab === "Updates" && can("admin") && html`<${AdminUpdates} />`}${tab === "Listen" && can("admin") && html`<${AdminListen} />`}${tab === "Settings" && can("admin") && html`<${AdminSettings} />`}</div>`;
+  const body = html`${tab === "People" && html`<${People} me=${me} tick=${tick} bump=${bump} />`}${tab === "Roles" && can("admin") && html`<${Roles} tick=${tick} bump=${bump} />`}
+    ${tab === "Sync" && can("admin") && html`<${AdminSync} />`}${tab === "Backup" && can("admin") && html`<${AdminBackup} />`}${tab === "Updates" && can("admin") && html`<${AdminUpdates} />`}${tab === "Listen" && can("admin") && html`<${AdminListen} />`}${tab === "Settings" && can("admin") && html`<${AdminSettings} />`}`;
+  if (tabs.length < 2) return html`<div class="stack"><h1>Admin</h1>${body}</div>`;
+  const hint = Object.fromEntries(ADMIN_TABS);
+  return html`<div class="stack"><h1>Admin</h1><div class="adm">
+    <aside class="adm-nav" aria-label="Admin sections"><nav>${tabs.map((t) => html`<div key=${t} class="adm-g">
+      <button type="button" class=${"adm-t" + (tab === t ? " on" : "")} aria-current=${tab === t ? "page" : null} onClick=${() => setTab(t)}><b>${t}</b><span>${hint[t]}</span></button>
+      ${tab === t && sec.secs.length > 1 && html`<ul class="adm-s">${sec.secs.map((x) => html`<li key=${x.id}><button type="button" class=${sec.cur === x.id ? "on" : ""} onClick=${() => sec.go(x.id)}>${x.t}${!x.open && html`<i class="adm-closed" title="collapsed" aria-label="collapsed"></i>`}</button></li>`)}</ul>`}</div>`)}</nav></aside>
+    <div class="adm-main" ref=${box}>${body}</div></div></div>`;
+}
+
+// ---------- Running: bots started with `aihub run` on people's machines. Commands are queued; the run takes them at its next report.
+const RUN_BADGE = { running: "green", waiting: "orange", starting: "orange", failed: "red", offline: "red" };
+const runDur = (n) => { n = Math.max(0, Math.round(n || 0)); return n >= 86400 ? (n / 86400 | 0) + "d " + (n % 86400 / 3600 | 0) + "h" : n >= 3600 ? (n / 3600 | 0) + "h " + (n % 3600 / 60 | 0) + "m" : n >= 60 ? (n / 60 | 0) + "m " + n % 60 + "s" : n + "s"; };
+const splitArgs = (t) => [...String(t || "").matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((m) => m[1] ?? m[2] ?? m[3]);
+const joinArgs = (a) => (a || []).map((x) => (/[\s"']/.test(x) || !x ? JSON.stringify(x) : x)).join(" ");
+const RUN_PRESETS = [["None", ""], ["Every 5 min", "5m"], ["Hourly", "1h"], ["Daily 08:00", "0 8 * * *"], ["Weekdays 08:00", "0 8 * * 1-5"]];
+function Running() {
+  const { me } = useStore(); const [scope, setScope] = useState("mine"); const [d, setD] = useState(null); const [e, setE] = useState(""); const [open, setOpen] = useState(""); const [busy, setBusy] = useState(""); const [q, setQ] = useState("");
+  const load = useCallback(async () => { try { setD(await api("/runs?scope=" + scope)); setE(""); } catch (x) { setE(x.message); } }, [scope]);
+  useEffect(() => { load(); const t = setInterval(() => { if (!document.hidden) load(); }, 4000); return () => clearInterval(t); }, [load]);
+  if (!me) return html`<${Empty} t="Sign in" d="Sign in to see the bots you run with aihub run." />`;
+  if (!d) return e ? html`<${Err} e=${e} />` : html`<div class="skel"></div>`;
+  const send = async (r, action, extra = {}) => { setBusy(r.key + action); try { await api("/runs/" + r.key + "/command", { method: "POST", body: { action, ...extra } }); toast(action === "set" ? "Change sent. It applies within seconds" : "Sent: " + action); load(); } catch (x) { toast(x.message, 1); } finally { setBusy(""); } };
+  const forget = async (r) => { try { await api("/runs/" + r.key, { method: "DELETE" }); toast("Removed from the list"); load(); } catch (x) { toast(x.message, 1); } };
+  const qq = q.trim().toLowerCase(); const items = d.items.filter((r) => !qq || [r.name, r.bot, r.host, r.owner, r.status].join(" ").toLowerCase().includes(qq));
+  const n = (st) => d.items.filter((r) => r.status === st).length; const now = Date.now() / 1000;
+  return html`<div class="stack"><div class="row" style="flex-wrap:wrap;align-items:flex-end"><div><h1>Running</h1><p class="mut">Bots started with <code>aihub run</code> on your machines. Stop, start, restart or change them here; a change reaches the machine at its next report (a few seconds while this page is open).</p></div><span class="sp"></span>
+      ${d.is_admin && html`<div class="seg" role="group" aria-label="Whose runs">${[["mine", "Mine"], ["all", "Everyone"]].map(([k, l]) => html`<button key=${k} class=${scope === k ? "on" : ""} aria-pressed=${scope === k} onClick=${() => setScope(k)}>${l}</button>`)}</div>`}</div>
+    <div class="kpis"><div class="stat"><b>${n("running")}</b><span>running</span></div><div class="stat"><b>${n("waiting")}</b><span>waiting (schedule / restart)</span></div><div class="stat"><b>${n("stopped")}</b><span>stopped</span></div><div class="stat"><b>${d.items.filter((r) => !r.online).length}</b><span>not connected</span></div></div>
+    ${d.items.length ? html`<input class="field" type="search" placeholder="Filter by name, bot, machine, person, status" aria-label="Filter runs" value=${q} onInput=${(x) => setQ(x.target.value)} />` : ""}
+    ${!d.items.length ? html`<div class="card stack"><h3>Nothing running yet</h3><p class="mut">Start a bot on a machine signed in to this hub. It runs in the background and shows up here.</p><${Cmd} text="aihub run aihub-bot -- --cron" /><p class="xs mut3">Other forms: <code>aihub run BOT --fg</code> (this terminal) · <code>--schedule 1h</code> · <code>--name NAME</code> · <code>aihub run list</code> · <code>aihub run logs NAME -f</code></p></div>`
+      : html`<div class="list">${items.map((r) => { const on = open === r.key; const B = (a) => busy === r.key + a;
+        const live = r.online; const up = r.status === "running" && r.last_start ? "up " + runDur(now - r.last_start) : r.status === "waiting" && r.next_at ? "next in " + runDur(r.next_at - now) : r.last_end ? "ended " + ago(r.last_end) : "";
+        return html`<div class="run" key=${r.key}><div class="li run-h">
+          <span class=${"run-dot " + (RUN_BADGE[r.status] || "")} aria-hidden="true"></span>
+          <div class="t"><b>${r.name}${r.name !== r.bot && html` <span class="mut sm">· ${r.bot}</span>`}</b><span>${r.host || "?"}${r.os ? " · " + r.os : ""}${d.scope === "all" ? " · " + (r.owner || "?") : ""}${r.mode === "fg" ? " · terminal" : ""}${r.schedule ? " · schedule " + r.schedule : ""} · restart ${r.restart || "no"}</span></div>
+          <div class="run-m"><span class=${"badge " + (RUN_BADGE[r.status] || "")}>${r.status}${r.pending ? " · " + r.pending + " queued" : ""}</span><span class="xs mut3">${up}${r.runs ? " · " + r.runs + (r.runs === 1 ? " start" : " starts") : ""}${r.last_exit != null ? " · exit " + r.last_exit : ""}</span></div>
+          <div class="row run-a">${live ? html`${["running", "waiting", "starting"].includes(r.status) ? html`<button class="btn sec sm" disabled=${B("stop")} onClick=${() => send(r, "stop")} title="Stop the bot; the supervisor waits so it can be started again from here">Stop</button>` : html`<button class="btn sm" disabled=${B("start")} onClick=${() => send(r, "start")}>Start</button>`}
+            <button class="btn sec sm" disabled=${B("restart")} onClick=${() => send(r, "restart")}>Restart</button>` : html`<button class="btn sec sm" onClick=${() => forget(r)} title="Remove this entry; a run that reports again comes back">Remove</button>`}
+            <button class="btn sec sm" aria-expanded=${on} onClick=${() => setOpen(on ? "" : r.key)}>${on ? "Close" : "Details"}</button></div></div>
+          ${r.error && html`<p class="sm run-err" role="alert">${r.error}</p>`}
+          ${on && html`<div class="run-b"><${RunEdit} r=${r} send=${send} busy=${busy} /><${RunLog} r=${r} /></div>`}</div>`; })}</div>`}
+    ${d.items.length ? html`<p class="xs mut3">A run that has not reported for ${d.online_secs} s is shown as not connected (machine asleep, offline, or the run ended). Start it again there with <code>aihub run start NAME</code>.</p>` : ""}</div>`;
+}
+function RunEdit({ r, send, busy }) {
+  const [sc, setSc] = useState(r.schedule || ""); const [rs, setRs] = useState(r.restart || "no"); const [ar, setAr] = useState(joinArgs(r.args));
+  const changed = sc.trim() !== (r.schedule || "") || rs !== (r.restart || "no") || ar.trim() !== joinArgs(r.args);
+  const save = () => { const b = {}; if (sc.trim() !== (r.schedule || "")) b.schedule = sc.trim(); if (rs !== (r.restart || "no")) b.restart = rs; if (ar.trim() !== joinArgs(r.args)) b.args = splitArgs(ar); send(r, "set", b); };
+  return html`<div class="stack run-edit"><h3 class="sm">Behaviour</h3>
+    <div class="li"><div class="t"><b>Schedule</b><span>Empty = run once (or keep running). Seconds, <code>30s</code> / <code>5m</code> / <code>2h</code> / <code>1d</code>, or cron (<code>0 8 * * 1-5</code> = weekdays 08:00, the machine's time).</span></div>
+      <div class="stack"><input class="field" value=${sc} placeholder="none" aria-label="Schedule" onInput=${(x) => setSc(x.target.value)} />
+      <div class="chips">${RUN_PRESETS.map(([l, v]) => html`<button type="button" key=${l} class=${"chip" + (sc.trim() === v ? " on" : "")} onClick=${() => setSc(v)}>${l}</button>`)}</div></div></div>
+    <div class="li"><div class="t"><b>When it ends</b><span>Restart policy: on-failure restarts after a non-zero exit (2 s, doubling to 5 min).</span></div>
+      <div class="seg">${["no", "on-failure", "always"].map((o) => html`<button key=${o} class=${rs === o ? "on" : ""} aria-pressed=${rs === o} onClick=${() => setRs(o)}>${o}</button>`)}</div></div>
+    <div class="li"><div class="t"><b>Arguments</b><span>${r.mine ? "Passed to the bot at its next start (quote values with spaces)." : "Only the owner of a run can change its arguments."}</span></div><input class="field mono" value=${ar} placeholder="--cron" aria-label="Bot arguments" disabled=${!r.mine} onInput=${(x) => setAr(x.target.value)} /></div>
+    <div class="row"><span class="sp"></span>${changed && html`<button class="btn sec sm" onClick=${() => { setSc(r.schedule || ""); setRs(r.restart || "no"); setAr(joinArgs(r.args)); }}>Reset</button>`}
+      <button class="btn sm" disabled=${!changed || !r.online || busy === r.key + "set"} onClick=${save}>Apply</button>${r.online && html`<button class="btn danger sm" disabled=${busy === r.key + "quit"} onClick=${() => confirm("End " + r.name + " and its supervisor? It can only be started again on its machine.") && send(r, "quit")}>End run</button>`}</div></div>`;
+}
+function RunLog({ r }) {
+  const [lines, setLines] = useState([]); const [follow, setFollow] = useState(true); const [q, setQ] = useState(""); const seq = useRef(0); const box = useRef(null); const all = useRef([]);
+  useEffect(() => { let on = 1; seq.current = 0; all.current = [];
+    const poll = async () => { try { const x = await api("/runs/" + r.key + "/log?after=" + seq.current); if (!on) return; if (x.seq < seq.current) all.current = []; all.current = all.current.concat(x.lines).slice(-1000); seq.current = x.seq; setLines(all.current); } catch {} };
+    poll(); const t = setInterval(() => { if (!document.hidden) poll(); }, 2000); return () => { on = 0; clearInterval(t); }; }, [r.key]);
+  useEffect(() => { if (follow && box.current) box.current.scrollTop = box.current.scrollHeight; }, [lines.length, follow]);
+  const qq = q.toLowerCase(); const shown = qq ? lines.filter((l) => l.line.toLowerCase().includes(qq)) : lines;
+  return html`<div class="stack"><div class="row run-log-h" style="flex-wrap:wrap"><h3 class="sm">Output</h3><span class="xs mut3">live tail · memory only, last 1000 lines</span><span class="sp"></span>
+      <input class="field" placeholder="Filter" aria-label="Filter output" value=${q} onInput=${(x) => setQ(x.target.value)} />
+      <label class="row sm" style="gap:6px"><input type="checkbox" checked=${follow} onChange=${(x) => setFollow(x.target.checked)} /> Follow</label></div>
+    <div ref=${box} class="mono xs vscroll run-log" tabindex="0" role="log" aria-live="polite" aria-label=${"Output of " + r.name}>
+      ${shown.length ? shown.map((l) => html`<div key=${l.seq} class=${l.line.startsWith("[aihub") ? "run-sys" : ""}><span class="mut3">${new Date(l.ts * 1000).toLocaleTimeString()}</span> ${l.line}</div>`) : html`<span class="mut">${r.online ? "Waiting for output… (lines arrive with the next report)" : "No output kept on the hub. On the machine: aihub run logs " + r.name}</span>`}</div></div>`;
 }
 const SC = { active: "green", pending: "orange", disabled: "red" };
 function People({ me, tick, bump }) {
@@ -626,7 +722,7 @@ function FoldBar({ f, children }) {
 }
 function Fold({ f, k, title, hint, badge, children }) {
   const on = f.open(k), id = "fold-" + k;
-  return html`<section class=${"fold" + (on ? " open" : "")}><h3 class="fold-h"><button type="button" aria-expanded=${on} aria-controls=${id} onClick=${() => f.toggle(k)}>
+  return html`<section id=${"sec-" + k} data-fold=${typeof title === "string" ? title : k} class=${"fold" + (on ? " open" : "")}><h3 class="fold-h"><button type="button" aria-expanded=${on} aria-controls=${id} onClick=${() => f.toggle(k)}>
       <svg class="fold-chev" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2l4 4-4 4"/></svg>
       <span class="fold-t">${title}</span>${badge != null && badge !== "" && html`<span class="badge">${badge}</span>`}${hint && html`<span class="fold-s">${hint}</span>`}</button></h3>
     ${on && html`<div class="fold-b" id=${id}>${children}</div>`}</section>`;
@@ -1342,12 +1438,12 @@ function App() {
   const logout = async () => { try { await api("/auth/logout", { method: "POST" }); } catch {} try { localStorage.removeItem("aihub_token"); sessionStorage.removeItem("aihub_token"); } catch {} set({ me: null }); nav("/"); };
   const on = (k) => (seg[0] === k ? "on" : "");
   const nl = (k, label) => ({ k, label, href: "#/" + k, on: seg[0] === k });
-  const ws = s.me ? [nl("knowledge", "Knowledge"), can("view_usage") && nl("usage", "Usage"), s.showGroups && nl("groups", "Groups")].filter(Boolean) : [];
+  const ws = s.me ? [nl("knowledge", "Knowledge"), nl("running", "Running"), can("view_usage") && nl("usage", "Usage"), s.showGroups && nl("groups", "Groups")].filter(Boolean) : [];
   const mg = s.me ? [can("view_dashboard") && nl("dashboard", "Dashboard"), can("audit") && nl("audit", "Audit"), (can("admin") || can("reset_password")) && nl("admin", "Admin")].filter(Boolean) : [];
   const navGroup = (label, items) => items.length > 1 ? html`<${NavMenu} label=${label} items=${items} />` : items.length ? html`<a class=${items[0].on ? "on" : ""} href=${items[0].href}>${items[0].label}</a>` : "";
   const br = s.brand || {}, ct = br.contact || {};
   const page = { "": html`<${Home} />`, browse: html`<${Browse} key=${s.route} />`, package: html`<${Package} name=${seg[1]} key=${seg[1]} />`, rankings: html`<${Rankings} />`, docs: html`<${Docs} slug=${seg[1]} key=${seg[1]} />`, start: html`<${Start} />`,
-    login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, knowledge: html`<${Knowledge} />`, dashboard: html`<${Dashboard} />`, usage: html`<${UsageHub} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
+    login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, knowledge: html`<${Knowledge} />`, dashboard: html`<${Dashboard} />`, usage: html`<${UsageHub} />`, running: html`<${Running} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
   return html`<div><a class="skip" href="#/" onClick=${(e) => { e.preventDefault(); const m = document.getElementById("main"); if (m) m.focus(); }}>Skip to content</a>${br.announcement && html`<div class="announce" role="status" dangerouslySetInnerHTML=${{ __html: br.announcement }}></div>`}<header class="nav"><div class="nav-in"><a class="brand glow" href="#/">${br.logo_url && html`<img decoding="async" class="logo" src=${br.logo_url} alt="" />`}<span>${br.name || "AI Hub"}</span></a>
     <button type="button" class="burger" aria-label="Menu" aria-expanded=${menu} aria-controls="menu" onClick=${() => setMenu(!menu)}><i></i><i></i><i></i></button>
     <div id="menu" class=${"menu" + (menu ? " open" : "")} onClick=${(e) => { if (e.target.closest && e.target.closest("a")) setMenu(false); }}><nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>

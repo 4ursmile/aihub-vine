@@ -64,7 +64,7 @@ def free_port():
 
 def clean_env(home):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("AIHUB_", "GIT_"))}
-    env.update(HOME=home, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
+    env.update(HOME=home, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="true", SSH_ASKPASS="true")     # never an IDE/GUI login prompt (VS Code askpass hung the run)
     return env
 
 

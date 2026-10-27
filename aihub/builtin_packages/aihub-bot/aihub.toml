@@ -1,6 +1,6 @@
 [package]
 name = "aihub-bot"
-version = "1.1.0"
+version = "1.1.1"
 type = "bot"
 description = "Sample chat bot (run it with `aihub run`): your soul and knowledge notes, the skills of every installed package, MCP servers, scheduled jobs and a drop-in extension folder."
 tags = ["aihub", "bot", "chat", "starter"]

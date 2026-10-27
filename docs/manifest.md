@@ -10,7 +10,7 @@ Each package archive contains an `aihub.toml` manifest. The CLI's `aihub dev ini
 | --- | --- | --- |
 | `name` | required | Canonical package name. Names are trimmed, lowercased, and runs of `-`, `_`, or `.` are converted to `-`. The normalized name must be 1–64 characters and start and end with a lowercase letter or digit. |
 | `version` | required | Version string, such as `1.2.0` or `1.2.0rc1`. See [version rules](#versions-and-constraints). |
-| `type` | `tool` | One of `skill`, `agent`, `mcp`, `tool`, `setup`, or `bot` (see `bots` doc: `[bot] run`, `[[bot.env]]`). |
+| `type` | `tool` | One of `skill`, `agent`, `mcp`, `tool`, `setup`, or `bot` / `service` (see `bots` doc: `[bot]`/`[service]` run, restart, schedule, `[[bot.env]]`/`[[service.env]]`; started by `aihub run`). |
 | `description` | `""` | Short package description. |
 | `tags` | `[]` | Tags are converted to lowercase strings. |
 | `readme` | `"README.md"` | Path of the README inside the package; lint warns if the file is missing. The index entry does not use this path: it stores the text of the first README found in the package root (`README.md`, `readme.md`, `Readme.md`, `README.markdown`, or `README`), capped at 20000 characters. |

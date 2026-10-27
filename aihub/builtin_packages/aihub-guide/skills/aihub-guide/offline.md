@@ -45,7 +45,7 @@ Keys and environment variables:
 | `telemetry_url`, `telemetry_inbox_branch` | `AIHUB_TELEMETRY_URL`, `AIHUB_TELEMETRY_INBOX_BRANCH` | Git repo and branch CLIs push usage files to (default: bundled `defaults.json`, then the index repo; branch `telemetry-inbox`) |
 | `telemetry_interval` | `AIHUB_TELEMETRY_INTERVAL` | Seconds per telemetry window (default 15 without a hub, 60 from the hub; allowed 5 to 3600) |
 | `telemetry_via`, `index_via` | `AIHUB_TELEMETRY_VIA`, `AIHUB_INDEX_VIA` | `git` = skip the hub and use git only (default: hub first, git as the fallback) |
-| `auto_update`, `auto_update_hours` | `AIHUB_AUTO_UPDATE`, `AIHUB_AUTO_UPDATE_HOURS`, `AIHUB_NO_UPDATE=1` | Self-update: `on` (default, installs a newer hub version), `notify` (only says one is available), `off`; check every N hours (default 24, 1..720; a failed check retries within 1 h). Non-interactive runs update silently (stderr only); `aihub upgrade --rollback` makes auto-update skip the version you left |
+| `auto_update`, `auto_update_minutes` | `AIHUB_AUTO_UPDATE`, `AIHUB_AUTO_UPDATE_MINUTES`, `AIHUB_NO_UPDATE=1` | Self-update: `on` (default, installs a newer hub version), `notify` (only says one is available), `off`. Checked in a detached background worker after every command (at most every N minutes, default 1, 1..43200; failures back off up to 1 h; old `auto_update_hours` still read), so commands never wait; the next run says `updated aihub A -> B`. `aihub auto-update` checks now. `aihub upgrade --rollback` makes auto-update skip the version you left |
 
 - `AIHUB_HOME` moves the CLI state directory from `~/.aihub` to another path.
 - Git logins are kept by `aihub credential`, a git credential helper that `aihub setup` registers for the index and telemetry hosts only (macOS Keychain, Windows DPAPI, Linux Secret Service, else a 0600 file). One entry per host; if already configured, setup changes nothing. Check: `git config --global --get-all credential.https://<host>.helper`.
@@ -97,6 +97,7 @@ aihub sync --check | --prune | --yes
 aihub doctor                      # index and telemetry inbox reachable? signed in? hooks? python3?
 aihub version                     # CLI version and the one the hub offers
 aihub upgrade [--check|--force|--rollback]
+aihub auto-update
 aihub flush                       # send queued usage events now
 # bare `aihub` menu also has Usage and Policy (guard on/off, tick active rules)
 aihub usage [--tool claude|codex] [--days N] [--by-day] [--plain] [--json]   # full screen browser in a tty, opens on Summary (arrows, mouse, Enter opens a session, tabs Summary/Sessions/Days/Tips, periods today/this month/last N days/all time, n = type N days); local report from the tools' own logs: sessions, models, tokens, cache, est. cost (no hub)
@@ -107,10 +108,16 @@ aihub usage --tips                        # efficiency suggestions from your own
 aihub hooks install [--tool claude]   # or: aihub hooks remove
 aihub skill install [--tool claude]   # (re)install aihub-guide and aihub-package
 aihub skill remove                    # uninstall both
-aihub run [BOT] [-- ARGS]            # start an installed bot (type=bot); settings in ~/.aihub/bots/NAME/.env, printed after install
+aihub run [BOT] [-- ARGS]            # start an installed bot (type=bot) or service (type=service, restart always by default) in the BACKGROUND (supervisor, log); settings in ~/.aihub/bots/NAME/.env (services: ~/.aihub/services/NAME/.env)
+aihub run BOT --fg | --name N | --schedule 5m|'0 8 * * *' | --restart no|on-failure|always | --no-hub
+aihub run list | logs N [-f] | listen N | stop N|--all | pause N | start N | restart N | set N --schedule .. --restart .. [-- ARGS] | status N | rm N
+                                      # signed in: runs show on the hub page Running (stop/start/restart/change them there); off: aihub config set run_report off
 aihub onboard [BOT]                   # optional guided credential setup of a bot that has one ([bot] onboard); install offers it in a terminal
+aihub --json CMD ... | CMD --json | AIHUB_JSON=1   # ONE JSON document {schema, ok, command, exit, error, hint, data, output, messages, changes, context}; no prompts, no secrets; secrets in: login/register/password --password-stdin, vault add --token-stdin
 aihub knowledge list|get NOTE|pull|push|edit NOTE|rm NOTE|path   # personal notes + bot soul (soul.md), also on the hub page Knowledge
 aihub knowledge share NOTE --user U|--group G [--write] | unshare | shares NOTE | shared | push-shared OWNER/NOTE   # shared notes land in ~/.aihub/knowledge/shared/<owner>/
+
+**Build a service (type = service).** `aihub dev init ./my-svc --type service --name my-svc`; `[service] run`, optional `restart` (default always) / `schedule`, `[[service.env]]`; `aihub run my-svc` keeps it up. Same as a bot otherwise.
 
 **Build a bot (type = bot).** 1) `aihub dev init ./my-bot --type bot --name my-bot`. 2) In `aihub.toml`, set `[bot] run = "bot/run.py"` and `title`; declare each setting as `[[bot.env]]` (`name`, `hint`, `required`, `secret`, `default`). 3) Write `bot/run.py`: read settings from the environment, `--once`/`--info` from argv after `--`. 4) `aihub dev validate`, then `aihub dev publish --bump patch`. 5) `aihub install my-bot` prints `settings:` (`~/.aihub/bots/my-bot/.env`); fill it in. 6) `aihub run my-bot` (`-- --info` to check). Memory, harnesses and cron: see `docs/bots.md` on the hub; this snapshot has none.
 aihub policy                          # guard that blocks agents from destructive calls (db/s3 delete, overwrite): on|off, enable|disable ID, add ID --pattern RE, test 'CMD', judge on|off (AI second opinion via claude -p; failure = allow), update

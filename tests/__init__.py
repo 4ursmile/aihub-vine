@@ -15,3 +15,11 @@ os.environ.setdefault("AIHUB_TELEMETRY_VIA", "git")
 os.environ.setdefault("AIHUB_INDEX_VIA", "git")
 
 os.environ.setdefault("AIHUB_POLICY_JUDGE", "off")      # no test may start a real `claude -p` judge
+
+# A test git call must never wait for a person. Run from an IDE terminal, git inherits the IDE's GUI askpass (VS Code: GIT_ASKPASS +
+# VSCODE_GIT_*), which opens a login dialog nobody answers and freezes the whole run (local test listeners answer 401 on purpose).
+# Tests that need their own askpass (test_git_login, test_robust) still patch it in for their duration.
+for _k in [k for k in os.environ if k.startswith("VSCODE_GIT_")]:
+    del os.environ[_k]
+os.environ["GIT_ASKPASS"] = os.environ["SSH_ASKPASS"] = "true"
+os.environ["GIT_TERMINAL_PROMPT"] = "0"

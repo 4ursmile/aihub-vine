@@ -1,6 +1,7 @@
 """Repository layer: the only module that writes SQL."""
 import hashlib
 import json
+import secrets
 import logging
 import re
 import sqlite3
@@ -198,6 +199,58 @@ class Repos:
             c = self.db.conn()
             c.execute("DELETE FROM knowledge WHERE user_id=? AND name=?", (uid, name))
             c.execute("DELETE FROM knowledge_share WHERE owner_id=? AND name=?", (uid, name))
+            c.commit()
+
+    # `aihub run` supervisors report here (one row per user, device and run); people queue commands the supervisor takes from its next report
+    def run_report(self, uid, client_id, host, os_name, run, done):
+        """Store the run's state; drop the commands it has applied (`done` = their tokens: SQLite reuses ids). -> commands still pending."""
+        rid = run["id"]
+        with self.lock:
+            c = self.db.conn()
+            c.execute("INSERT OR REPLACE INTO runs(user_id,client_id,rid,name,bot,host,os,status,spec,seen) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                      (uid, client_id, rid, run.get("name") or rid, run.get("bot") or "", host, os_name, run.get("status") or "", json.dumps(run), time.time()))
+            for t in done[:200]:
+                c.execute("DELETE FROM run_commands WHERE user_id=? AND client_id=? AND rid=? AND token=?", (uid, client_id, rid, t))
+            c.commit()
+        return self.run_commands(uid, client_id, rid)
+
+    def run_commands(self, uid, client_id, rid):
+        return [{**json.loads(r[2] or "{}"), "id": r[0], "action": r[1], "by": r[3], "token": r[4]} for r in self.db.conn().execute(
+            "SELECT id,action,data,by_user,token FROM run_commands WHERE user_id=? AND client_id=? AND rid=? ORDER BY id", (uid, client_id, rid)).fetchall()]
+
+    def runs_list(self, uid=None):
+        """Runs of one person (uid) or everybody (None), newest report first, with the owner's name and how many commands wait."""
+        q = ("SELECT r.user_id,r.client_id,r.rid,r.name,r.bot,r.host,r.os,r.status,r.spec,r.seen,u.username,"
+             "(SELECT COUNT(*) FROM run_commands k WHERE k.user_id=r.user_id AND k.client_id=r.client_id AND k.rid=r.rid) AS pending "
+             "FROM runs r LEFT JOIN users u ON u.id=r.user_id")
+        rows = self.db.conn().execute(q + (" WHERE r.user_id=?" if uid is not None else "") + " ORDER BY r.seen DESC",
+                                      (uid,) if uid is not None else ()).fetchall()
+        out = []
+        for r in rows:
+            try:
+                spec = json.loads(r[8] or "{}")
+            except ValueError:
+                spec = {}
+            out.append({"user_id": r[0], "client_id": r[1], "rid": r[2], "name": r[3], "bot": r[4], "host": r[5], "os": r[6], "status": r[7],
+                        "spec": spec, "seen": r[9], "owner": r[10], "pending": r[11]})
+        return out
+
+    def run_get(self, uid, client_id, rid):
+        return next((x for x in self.runs_list(uid) if x["client_id"] == client_id and x["rid"] == rid), None)
+
+    def run_command_add(self, uid, client_id, rid, action, data, by):
+        with self.lock:
+            c = self.db.conn()
+            cur = c.execute("INSERT INTO run_commands(user_id,client_id,rid,action,data,created,by_user,token) VALUES(?,?,?,?,?,?,?,?)",
+                            (uid, client_id, rid, action, json.dumps(data or {}), time.time(), by, secrets.token_hex(8)))
+            c.commit()
+            return cur.lastrowid
+
+    def run_delete(self, uid, client_id, rid):
+        with self.lock:
+            c = self.db.conn()
+            c.execute("DELETE FROM runs WHERE user_id=? AND client_id=? AND rid=?", (uid, client_id, rid))
+            c.execute("DELETE FROM run_commands WHERE user_id=? AND client_id=? AND rid=?", (uid, client_id, rid))
             c.commit()
 
     # sharing: a note goes to a user or a group, read or write; the owner keeps it, recipients see it under shared/<owner>/<name>

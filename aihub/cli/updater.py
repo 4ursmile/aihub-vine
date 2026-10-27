@@ -1,4 +1,9 @@
-"""CLI version management: `aihub version`, `aihub upgrade`, and the throttled automatic update check."""
+"""CLI version management: `aihub version`, `aihub upgrade`, and the automatic update.
+
+Auto-update runs after every command but never makes it wait: `auto()` reads update.json, prints what the last background check
+found, and (when the debounce gap has passed) starts ONE detached, low-priority `aihub auto-update --background` worker (O_EXCL
+lock queue/update.lock taken before the spawn, so a burst of commands starts one). The worker asks the hub, downloads and verifies
+the new zipapp and swaps it in; the next command runs the new version and says so once."""
 import hashlib
 import json
 import os
@@ -11,9 +16,11 @@ from ..core import version as V
 from ..core.release import VERSION
 from . import api, paths, ui
 
-CHECK_EVERY = 24 * 3600                 # default auto_update_hours
-RETRY_EVERY = 3600                      # a failed check is retried after min(this, the interval)
-NEVER = ("hook", "flush", "usage-sync", "credential", "upgrade", "version", "self-uninstall", "uninstall")
+GAP = 60                                # default auto_update_minutes = 1: a check after (almost) every command, at most once a minute
+RETRY_BASE, RETRY_MAX = 60, 3600        # failed checks back off 1 min, 2, 4, ... up to 1 h (never sooner than the gap)
+STALE = 600                             # a worker lock older than this belonged to a dead worker
+NOTIFY_EVERY = 24 * 3600                # notify mode repeats "X available" at most once a day per version
+NEVER = ("hook", "flush", "usage-sync", "credential", "upgrade", "version", "self-uninstall", "uninstall", "auto-update")
 
 
 def state():
@@ -50,16 +57,18 @@ def mode():
     return "on"
 
 
-def hours():
-    """Check interval in hours, 1..720 (env AIHUB_AUTO_UPDATE_HOURS > config auto_update_hours > 24)."""
-    raw = os.environ.get("AIHUB_AUTO_UPDATE_HOURS")
-    if raw is None or not str(raw).strip():
-        raw = paths.config().get("auto_update_hours", CHECK_EVERY // 3600)
-    try:
-        h = float(str(raw).strip())
-    except ValueError:
-        h = CHECK_EVERY // 3600
-    return int(min(720, max(1, h)))
+def minutes():
+    """Debounce between checks in minutes, 1..43200. Env AIHUB_AUTO_UPDATE_MINUTES > config auto_update_minutes >
+    the older auto_update_hours (env, then config; x 60) > 1."""
+    for raw, scale in ((os.environ.get("AIHUB_AUTO_UPDATE_MINUTES"), 1), (paths.config().get("auto_update_minutes"), 1),
+                       (os.environ.get("AIHUB_AUTO_UPDATE_HOURS"), 60), (paths.config().get("auto_update_hours"), 60)):
+        if raw is None or not str(raw).strip():
+            continue
+        try:
+            return int(min(43200, max(1, float(str(raw).strip()) * scale)))
+        except ValueError:
+            continue
+    return GAP // 60
 
 
 def by_pip():
@@ -77,7 +86,7 @@ def hub_install(info):
     dst = pyz_path()
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     apply(info, dst)
-    _state({"checked": time.time(), "ok": True, "pyz_version": info["version"], "pyz": dst}, ("last_error", "available"))
+    _state({"checked": time.time(), "ok": True, "pyz_version": info["version"], "pyz": dst}, ("last_error", "available", "fails"))
 
 
 def pip_upgrade():
@@ -107,7 +116,7 @@ def target():
     return None
 
 
-def remote(timeout=5):
+def remote(timeout=10):
     with api._req("GET", paths.config()["hub"].rstrip("/") + "/cli/version", timeout=timeout) as r:
         return json.loads(r.read())
 
@@ -147,9 +156,12 @@ def apply(info, dst=None):
 def cmd_version(a):
     ui.out("  aihub CLI  %s%s" % (VERSION, " (pip)" if by_pip() else ""))
     m, st = mode(), state()
+    res = {"version": VERSION, "pip": by_pip(), "auto_update": m, "checked": st.get("checked"), "last_error": st.get("last_error"),
+           "skip_version": st.get("skip_version"), "hub_version": None, "update_available": None}
+    ui.result(res)
     line = "auto-update: %s" % m
     if m != "off":
-        line += ", every %d h" % hours()
+        line += ", checked in the background after every command (at most every %d min)" % minutes()
         if st.get("checked"):
             line += ", last check %s" % time.strftime("%Y-%m-%d %H:%M", time.localtime(st["checked"]))
     ui.info(line)
@@ -162,6 +174,7 @@ def cmd_version(a):
     except Exception:
         ui.info("hub: unreachable, cannot compare versions")
         return
+    res.update(hub_version=info["version"], update_available=V.compare(info["version"], VERSION) > 0)
     ui.out("  hub offers %s" % info["version"])
     if V.compare(info["version"], VERSION) > 0:
         ui.note("update available. run: aihub upgrade")
@@ -199,7 +212,7 @@ def cmd_upgrade(a):
             ui.good("pip finished; run `aihub -v` to see the version")
         return
     apply(info)
-    _state({"checked": time.time(), "ok": True}, ("last_error", "available"))
+    _state({"checked": time.time(), "ok": True}, ("last_error", "available", "fails"))
     ui.celebrate("aihub %s installed (previous kept; undo with: aihub upgrade --rollback)" % info["version"])
 
 
@@ -216,17 +229,141 @@ def _say(msg):
 
 def due(st, now=None):
     now = time.time() if now is None else now
-    wait = hours() * 3600
-    if st.get("ok") is False:
-        wait = min(RETRY_EVERY, wait)
+    wait = minutes() * 60
+    fails = int(st.get("fails") or (1 if st.get("ok") is False else 0))
+    if fails:
+        wait = max(wait, min(RETRY_MAX, RETRY_BASE * 2 ** (fails - 1)))
     return now - st.get("checked", 0) >= wait
 
 
+def _lock():
+    return paths.p("queue", "update.lock")
+
+
+def _acquire():
+    """Become the one worker (O_EXCL). A stale lock (dead worker) is taken over."""
+    try:
+        paths.ensure("queue")
+    except OSError:
+        return False
+    for _ in range(2):
+        try:
+            os.close(os.open(_lock(), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            return True
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(_lock()) < STALE:
+                    return False
+                os.remove(_lock())
+            except OSError:
+                return False
+        except OSError:
+            return False
+    return False
+
+
+def _release():
+    try:
+        os.remove(_lock())
+    except OSError:
+        pass
+
+
+def _self_cmd():
+    arg0 = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if arg0.endswith(".pyz") or os.path.isfile(arg0) and arg0.endswith("aihub"):
+        return [sys.executable, arg0]
+    return [sys.executable, "-m", "aihub.cli"]
+
+
+def spawn():
+    """Start the detached worker; the caller holds the lock. Low priority and no window, stdio closed: the command, Claude Code and
+    whatever else runs never wait for it."""
+    kw = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+    if os.name == "nt":
+        kw["creationflags"] = 0x08000000 | 0x00000200 | 0x00004000      # CREATE_NO_WINDOW | NEW_PROCESS_GROUP | BELOW_NORMAL_PRIORITY
+    else:
+        kw["start_new_session"] = True
+    try:
+        subprocess.Popen(_self_cmd() + ["auto-update", "--background"], **kw)
+    except Exception:
+        _release()
+
+
+def _fail(e):
+    st = state()
+    _state({"checked": time.time(), "ok": False, "fails": int(st.get("fails") or 0) + 1, "last_error": str(e)[:300]})
+
+
+def check():
+    """One check (the worker's body; tests call it directly). -> the version installed, else None. Never raises."""
+    try:
+        m = mode()
+        if m == "off":
+            return None
+        st = state()
+        info = remote()
+        new = info["version"]
+        if V.compare(new, VERSION) <= 0:
+            _state({"checked": time.time(), "ok": True}, ("last_error", "available", "fails"))
+            return None
+        _state({"checked": time.time(), "ok": True, "available": new}, ("last_error", "fails"))
+        if new == st.get("skip_version") or m == "notify":
+            return None
+        hub_install(info) if by_pip() else apply(info)
+        _state({"checked": time.time(), "ok": True, "announce": {"from": VERSION, "to": new}}, ("last_error", "available", "fails"))
+        return new
+    except Exception as e:
+        _fail(e)
+        return None
+
+
+def cmd_auto_update(a):
+    """Hidden: the detached worker started by auto(). Without --background: check now in the foreground (lock still respected)."""
+    if not a.background and not _acquire():
+        ui.info("an update check is already running")
+        return
+    try:
+        if a.background and hasattr(os, "nice"):
+            try:
+                os.nice(10)
+            except OSError:
+                pass
+        new = check()
+        if not a.background:
+            st = state()
+            if new:
+                ui.good("updated aihub %s -> %s; takes effect on the next run" % (VERSION, new))
+            elif st.get("ok") is False:
+                ui.error(st.get("last_error") or "update check failed")
+            else:
+                ui.good("aihub %s is current%s" % (VERSION, " (%s available)" % st["available"] if st.get("available") else ""))
+    finally:
+        _release()
+
+
+def _tell(st, m):
+    """Print what the last background check found: once after an update, once a day per version in notify mode."""
+    ann = st.get("announce")
+    if isinstance(ann, dict):
+        if ann.get("to") == VERSION:
+            _say("updated aihub %s -> %s (turn off: aihub config set auto_update off)" % (ann.get("from"), VERSION))
+        _state(drop=("announce",))
+        return
+    new = st.get("available")
+    if not new or new == st.get("skip_version") or V.compare(new, VERSION) <= 0:
+        return
+    if m == "notify":
+        seen = st.get("notified") or {}
+        if seen.get("version") == new and time.time() - seen.get("at", 0) < NOTIFY_EVERY:
+            return
+        _state({"notified": {"version": new, "at": time.time()}})
+        _say("aihub %s available: run aihub upgrade" % new)
+
+
 def auto(cmd, a=None):
-    """Called after a command finishes (last in main(), so the zipapp swap happens after the other tail calls).
-    Mode on = install a newer hub version, notify = only say so, off = nothing. Once per auto_update_hours (a failed check retries
-    after at most an hour). Silent on stdout when not interactive, never for hooks / machine-output commands, never fatal. Imports at
-    module top only: this may replace aihub.pyz under the running process."""
+    """Called last in main() after every command. Costs one small file read (plus a process spawn when a check is due); all network
+    work happens in the detached worker. Skipped for hooks / machine-output commands, never raises."""
     try:
         if cmd in NEVER or any(getattr(a, k, False) is True for k in ("json", "plain", "name_only")):
             return
@@ -234,24 +371,8 @@ def auto(cmd, a=None):
         if m == "off" or not (target() or by_pip()):
             return
         st = state()
-        if not due(st):
-            return
-        try:
-            info = remote(timeout=3)
-            new = info["version"]
-            if V.compare(new, VERSION) <= 0:
-                _state({"checked": time.time(), "ok": True}, ("last_error", "available"))
-                return
-            _state({"checked": time.time(), "ok": True, "available": new}, ("last_error",))
-            if new == st.get("skip_version"):
-                return
-            if m == "notify":
-                _say("aihub %s available: run aihub upgrade" % new)
-                return
-            hub_install(info) if by_pip() else apply(info)
-            _state({"checked": time.time(), "ok": True}, ("last_error", "available"))
-            _say("updated aihub %s -> %s; takes effect on the next run (turn off: aihub config set auto_update off)" % (VERSION, new))
-        except Exception as e:
-            _state({"checked": time.time(), "ok": False, "last_error": str(e)[:300]})
+        _tell(st, m)
+        if due(st) and _acquire():
+            spawn()
     except Exception:
         pass

@@ -6,7 +6,8 @@ Sample chat bot for AI Hub. Install it, put your key in the settings file, run i
 aihub install aihub-bot
 # edit the file the installer printed (~/.aihub/bots/aihub-bot/.env): ANTHROPIC_API_KEY=...
 aihub knowledge edit soul        # who the bot is for you
-aihub run aihub-bot              # chat;  aihub run aihub-bot -- --once "question"
+aihub run aihub-bot --fg         # chat in this terminal;  aihub run aihub-bot --fg -- --once "question"
+aihub run aihub-bot -- --cron     # scheduled prompts in the background (aihub run list / logs aihub-bot -f / stop aihub-bot)
 ```
 
 ## Layout

@@ -545,6 +545,44 @@ a.pk-pill{color:color-mix(in srgb,var(--blue) 60%,var(--fg))}a.pk-pill:hover{bac
 .fold-b{padding:2px 0 22px}.fold-b>*+*{margin-top:12px}
 .vscroll{max-height:360px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 
+/* ---------- admin side nav: tabs in a sticky sidebar, the open tab's sections listed under it (phones: one scrolling pill row) */
+.adm{display:grid;grid-template-columns:minmax(190px,220px) minmax(0,1fr);gap:28px;align-items:start}
+.adm-nav{position:sticky;top:76px;max-height:calc(100vh - 96px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
+.adm-nav nav{display:flex;flex-direction:column;gap:2px}
+.adm-t{appearance:none;border:0;background:transparent;color:var(--fg);font:inherit;width:100%;text-align:left;cursor:pointer;padding:8px 12px;border-radius:var(--r-sm);display:flex;flex-direction:column;gap:1px;min-height:44px;justify-content:center}
+.adm-t b{font-weight:500;font-size:15px}.adm-t span{font-size:12px;color:var(--fg-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.adm-t:hover{background:var(--fill)}
+.adm-t.on{background:color-mix(in srgb,var(--blue) 12%,transparent)}.adm-t.on b{color:var(--blue);font-weight:600}
+.adm-s{list-style:none;padding:2px 0 8px 12px;margin:0 0 0 12px;border-left:1px solid var(--sep)}
+.adm-s button{appearance:none;border:0;background:transparent;font:inherit;font-size:13px;color:var(--fg-2);cursor:pointer;text-align:left;width:100%;padding:5px 8px;border-radius:7px;display:flex;align-items:center;gap:6px;min-height:30px}
+.adm-s button:hover{color:var(--fg);background:var(--fill)}.adm-s button.on{color:var(--blue);font-weight:500}
+.adm-closed{width:5px;height:5px;border-radius:50%;background:var(--fg-3);opacity:.6;margin-left:auto;flex:none}
+.adm-main{min-width:0}.adm-main section.fold,.adm-main [id^=adm-h-]{scroll-margin-top:84px}
+@media(max-width:860px){
+  .adm{grid-template-columns:minmax(0,1fr);gap:16px}
+  .adm-nav{position:sticky;top:60px;z-index:5;max-height:none;overflow-x:auto;overflow-y:hidden;margin:0 -22px;padding:4px 22px;background:var(--bg);scrollbar-width:none}
+  .adm-nav nav{flex-direction:row;gap:6px;width:max-content}
+  .adm-t{flex-direction:row;padding:6px 14px;border-radius:980px;background:var(--fill);min-height:36px;width:auto}.adm-t span,.adm-s{display:none}
+  .adm-t.on{background:var(--blue)}.adm-t.on b{color:var(--on)}
+}
+/* ---------- running bots (aihub run) */
+.run+.run{border-top:1px solid var(--sep)}
+.run-h{flex-wrap:wrap}.run-h .t span{white-space:normal}
+.run-dot{width:10px;height:10px;border-radius:50%;flex:none;background:var(--fg-3);opacity:.5}
+.run-dot.green{background:var(--green);opacity:1;box-shadow:0 0 0 4px color-mix(in srgb,var(--green) 18%,transparent)}
+.run-dot.orange{background:var(--orange);opacity:1}.run-dot.red{background:var(--red);opacity:1}
+.run-m{display:flex;flex-direction:column;align-items:flex-end;gap:3px;text-align:right}
+.run-a{flex-wrap:wrap;justify-content:flex-end}
+.run-err{color:var(--red);padding:0 18px 12px 42px}
+.run-b{padding:4px 18px 18px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:20px}
+.run-edit .li{padding:10px 0;flex-direction:column;align-items:stretch;gap:8px;min-height:0}.run-edit .li::before{display:none}.run-edit .li .t span{white-space:normal}
+.run-edit .li .field{width:100%}.run-edit .seg{align-self:flex-start}.run-edit h3,.run-log-h h3{margin:0}
+.run-log-h .field{width:min(100%,12rem);min-height:34px;padding:6px 12px;font-size:14px}
+.run-log{max-height:50vh;min-height:12rem;overflow:auto;white-space:pre-wrap;word-break:break-word;padding:8px;border-radius:8px;background:var(--fill)}
+.run-sys{color:var(--blue)}
+@media(max-width:860px){.run-b{grid-template-columns:minmax(0,1fr)}.run-m{align-items:flex-start;text-align:left}.run-a{justify-content:flex-start}}
+@media(prefers-reduced-motion:reduce){.adm-s button,.adm-t{transition:none}}
+
 /* ---------- usage: group picker */
 .gp{display:flex;flex-direction:column;gap:10px}.gp-bar{gap:8px}
 .gp-open{gap:8px}.gp-open b{font-weight:600;color:var(--blue)}

@@ -4,7 +4,9 @@ from . import naming, version
 import os
 import re
 
-TYPES = ("skill", "agent", "mcp", "tool", "setup", "bot")
+TYPES = ("skill", "agent", "mcp", "tool", "setup", "bot", "service")
+RUNNABLE = ("bot", "service")     # types `aihub run` starts; their [bot] / [service] table has the same shape
+RESTARTS = ("no", "on-failure", "always")
 OSES = ("macos", "linux", "windows")
 SCRIPT_EXT = (".sh", ".ps1", ".cmd", ".bat", ".py")
 
@@ -45,14 +47,14 @@ def lint(m: dict, root: str):
         missing = [o for o in (m["requires"]["os"] or OSES) if ("install_" + o) not in m["scripts"]]
         if missing:
             warns.append("type=%s but no install script for: %s" % (typ, ", ".join(missing)))
-    if typ == "bot":
-        run = m["bot"]["run"]
+    if typ in RUNNABLE:
+        run = m[typ]["run"]
         if not run:
-            errs.append('type="bot" needs [bot] run = "path/to/start.py" (what `aihub run` starts)')
+            errs.append('type="%s" needs [%s] run = "path/to/start.py" (what `aihub run` starts)' % (typ, typ))
         elif run.lower().endswith(SCRIPT_EXT) and " " not in run:
-            need(run, "[bot] run")
-    if typ == "bot" and m["bot"]["onboard"]:
-        need(m["bot"]["onboard"], "[bot] onboard")
+            need(run, "[%s] run" % typ)
+        if m[typ]["onboard"]:
+            need(m[typ]["onboard"], "[%s] onboard" % typ)
     if typ == "mcp" and not m["mcp_servers"]:
         errs.append('type="mcp" needs at least one [[mcp_servers]] entry')
     if (m.get("python") or {}).get("install") and not os.path.isfile(os.path.join(base, "pyproject.toml")):
@@ -97,8 +99,15 @@ def _authors(raw) -> list:
     return out
 
 
-def _bot(b) -> dict:
-    """[bot] run = "bot.py", title, env = [{name, hint, required, secret}]. Display fields never raise: a bad entry is dropped."""
+def runnable(m: dict) -> dict:
+    """The [bot] or [service] table of a package `aihub run` can start (the bot one for any other type)."""
+    typ = m["package"]["type"]
+    return (m.get(typ) if typ in RUNNABLE else None) or m["bot"]
+
+
+def _bot(b, restart="") -> dict:
+    """[bot] / [service] run = "bot.py", title, onboard, env = [{name, hint, required, secret}], restart, schedule (run defaults).
+    Display fields never raise: a bad entry is dropped."""
     if not isinstance(b, dict):
         b = {}
     env = []
@@ -108,7 +117,9 @@ def _bot(b) -> dict:
         if isinstance(e, dict) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(e.get("name", ""))):
             env.append({"name": str(e["name"]), "hint": str(e.get("hint", "")), "required": bool(e.get("required", True)),
                         "secret": bool(e.get("secret", False)), "default": str(e.get("default", ""))})
-    return {"run": str(b.get("run", "")).strip(), "title": str(b.get("title", "")), "onboard": str(b.get("onboard", "")).strip(), "env": env}
+    r = str(b.get("restart", "")).strip()
+    return {"run": str(b.get("run", "")).strip(), "title": str(b.get("title", "")), "onboard": str(b.get("onboard", "")).strip(), "env": env,
+            "restart": r if r in RESTARTS else restart, "schedule": str(b.get("schedule", "")).strip()}
 
 
 def normalize(d: dict) -> dict:
@@ -167,5 +178,6 @@ def normalize(d: dict) -> dict:
         "scripts": d.get("scripts", {}),         # {install_<os>: "...", uninstall_<os>: "..."}
         "setup": setup,
         "bot": _bot(bot),
+        "service": _bot(d.get("service") or {}, restart="always"),   # a service is meant to stay up
         "git": {k: str(g.get(k, "")) for k in ("url", "branch", "subdir")} if (g := d.get("git") or {}) is not None else {},
     }

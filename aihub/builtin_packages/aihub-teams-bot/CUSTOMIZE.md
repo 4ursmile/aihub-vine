@@ -45,7 +45,7 @@ Another MCP server for this bot only: edit its entry in the package manifest (`[
 | `base.py` | finds the installed aihub-bot harness |
 | `../tasks/*.md` | built-in task prompts |
 
-To test a change without Teams: `aihub run aihub-teams-bot -- --try "your message"`.
+To test a change without Teams: `aihub run aihub-teams-bot --fg -- --try "your message"`.
 
 ## 4. Make your own team bot (derive and publish)
 

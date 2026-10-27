@@ -10,7 +10,7 @@ import time
 
 ACCENT = "38;5;75"      # sky blue, the single accent
 DIM, OK, WARN, ERR = "2", "38;5;41", "38;5;214", "38;5;203"
-TYPE_COLOR = {"skill": "38;5;75", "agent": "38;5;41", "mcp": "38;5;214", "tool": "38;5;250", "setup": "38;5;203", "bot": "38;5;177"}
+TYPE_COLOR = {"skill": "38;5;75", "agent": "38;5;41", "mcp": "38;5;214", "tool": "38;5;250", "setup": "38;5;203", "bot": "38;5;177", "service": "38;5;43"}
 
 
 def _vt():
@@ -69,7 +69,34 @@ def vlen(s): return len(_ANSI.sub("", s))
 def width(): return max(40, min(shutil.get_terminal_size((80, 24)).columns, 100))
 
 
+# ---------- JSON mode (`aihub --json CMD`, AIHUB_JSON=1): nothing is printed for people; every line is recorded with its level and the
+# command may attach structured data with result(). main writes ONE JSON document at the end (see main._json_envelope).
+JSON = False
+LOG = []            # [{"level": step|good|bad|note|info|heading|done|text, "text": plain text}]
+DATA = {}           # {"data": ...} once a command called result()
+
+
+def json_mode():
+    global JSON, TTY, COLOR, FANCY, INTERACTIVE
+    JSON, TTY, COLOR, FANCY, INTERACTIVE = True, False, False, False, False
+    del LOG[:]
+    DATA.clear()
+
+
+def result(data):
+    """Structured answer of the command (JSON mode). Human mode ignores it, so a command calls it and then prints as usual or returns."""
+    DATA["data"] = data
+
+
+def _say(level, text):
+    LOG.append({"level": level, "text": _ANSI.sub("", str(text)).strip("\n")})
+
+
 def out(s=""):
+    if JSON:
+        if str(s).strip():
+            _say("text", s)
+        return
     print(s)
     sys.stdout.flush()
 
@@ -111,16 +138,21 @@ def banner(tagline="skills, agents and MCP servers for your AI tools"):
 
 
 # ---------- lines
-def step(msg): out("  %s %s" % (accent(ARROW), msg))
-def good(msg): out("  %s %s" % (ok(CHECK), msg))
-def bad(msg): out("  %s %s" % (err(CROSS), msg))
-def note(msg): out("  %s %s" % (warn(BANG), msg))
-def info(msg): out("  " + dim(msg))
-def heading(msg): out("\n" + bold(msg))
+def step(msg): _say("step", msg) if JSON else out("  %s %s" % (accent(ARROW), msg))
+def good(msg): _say("good", msg) if JSON else out("  %s %s" % (ok(CHECK), msg))
+def bad(msg): _say("bad", msg) if JSON else out("  %s %s" % (err(CROSS), msg))
+def note(msg): _say("note", msg) if JSON else out("  %s %s" % (warn(BANG), msg))
+def info(msg): _say("info", msg) if JSON else out("  " + dim(msg))
+def heading(msg): _say("heading", msg) if JSON else out("\n" + bold(msg))
 def code(cmd): return accent(cmd) if COLOR else "`%s`" % cmd
 
 
 def error(msg, hint=None):
+    if JSON:
+        DATA.setdefault("error", str(msg))
+        if hint:
+            DATA.setdefault("hint", hint)
+        return
     sys.stderr.write("%s %s\n" % (err("error:") if COLOR else "error:", msg))
     if hint:
         sys.stderr.write("%s %s\n" % (dim("hint:") if COLOR else "hint:", hint))
@@ -143,6 +175,8 @@ def hint_for(msg):
 
 
 def celebrate(msg):
+    if JSON:
+        return _say("done", msg)
     out("\n  %s %s" % (ok(CHECK), ok(bold(msg))))
 
 

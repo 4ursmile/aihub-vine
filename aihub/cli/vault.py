@@ -74,6 +74,8 @@ def _save(scheme, host, user, token):
 
 def do_list(a):
     d = _load()
+    ui.result({"backend": credhelper.describe(), "remotes": [{"host": h, "scheme": v.get("scheme", "https"), "username": v.get("username", ""),
+                                                              "login": "stored" if _secret(h) else "missing"} for h, v in sorted(d.items())]})
     if not d:
         ui.info("no remotes yet. Add one: aihub vault add")
         return 0
@@ -96,6 +98,7 @@ def do_add(a):
     if host in _load() and ui.INTERACTIVE and not ui.confirm("%s is already in the vault. Replace its login?" % host, False):
         return 0
     _save(scheme, host, user, _token(a, "  token/password: "))
+    ui.result({"host": host, "scheme": scheme, "username": user, "login": "stored"})
     ui.good("saved %s for %s" % (user, host))
     return 0
 
@@ -115,6 +118,7 @@ def do_edit(a):
     if not (user and tok):
         raise ValueError("nothing stored to keep: give a username and a token")
     _save(cur.get("scheme", "https"), host, user, tok)
+    ui.result({"host": host, "username": user, "login": "stored"})
     ui.good("updated %s (%s)" % (host, user))
     return 0
 
@@ -129,6 +133,7 @@ def do_remove(a):
     d.pop(host, None)
     credhelper.forget(host)                   # git's own reject never erases a vault host; only this does
     paths.save(FILE, d, private=True)
+    ui.result({"host": host, "removed": True})
     ui.good("removed %s" % host)
     return 0
 
@@ -163,9 +168,11 @@ def do_test(a):
         targets = [("%s://%s" % (v.get("scheme", "https"), h), h) for h, v in sorted(_load().items())]
     if not targets:
         raise ValueError("the vault is empty (add one: aihub vault add)")
-    bad = 0
+    bad, res = 0, []
+    ui.result(res)
     for url, host in targets:
         got = credhelper.lookup(host)
+        res.append({"host": host, "url": url, "username": got[0] if got else None, "login": "stored" if got else "missing", "reachable": False})
         if not got:
             ui.bad("%-28s no stored login (aihub vault add %s --user NAME)" % (host, url))
             if host in _load():
@@ -179,6 +186,7 @@ def do_test(a):
             ok = gitx.reachable(url)
         finally:
             gitx.LOGIN = saved
+        res[-1]["reachable"] = bool(ok)
         if ok:
             ui.good("%-28s %s: reachable" % (host, got[0]))
         else:

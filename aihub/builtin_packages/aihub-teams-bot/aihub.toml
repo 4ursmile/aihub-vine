@@ -1,6 +1,6 @@
 [package]
 name = "aihub-teams-bot"
-version = "1.2.0"
+version = "1.2.1"
 type = "bot"
 description = "Microsoft Teams bot built on aihub-bot (Teams SDK): per-chat memory, a task file to retarget it, allow-list, slash commands and a customisation guide."
 tags = ["aihub", "bot", "teams", "microsoft", "starter"]

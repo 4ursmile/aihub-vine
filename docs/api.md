@@ -140,6 +140,18 @@ Most administration routes require the `admin` permission. The rows name any oth
 | GET | `/api/v1/audit` | `audit` | Security audit search. `source=tools` (agent tool calls and installs) or `admin` (account, role and setting changes). Filters: `q` (free text over parameters, tool, package, path, host, person), `actor`, `action` (tool/component or action name), `package`, `kind`, `host` (device), `os`, `days` (0 = all time) or `start`/`end` (unix seconds), `page`, `per_page` (max 200). `%` and `_` in text are literal. |
 | GET | `/api/v1/audit/export` | `audit` | Same filters, up to 5,000 rows as CSV. The export itself is audited. |
 
+## Running bots (`aihub run`)
+
+The CLI's run supervisors report here; the hub never connects to a machine. A command waits in the database until the run's next report (every 15 s; 2 s while someone looks at the run). Owner or admin only; another person's run answers 404.
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| POST | `/api/v1/runs/report` | signed in | Body `{client_id, host, os, cli_version, run: {id, name, bot, args, schedule, restart, status, pid, runs, last_exit, last_start, last_end, next_at, started, alive, paused, mode, error}, log: [{seq, ts, line}], done: [command tokens applied]}`. Reply `{commands: [{id, token, action, by, schedule?, restart?, args?}], next}`. |
+| GET | `/api/v1/runs` | signed in | `scope=mine` (default) or `all` (admins). Items carry `key` (`uid/client_id/rid`), `owner`, `host`, `os`, `status` (`offline` after 60 s without a report), `online`, `pending`, and the run fields. |
+| GET | `/api/v1/runs/{uid}/{client_id}/{rid}/log` | owner/admin | `after=SEQ`: log lines kept in memory (last 1000 per run, lost on a hub restart). |
+| POST | `/api/v1/runs/{uid}/{client_id}/{rid}/command` | owner/admin | `{action: start\|stop\|restart\|quit\|set}`; `set` takes `schedule` (`""` removes it), `restart`, `args` (list; owner only, 403 for an admin acting on someone else's run). `stop` stops the bot and keeps the supervisor (so `start` works later); `quit` ends both. 409 when the run is not connected. Admin actions on someone else's run are audited (`run_<action>`). |
+| DELETE | `/api/v1/runs/{uid}/{client_id}/{rid}` | owner/admin | Remove the entry (a live run that reports again comes back). |
+
 ## Other server routes
 
 These routes are outside the `/api/v1` API prefix, except for the repository documentation endpoints at the end of the table:

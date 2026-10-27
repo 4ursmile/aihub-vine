@@ -216,15 +216,16 @@ class UpdateState(unittest.TestCase):
         os.environ.pop("AIHUB_NO_UPDATE", None)
         os.environ.pop("AIHUB_AUTO_UPDATE", None)
         os.environ.pop("AIHUB_AUTO_UPDATE_HOURS", None)
+        os.environ.pop("AIHUB_AUTO_UPDATE_MINUTES", None)
 
     def config(self, **kw):
         ch.paths.save("config.json", kw)
 
     def test_old_update_json_shapes_are_read(self):
         now = time.time()
-        updater.paths.save("update.json", {"checked": now - 100})
+        updater.paths.save("update.json", {"checked": now - 30})
         self.assertFalse(updater.due(updater.state(), now))
-        updater.paths.save("update.json", {"checked": now - 100, "pyz_version": "0.7.0", "pyz": "/x/aihub.pyz"})
+        updater.paths.save("update.json", {"checked": now - 30, "pyz_version": "0.7.0", "pyz": "/x/aihub.pyz"})
         self.assertFalse(updater.due(updater.state(), now))
         self.assertTrue(updater.due({"checked": now - 25 * 3600}, now))
         self.assertTrue(updater.due({}, now))

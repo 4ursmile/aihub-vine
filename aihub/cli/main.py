@@ -19,17 +19,48 @@ def cmd_config(a):
             raise ValueError("usage: aihub config set <key> <value>")
         c[a.key] = a.value
         paths.save("config.json", c)
-        ui.good("%s = %s" % (a.key, a.value))
+        ui.good("%s = %s" % (a.key, "set" if ui.JSON and SECRET_KEY.search(a.key) else a.value))
     cfg = paths.config()
+    ui.result(masked(cfg))
+    if ui.JSON:
+        return
     if a.action != "set" or not ui.TTY:
         print(json.dumps(cfg, indent=2))
 
 
+SECRET_KEY = re.compile(r"token|secret|passw|credential|api_?key", re.I)
+
+
+def masked(v):
+    """A copy safe to print as JSON: any value under a key that looks secret becomes "set" (or "" when empty)."""
+    if isinstance(v, dict):
+        return {k: ("set" if x else "") if SECRET_KEY.search(str(k)) and not isinstance(x, (dict, list, bool)) else masked(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [masked(x) for x in v]
+    return v
+
+
+def _secret_in(a, what):
+    """--password-stdin: the secret(s) on standard input, one per line (never argv, never echoed)."""
+    lines = sys.stdin.read().splitlines()
+    if len(lines) < what or any(not x for x in lines[:what]):
+        raise ValueError("--password-stdin: expected %d non-empty line(s) on standard input" % what)
+    return lines[:what]
+
+
 def cmd_login(a):
-    u = a.username or input("username: ")
-    r = api.call("POST", "/auth/login", {"username": u, "password": getpass.getpass("password: ")})
+    if a.password_stdin or ui.JSON:
+        if not a.username:
+            raise ValueError("give the USERNAME (and the password on standard input with --password-stdin)")
+        pw = _secret_in(a, 1)[0]
+    else:
+        a.username = a.username or input("username: ")
+        pw = getpass.getpass("password: ")
+    u = a.username
+    r = api.call("POST", "/auth/login", {"username": u, "password": pw})
     u = r.get("username") or u                               # the hub may map abc@gmail.com to the account abc (allowed sign-in domains)
     paths.save("credentials.json", {"token": r["token"], "username": u}, private=True)
+    ui.result({"signed_in": True, "username": u, "hub": paths.config()["hub"]})       # never the token
     ui.celebrate("Welcome back, %s" % u)
     from . import hooks, usagesync
     hooks.verify()
@@ -42,6 +73,7 @@ def cmd_logout(a):
     if not cred.get("token") and not cred.get("username"):
         return ui.info("not signed in")
     paths.save("credentials.json", {}, private=True)
+    ui.result({"signed_in": False, "signed_out": cred.get("username") or None})
     ui.good("Signed out %s" % (cred.get("username") or ""))
 
 
@@ -50,15 +82,21 @@ def cmd_password(a):
     cred = paths.load("credentials.json", {})
     if not cred.get("token"):
         raise ValueError("not signed in: run 'aihub login' first")
-    old = getpass.getpass("current password: ")
-    new = getpass.getpass("new password: ")
+    if a.password_stdin or ui.JSON:
+        old, new = _secret_in(a, 2)                          # line 1 current, line 2 new
+        again = new
+    else:
+        old = getpass.getpass("current password: ")
+        new = getpass.getpass("new password: ")
+        again = None
     if len(new) < 6:
         raise ValueError("new password must be at least 6 characters")
     if new == old:
         raise ValueError("new password must differ from the current one")
-    if getpass.getpass("repeat new password: ") != new:
+    if (again if again is not None else getpass.getpass("repeat new password: ")) != new:
         raise ValueError("the two new passwords do not match")
     api.call("POST", "/auth/password", {"old": old, "new": new})
+    ui.result({"changed": True, "username": cred.get("username")})
     ui.good("Password changed for %s" % (cred.get("username") or "your account"))
     ui.info("your other devices were signed out; sign in again there with 'aihub login'")
 
@@ -70,11 +108,17 @@ def cmd_admin(a):
 
 
 def cmd_register(a):
-    u = input("username: ")
-    pw = getpass.getpass("password: ")
-    if getpass.getpass("re-enter password: ") != pw:
-        raise SystemExit("aihub: the two passwords do not match; nothing was created")
+    if a.password_stdin or ui.JSON:
+        if not a.username:
+            raise ValueError("give the USERNAME (and the password on standard input with --password-stdin)")
+        u, pw = a.username, _secret_in(a, 1)[0]
+    else:
+        u = a.username or input("username: ")
+        pw = getpass.getpass("password: ")
+        if getpass.getpass("re-enter password: ") != pw:
+            raise SystemExit("aihub: the two passwords do not match; nothing was created")
     api.call("POST", "/auth/register", {"username": u, "password": pw})
+    ui.result({"created": True, "username": u})
     ui.good("Account created for %s" % u)
     ui.info("next: aihub login   (new accounts may need admin approval first)")
 
@@ -89,6 +133,8 @@ def _plain_line(a, name, version):
 
 
 def cmd_search(a):
+    if ui.JSON:
+        return ui.result(registry.search(a.term))                 # every match, no 30-row cap
     if _plain(a):
         for p in registry.search(a.term):
             print(_plain_line(a, p["name"], p.get("latest_version")))
@@ -106,6 +152,13 @@ def cmd_search(a):
                ui.highlight((p.get("description") or "").replace("\n", " "), a.term)] for p in items])
     ui.out()
     ui.info("install one with: aihub install <name>      details: aihub info <name>")
+
+
+INSTALLED_KEYS = ("version", "type", "components", "path", "bot_home", "venv", "rev", "repo", "source", "installed", "tools", "shims")
+
+
+def installed_view(n, r):
+    return masked(dict({k: r[k] for k in INSTALLED_KEYS if k in r}, name=n, enabled=installer.enabled(r)))
 
 
 def cmd_info(a):
@@ -172,6 +225,7 @@ def cmd_install(a):
         installer.install(n, sp, a.yes, a.tool)
         return
     failed = installer.install_many([_spec(s) for s in specs], a.yes, a.tool)    # one plan, parallel downloads
+    ui.result({"failed": [{"name": n, "error": str(e)} for n, e in failed]})
     for n, e in failed:
         ui.bad("%s: %s" % (n, e))
     if failed:
@@ -283,6 +337,8 @@ def cmd_self_uninstall(a):
                            "detail": "origin=" + _cli_origin()}, timeout=10)      # before ~/.aihub (and the spool) is deleted
     except Exception:
         pass
+    from . import runs
+    runs.stop_all()                 # supervised bots (aihub run) end before their files and ~/.aihub go away
     for n in pk:
         try:
             installer.uninstall(n, quiet=True)
@@ -313,6 +369,8 @@ def cmd_self_uninstall(a):
 
 def cmd_list(a):
     pk = installer.state()["packages"]
+    if ui.JSON:
+        return ui.result([installed_view(n, r) for n, r in sorted(pk.items())])
     if _plain(a):
         for n, r in sorted(pk.items()):
             print(_plain_line(a, n, r["version"]))
@@ -331,23 +389,29 @@ def cmd_list(a):
 
 
 def cmd_run(a):
-    """Start an installed bot. Without a name: the only installed bot, or a list to choose from."""
-    found = installer.bots()
-    name = a.name
-    if not name:
-        if len(found) == 1:
-            name = next(iter(found))
+    """Bots as supervised processes (background by default). Without a target: the installed bots and the runs on this machine."""
+    from . import runs
+    if not a.target:
+        found = installer.bots()
+        if len(found) == 1 and not runs.all_runs():
+            a.target = next(iter(found))
         else:
             ui.out()
             if not found:
-                ui.note("No bots installed. Try: aihub install aihub-bot")
+                ui.note("No bots or services installed. Try: aihub install aihub-bot")
             else:
-                ui.table(["BOT", "SETTINGS"], [[ui.bold(n), os.path.join(r.get("bot_home", ""), ".env")] for n, (r, _) in sorted(found.items())])
-                ui.info("run one with: aihub run NAME")
+                ui.table(["NAME", "TYPE", "SETTINGS"], [[ui.bold(n), installer.runnable_kind(n, r) or "bot", os.path.join(r.get("bot_home", ""), ".env")]
+                                                        for n, (r, _) in sorted(found.items())])
+                ui.info("run one with: aihub run NAME   (--fg: in this terminal)")
+            if runs.all_runs():
+                runs.cmd_list(a)
             return
-    code = installer.run_bot(naming.normalize(name), a.args)
-    if code:
-        sys.exit(code)
+    if a.target not in ("_supervise",) + RUN_ACTIONS:
+        a.target = naming.normalize(a.target)
+    return runs.cli(a)
+
+
+RUN_ACTIONS = ("start", "stop", "quit", "kill", "restart", "pause", "list", "ls", "ps", "logs", "log", "listen", "attach", "set", "rm", "remove", "status", "show")
 
 
 def cmd_onboard(a):
@@ -355,10 +419,10 @@ def cmd_onboard(a):
     found = installer.bots()
     name = a.name and naming.normalize(a.name)
     if not name:
-        withs = [n for n, (_, mm) in found.items() if mm["bot"]["onboard"]]
+        withs = [n for n, (_, mm) in found.items() if M.runnable(mm)["onboard"]]
         if len(withs) != 1:
             ui.out()
-            ui.info("bots with guided setup: %s" % (", ".join(withs) or "none"))
+            ui.info("bots/services with guided setup: %s" % (", ".join(withs) or "none"))
             ui.info("run one with: aihub onboard NAME")
             return
         name = withs[0]
@@ -432,6 +496,7 @@ def cmd_lock(a):
     if not lock["packages"]:
         raise ValueError("nothing installed, so there is nothing to lock")
     text = json.dumps(lock, indent=2) + "\n"
+    ui.result({"file": os.path.abspath(a.file), "lock": lock})
     if a.check:
         try:
             same = open(a.file, encoding="utf-8").read() == text
@@ -1390,6 +1455,7 @@ def build_parser():
                 "Docs: <hub URL>/#/docs/publishing."))
     from ..core.release import VERSION as _V
     ap.add_argument("-v", "--version", action="version", version="aihub %s" % _V)
+    ap.add_argument("--json", dest="json_out", action="store_true", help="Any command: one JSON document on stdout (same as the command's own --json, or AIHUB_JSON=1).")
     ap.register("action", "parsers", _GroupedSubParsersAction)
     sp = ap.add_subparsers(dest="cmd", metavar="command")
     sp.command_groups = [
@@ -1398,7 +1464,7 @@ def build_parser():
         ("Manage", ["enable", "disable", "tree", "lock", "sync"]),
         ("Account", ["config", "login", "logout", "password", "register", "vault", "admin"]),
         ("Publish", ["dev"]),
-        ("Setup and maintenance", ["run", "onboard", "knowledge", "soul", "policy", "welcome", "doctor", "version", "upgrade", "hook", "flush", "usage-sync", "hooks", "skill", "self-uninstall"]),
+        ("Setup and maintenance", ["run", "onboard", "knowledge", "soul", "policy", "welcome", "doctor", "version", "upgrade", "auto-update", "hook", "flush", "usage-sync", "hooks", "skill", "self-uninstall"]),
     ]
 
     def add(name, fn, help, description, epilog, *args):
@@ -1406,6 +1472,8 @@ def build_parser():
                           formatter_class=HelpFormatter)
         for a in args:
             p.add_argument(*a[0], **a[1])
+        if not any("--json" in a[0] for a in args):
+            p.add_argument("--json", action="store_true", help=JSON_HELP)
         p.set_defaults(fn=fn)
         return p
 
@@ -1413,7 +1481,7 @@ def build_parser():
     PLAIN = (arg("--plain", action="store_true", help="One 'name version' line per package, nothing else (for scripts)."),
              arg("--name-only", action="store_true", help="One package name per line, nothing else (implies --plain)."))
     add("config", cmd_config, "Show or change CLI configuration.",
-        "Print the current CLI configuration, or set a configuration value. The hub URL is stored under the key 'hub'. Self-update keys: auto_update (on|notify|off) and auto_update_hours (1..720).",
+        "Print the current CLI configuration, or set a configuration value. The hub URL is stored under the key 'hub'. Self-update keys: auto_update (on|notify|off) and auto_update_minutes (1..43200, default 1; the older auto_update_hours still works).",
         "Examples:\n  aihub config\n  aihub config set hub https://hub.example.com",
         arg("action", nargs="?", default="show", metavar="ACTION", help="'show' (default) or 'set'."),
         arg("key", nargs="?", metavar="KEY", help="Configuration key to change when ACTION is 'set'."),
@@ -1421,13 +1489,15 @@ def build_parser():
     add("login", cmd_login, "Sign in and save an access token.",
         "Sign in to the configured hub. If USERNAME is omitted, the CLI prompts for it; the password is entered without echo and the token is saved locally.",
         "Examples:\n  aihub login\n  aihub login sam",
-        arg("username", nargs="?", metavar="USERNAME", help="Account username; prompted for when omitted."))
+        arg("username", nargs="?", metavar="USERNAME", help="Account username; prompted for when omitted."),
+        arg("--password-stdin", action="store_true", help="Read the password from standard input (scripts, web UIs); needs USERNAME."))
     add("logout", cmd_logout, "Sign out and forget the saved token.",
         "Delete the saved access token. Usage events are anonymous afterwards; the hub still groups them with your account by user name when the OS user name matches.",
         "Example:\n  aihub logout")
     add("password", cmd_password, "Change your hub password.",
         "Change the password of the signed-in account. Prompts (without echo) for the current password and the new one twice. The hub signs your other devices out; the token saved on this machine stays valid. Needs 'aihub login' first; a forgotten password is reset by an administrator.",
-        "Example:\n  aihub password")
+        "Examples:\n  aihub password\n  printf '%s\\n%s\\n' \"$OLD\" \"$NEW\" | aihub password --password-stdin",
+        arg("--password-stdin", action="store_true", help="Read the current password (line 1) and the new one (line 2) from standard input."))
     add("admin", cmd_admin, "Manage accounts, groups and roles on the hub (admin).",
         "Administer the hub you are signed in to. Areas: 'users' (list [QUERY], role ROLE USER..., status STATE USER..., reset-password USER..., delete USER..., create FILE, batch FILE), "
         "'groups' (list, show G, create G..., describe G, delete G..., add G USER... [--manager], remove G USER..., manager G USER..., unmanager G USER...) and 'roles' (list, perms, show R, create R, set R, delete R). "
@@ -1455,7 +1525,9 @@ def build_parser():
         arg("--remove-perm", help="roles set: permissions to remove."))
     add("register", cmd_register, "Create an account on the configured hub.",
         "Prompt for a username and password and create an account on the configured hub. Registration is subject to the hub's signup policy; sign in separately with 'aihub login'.",
-        "Example:\n  aihub register")
+        "Examples:\n  aihub register\n  printf %s \"$PW\" | aihub register sam --password-stdin",
+        arg("username", nargs="?", metavar="USERNAME", help="Account name; prompted for when omitted."),
+        arg("--password-stdin", action="store_true", help="Read the password from standard input (no confirmation prompt); needs USERNAME."))
     add("search", cmd_search, "Search the hub for packages.",
         "Search package names and descriptions on the configured hub. Omitting TERM lists the available packages; at most 30 results are shown.",
         "Examples:\n  aihub search sql\n  aihub search --plain\n  aihub search sql --name-only",
@@ -1539,11 +1611,15 @@ def build_parser():
         "Print the installed CLI version and compare it with the version the hub distributes.",
         "Example:\n  aihub version")
     add("upgrade", updater.cmd_upgrade, "Upgrade the aihub CLI itself to the hub's version.",
-        "Download the CLI from the configured hub, verify its SHA-256, and replace the running copy. The previous copy is kept so --rollback can restore it. The CLI also checks the hub on its own (default every 24 h): 'aihub config set auto_update on|notify|off' (notify = only print that a version is available) and 'aihub config set auto_update_hours N' (1..720); AIHUB_NO_UPDATE=1 turns it off. Rolling back makes auto-update skip that version.",
+        "Download the CLI from the configured hub, verify its SHA-256, and replace the running copy. The previous copy is kept so --rollback can restore it. The CLI also updates itself: after every command a detached background check (at most once a minute; the command never waits) installs a newer hub version, and the next run says so. 'aihub config set auto_update on|notify|off' (notify = only print that a version is available), 'aihub config set auto_update_minutes N' (gap between checks, 1..43200); AIHUB_NO_UPDATE=1 turns it off. Rolling back makes auto-update skip that version.",
         "Examples:\n  aihub upgrade\n  aihub upgrade --check\n  aihub upgrade --rollback",
         arg("--check", action="store_true", help="Only report whether a newer version exists."),
         arg("--force", action="store_true", help="Reinstall even when already current."),
         arg("--rollback", action="store_true", help="Restore the version that was installed before the last upgrade."))
+    add("auto-update", updater.cmd_auto_update, "Check the hub for a newer CLI now and install it.",
+        "Run the automatic update check in the foreground: ask the hub, install a newer version (respects auto_update notify/off and a rolled-back version). Normally this runs by itself in the background after every command.",
+        "Example:\n  aihub auto-update",
+        arg("--background", action="store_true", help=argparse.SUPPRESS))
     add("setup", remote_config.cmd_setup, "Pull the package index and telemetry settings from the hub.",
         "Ask the hub for the package index location and where usage events are sent. Values come over HTTPS, are stored in your aihub config (git tokens go to your git credential helper), and are refreshed automatically on the interval the admin sets. If the hub cannot be reached, you are asked for the values instead; environment variables AIHUB_INDEX_URL and AIHUB_TELEMETRY_URL are picked up automatically.",
         "Examples:\n  aihub setup\n  aihub setup --hub https://hub.example.com",
@@ -1566,11 +1642,22 @@ def build_parser():
         arg("--user", metavar="NAME", help="Git user name."),
         arg("--token-stdin", action="store_true", help="Read the token/password from standard input."),
         arg("-y", "--yes", action="store_true", help="Do not ask before removing."))
-    add("run", cmd_run, "Run an installed chat bot.",
-        "Start a bot package (type bot). The bot gets its settings from ~/.aihub/bots/NAME/.env and sees your knowledge notes, the skills of installed packages and its own MCP servers. With one bot installed the name can be left out.",
-        "Examples:\n  aihub run\n  aihub run aihub-bot\n  aihub run aihub-bot -- --once 'what changed today?'",
-        arg("name", nargs="?", metavar="BOT", help="Installed bot package."),
-        arg("args", nargs="*", metavar="ARG", help="Passed to the bot (put -- before options)."))
+    add("run", cmd_run, "Run bots and services in the background: start, stop, list, logs, schedule.",
+        "Start a bot or service package (type bot or service; a service restarts always by default, or as its [service] restart / schedule says) under a small supervisor, in the background by default: its output goes to ~/.aihub/runs/NAME.log, it restarts on failure (--restart) or runs on a schedule (--schedule: seconds, 30s/5m/2h/1d or a cron expression). --fg runs it in this terminal instead (needed for an interactive chat). The bot gets its settings from ~/.aihub/bots/BOT/.env (a service: ~/.aihub/services/NAME/.env) and sees your knowledge notes, the skills of installed packages and its own MCP servers. Signed in to a hub, every run also shows on the hub's Running page, where it can be stopped, started, restarted and changed (aihub config set run_report off to keep runs local).\n\nActions: aihub run BOT | start NAME | stop NAME|--all | pause NAME | restart NAME | list | logs NAME [-f] | listen NAME | set NAME ... | status NAME | rm NAME",
+        "Examples:\n  aihub run aihub-bot -- --cron\n  aihub run aihub-bot --fg\n  aihub run aihub-bot --name digest --schedule '0 8 * * 1-5' -- --once 'summarize yesterday'\n  aihub run list\n  aihub run logs digest -f\n  aihub run set digest --schedule 2h --restart on-failure\n  aihub run stop --all",
+        arg("target", nargs="?", metavar="BOT|ACTION", help="Installed bot or service to start, or an action: start, stop, pause, restart, list, logs, listen, set, status, rm."),
+        arg("args", nargs="*", metavar="ARG", help="Run name for an action; for a start, passed to the bot (put -- before options)."),
+        arg("--name", metavar="NAME", help="Name of the run (default: the bot name); start the same bot several times under different names."),
+        arg("--fg", "--foreground", dest="fg", action="store_true", help="Run in this terminal (stdin attached, output shown and logged); Ctrl-C stops it."),
+        arg("--schedule", metavar="WHEN", help="Run on a schedule: seconds, 30s/5m/2h/1d, or a cron expression ('0 8 * * 1-5'). With set: '' removes it."),
+        arg("--restart", choices=["no", "on-failure", "always"], help="Restart policy when the bot ends (default: the package's [bot]/[service] restart, else on-failure (service: always); no with --schedule or --fg)."),
+        arg("--no-hub", action="store_true", help="Do not report this run to the hub."),
+        arg("-f", "--follow", action="store_true", help="logs: keep printing new output (Ctrl-C stops)."),
+        arg("-n", "--lines", type=int, default=40, metavar="N", help="logs: lines to show (default 40)."),
+        arg("--all", action="store_true", help="stop: every running run."),
+        arg("--clear-args", action="store_true", help="set: remove the saved bot arguments."),
+        arg("--force", action="store_true", help="rm: stop it first if it runs."),
+        arg("--json", action="store_true", help="list/status: JSON output."))
     add("onboard", cmd_onboard, "Optional guided credential setup for an installed bot.",
         "Runs the bot's own onboarding script. The Teams bot signs you in with the Teams Developer CLI (`teams login`, a browser popup), creates its app registration (`teams app create`) and writes CLIENT_ID, CLIENT_SECRET and TENANT_ID into the bot's .env; after that the bot runs without you signed in. Install offers it in a terminal; you can always edit .env by hand instead.",
         "Examples:\n  aihub onboard\n  aihub onboard aihub-teams-bot",
@@ -1701,17 +1788,158 @@ def build_parser():
                        help="Package directory containing aihub.toml, or a folder holding several packages (default: current directory).")
         for e in extra:
             p.add_argument(*e[0], **e[1])
+        if not any("--json" in e[0] for e in extra):
+            p.add_argument("--json", action="store_true", help=JSON_HELP)
         if n not in ("init", "list"):
             p.add_argument("--only", action="append", metavar="NAME", help="In a folder of several packages, work on just these (folder or package name; repeat or comma-separate).")
         p.set_defaults(fn=fn if n in ("init", "list", "publish", "tree", "doctor", "tree-solve") else _each(fn))
     return ap
 
 
+JSON_HELP = "Print one JSON document on stdout: {ok, command, data, messages, changes, context, error, hint} (docs/cli.md, JSON output)."
+NO_ENVELOPE = ("hook", "flush", "usage-sync", "credential")        # git / hooks / workers read these streams themselves
+NATIVE_JSON = ("usage",)                                          # its own --json keeps its own shape; `aihub --json usage` wraps it
+JSON_SCHEMA = 1
+
+
+def json_wanted(a):
+    if not getattr(a, "cmd", None) or a.cmd in NO_ENVELOPE or a.cmd == "run" and getattr(a, "target", None) == "_supervise":
+        return False
+    if a.cmd == "auto-update" and getattr(a, "background", False):
+        return False
+    if getattr(a, "json_out", False) or (os.environ.get("AIHUB_JSON") or "").lower() in ("1", "true", "yes", "on"):
+        return True
+    return bool(getattr(a, "json", False)) and a.cmd not in NATIVE_JSON
+
+
+def _context():
+    """Who and where: shared with any UI that drives the CLI (same credentials.json, same vault). Never a token or password."""
+    from ..core.release import VERSION
+    cred, cfg = paths.load("credentials.json", {}), paths.config()
+    return {"hub": cfg.get("hub"), "hub_configured": paths.hub_configured(), "signed_in": bool(cred.get("token")),
+            "username": cred.get("username") or None, "cli_version": VERSION, "home": paths.HOME(), "client_id": cfg.get("client_id")}
+
+
+def _pkg_snapshot():
+    try:
+        return {n: (r.get("version"), installer.enabled(r)) for n, r in installer.state()["packages"].items()}
+    except Exception:
+        return {}
+
+
+def _changes(before, after):
+    out = {"installed": [], "removed": [], "updated": [], "enabled": [], "disabled": []}
+    for n, (v, on) in sorted(after.items()):
+        if n not in before:
+            out["installed"].append({"name": n, "version": v})
+        else:
+            v0, on0 = before[n]
+            if v != v0:
+                out["updated"].append({"name": n, "from": v0, "to": v})
+            if on != on0:
+                out["enabled" if on else "disabled"].append(n)
+    out["removed"] = [{"name": n, "version": before[n][0]} for n in sorted(before) if n not in after]
+    return {k: v for k, v in out.items() if v}
+
+
+def _json_envelope(a, body):
+    """Run body() with nothing reaching stdout but ONE JSON document. ui lines are recorded; stray prints are captured (and parsed as the
+    data when they are JSON, e.g. `info`, `run list`); child processes (install scripts, git, pip) write to stderr instead of stdout."""
+    import io
+    ui.json_mode()
+    if hasattr(a, "json"):
+        a.json = True                       # commands with their own JSON output use it; updater/welcome stay quiet
+    # never forced to --yes: without a terminal each command takes its safe non-interactive default (self-uninstall refuses, ...)
+    sys.stdout.flush()
+    real = os.dup(1)
+    os.dup2(2, 1)
+    cap, keep = io.StringIO(), sys.stdout
+    sys.stdout = cap
+    before = _pkg_snapshot()
+    sub = next((getattr(a, k) for k in ("dev_cmd", "action", "target", "area") if isinstance(getattr(a, k, None), str)), None)
+    env = {"schema": JSON_SCHEMA, "ok": True, "command": a.cmd + (" " + sub if sub else ""), "exit": 0, "error": None, "hint": None}
+    try:
+        body()
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+        if not isinstance(e.code, (int, type(None))):
+            env["error"] = str(e.code)
+        env.update(exit=code, ok=code == 0)
+    except (api.ApiError, ValueError, KeyError, OSError) as e:
+        env.update(ok=False, exit=1, error=str(e), hint=ui.hint_for(e))
+    except KeyboardInterrupt:
+        env.update(ok=False, exit=130, error="interrupted")
+    except Exception as e:                  # a bug must still produce a document the UI can read
+        env.update(ok=False, exit=1, error="%s: %s" % (type(e).__name__, e))
+    finally:
+        sys.stdout = keep
+        os.dup2(real, 1)
+        os.close(real)
+    if ui.DATA.get("error") and env["ok"]:
+        env.update(ok=False, exit=env["exit"] or 1)
+    env["error"] = env["error"] or ui.DATA.get("error")
+    env["hint"] = env["hint"] or ui.DATA.get("hint")
+    text = cap.getvalue()
+    data = ui.DATA.get("data")
+    if "data" not in ui.DATA and text.strip():
+        try:
+            data = json.loads(text)
+            text = ""
+        except ValueError:
+            pass
+    env.update(data=masked(data), output=text or None, messages=list(ui.LOG), changes=_changes(before, _pkg_snapshot()), context=_context())
+    _emit_json(env)
+    return env["exit"]
+
+
+def _emit_json(env):
+    doc = json.dumps(env, indent=2, default=str)
+    tok = paths.load("credentials.json", {}).get("token")
+    if tok and len(tok) >= 8:
+        doc = doc.replace(tok, "***")         # safety net: the hub token never leaves in a JSON answer, whatever printed it
+    sys.stdout.write(doc + "\n")
+    sys.stdout.flush()
+    return env["exit"]
+
+
+def _json_argv(argv):
+    args = sys.argv[1:] if argv is None else list(argv)
+    return "--json" in args[:args.index("--")] if "--" in args else "--json" in args or \
+        (os.environ.get("AIHUB_JSON") or "").lower() in ("1", "true", "yes", "on")
+
+
 def main(argv=None):
     ap = build_parser()
-    a = ap.parse_args(argv)
+    if _json_argv(argv):
+        import io
+        err, keep = io.StringIO(), sys.stderr
+        sys.stderr = err
+        try:
+            a = ap.parse_args(argv)
+        except SystemExit as e:           # bad command line: still one JSON document (help text with --help)
+            sys.stderr = keep
+            if not e.code:
+                return 0
+            msg = [x for x in err.getvalue().splitlines() if x.strip()]
+            _emit_json({"schema": JSON_SCHEMA, "ok": False, "command": None, "exit": 2, "error": (msg[-1] if msg else "bad arguments").split("error: ", 1)[-1],
+                        "hint": "aihub CMD --help", "data": None, "output": err.getvalue() or None, "messages": [], "changes": {}, "context": _context()})
+            return 2
+        finally:
+            sys.stderr = keep
+    else:
+        a = ap.parse_args(argv)
     from . import hooks, integrations, policy, telemetry, tls, usage, usagesync
     from ..core import release                  # `aihub upgrade` swaps aihub.pyz under this process: load every module the tail of main needs BEFORE it
+    if json_wanted(a):
+        def body():
+            code = _main(a, ap, hooks, policy, tls)
+            if code:
+                raise SystemExit(code)
+        return _json_envelope(a, body)
+    return _main(a, ap, hooks, policy, tls)
+
+
+def _main(a, ap, hooks, policy, tls):
     try:
         if not getattr(a, "cmd", None):
             if not ui.INTERACTIVE:
@@ -1722,10 +1950,10 @@ def main(argv=None):
                 return 0
             cmd_menu()
             return 0
-        if ui.INTERACTIVE and a.cmd not in ("hook", "flush", "usage-sync", "welcome", "config", "credential", "vault", "policy", "run") and not os.path.exists(paths.p(".welcomed")):
+        if ui.INTERACTIVE and a.cmd not in ("hook", "flush", "usage-sync", "auto-update", "welcome", "config", "credential", "vault", "policy", "run") and not os.path.exists(paths.p(".welcomed")):
             cmd_welcome(argparse.Namespace(yes=False))
-        if a.cmd == "credential":
-            return a.fn(a)              # git calls this on every fetch: no welcome, updater or network
+        if a.cmd == "credential" or a.cmd == "auto-update" and a.background or a.cmd == "run" and a.target == "_supervise":
+            return a.fn(a)              # git calls this on every fetch / the detached update worker: no welcome, updater or network
         if a.cmd not in ("hook", "flush", "usage-sync", "credential"):
             tls.warn_if_insecure()
         a.fn(a)

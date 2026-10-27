@@ -1,4 +1,5 @@
 """CLI of the bot: chat REPL (default), --once "question", --cron (run scheduled prompts), --info (what the bot sees), --memory (what it remembers)."""
+import os
 import sys
 
 from . import config, cron, memory, skills
@@ -34,6 +35,9 @@ def main(argv):
                 print("no jobs. Add some to %s/cron.json or with bot.cron() in an extension." % config.HOME)
                 return 1
             cron.loop(jobs, lambda p: agent.ask(p, keep=False))
+        if not sys.stdin.isatty() and "AIHUB_RUN_ID" in os.environ:
+            print("chat needs a terminal: aihub run aihub-bot --fg   (in the background use: aihub run aihub-bot -- --cron)")
+            return 0
         print("aihub-bot (%s). /info, /exit. Soul: aihub knowledge edit soul" % config.MODEL)
         while True:
             try:

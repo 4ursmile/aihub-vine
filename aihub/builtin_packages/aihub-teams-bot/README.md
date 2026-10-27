@@ -6,9 +6,9 @@ cron, extensions and harness choice (`BOT_HARNESS`); this package adds the Teams
 ```sh
 aihub install aihub-teams-bot       # offers an OPTIONAL guided setup (Teams CLI login popup, app registration, fills .env)
 aihub onboard aihub-teams-bot       # run that guided setup later (needs Node 22.12+); or fill CLIENT_ID / CLIENT_SECRET / TENANT_ID by hand
-aihub run aihub-teams-bot -- --try "hello"      # test the brain without Teams
-aihub run aihub-teams-bot -- --info             # what it will do
-aihub run aihub-teams-bot                       # serves http://localhost:3978/api/messages
+aihub run aihub-teams-bot --fg -- --try "hello" # test the brain without Teams
+aihub run aihub-teams-bot --fg -- --info        # what it will do
+aihub run aihub-teams-bot                       # serves http://localhost:3978/api/messages in the background (aihub run logs aihub-teams-bot -f)
 ```
 
 Teams must reach that endpoint over https (a dev tunnel or your server); register it as the bot's messaging endpoint.

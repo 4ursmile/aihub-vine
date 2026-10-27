@@ -21,10 +21,12 @@ The reference bot is `aihub-bot` (built in). Its layout is in [Layout recommenda
 aihub install aihub-bot                   # prints: source, settings (.env), run it
 # edit ~/.aihub/bots/aihub-bot/.env       # set ANTHROPIC_API_KEY (or pick another BOT_HARNESS)
 aihub knowledge edit soul                 # who the assistant is for you
-aihub run aihub-bot                       # chat; add -- --once "question" for one answer
+aihub run aihub-bot --fg                  # chat in this terminal; add -- --once "question" for one answer
+aihub run aihub-bot -- --cron             # scheduled prompts, in the background
+aihub run list                            # what runs; aihub run logs aihub-bot -f to watch it
 ```
 
-`aihub run` with no name starts the only installed bot; with several, it lists them.
+`aihub run` starts a bot in the background under a supervisor (log in `~/.aihub/runs/NAME.log`, restart on failure, optional `--schedule`); `--fg` keeps it in the terminal, which an interactive chat needs. With no name it starts the only installed bot; with several, it lists them and the runs. Signed in to a hub, runs appear on the hub's **Running** page, where they can be stopped, started, restarted and changed. Full command list: `docs/cli.md` (Bots and knowledge).
 
 ## Build your own bot
 
@@ -153,6 +155,29 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 ```
 
 Install behavior for `[[bot.env]]`: `.env` is created once. It holds one `NAME=value` line per entry, preceded by its hint. Later installs and updates never overwrite it, so a new `[[bot.env]]` entry added in a later version is **not** added to an existing `.env`; add it by hand.
+
+## Services (`type = "service"`)
+
+A **service** is a long-running program (web server, worker, sync daemon) started the same way: `aihub install NAME`, then `aihub run NAME`. It uses the bot machinery with three differences:
+
+- the table is `[service]` (same keys as `[bot]`: `run`, `title`, `onboard`, `[[service.env]]`) plus two run defaults: `restart = "no" | "on-failure" | "always"` (default **always**; an invalid value is ignored) and `schedule = "5m"` (seconds, 30s/5m/2h/1d or cron; empty = keep it up). `[bot]` takes the same two keys (bot default stays on-failure). Flags (`--restart`, `--schedule`, `--fg`) always win;
+- settings live in `~/.aihub/services/NAME/.env` (+ `mcp.json`); the component is `service:NAME`;
+- the process gets `AIHUB_SERVICE`, `AIHUB_SERVICE_DIR`, `AIHUB_SERVICE_HOME`, `AIHUB_SERVICE_ENV` in addition to the usual `AIHUB_BOT_*` set.
+
+```sh
+aihub dev init ./my-svc --type service --name my-svc    # starter: service/run.py, restart = "always", a PORT setting
+```
+
+```toml
+[service]
+run = "service/run.py"
+restart = "always"
+
+[[service.env]]
+name = "PORT"
+default = "8080"
+required = false
+```
 
 ## Where things live
 

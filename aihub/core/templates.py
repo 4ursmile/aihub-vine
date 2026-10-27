@@ -184,7 +184,7 @@ HEAD = """# aihub.toml - the manifest. Docs: /#/docs/publishing
 [package]
 name = "{name}"
 version = "0.1.0"                 # immutable once published; bump it for every release (aihub dev publish --bump patch)
-type = "{type}"                   # skill | agent | mcp | tool | setup | bot
+type = "{type}"                   # skill | agent | mcp | tool | setup | bot | service
 description = "{description}"
 tags = []                         # lowercase words people search for
 readme = "README.md"
@@ -252,6 +252,23 @@ TEMPLATES["bot"] = {
     "files": {"bot/run.py": BOT_RUN, "README.md": README, ".gitignore": BOT_IGNORE},
 }
 EXEC.add("bot/run.py")
+
+SERVICE_RUN = """#!/usr/bin/env python3
+# Started by `aihub run {name}` and kept up (restart = "always"). Settings come from the environment (the .env file printed at install).
+import os
+import time
+
+print("{name} service is up; home: " + os.environ.get("AIHUB_SERVICE_HOME", ""), flush=True)
+while True:
+    time.sleep(60)
+    print("{name}: still alive", flush=True)
+"""
+
+TEMPLATES["service"] = {
+    "manifest": HEAD + '\n[service]\nrun = "service/run.py"\ntitle = "{title}"\nrestart = "always"         # no | on-failure | always\n# schedule = "5m"          # optional: run on a schedule instead (seconds, 30s/5m/2h/1d or cron)\n\n[[service.env]]\nname = "PORT"\nhint = "port to listen on"\ndefault = "8080"\nrequired = false\n',
+    "files": {"service/run.py": SERVICE_RUN, "README.md": README, ".gitignore": BOT_IGNORE},
+}
+EXEC.add("service/run.py")
 
 
 def render(typ, name, description="", authors=()):

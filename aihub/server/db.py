@@ -52,6 +52,9 @@ CREATE TABLE IF NOT EXISTS usage_session(user_id INTEGER, sid TEXT, tool TEXT, m
   updated {real}, PRIMARY KEY(user_id,sid));
 CREATE INDEX IF NOT EXISTS us_day ON usage_session(day);
 CREATE TABLE IF NOT EXISTS knowledge_share(owner_id INTEGER, name TEXT, principal_type TEXT, principal_id INTEGER, access TEXT, PRIMARY KEY(owner_id,name,principal_type,principal_id));
+CREATE TABLE IF NOT EXISTS runs(user_id INTEGER, client_id TEXT, rid TEXT, name TEXT, bot TEXT, host TEXT, os TEXT, status TEXT, spec TEXT, seen {real},
+  PRIMARY KEY(user_id,client_id,rid));
+CREATE TABLE IF NOT EXISTS run_commands(id {pk}, user_id INTEGER, client_id TEXT, rid TEXT, action TEXT, data TEXT, created {real}, by_user TEXT, token TEXT);
 """
 
 # Every permission the app checks. Admins grant these to roles in the UI.
@@ -174,7 +177,7 @@ class Conn:
 
 
 class DB:
-    ID_TABLES = {"users", "groups", "packages", "versions", "events", "audit_log"}
+    ID_TABLES = {"users", "groups", "packages", "versions", "events", "audit_log", "run_commands"}
 
     def __init__(self, settings=None, path=None):
         from .config import Settings

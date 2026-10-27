@@ -185,9 +185,10 @@ def _activate(rec, m, dest, tools, assume_yes, name):
         rec["shims"].extend(write_shim(bindir, cmdname, target, rec.get("venv")))
     rec["reverts"] = []
     rec["tools"] = []
-    is_bot = m["package"]["type"] == "bot"
+    kind = m["package"]["type"]
+    is_bot = kind in M.RUNNABLE                      # bot or service: started by `aihub run`
     if is_bot:
-        rec["bot_home"] = bot_home(name)             # the bot's own MCP servers are never registered into the AI tools
+        rec["bot_home"] = bot_home(name, kind)       # its own MCP servers are never registered into the AI tools
         write_bot_files(name, m, dest)
     comps = (m["skills"], m["agents"], [] if is_bot else m["mcp_servers"])
     if any(comps):
@@ -215,7 +216,7 @@ def _activate(rec, m, dest, tools, assume_yes, name):
             ui.info("usage hook (%s): %s" % (label, status))
     rec["components"] = (["skill:" + x["name"] for x in m["skills"]] + ["agent:" + x["name"] for x in m["agents"]]
                          + ["mcp:" + x["name"] for x in ([] if is_bot else m["mcp_servers"])]
-                         + (["bot:" + name] if is_bot else []))
+                         + ([kind + ":" + name] if is_bot else []))
     rec["reverts"] = [x for x in rec["reverts"] if x]
     steps = (m["setup"] or {}).get("steps", [])
     rec["setup_reverts"] = []
@@ -226,18 +227,19 @@ def _activate(rec, m, dest, tools, assume_yes, name):
     rec["enabled"] = True
 
 
-def bot_home(name):
-    """Per-bot folder that survives updates and holds the user's own settings: .env, mcp.json, memory."""
-    return paths.p("bots", name)
+def bot_home(name, kind="bot"):
+    """Per-bot (or per-service) folder that survives updates and holds the user's own settings: .env, mcp.json, memory."""
+    return paths.p("services" if kind == "service" else "bots", name)
 
 
 def write_bot_files(name, m, dest):
     """Create <bot_home>/.env (never overwritten, so edits survive updates) and mcp.json (rewritten from the manifest)."""
-    home = paths.ensure("bots", name)
+    kind = m["package"]["type"]
+    home = paths.ensure("services" if kind == "service" else "bots", name)
     envf = os.path.join(home, ".env")
     if not os.path.exists(envf):
         lines = ["# %s settings. `aihub run %s` loads this file. Lines: NAME=value" % (name, name)]
-        for e in m["bot"]["env"]:
+        for e in M.runnable(m)["env"]:
             lines.append("# %s%s" % (e["hint"] or e["name"], "" if e["required"] else " (optional)"))
             lines.append("%s=%s" % (e["name"], e["default"]))
         with open(envf, "w", encoding="utf-8") as f:
@@ -268,11 +270,17 @@ def read_env(path):
     return out
 
 
+def runnable_kind(name, rec):
+    """'bot' / 'service' when the installed package is one `aihub run` starts, else None."""
+    comps = rec.get("components", [])
+    return next((k for k in M.RUNNABLE if k + ":" + name in comps), None)
+
+
 def bots():
-    """-> {name: (record, manifest)} for installed, enabled bots."""
+    """-> {name: (record, manifest)} for installed, enabled bots and services (everything `aihub run` can start)."""
     out = {}
     for n, r in state()["packages"].items():
-        if enabled(r) and "bot:" + n in r.get("components", []):
+        if enabled(r) and runnable_kind(n, r):
             try:
                 out[n] = (r, _load_manifest(r))
             except api.ApiError:
@@ -282,7 +290,8 @@ def bots():
 
 def bot_env(name, rec, m):
     """AIHUB_* variables every bot process (the bot itself and its onboarding script) receives."""
-    home = rec.get("bot_home") or bot_home(name)
+    kind = runnable_kind(name, rec) or "bot"
+    home = rec.get("bot_home") or bot_home(name, kind)
     skill_dirs, pkg_dirs = [], []
     for n, r in state()["packages"].items():
         if not enabled(r) or n == name:
@@ -295,6 +304,9 @@ def bot_env(name, rec, m):
     env = {"AIHUB_BOT": name, "AIHUB_BOT_DIR": rec["path"], "AIHUB_BOT_HOME": home, "AIHUB_BOT_ENV": os.path.join(home, ".env"),
            "AIHUB_BOT_MCP": os.path.join(home, "mcp.json"), "AIHUB_KNOWLEDGE_DIR": paths.p("knowledge"),
            "AIHUB_HUB": paths.config()["hub"], "AIHUB_SKILL_DIRS": os.pathsep.join(skill_dirs), "AIHUB_PACKAGE_DIRS": os.pathsep.join(pkg_dirs)}
+    if kind == "service":
+        env.update({"AIHUB_SERVICE": name, "AIHUB_SERVICE_DIR": rec["path"], "AIHUB_SERVICE_HOME": home,
+                    "AIHUB_SERVICE_ENV": os.path.join(home, ".env")})
     if rec.get("venv"):
         env["VIRTUAL_ENV"] = rec["venv"]
     return env
@@ -305,14 +317,15 @@ def onboard(name, assume_yes=False, force=False):
     `aihub onboard` runs it on request (force). -> True when it ran and finished."""
     found = bots()
     if name not in found:
-        raise api.ApiError("%s is not an installed bot" % name)
+        raise api.ApiError("%s is not an installed bot or service" % name)
     rec, m = found[name]
-    script = m["bot"]["onboard"]
+    kind = m["package"]["type"] if m["package"]["type"] in M.RUNNABLE else "bot"
+    script = M.runnable(m)["onboard"]
     if not script:
         if force:
-            raise api.ApiError("%s has no guided setup ([bot] onboard)" % name)
+            raise api.ApiError("%s has no guided setup ([%s] onboard)" % (name, kind))
         return False
-    home = rec.get("bot_home") or bot_home(name)
+    home = rec.get("bot_home") or bot_home(name, kind)
     if not force:
         if assume_yes or not ui.INTERACTIVE:
             ui.info("guided setup (optional):  aihub onboard %s" % name)
@@ -329,17 +342,19 @@ def onboard(name, assume_yes=False, force=False):
     return code == 0
 
 
-def run_bot(name, args=()):
-    """Start an installed bot with its .env, knowledge, MCP list and skill folders in the environment. -> exit code."""
+def bot_command(name, args=()):
+    """-> (cmd, shell, cwd, env) that starts an installed bot with its .env, knowledge, MCP list and skill folders in the environment.
+    Raises when it is not installed or a required setting is empty. `aihub run` builds it again on every (re)start, so .env edits apply."""
     found = bots()
     if name not in found:
-        raise api.ApiError("%s is not an installed bot (install one: aihub search --type bot, then aihub install <name>)" % name)
+        raise api.ApiError("%s is not an installed bot or service (find one: aihub search --type bot / --type service, then aihub install <name>)" % name)
     rec, m = found[name]
-    home = rec.get("bot_home") or bot_home(name)
+    spec = M.runnable(m)
+    home = rec.get("bot_home") or bot_home(name, runnable_kind(name, rec) or "bot")
     envf = os.path.join(home, ".env")
     env = dict(os.environ)
     env.update({k: v for k, v in read_env(envf).items() if v})
-    missing = [e for e in m["bot"]["env"] if e["required"] and not env.get(e["name"])]
+    missing = [e for e in spec["env"] if e["required"] and not env.get(e["name"])]
     if missing:
         ui.note("%s needs settings before it can run. Edit this file:" % name)
         ui.out("    " + envf)
@@ -347,11 +362,17 @@ def run_bot(name, args=()):
             ui.out("    %s   %s" % (e["name"], ui.dim(e["hint"])))
         raise api.ApiError("missing: %s" % ", ".join(e["name"] for e in missing))
     env.update(bot_env(name, rec, m))
-    cmd, shell, _ = script_command(m["bot"]["run"], rec["path"])
+    cmd, shell, _ = script_command(spec["run"], rec["path"])
     if isinstance(cmd, list) and cmd[0] == sys.executable and rec.get("venv"):
         cmd[0] = os.path.join(rec["venv"], "Scripts" if OS == "windows" else "bin", "python")
     if isinstance(cmd, list):
         cmd = cmd + list(args)
+    return cmd, shell, home, env
+
+
+def run_bot(name, args=()):
+    """Run an installed bot attached to this terminal (no supervisor, no log). -> exit code."""
+    cmd, shell, home, env = bot_command(name, args)
     return subprocess.call(cmd, shell=shell, cwd=home, env=env)
 
 
@@ -360,7 +381,7 @@ def source_hints(name, rec):
     ui.info("source:   %s" % rec["path"])
     if rec.get("bot_home"):
         ui.info("settings: %s   (credentials go here)" % os.path.join(rec["bot_home"], ".env"))
-        ui.info("run it:   aihub run %s" % name)
+        ui.info("run it:   aihub run %s   (background; --fg for this terminal)" % name)
 
 
 def _deactivate(rec):
@@ -534,7 +555,7 @@ def _finish(name, done_names, assume_yes, tools):
     if r.get("components"):
         ui.info("adds: " + ", ".join(r["components"]))
     source_hints(name, r)
-    if "bot:" + name in r.get("components", []):
+    if runnable_kind(name, r):
         onboard(name, assume_yes)
     if r.get("shims"):
         ui.info("commands: " + ", ".join(dict.fromkeys(os.path.splitext(os.path.basename(x))[0] if x.lower().endswith(".cmd") else os.path.basename(x) for x in r["shims"])))

@@ -322,23 +322,36 @@ def create_app(settings: Settings = None) -> FastAPI:
     def install_ps1():
         return INSTALL_PS1.replace("__HUB__", _cli_url())
 
+    pyz_seen = [0.0]
+
     def _pyz():
+        """Build aihub.pyz when a source file is newer. The tree walk runs at most every 30 s (clients poll /cli/version often)."""
         from ..core import zipapp
         out = os.path.join(s.data_dir, "aihub.pyz")
+        if time.monotonic() - pyz_seen[0] < 30 and os.path.exists(out):
+            return out
+        pyz_seen[0] = time.monotonic()
         src = os.path.dirname(HERE)
         newest = max(os.path.getmtime(os.path.join(d, f)) for d, _, fs in os.walk(src) for f in fs if f.endswith(".py"))
         if not os.path.exists(out) or os.path.getmtime(out) < newest:
             zipapp.build(out)
         return out
 
+    pyz_sha = {}
+
     @app.get("/cli/version")
     def cli_version():
-        """Polled by `aihub` for auto-update. `sha256` lets the client verify the zipapp before replacing itself."""
+        """Polled by every `aihub` client in the background (up to once a minute each). `sha256` lets the client verify the zipapp
+        before replacing itself; it is cached per (path, mtime, size) so a poll costs a stat, not a read + hash of the whole file."""
         import hashlib
         out = _pyz()
-        with open(out, "rb") as f:
-            sha = hashlib.sha256(f.read()).hexdigest()
-        return {"version": VERSION, "sha256": sha, "url": "/cli/aihub.pyz", "size": os.path.getsize(out)}
+        st = os.stat(out)
+        key = (out, st.st_mtime_ns, st.st_size)
+        if key not in pyz_sha:
+            with open(out, "rb") as f:
+                pyz_sha.clear()
+                pyz_sha[key] = hashlib.sha256(f.read()).hexdigest()
+        return {"version": VERSION, "sha256": pyz_sha[key], "url": "/cli/aihub.pyz", "size": st.st_size}
 
     @app.get("/cli/aihub.pyz")
     def cli_pyz():
