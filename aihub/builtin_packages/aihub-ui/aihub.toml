@@ -28,3 +28,8 @@ name = "UI_OPEN"
 hint = "open the browser when the service starts (1 or 0)"
 required = false
 default = "1"
+
+[git]
+url = "https://github.com/4ursmile/aihub-vine"
+branch = "git_db"
+subdir = "aihub/builtin_packages/aihub-ui"
