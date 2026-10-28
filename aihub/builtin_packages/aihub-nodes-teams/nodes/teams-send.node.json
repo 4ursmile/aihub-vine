@@ -1,0 +1,13 @@
+{
+  "id": "teams-send",
+  "title": "Send to Teams",
+  "kind": "action",
+  "group": "Teams",
+  "description": "Posts a message to a Teams channel through its Workflows / incoming webhook URL.",
+  "run": ["{python}", "nodes/teams_send.py"],
+  "timeout": 30,
+  "fields": [
+    {"name": "webhook_url", "label": "Webhook URL", "type": "password", "required": true, "help": "Stored encrypted; never shown again."},
+    {"name": "text", "label": "Message", "type": "textarea", "default": "{{input}}", "help": "{{input}} is the text from the previous node."}
+  ]
+}

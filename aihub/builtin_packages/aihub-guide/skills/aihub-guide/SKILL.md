@@ -37,7 +37,7 @@ curl -fsSL $HUB/api/v1/docs/<slug>/raw       # one document as Markdown
 | --- | --- |
 | cli | every `aihub` command and flag, tool install locations, usage hooks, lock/sync |
 | manifest | `aihub.toml` fields, setup steps, scripts, requirements |
-| bots | building chat bots (`type = "bot"`) and long-running services (`type = "service"`), `aihub run`, .env settings, personal knowledge and soul, sample `aihub-bot` |
+| bots | building chat bots (`type = "bot"`) and long-running services (`type = "service"`), shared Works graphs for aihub-ui (`type = "workflow"`), `aihub run`, .env settings, personal knowledge and soul, sample `aihub-bot` |
 | publishing | project layouts per package type, visibility, release steps, the assistant packaging workflow |
 | publishing-examples | complete worked examples to copy from |
 | api | REST endpoints, auth, admin routes |

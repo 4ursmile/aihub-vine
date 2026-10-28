@@ -27,7 +27,8 @@ PRICES = [
     (r"gpt-5|codex", (1.25, 10.0, 1.25, 0.125)),
     (r"o3|o4-mini", (2.0, 8.0, 2.0, 0.5)),
 ]
-TOOLS = ("claude", "codex")
+TOOLS = ("claude", "codex", "aihub-ui")
+UI_LOG = ("ui", "usage.jsonl")      # ~/.aihub/ui/usage.jsonl: one line per aihub-ui chat turn that Claude Code does not log (Free chat)
 
 
 _RX = {}
@@ -137,6 +138,9 @@ def _n(v):
 
 
 def _files_of(tool):
+    if tool == "aihub-ui":
+        fp = paths.p(*UI_LOG)
+        return [fp] if os.path.isfile(fp) else []
     root = os.path.join(os.path.expanduser("~"), "." + tool, "projects" if tool == "claude" else "sessions")
     return glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True)
 
@@ -237,6 +241,22 @@ def parse_codex(fp):
     return out, {k: {"title": v.get("title") or "", "cwd": v.get("cwd") or ""} for k, v in meta.items()}
 
 
+def parse_ui(fp):
+    """-> (records, meta). Lines written by the aihub-ui service: {ts, session, model, input, output, cache_read, cache_write}."""
+    out = []
+    for j in _lines(fp):
+        try:
+            ts = float(j["ts"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        model = str(j.get("model") or "")
+        if not model:
+            continue
+        out.append({"ts": ts, "tool": "aihub-ui", "session": str(j.get("session") or "ui"), "model": model, "input": _n(j.get("input")),
+                    "output": _n(j.get("output")), "cache_write": _n(j.get("cache_write")), "cache_read": _n(j.get("cache_read"))})
+    return out, {}
+
+
 CACHE = "usage-cache.json"
 CACHE_V = 2
 
@@ -279,7 +299,7 @@ def collect(tools=TOOLS, since=0.0, progress=None, meta=None):
         if hit and hit.get("m") == st.st_mtime and hit.get("s") == st.st_size:
             recs, md = hit["r"], hit.get("t") or {}
         else:
-            recs, md = (parse_claude if t == "claude" else parse_codex)(fp)
+            recs, md = {"claude": parse_claude, "aihub-ui": parse_ui}.get(t, parse_codex)(fp)
             dirty = True
         fresh[key] = {"m": st.st_mtime, "s": st.st_size, "r": recs, "t": md}
         out += recs

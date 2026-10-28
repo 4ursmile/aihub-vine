@@ -65,6 +65,24 @@ The server stores no package files and has no upload or download routes (`/uploa
 | GET | `/api/v1/index/packages/{name}/transfer/{version}` | Permission `install_indirect`; none for a package published with `-i` (its stored archive is sent, `X-Aihub-Cache: direct`, `X-Aihub-Sha256`). The file answers `Range` requests (`206`, `Accept-Ranges: bytes`), which the CLI and the web page use to download in parallel chunks | `aihub install -i`: tar.gz of the package, fetched from git by the hub and cached by (repo, subdir, commit). Header `X-Aihub-Rev`. `502` + `Retry-After` when git fails. |
 | GET | `/api/v1/index/packages/{name}` | Per `public_browse` | One full index entry. `ETag` is the entry hash `h` from the catalog; `304` when unchanged. A private package the viewer may not see answers `404`, the same as a missing one. |
 
+## Spaces (`author@space-name`)
+
+Published with `aihub space publish` or the Spaces page. Visibility like packages: `public` or `private` + `view`/`edit` for users and groups; owner and admins manage.
+`ref` below is `owner@slug` (URL-encode the `@` if your client needs it).
+
+| Route | |
+| --- | --- |
+| `POST /spaces?name=&filename=&kind=&title=&description=&tags=&visibility=&view=&transition=&autoplay=&loop=` | body = the file (raw); creates or replaces the caller's space. `publish` permission |
+| `PUT /spaces/{ref}/content` | new content for a space you may edit |
+| `GET /spaces?q=&kind=&sort=top\|new\|name&mine=&owner=&limit=&offset=` | visible spaces; `GET /spaces/overview` = carousel, top, recent, counts per kind |
+| `GET /spaces/{ref}` / `PATCH` / `DELETE` | metadata (+ `level`, `can_edit`, `can_manage`); PATCH title, description, tags, view/transition/autoplay/loop (edit), visibility (owner/admin) |
+| `GET\|PUT /spaces/{ref}/access`, `DELETE /spaces/{ref}/access/{user\|group}/{name}` | sharing, `access` = view \| edit; PUT takes `{type, name, access}` or `{items: [{type, name}, ...], access}` (up to 500, all or none) |
+| `GET /spaces/{ref}/data` | slides deck JSON / sheet JSON / doc HTML (ETag per revision) |
+| `GET /spaces/{ref}/viewurl` | signed 6 h link for the sandboxed frame (html kinds, PDF): `/spaces/{ref}/v/{token}/{path}` |
+| `GET /spaces/{ref}/file`, `GET /spaces/{ref}/open`, `POST /spaces/{ref}/view` | original file; paste-able link for public spaces; view counter |
+
+Untrusted HTML is served only from the signed `v/` URL with a `sandbox` CSP and shown in a sandboxed iframe: it never runs on the hub origin and cannot read the sign-in token.
+
 ## Reviews
 
 | Method | Path | Auth required | Purpose |
@@ -86,6 +104,7 @@ CLIs send events to `POST /api/v1/telemetry` first; if the hub is unreachable fo
 | GET | `/api/v1/dashboard/events` | `view_dashboard` | Paginated activity log (no command detail or working directory). |
 | POST | `/api/v1/usage/sync` | `view_usage` (signed in, or the anonymous role) | CLI upload of one device's daily token totals: `{"client_id", "local_user", "rows": [{day, tool, model, requests, input, output, cache_write, cache_read, cost, unpriced}]}` plus `"sessions": [{sid, day, tool, model, start, end, requests, input, output, cache_write, cache_read, cost, unpriced, peak, cold, compact, big, light}]` (max 20000 rows, gzip accepted). A row is the whole UTC day and overwrites the stored one (idempotent); a day or session never shrinks. Clients add up, except that a client reporting a day with 5+ requests and exactly the same numbers as another client of the same person is the same machine (a reinstall) and is merged into it (larger day total wins). Rows wait in memory and ONE transaction writes them every `usage_db_interval` s (default 5, Admin > Sync); they are journaled (fsync) before the 2xx, a read flushes the caller's own pending rows first. 429/503 carry `Retry-After`. Bad rows are dropped, not an error. Not signed in: the rows go to the hub account whose name equals `local_user` after the same normalization as `localize_users` (`Sam`, `sam@corp.com`, `sam` are one person; with the setting off the exact name); no single match = `{"stored": 0, "matched": false}`. |
 | GET | `/api/v1/usage/sessions?scope=me\|groups&group=&days=&from=&to=&tool=&model=&user=&limit=100` | Signed in | Sessions (biggest cost first) with `peak` context, requests, cache hit, length, `cold` / `compact` / `big` counts, and **usage hints** (`hints`: cold cache rebuilds, huge context, low cache hit, premium model for short replies, one-shot sessions, one session dominating; each with `amount` USD affected and the short ids). Same scope, group and visibility rules as `/usage`. A session is only its short id: titles, prompts and folders never leave a machine. |
+| GET | `/api/v1/groups/lookup?q=&limit=` | signed in | Names of users and groups matching `q` (`limit` 1..500, default 8; share pickers ask for 500). |
 | GET | `/api/v1/usage/groups` | `view_usage` | Groups whose usage the caller may see: the ones they belong to (a site admin: all). |
 | GET | `/api/v1/usage?scope=me\|groups&group=ID,ID&days=30&from=&to=&tool=&model=&user=` | Signed in | Tokens and estimated cost. `scope=me` = the caller's own usage; `scope=groups` = everybody in the chosen groups (blank = all the caller's groups; another group is 403), each person counted once even when in several groups. Returns `totals`, `daily`, `by_model`, `by_tool`, `by_user`, `by_group`, `members`, `options`. |
 

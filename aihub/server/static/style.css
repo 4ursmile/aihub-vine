@@ -800,3 +800,104 @@ a.pk-pill{color:color-mix(in srgb,var(--blue) 60%,var(--fg))}a.pk-pill:hover{bac
 @media(prefers-reduced-transparency:reduce),(prefers-contrast:more){.au-card{backdrop-filter:none;-webkit-backdrop-filter:none;background:var(--glass-solid)}.au-orbs,.au-sheen,.au-ring{display:none}}
 @media(prefers-contrast:more){.au-in{border-color:var(--sep)}}
 @media(prefers-reduced-motion:reduce){.au-card{transform:none!important}.au-orbs i{animation:none}.au-ring{display:none}.au-more{transition:none}}
+
+/* ---------- spaces (documents, slides, reports...). Cards and forms reuse the shared tokens; the viewer is plain boxes, no blur. */
+.sp-find{display:flex;flex-direction:column;gap:12px}.sp-chips{display:flex;flex-wrap:wrap;gap:8px}.chip.on{background:var(--blue);color:var(--on)}.chip.on i{color:inherit;opacity:.8}
+.sp-h{font-size:21px;margin:8px 0 12px}.sp-hint{font-size:13px;color:var(--fg-2)}.sp-ref{font-size:13px;color:var(--fg-2);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sp-card{display:flex;flex-direction:column;padding:0;overflow:hidden;color:inherit}.sp-card:hover{text-decoration:none;transform:translateY(-2px)}
+.sp-tile{display:flex;align-items:flex-end;justify-content:space-between;height:96px;padding:12px 14px;background:linear-gradient(135deg,hsl(var(--h) 60% 46%),hsl(calc(var(--h) + 40) 60% 34%));color:#fff}
+.sp-tile b{font-size:13px;letter-spacing:.04em;text-transform:uppercase}.sp-body{padding:14px 16px 16px}.sp-body h3{font-size:17px;margin-bottom:2px}.sp-body p{margin:2px 0;color:var(--fg-2);font-size:14px}.sp-body .sp-ref{font-size:12px}
+.sp-car{position:relative;overflow:hidden;border-radius:var(--r);box-shadow:var(--shadow)}.sp-car-track{display:flex;transition:transform .6s var(--ease,cubic-bezier(.2,.7,.2,1))}
+.sp-slide{flex:0 0 100%;min-height:240px;display:flex;align-items:flex-end;color:#fff;background:linear-gradient(135deg,hsl(var(--h) 62% 44%),hsl(calc(var(--h) + 50) 62% 28%))}.sp-slide:hover{text-decoration:none}
+.sp-slide-in{padding:28px 28px 56px;max-width:720px}.sp-slide h2{font-size:clamp(24px,4vw,38px);line-height:1.1;margin:10px 0 6px}.sp-slide p{opacity:.9}.sp-slide .meta{color:rgba(255,255,255,.8);margin-top:10px}.sp-slide .badge{background:rgba(255,255,255,.2);color:#fff}
+.sp-car-ctl{position:absolute;left:0;right:0;bottom:12px;display:flex;justify-content:center;align-items:center;gap:8px}.sp-dot{appearance:none;border:0;width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.5);padding:0;cursor:pointer}.sp-dot.on{background:#fff;width:22px;border-radius:4px;transition:width .3s}
+.sp-form{padding:18px;display:flex;flex-direction:column;gap:14px}.sp-form label,.sp-panel label{display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--fg-2)}.sp-form small{color:var(--fg-3)}
+.sp-grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.sp-check{flex-direction:row!important;align-items:center;gap:8px!important}
+.sp-drop{position:relative;display:flex!important;align-items:center;text-align:center;border:2px dashed var(--sep);border-radius:var(--r);padding:28px 16px;cursor:pointer;color:var(--fg-2)!important}.sp-drop b{color:var(--fg);font-size:16px;word-break:break-all}.sp-drop.on,.sp-drop:hover{border-color:var(--blue);background:color-mix(in srgb,var(--blue) 6%,transparent)}.sp-drop input{position:absolute;inset:0;opacity:0;cursor:pointer}
+.sp-head{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;align-items:flex-start}.sp-head h1{font-size:clamp(24px,3.4vw,34px)}.sp-back{font-size:13px}.sp-desc{color:var(--fg-2);margin-top:6px;max-width:70ch}.sp-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.btn.sec.on{background:var(--fill-2)}
+.sp-panel{background:var(--surface);border-radius:var(--r);box-shadow:var(--shadow);padding:16px 18px;display:flex;flex-direction:column;gap:12px}.sp-panel h3{font-size:16px}.sp-acl{list-style:none;padding:0;display:flex;flex-direction:column;gap:6px}.sp-acl li{display:flex;gap:8px;align-items:center}.sp-acl b{flex:1}.field.sm{width:auto;min-height:36px}
+.sp-stage{position:relative;background:var(--surface);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden}.sp-s-fit{height:calc(100vh - 210px);min-height:360px;display:flex;flex-direction:column}.sp-s-canvas{}
+.sp-s-full{position:fixed;inset:0;z-index:300;border-radius:0;background:#0b0b0d;display:flex;flex-direction:column;height:100%}.sp-s-full .sp-doc,.sp-s-full .sp-sheet{background:var(--surface);overflow:auto;flex:1}.sp-fl{position:absolute;top:10px;right:10px;z-index:5;opacity:.0;transition:opacity .25s}.sp-s-full:hover .sp-fl,.sp-fl:focus-within{opacity:1}
+.sp-frame{display:block;border:0;width:100%;background:#fff}.sp-s-canvas .sp-frame{height:min(80vh,900px)}.sp-s-fit .sp-frame,.sp-s-full .sp-frame{flex:1;height:100%}
+.sp-doc{padding:28px clamp(16px,5vw,56px);max-width:860px;margin:0 auto;line-height:1.6;overflow-wrap:anywhere}.sp-s-fit .sp-doc{overflow:auto;max-width:none}.sp-doc>*{max-width:820px;margin-left:auto;margin-right:auto}.sp-doc h1,.sp-doc h2,.sp-doc h3{margin:1.2em auto .4em}.sp-doc p,.sp-doc ul{margin:.7em auto}.sp-doc ul{padding-left:1.4em}.sp-doc table{border-collapse:collapse;width:100%}.sp-doc td,.sp-doc th{border:1px solid var(--sep);padding:6px 10px}.sp-doc pre{background:var(--fill);padding:12px;border-radius:8px;overflow:auto}.tscroll{overflow:auto}
+.sp-sheet{padding:14px;display:flex;flex-direction:column;gap:12px;min-height:0}.sp-s-fit .sp-sheet{flex:1;overflow:hidden}.sp-tw{overflow:auto;flex:1;max-height:75vh;border:1px solid var(--sep);border-radius:10px}.sp-s-fit .sp-tw,.sp-s-full .sp-tw{max-height:none}
+.sp-tw table{border-collapse:separate;border-spacing:0;font-size:13px;min-width:100%}.sp-tw th{position:sticky;top:0;background:var(--surface-2);text-align:left;font-weight:600}.sp-tw th,.sp-tw td{padding:6px 10px;border-bottom:1px solid var(--sep);white-space:nowrap;max-width:360px;overflow:hidden;text-overflow:ellipsis}.sp-tw .n{color:var(--fg-3);text-align:right;position:sticky;left:0;background:var(--surface-2)}
+/* slide player: frames are fixed-size stages scaled to fit; a transition is a CSS animation on the outgoing and incoming frame */
+.sp-player{display:flex;flex-direction:column;flex:1;min-height:0}.sp-slides{position:relative;overflow:hidden;background:#111;flex:1;min-height:0;perspective:1600px}.sp-r-canvas{flex:none;width:100%;max-height:82vh}
+.sp-fr{position:absolute;inset:0}.sp-fr-in{position:absolute;left:50%;top:50%;transform-origin:center center;background:#fff;box-shadow:0 8px 40px rgba(0,0,0,.35)}.sp-fr-in iframe{display:block;border:0;background:#fff}
+.sp-fr.in-fade{animation:spFi .45s both}.sp-fr.out-fade{animation:spFo .45s both}
+.sp-fr.in-slide{animation:spSi .5s cubic-bezier(.2,.7,.2,1) both}.sp-fr.out-slide{animation:spSo .5s cubic-bezier(.2,.7,.2,1) both}.sp-fr.in-slide.back{animation-name:spSib}.sp-fr.out-slide.back{animation-name:spSob}
+.sp-fr.in-zoom{animation:spZi .5s cubic-bezier(.2,.7,.2,1) both}.sp-fr.out-zoom{animation:spZo .5s both}
+.sp-fr.in-flip{animation:spFli .55s both}.sp-fr.out-flip{animation:spFlo .55s both;backface-visibility:hidden}.sp-fr.in-flip.back{animation-name:spFlib}.sp-fr.out-flip.back{animation-name:spFlob}
+@keyframes spFi{from{opacity:0}}@keyframes spFo{to{opacity:0}}
+@keyframes spSi{from{transform:translateX(100%)}}@keyframes spSo{to{transform:translateX(-100%)}}@keyframes spSib{from{transform:translateX(-100%)}}@keyframes spSob{to{transform:translateX(100%)}}
+@keyframes spZi{from{transform:scale(.8);opacity:0}}@keyframes spZo{to{transform:scale(1.15);opacity:0}}
+@keyframes spFli{from{transform:rotateY(90deg);opacity:0}}@keyframes spFlo{to{transform:rotateY(-90deg);opacity:0}}@keyframes spFlib{from{transform:rotateY(-90deg);opacity:0}}@keyframes spFlob{to{transform:rotateY(90deg);opacity:0}}
+.sp-hit{position:absolute;inset:0;z-index:2;cursor:pointer;touch-action:pan-y}.sp-prog{position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(255,255,255,.2);z-index:3}.sp-prog i{display:block;height:100%;background:var(--blue);transition:width .3s}
+.sp-bar{display:flex;gap:10px;align-items:center;padding:10px 14px;background:var(--surface)}.sp-s-full .sp-bar{background:#0b0b0d;color:#ddd}
+body.sp-full{overflow:hidden}body.bare .nav,body.bare .foot,body.bare .announce,body.bare .sp-head,body.bare .sp-back{display:none}body.bare main{padding:0}body.bare .sp-s-fit{height:100vh;border-radius:0}
+@media(max-width:700px){.sp-s-fit{height:calc(100vh - 260px)}.sp-slide-in{padding:20px 18px 54px}.sp-actions{width:100%}}
+@media(prefers-reduced-motion:reduce){.sp-fr,.sp-car-track{animation:none!important;transition:none!important}}
+.sp-slide .meta,.sp-body .meta{display:flex;flex-wrap:wrap;gap:6px 14px}
+body.sp-full .page,body.sp-full main{animation:none!important;transform:none!important;filter:none!important;backdrop-filter:none!important}body.sp-full .nav{display:none}
+.stack>.sp-s-full{margin:0!important}.sp-s-full .sp-bar .btn{color:#e5e5ea;background:rgba(255,255,255,.14)}.sp-s-full .sp-bar .btn:disabled{opacity:.35}
+
+/* spaces v2: one tool bar; Fit = the page column's width with the title aligned above; Canvas = native size; floating slide pill */
+.sp-head{display:block}.sp-head h1{margin:2px 0 4px}
+.sp-tools{display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:5px;background:var(--surface);border-radius:16px;box-shadow:var(--shadow)}
+.sp-modes{display:inline-flex;background:var(--fill);border-radius:12px;padding:3px;gap:2px}
+.sp-modes button,.sp-ib{appearance:none;border:0;background:transparent;color:var(--fg);font:inherit;font-size:13px;font-weight:500;display:inline-flex;align-items:center;gap:7px;height:34px;padding:0 12px;border-radius:10px;cursor:pointer;transition:background .15s,color .15s}
+.sp-modes button.on{background:var(--surface);box-shadow:0 1px 3px rgba(0,0,0,.12);color:var(--blue)}.sp-ib{color:var(--fg-2);padding:0 10px}.sp-ib:hover,.sp-modes button:hover:not(.on){background:var(--fill)}.sp-ib.on{background:color-mix(in srgb,var(--blue) 14%,transparent);color:var(--blue)}.sp-ib.warn:hover{background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)}
+.sp-sep{width:1px;align-self:stretch;margin:6px 4px;background:var(--sep)}.sp-ask{display:inline-flex;align-items:center;gap:8px;font-size:13px;padding:0 6px;flex-wrap:wrap}
+@media(max-width:700px){.sp-tools .lb{display:none}.sp-modes button,.sp-ib{padding:0 11px}}
+.sp-s-fit.sp-k-slides{height:auto;min-height:0;background:transparent;box-shadow:none;overflow:visible;display:block}.sp-p-fit .sp-slides{width:100%;border-radius:14px;box-shadow:var(--shadow);flex:none}
+.sp-s-canvas.sp-k-slides{overflow:auto}.sp-p-canvas .sp-cv{overflow:auto;max-width:100%}.sp-p-canvas .sp-slides{flex:none;max-height:none;margin:0 auto}
+.sp-p-full,.sp-p-full .sp-cv{flex:1;display:flex;min-height:0}.sp-p-full .sp-slides{flex:1}
+.sp-pill{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);z-index:4;display:flex;align-items:center;gap:2px;padding:4px;border-radius:999px;background:rgba(20,20,22,.7);color:#fff;backdrop-filter:blur(10px) saturate(150%);-webkit-backdrop-filter:blur(10px) saturate(150%);opacity:0;transition:opacity .25s}
+.sp-slides:hover .sp-pill,.sp-pill:focus-within{opacity:1}@media(hover:none){.sp-pill{opacity:1}}
+.sp-pill button{appearance:none;border:0;background:transparent;color:inherit;width:34px;height:34px;border-radius:50%;font-size:20px;line-height:1;cursor:pointer}.sp-pill button:hover:not(:disabled){background:rgba(255,255,255,.18)}.sp-pill button:disabled{opacity:.3;cursor:default}.sp-pill .pp{font-size:12px}
+.sp-pill span{min-width:56px;text-align:center;font-size:13px;font-variant-numeric:tabular-nums}.sp-pill i{opacity:.55;font-style:normal}
+.sp-bar{display:none}
+
+/* Fit = wide focus mode: nearly the whole window width, hub bar tucked away */
+body.sp-wide main{max-width:none;padding:14px clamp(10px,1.6vw,28px) 40px}
+body.sp-wide .nav{position:fixed;left:0;right:0;top:0;transform:translateY(-130%);transition:transform .28s cubic-bezier(.2,.7,.2,1)}
+body.sp-wide.nav-peek .nav{transform:none}
+body.sp-wide .foot{display:none}
+body.sp-wide .sp-head,body.sp-wide .sp-tools{max-width:none}
+body.sp-wide .sp-s-fit:not(.sp-k-slides){height:calc(100vh - 150px)}
+.sp-peek{position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:60;appearance:none;border:0;cursor:pointer;width:44px;height:18px;border-radius:0 0 12px 12px;background:var(--glass);color:var(--fg-2);display:none;align-items:center;justify-content:center;box-shadow:var(--shadow);opacity:.55;transition:opacity .2s}
+.sp-peek:hover{opacity:1}body.sp-wide .sp-peek{display:flex}body.sp-wide.nav-peek .sp-peek{display:none}
+body.sp-wide .sp-head{display:flex;align-items:baseline;gap:6px 14px;flex-wrap:wrap}body.sp-wide .sp-head h1{font-size:22px;margin:0}body.sp-wide .sp-desc{display:none}
+body.sp-wide .sp-page{gap:0}body.sp-wide .sp-page>*+*{margin-top:10px}
+body.sp-wide .sp-head{justify-content:flex-start}body.sp-wide .sp-head .sp-ref{margin-left:auto}
+
+/* smoother transitions: frames persist and are preloaded; the incoming frame sits above a still outgoing one (no dip to the dark stage), GPU layers, softer easing */
+.sp-fr{will-change:transform,opacity;backface-visibility:hidden;contain:strict}
+.sp-fr.off{opacity:0;visibility:hidden;pointer-events:none}.sp-fr.cur{z-index:2}.sp-fr[class*=out-]{z-index:1}
+.sp-fr.in-fade{animation:spFi .6s cubic-bezier(.4,0,.2,1) both}.sp-fr.out-fade{animation:none}
+.sp-fr.in-slide{animation:spSi .65s cubic-bezier(.22,.8,.2,1) both}.sp-fr.out-slide{animation:spSo .65s cubic-bezier(.22,.8,.2,1) both}.sp-fr.in-slide.back{animation-name:spSib}.sp-fr.out-slide.back{animation-name:spSob}
+.sp-fr.in-zoom{animation:spZi .65s cubic-bezier(.22,.8,.2,1) both}.sp-fr.out-zoom{animation:spZo .65s cubic-bezier(.4,0,.2,1) both}
+.sp-fr.in-flip{animation:spFli .7s cubic-bezier(.3,.7,.2,1) both}.sp-fr.out-flip{animation:spFlo .7s cubic-bezier(.3,.7,.2,1) both}
+@keyframes spSi{from{transform:translate3d(100%,0,0)}to{transform:none}}@keyframes spSo{from{transform:none}to{transform:translate3d(-26%,0,0);opacity:.35}}
+@keyframes spSib{from{transform:translate3d(-100%,0,0)}to{transform:none}}@keyframes spSob{from{transform:none}to{transform:translate3d(26%,0,0);opacity:.35}}
+@keyframes spZi{from{transform:scale(.9);opacity:0}to{transform:none;opacity:1}}@keyframes spZo{from{transform:none;opacity:1}to{transform:scale(1.08);opacity:0}}
+@keyframes spFli{from{transform:rotateY(80deg) scale(.96);opacity:0}to{transform:none;opacity:1}}@keyframes spFlo{from{transform:none;opacity:1}to{transform:rotateY(-80deg) scale(.96);opacity:0}}
+
+/* switching Canvas / Fit / Full screen: the stage morphs (View Transitions), the rest of the page cross-fades */
+.sp-stage{view-transition-name:sp-stage}
+::view-transition-group(sp-stage){animation-duration:.5s;animation-timing-function:cubic-bezier(.22,.8,.2,1)}
+::view-transition-old(sp-stage),::view-transition-new(sp-stage){height:100%;object-fit:cover;animation-duration:.5s}
+::view-transition-group(root){animation-duration:.35s}
+.sp-modes button,.sp-ib{transition:background .2s,color .2s,box-shadow .2s}
+body.sp-wide main{transition:padding .35s cubic-bezier(.22,.8,.2,1)}
+@media(prefers-reduced-motion:reduce){::view-transition-group(*),::view-transition-old(*),::view-transition-new(*){animation:none!important}}
+
+/* plain and fast: no blur over iframes, no will-change/contain layers, no perspective, no keyframes; the exit button is always visible */
+.sp-fr{will-change:auto;contain:none;backface-visibility:visible;animation:none!important;opacity:0;visibility:hidden;pointer-events:none}
+.sp-fr.cur{opacity:1;visibility:visible;z-index:2;transition:opacity .15s linear}.sp-fr.off{opacity:0;visibility:hidden}.nofx .sp-fr.cur{transition:none}
+.sp-slides{perspective:none}.sp-fr-in{box-shadow:none}
+.sp-pill{backdrop-filter:none;-webkit-backdrop-filter:none;background:rgba(20,20,22,.82)}
+.sp-fl{opacity:1!important}
+::view-transition-group(*),::view-transition-old(*),::view-transition-new(*){animation:none!important}
+.sp-stage{view-transition-name:none}body.sp-wide main{transition:none}.sp-modes button,.sp-ib{transition:none}

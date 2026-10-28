@@ -17,6 +17,11 @@ def _col(ref):
 
 
 def _xlsx(data):
+    return _xlsx_all(data)[0][1]
+
+
+def _xlsx_all(data):
+    """-> [(sheet name, rows)] for every worksheet, in workbook order."""
     z = zipfile.ZipFile(io.BytesIO(data))
     if sum(i.file_size for i in z.infolist()) > 20 * 1024 * 1024:
         raise ValueError("spreadsheet too large")
@@ -24,11 +29,22 @@ def _xlsx(data):
     if "xl/sharedStrings.xml" in z.namelist():
         for si in ET.fromstring(z.read("xl/sharedStrings.xml")).findall("m:si", NS):
             shared.append("".join(t.text or "" for t in si.iter("{%s}t" % NS["m"])))
-    sheets = sorted(n for n in z.namelist() if re.match(r"xl/worksheets/sheet\d+\.xml$", n))
-    if not sheets:
+    files = sorted((n for n in z.namelist() if re.match(r"xl/worksheets/sheet\d+\.xml$", n)), key=lambda n: int(re.findall(r"\d+", n)[-1]))
+    if not files:
         raise ValueError("no worksheet found")
+    names = {}
+    try:                                                    # real sheet names: workbook.xml (name, r:id) + its rels (id -> file)
+        rid = {r.get("Id"): "xl/" + r.get("Target").lstrip("/").replace("xl/", "", 1) for r in ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))}
+        for sh in ET.fromstring(z.read("xl/workbook.xml")).iter("{%s}sheet" % NS["m"]):
+            names[rid.get(sh.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"))] = sh.get("name")
+    except (KeyError, ET.ParseError, AttributeError):
+        pass
+    return [(names.get(f) or "Sheet%d" % (i + 1), _sheet_rows(z, f, shared)) for i, f in enumerate(files)]
+
+
+def _sheet_rows(z, name, shared):
     rows = []
-    for row in ET.fromstring(z.read(sheets[0])).iter("{%s}row" % NS["m"]):
+    for row in ET.fromstring(z.read(name)).iter("{%s}row" % NS["m"]):
         cells = []
         for c in row.findall("m:c", NS):
             idx = _col(c.get("r", "A1"))
@@ -45,6 +61,16 @@ def _xlsx(data):
             cells.append(v.strip())
         rows.append(cells)
     return rows
+
+
+def parse_all(data):
+    """Every worksheet of an .xlsx -> [(name, rows)]."""
+    if len(data) > 50 * 1024 * 1024:
+        raise ValueError("file too large")
+    try:
+        return _xlsx_all(data)
+    except (zipfile.BadZipFile, ET.ParseError, KeyError):
+        raise ValueError("could not read the .xlsx file")
 
 
 def parse(data, filename=""):

@@ -27,6 +27,7 @@ from .config import Settings
 from .db import init_db
 from .repos import EventBuffer, Repos
 from .routers import r as api
+from .routers_spaces import r as spaces_api
 from . import builtin
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -258,6 +259,7 @@ def create_app(settings: Settings = None) -> FastAPI:
     app.state.updater = Updater(app)
     app.add_middleware(GZipMiddleware, minimum_size=800)
     app.include_router(api)
+    app.include_router(spaces_api)
 
     class DbUnitOfWork:
         """Pure ASGI middleware: one database unit per request, always ended - even when the client disconnects or the handler raises.

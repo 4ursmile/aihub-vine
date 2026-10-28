@@ -184,7 +184,7 @@ HEAD = """# aihub.toml - the manifest. Docs: /#/docs/publishing
 [package]
 name = "{name}"
 version = "0.1.0"                 # immutable once published; bump it for every release (aihub dev publish --bump patch)
-type = "{type}"                   # skill | agent | mcp | tool | setup | bot | service
+type = "{type}"                   # skill | agent | mcp | tool | setup | bot | service | workflow | node
 description = "{description}"
 tags = []                         # lowercase words people search for
 readme = "README.md"
@@ -271,13 +271,63 @@ TEMPLATES["service"] = {
 EXEC.add("service/run.py")
 
 
+WORKFLOW_JSON = """{{
+ "title": "{title}",
+ "enabled": false,
+ "keep": 40,
+ "nodes": [
+  {{"id": "a", "type": "start.manual", "x": 60, "y": 80, "label": "", "config": {{"inputs": "topic|Topic|text||*"}}}},
+  {{"id": "b", "type": "ai.claude", "x": 360, "y": 80, "label": "", "config": {{"prompt": "Write three bullet points about {{{{data.topic}}}}.", "mode": "edits"}}}},
+  {{"id": "c", "type": "flow.output", "x": 660, "y": 80, "label": "", "config": {{"template": "{{{{input}}}}"}}}}
+ ],
+ "edges": [{{"from": "a", "to": "b"}}, {{"from": "b", "to": "c"}}]
+}}
+"""
+
+TEMPLATES["workflow"] = {
+    "manifest": HEAD + '\n# A workflow is a Works graph for aihub-ui (no code). Node packages it needs go here:\n# [requires]\n# packages = ["aihub-nodes-teams"]\n',
+    "files": {"works/{name}.work.json": WORKFLOW_JSON, "README.md": README, ".gitignore": GITIGNORE},
+}
+
+
+NODE_JSON = """{{
+  "id": "{name}",
+  "title": "{title}",
+  "kind": "action",
+  "group": "{title}",
+  "description": "{description}",
+  "run": ["{{python}}", "nodes/{pyname}.py"],
+  "timeout": 30,
+  "fields": [
+    {{"name": "text", "label": "Text", "type": "textarea", "default": "{{{{input}}}}", "help": "{{{{input}}}} is the text from the previous node."}},
+    {{"name": "token", "label": "Token", "type": "password", "help": "Stored encrypted; the program gets it on stdin."}}
+  ]
+}}
+"""
+
+NODE_PY = """#!/usr/bin/env python3
+\"\"\"Action node: ONE JSON document on stdin ({{config, input, inputs, run, workdir}}); print ONE JSON line: {{"ok": true, "output": "..."}} or {{"ok": false, "error": "..."}}.\"\"\"
+import json
+import sys
+
+req = json.load(sys.stdin)
+text = (req["config"].get("text") or "{{{{input}}}}").replace("{{{{input}}}}", req.get("input", ""))
+print(json.dumps({{"ok": True, "output": text.upper()}}))
+"""
+
+TEMPLATES["node"] = {
+    "manifest": HEAD + '\n# A node package adds nodes to the aihub-ui Works editor: nodes/NAME.node.json + the program it runs (docs: ui-nodes).\n',
+    "files": {"nodes/{name}.node.json": NODE_JSON, "nodes/{pyname}.py": NODE_PY, "README.md": README, ".gitignore": GITIGNORE},
+}
+
+
 def render(typ, name, description="", authors=()):
     """-> (manifest_text, {path: content}, set_of_executable_paths) for a starter project."""
     if typ not in TEMPLATES:
         raise ValueError("unknown type %r; choose from %s" % (typ, ", ".join(sorted(TEMPLATES))))
     title = name.replace("-", " ").replace("_", " ").title()
     desc = description or "%s - describe what it does in one sentence" % title
-    sub = dict(name=name, title=title, Name=name.replace("-", "_").upper(), type=typ, description=desc.replace('"', "'"))
+    sub = dict(name=name, title=title, Name=name.replace("-", "_").upper(), type=typ, description=desc.replace('"', "'"), pyname=name.replace("-", "_"))
     t = TEMPLATES[typ]
     files = {p.format(**sub): c.format(**sub) for p, c in t["files"].items()}
     execs = {p.format(**sub) for p in EXEC} & set(files)

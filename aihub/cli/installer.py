@@ -382,6 +382,12 @@ def source_hints(name, rec):
     if rec.get("bot_home"):
         ui.info("settings: %s   (credentials go here)" % os.path.join(rec["bot_home"], ".env"))
         ui.info("run it:   aihub run %s   (background; --fg for this terminal)" % name)
+    nd = os.path.join(rec["path"], "nodes")
+    if os.path.isdir(nd) and any(f.endswith(".node.json") for f in os.listdir(nd)):
+        ui.info("nodes:    available in aihub-ui Works > Add node (group = the node's group); secret fields are stored encrypted by the UI")
+    wd = os.path.join(rec["path"], "works")
+    if os.path.isdir(wd) and any(f.endswith(".work.json") for f in os.listdir(wd)):
+        ui.info("workflow: in aihub-ui open Works > Workflows from packages > Add to Works (fill in its secret fields; run it from a chat with /work:NAME)")
 
 
 def _deactivate(rec):

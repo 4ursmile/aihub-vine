@@ -142,6 +142,8 @@ Always pass arguments as a list (`execFile`, `subprocess.run([...])`), never thr
 
 ## A local web UI as a package (for example `aihub-ui`)
 
+A complete example ships with the hub: the builtin `aihub-ui` package (`aihub install aihub-ui && aihub run aihub-ui`), a chat UI plus package/service/MCP/vault/knowledge management built exactly as described below.
+
 Nothing in the CLI needs to change to ship one:
 
 1. Make it a **bot** package so `aihub run` manages it: `[bot] run = "ui/server.py"`, plus `[[bot.env]]` entries for its port. `aihub run aihub-ui` then starts it in the background with a log and restart on failure, `aihub run stop aihub-ui` stops it, and when the user is signed in it shows on the hub's Running page. (A `type = "tool"` package with `[bin] aihub-ui = "ui/server.py"` works too, but then you manage the process yourself.)

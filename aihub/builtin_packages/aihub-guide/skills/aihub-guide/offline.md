@@ -100,7 +100,7 @@ aihub upgrade [--check|--force|--rollback]
 aihub auto-update
 aihub flush                       # send queued usage events now
 # bare `aihub` menu also has Usage and Policy (guard on/off, tick active rules)
-aihub usage [--tool claude|codex] [--days N] [--by-day] [--plain] [--json]   # full screen browser in a tty, opens on Summary (arrows, mouse, Enter opens a session, tabs Summary/Sessions/Days/Tips, periods today/this month/last N days/all time, n = type N days); local report from the tools' own logs: sessions, models, tokens, cache, est. cost (no hub)
+aihub usage [--tool claude|codex|aihub-ui] [--days N] [--by-day] [--plain] [--json]   # full screen browser in a tty, opens on Summary (arrows, mouse, Enter opens a session, tabs Summary/Sessions/Days/Tips, periods today/this month/last N days/all time, n = type N days); local report from the tools' own logs: sessions, models, tokens, cache, est. cost (no hub)
 aihub usage --sessions [--days N] [--sort recent|cost|ctx|requests] [--find TEXT] [--top N]   # session list
 aihub usage-sync                         # send your daily token totals to the hub now (normally automatic after each Claude answer turn; hub Usage page shows you and your groups; off: aihub config set usage_sync off)
 aihub usage --session ID                  # one session: context per request, cold cache rebuilds
@@ -114,10 +114,16 @@ aihub run list | logs N [-f] | listen N | stop N|--all | pause N | start N | res
                                       # signed in: runs show on the hub page Running (stop/start/restart/change them there); off: aihub config set run_report off
 aihub onboard [BOT]                   # optional guided credential setup of a bot that has one ([bot] onboard); install offers it in a terminal
 aihub --json CMD ... | CMD --json | AIHUB_JSON=1   # ONE JSON document {schema, ok, command, exit, error, hint, data, output, messages, changes, context}; no prompts, no secrets; secrets in: login/register/password --password-stdin, vault add --token-stdin
+aihub space publish FILE|FOLDER [NAME|owner@name] [--kind K] [--title T] [--public|--private] [--view canvas|fit|full] [--transition fade|slide|zoom|flip|none] [--autoplay S] [--loop]   # publish a .pptx/.docx/.md/.xlsx/.csv/.pdf/.html (or folder with index.html) as a Space; opens at <hub>/#/s/author@name
+aihub space list|top|search WORDS|info REF|url REF [--view full] [--bare]|get REF|rm REF|set REF ...|share REF --user U|--group G [--edit]|unshare|shares   # manage Spaces
 aihub knowledge list|get NOTE|pull|push|edit NOTE|rm NOTE|path   # personal notes + bot soul (soul.md), also on the hub page Knowledge
 aihub knowledge share NOTE --user U|--group G [--write] | unshare | shares NOTE | shared | push-shared OWNER/NOTE   # shared notes land in ~/.aihub/knowledge/shared/<owner>/
 
 **Build a service (type = service).** `aihub dev init ./my-svc --type service --name my-svc`; `[service] run`, optional `restart` (default always) / `schedule` / `unique = true` (only one run at a time), `[[service.env]]`; `aihub run my-svc` keeps it up. Same as a bot otherwise.
+
+**Build Works nodes (type = node).** `aihub dev init ./my-node --type node --name my-node` writes `nodes/my-node.node.json` + `nodes/my_node.py` (reads one JSON document on stdin, prints one JSON line). `aihub dev publish` shares it; `aihub install NAME` makes it appear in aihub-ui Works > Add node. `dev validate` checks each `nodes/*.node.json` has id, kind (trigger|action) and a run list.
+
+**Build a workflow (type = workflow).** `aihub dev init ./my-flow --type workflow --name my-flow` writes `works/my-flow.work.json` (a Works graph for aihub-ui; no code). Easier: build it in aihub-ui (Works), press Share (secrets are removed, needed node packages go under `[requires] packages`), then `aihub dev publish` in the folder it names. Install with `aihub install NAME`; in aihub-ui use Works > Workflows from packages > Add to Works, fill the secret fields, run it from a chat with `/work:NAME`. `dev validate` checks each `works/*.work.json` is JSON with nodes.
 
 **Build a bot (type = bot).** 1) `aihub dev init ./my-bot --type bot --name my-bot`. 2) In `aihub.toml`, set `[bot] run = "bot/run.py"` and `title`; declare each setting as `[[bot.env]]` (`name`, `hint`, `required`, `secret`, `default`). 3) Write `bot/run.py`: read settings from the environment, `--once`/`--info` from argv after `--`. 4) `aihub dev validate`, then `aihub dev publish --bump patch`. 5) `aihub install my-bot` prints `settings:` (`~/.aihub/bots/my-bot/.env`); fill it in. 6) `aihub run my-bot` (`-- --info` to check). Memory, harnesses and cron: see `docs/bots.md` on the hub; this snapshot has none.
 aihub policy                          # guard that blocks agents from destructive calls (db/s3 delete, overwrite): on|off, enable|disable ID, add ID --pattern RE, test 'CMD', judge on|off (AI second opinion via claude -p; failure = allow), update

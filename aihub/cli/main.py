@@ -324,6 +324,7 @@ def cmd_self_uninstall(a):
     ui.out()
     ui.out("  This removes aihub from this machine:")
     ui.out("    - %d installed package(s)%s" % (len(pk), ": " + ", ".join(pk[:6]) + (" ..." if len(pk) > 6 else "") if pk else ""))
+    ui.out("    - running bots and services (aihub run) are stopped first")
     ui.out("    - usage hooks in your AI tools")
     ui.out("    - the PATH line in %s" % (", ".join(rc) if rc else "your shell config (none found)"))
     ui.out("    - %s (settings, credentials, queue, the aihub program)" % home)
@@ -338,7 +339,7 @@ def cmd_self_uninstall(a):
     except Exception:
         pass
     from . import runs
-    runs.stop_all()                 # supervised bots (aihub run) end before their files and ~/.aihub go away
+    runs.stop_all()                 # supervised bots and services (aihub run) end before their files and ~/.aihub go away
     for n in pk:
         try:
             installer.uninstall(n, quiet=True)
@@ -433,6 +434,11 @@ def cmd_onboard(a):
 def cmd_knowledge(a):
     from . import knowledge
     knowledge.cli(a)
+
+
+def cmd_space(a):
+    from . import spaces
+    spaces.cli(a)
 
 
 def cmd_soul(a):
@@ -682,14 +688,35 @@ def cmd_welcome(a):
     if not paths.load("credentials.json", {}).get("token"):
         ui.out()
         ui.note("an account is optional: `aihub login` shows your name in usage reports")
+    _offer_ui(ask)
     _mark_welcomed()
     ui.celebrate("All set")
     ui.out()
     ui.out("  " + ui.dim("Try these next"))
-    for cmd, why in (("aihub search", "browse what is available"), ("aihub install <name>", "add a skill, agent or MCP server"),
+    for cmd, why in (("aihub install aihub-ui && aihub run aihub-ui", "local chat UI (open the address it prints)"),
+                     ("aihub search", "browse what is available"), ("aihub install <name>", "add a skill, agent or MCP server"),
                      ("aihub dev init", "start publishing your own")):
         ui.out("    %s  %s" % (ui.accent("%-22s" % cmd), ui.dim(why)))
     ui.out()
+
+
+def _offer_ui(ask):
+    import shutil
+    """welcome: guide to the local UI (service package aihub-ui): install, then run. Asks only on a terminal; never fails the welcome."""
+    ui.out()
+    ui.info("aihub-ui is a local chat UI for Claude. Install: aihub install aihub-ui   Run: aihub run aihub-ui")
+    if not ask:
+        return
+    exe = shutil.which("aihub")
+    if not exe or not ui.confirm("Install and start aihub-ui now?", True):
+        return
+    import subprocess
+    for cmd in (["install", "aihub-ui"], ["run", "aihub-ui"]):
+        try:
+            if subprocess.call([exe] + cmd) != 0:
+                return ui.note("`aihub %s` did not finish; run it later by hand" % " ".join(cmd))
+        except OSError as e:
+            return ui.note("could not run aihub: %s" % e)
 
 
 def _mark_welcomed():
@@ -1463,7 +1490,7 @@ def build_parser():
         ("Install", ["install", "uninstall", "update", "list", "download", "unpublish"]),
         ("Manage", ["enable", "disable", "tree", "lock", "sync"]),
         ("Account", ["config", "login", "logout", "password", "register", "vault", "admin"]),
-        ("Publish", ["dev"]),
+        ("Publish", ["dev", "space"]),
         ("Setup and maintenance", ["run", "onboard", "knowledge", "soul", "policy", "welcome", "doctor", "version", "upgrade", "auto-update", "hook", "flush", "usage-sync", "hooks", "skill", "self-uninstall"]),
     ]
 
@@ -1670,6 +1697,32 @@ def build_parser():
         arg("--user", help="share/unshare: hub user name."),
         arg("--group", help="share/unshare: hub group name (everyone in it)."),
         arg("--write", action="store_true", help="share: let them edit the note too (default read-only)."))
+    add("space", cmd_space, "Publish documents, slides, reports, PDFs, sheets and HTML pages as a Space on the hub.",
+        "A Space is addressed author@space-name and opens at <hub>/#/s/author@space-name. Send a .pptx, .docx, .md, .xlsx/.csv, .pdf, an .html file (a report, dashboard, or a slide deck made of <section class=\"slide\"> parts) or a folder with index.html. Slides play directly in the browser with transitions; the viewer size (canvas | fit | full screen) defaults to --view and the reader can switch. Spaces are public or private; share a private one with a user or group as view or edit, like a package. Publishing the same name again replaces the content (needs --private/--public only to change who sees it).",
+        "Examples:\n  aihub space publish deck.pptx q3-review --view fit\n  aihub space publish report.html --kind dashboard --private\n  aihub space publish ./site team-site\n  aihub space publish new.pptx alice@q3-review      # new version of a space you may edit\n  aihub space share me@q3-review --group data-team --edit\n  aihub space set me@q3-review --transition fade --autoplay 8\n  aihub space top\n  aihub space search quarterly\n  aihub space url me@q3-review --view full",
+        arg("action", choices=["publish", "list", "top", "search", "info", "url", "open", "get", "rm", "set", "share", "unshare", "shares"], help="What to do."),
+        arg("target", nargs="?", metavar="PATH|SPACE", help="publish: file or folder; others: author@space-name (a pasted hub link works too)."),
+        arg("extra", nargs="?", metavar="NAME|WORDS", help="publish: space name (slug), or author@name to add a version to somebody else's space; search: the words."),
+        arg("--kind", choices=list(("auto", "doc", "slides", "report", "pdf", "sheet", "dashboard", "html")), help="publish/list/set: kind (default: from the file)."),
+        arg("--title", help="Title shown on the hub."),
+        arg("--description", help="One line shown on cards."),
+        arg("--tags", help="Comma list."),
+        arg("--public", action="store_true", help="Anyone, even signed out, can open it."),
+        arg("--private", action="store_true", help="Only you and the people/groups you share it with."),
+        arg("--view", choices=["canvas", "fit", "full"], help="Default viewer size: canvas (in the page), fit (fills the screen area), full (full window). url/open: the mode in the link."),
+        arg("--transition", choices=["auto", "none", "fade", "slide", "zoom", "flip"], help="Slides: transition between slides (auto = the one in the file)."),
+        arg("--autoplay", type=int, metavar="SECONDS", help="Slides: advance by itself every N seconds (0 = off)."),
+        arg("--loop", dest="loop", action="store_true", default=None, help="Slides: start over after the last slide."),
+        arg("--no-loop", dest="loop", action="store_false", help="Slides: stop at the last slide."),
+        arg("--user", help="share/unshare: hub user."),
+        arg("--group", help="share/unshare: hub group."),
+        arg("--edit", action="store_true", help="share: let them publish new versions and change settings (default view only)."),
+        arg("--bare", action="store_true", help="url: a link without the hub header and footer (for embedding)."),
+        arg("--mine", action="store_true", help="list: only my spaces."),
+        arg("--limit", type=int, default=30, help="list/top/search: how many (default 30)."),
+        arg("-o", "--output", help="get: file to save."),
+        arg("--open", action="store_true", help="publish: open the page in the browser."),
+        arg("-y", "--yes", action="store_true", help="rm: do not ask."))
     add("soul", cmd_soul, "Print your soul (persona) note.",
         "Shortcut for 'aihub knowledge get soul': the persona note from the hub (local copy if the hub is unreachable), written to stdout so an assistant or script can read it.",
         "Examples:\n  aihub soul\n  aihub soul > soul.md")
@@ -1691,7 +1744,7 @@ def build_parser():
     add("usage", cmd_usage, "Local usage report per AI tool: sessions, models, tokens, cache and estimated cost.",
         "Read the session logs of the AI tools on this machine (Claude Code ~/.claude/projects, Codex ~/.codex/sessions) and show sessions, requests, tokens, cache use and an ESTIMATED price for today, the last N days and all time, by tool and by model. Purely local: nothing is sent to the hub. Prices are list prices per 1M tokens; add or override models in ~/.aihub/prices.json as {\"model-substring\": {\"input\": 3, \"output\": 15, \"cache_write\": 3.75, \"cache_read\": 0.3}}.",
         "Examples:\n  aihub usage\n  aihub usage --days 7 --sessions\n  aihub usage --session 3f9a1c2b\n  aihub usage --tips --days 14\n  aihub usage --by-day --days 14\n  aihub usage --tool claude --days 7 --plain\n  aihub usage --json",
-        arg("--tool", action="append", choices=["claude", "codex"], help="Only this tool (repeatable)."),
+        arg("--tool", action="append", choices=["claude", "codex", "aihub-ui"], help="Only this tool (repeatable)."),
         arg("--days", type=int, default=30, help="Last N days: one of the windows (with today, this month and all time), and the window of --sessions/--session/--tips (default 30, 0 = all time). In the full screen view press n to type another number."),
         arg("--sessions", action="store_true", help="List sessions (last used, tool, project, requests, peak context, cache hit, cost, title) and exit."),
         arg("--session", metavar="ID_OR_TEXT", help="Show one session: totals, context per request and cache rebuild flags. Matches an id (the last 8 characters are enough), title or folder."),

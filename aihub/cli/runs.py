@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 
 from ..core.release import VERSION
 from ..core.schedule import next_delay, parse_schedule
@@ -600,6 +601,52 @@ def launch(r, fg=False):
     return 0
 
 
+def open_url(url):
+    """Open URL in the system default browser: the webbrowser module first, then the OS opener (open / xdg-open / start)."""
+    try:
+        if webbrowser.open(url):
+            return True
+    except Exception:
+        pass
+    cmd = (["open", url] if sys.platform == "darwin" else ["cmd", "/c", "start", "", url] if os.name == "nt" else ["xdg-open", url])
+    try:
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=os.name != "nt")
+        return True
+    except OSError:
+        return False
+
+
+def show_link(bot_manifest, open_it=True, since=0):
+    """A service that serves a page (manifest url_file, a file under ~/.aihub with its address): print the address and open it.
+    -> True when an address was found. Nothing is printed or opened in JSON mode (the address carries a key)."""
+    rel = M.runnable(bot_manifest).get("url_file")
+    if not rel:
+        return False
+    path = os.path.join(paths.HOME(), rel)
+    for _ in range(25 if since else 1):                # just started: wait for the service to write its address (max ~5 s)
+        try:
+            if os.path.getmtime(path) >= since - 1:
+                break
+        except OSError:
+            pass
+        time.sleep(0.2)
+    try:
+        with open(path, encoding="utf-8") as f:
+            url = f.read().strip()
+    except OSError:
+        return False
+    if not url.startswith(("http://127.0.0.1", "http://localhost", "https://")):
+        return False
+    if ui.JSON:
+        ui.info("address: %s" % os.path.join(paths.HOME(), rel))
+        return True
+    ui.good("open: " + url)
+    if open_it and ui.INTERACTIVE:
+        if not open_url(url):
+            ui.info("could not start a browser; copy the address above")
+    return True
+
+
 def start(target, args, a, resume=False):
     found = installer.bots()
     rid = rid_of(a.name or target)
@@ -614,8 +661,14 @@ def start(target, args, a, resume=False):
     if M.runnable(found[bot][1]).get("unique"):
         other = next((x for x in all_runs() if x.get("bot") == bot and x["id"] != rid and alive(x)), None)
         if other:
+            if show_link(found[bot][1]):                  # a page service that is already up: show its address and open it
+                ui.note("%s is already running (%s); it allows one run at a time. Restart: aihub run restart %s" % (bot, other["id"], other["id"]))
+                return 0
             raise api.ApiError("%s allows only one run at a time (unique = true) and %s is it. Use: aihub run restart %s | stop %s"
                                % (bot, other["id"], other["id"], other["id"]))
+    if old and alive(old) and not a.fg and show_link(found[bot][1]):
+        ui.note("%s is already running (pid %s). Restart: aihub run restart %s" % (rid, old.get("pid") or old.get("sup_pid"), rid))
+        return 0
     if old and alive(old):
         if a.fg:
             raise api.ApiError("%s is already running in the background (aihub run stop %s first, or --name OTHER)" % (rid, rid))
@@ -639,7 +692,11 @@ def start(target, args, a, resume=False):
         r["hub"] = hub_on() and not a.no_hub
         r["mode"] = "fg" if a.fg else "bg"
     installer.bot_command(bot, r["args"])   # missing settings: say so here, in the terminal, not in a log
-    return launch(r, fg=a.fg)
+    t0 = time.time()
+    code = launch(r, fg=a.fg)
+    if code == 0 and not a.fg:
+        show_link(found[bot][1], open_it=False, since=t0)       # the service opens the browser itself on its first start
+    return code
 
 
 def _need(rest, what):
@@ -672,12 +729,19 @@ def stop(rid, r, quiet=False):
 
 
 def stop_all():
-    """`self-uninstall`: end every run before ~/.aihub goes away."""
+    """`self-uninstall`: end every run (bots and services) before ~/.aihub goes away. One that fails to stop never skips the rest."""
     try:
-        for r in all_runs():
-            stop(r["id"], r, quiet=True)
+        rows = all_runs()
     except Exception:
-        pass
+        return
+    for r in rows:
+        if not alive(r):
+            continue
+        try:
+            stop(r["id"], r, quiet=True)
+            ui.good("stopped %s" % r["id"])
+        except Exception as e:
+            ui.note("could not stop %s: %s" % (r["id"], e))
 
 
 def cmd_list(a):

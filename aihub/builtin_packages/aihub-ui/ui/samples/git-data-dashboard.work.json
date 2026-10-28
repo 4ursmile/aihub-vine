@@ -1,0 +1,20 @@
+{
+ "title": "Git data to dashboard Space",
+ "description": "Pulls a data repo from git (path only), has Claude read the files (parquet/csv/json) and build a dashboard, then creates or updates a Space on the hub.",
+ "enabled": false,
+ "keep": 20,
+ "nodes": [
+  {"id": "a", "type": "start.manual", "x": 40, "y": 140, "label": "Which data",
+   "config": {"inputs": "repo|Data repository (https)|text||*\nref|Branch or tag|text|\nfolder|Folder with the data|text|data\nspace|Space name|text|sales-dashboard|*\nvisibility|Who can open it|select|private,public"}},
+  {"id": "g", "type": "git.pull", "x": 255, "y": 140, "label": "Read data from git (path)",
+   "config": {"url": "{{data.repo}}", "ref": "{{data.ref}}", "paths": "{{data.folder}}"}},
+  {"id": "c", "type": "ai.claude", "x": 470, "y": 140, "label": "Analyse + build dashboard",
+   "config": {"prompt": "The data lives at this path (a pointer, read it yourself with your tools: parquet via pandas/pyarrow or duckdb, csv, json):\n{{input}}\n\n1. Inspect the files: schema, row counts, date range. Install nothing globally; use `python -m pip install --user pandas pyarrow` only if missing.\n2. Compute the 4-6 numbers and 3-4 charts that matter most.\n3. Write ONE self-contained folder `dashboard/` in your working folder with `index.html` (inline CSS/JS, charts as inline SVG or Chart.js from cdnjs, no data fetched at view time; embed the aggregated numbers as JSON in the page; never embed raw rows).\n4. Answer with 3 bullets of findings, then as the LAST line: `OUTPUT: ` followed by the full path of the dashboard folder.", "model": "sonnet", "effort": "medium", "mode": "edits", "fresh": false}},
+  {"id": "p", "type": "space.publish", "x": 685, "y": 140, "label": "Create / update Space",
+   "config": {"path": "{{input}}", "name": "{{data.space}}", "kind": "dashboard", "title": "Dashboard: {{data.space}}", "description": "Built from {{data.repo}} by a Works flow", "visibility": "private"}},
+  {"id": "o", "type": "flow.output", "x": 900, "y": 140, "label": "Result", "config": {"title": "Dashboard published", "template": "{{input}}"}},
+  {"id": "n", "type": "flow.note", "x": 470, "y": 300, "label": "Tip",
+   "config": {"text": "Nodes pass paths, not content. Add Send email (Outlook) after Publish to mail the link, or a Start: schedule node to refresh the Space every Monday (same name = new revision)."}}
+ ],
+ "edges": [{"from": "a", "to": "g"}, {"from": "g", "to": "c"}, {"from": "c", "to": "p"}, {"from": "p", "to": "o"}]
+}

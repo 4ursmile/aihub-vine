@@ -1,0 +1,13 @@
+{
+  "id": "teams-message",
+  "title": "Start: Teams message",
+  "kind": "trigger",
+  "group": "Teams",
+  "description": "Starts the work for each message POSTed to http://127.0.0.1:PORT/message as {from, chat, text}. Messages not matching the filter are dropped before any run exists.",
+  "run": ["{python}", "nodes/teams_message.py"],
+  "fields": [
+    {"name": "port", "label": "Local port", "type": "number", "default": 8791, "required": true},
+    {"name": "from_regex", "label": "Only from senders matching (regex)", "type": "text", "default": ""},
+    {"name": "chat", "label": "Only in this chat (exact name, empty = any)", "type": "text", "default": ""}
+  ]
+}

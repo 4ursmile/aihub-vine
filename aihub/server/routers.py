@@ -1230,11 +1230,12 @@ def groups_list(request: Request, u=Depends(require_user)):
 
 
 @r.get("/groups/lookup")
-def groups_lookup(request: Request, q: str = "", u=Depends(require_user)):
+def groups_lookup(request: Request, q: str = "", limit: int = 8, u=Depends(require_user)):
     """Names only, for the share dialog: any signed-in person can pick a group or user to share a repo with."""
     q = q.strip().lower()[:40]
-    g = [x["name"] for x in R(request).groups() if q in x["name"]][:8]
-    us = [dict(_public(x)) for x in R(request).users(q)[:8] if x["status"] == "active"]
+    n = max(1, min(int(limit), 500))                      # share pickers ask for the whole list (limit=500); the search box keeps 8
+    g = [x["name"] for x in R(request).groups() if q in x["name"]][:n]
+    us = [dict(_public(x)) for x in R(request).users(q)[:n] if x["status"] == "active"]
     return {"groups": g, "users": us}
 
 

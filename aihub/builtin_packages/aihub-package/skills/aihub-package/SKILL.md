@@ -43,6 +43,10 @@ Do the five steps of "Assistant packaging workflow": detect the situation, choos
 
 **type = bot (chat bot).** Create it with `aihub dev init . --type bot --name <name>`. It needs `[bot] run = "bot/run.py"` (a file inside the package that `aihub run` starts), optional `title`, and one `[[bot.env]]` entry per setting (`name`, `hint`, `required`, `secret`, `default`). Optional: `[[mcp_servers]]` (used only by the bot), `[python] requires`, install scripts. Never put keys in the package; users fill `~/.aihub/bots/<name>/.env`. Full guide (layout, memory, harnesses, cron, tests): the `bots` doc on the hub.
 
+**type = node (Works nodes for aihub-ui).** `aihub dev init . --type node --name <name>` creates `nodes/<name>.node.json` + `nodes/<name>.py` (stdin JSON in, one JSON line out; protocol in the `ui-nodes` doc). Secret fields use `"type": "password"`. Then `aihub dev publish`; users `aihub install` it and the node appears in Works > Add node.
+
+**type = workflow (a shared Works graph for aihub-ui).** `aihub dev init . --type workflow --name <name>` creates `works/<name>.work.json` (nodes, edges, optional `inputs` on the start node and a `flow.output` node; no code, no install script). List node packages it needs under `[requires] packages`; never put secrets in the file. Normally built in aihub-ui (Works > Share), then `aihub dev publish`.
+
 **type = service (long-running program).** `aihub dev init . --type service --name <name>`. Same shape as a bot, table `[service]`: `run` (required), `title`, `onboard`, `[[service.env]]`, plus `restart` (no|on-failure|always, default always), optional `schedule` and `unique = true` (only one run of it at a time; also valid in `[bot]`). Settings go in `~/.aihub/services/<name>/.env`; `aihub run <name>` starts and supervises it.
 
 **Interactive wizard.** `aihub dev init -w [path]` (terminal only) asks whether the folder becomes one package, a monorepo (and which existing sub folders become packages), or gets one more package in a workspace. Suggest it to a user who is unsure; as an assistant without a terminal use the flags below (`--mono`, `--sub`, `--name`, `--type`) instead.

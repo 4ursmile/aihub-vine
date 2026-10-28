@@ -1,0 +1,12 @@
+[package]
+name = "aihub-slides"
+version = "1.0.0"
+type = "skill"
+description = "Teaches Claude to build slide decks and documents as HTML that AI Hub UI presents as a slideshow and exports to PowerPoint, Word and PDF, in a saved theme."
+tags = ["slides", "presentation", "docs", "pptx", "docx"]
+readme = "README.md"
+license = "MIT"
+
+[[skills]]
+name = "aihub-slides"
+path = "skills/aihub-slides"

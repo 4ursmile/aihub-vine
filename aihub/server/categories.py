@@ -16,7 +16,7 @@ CATEGORIES = [
 ]
 
 # when no tag matches, fall back on the package type
-TYPE_FALLBACK = {"agent": "development", "mcp": "data", "tool": "productivity", "setup": "ops", "bot": "productivity", "service": "ops", "skill": "productivity"}
+TYPE_FALLBACK = {"agent": "development", "mcp": "data", "tool": "productivity", "setup": "ops", "bot": "productivity", "service": "ops", "workflow": "productivity", "node": "development", "skill": "productivity"}
 
 BY_ID = {c[0]: {"id": c[0], "label": c[1], "desc": c[2], "tags": c[3]} for c in CATEGORIES}
 

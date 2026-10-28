@@ -1,0 +1,30 @@
+[package]
+name = "aihub-ui"
+version = "1.19.0"
+type = "service"
+description = "Local chat and control UI for AI Hub: chat with Claude Code, manage packages, services, MCP servers, logins, knowledge and works. Localhost only."
+tags = ["aihub", "ui", "chat", "local"]
+readme = "README.md"
+license = "MIT"
+
+[requires]
+os = []
+
+[service]
+run = "ui/server.py"
+title = "AI Hub UI"
+restart = "always"
+unique = true
+url_file = "ui/url.txt"
+
+[[service.env]]
+name = "UI_PORT"
+hint = "port on 127.0.0.1 (0 = pick a free one; the address is written to ~/.aihub/ui/url.txt)"
+required = false
+default = "8765"
+
+[[service.env]]
+name = "UI_OPEN"
+hint = "open the browser when the service starts (1 or 0)"
+required = false
+default = "1"

@@ -55,6 +55,11 @@ CREATE TABLE IF NOT EXISTS knowledge_share(owner_id INTEGER, name TEXT, principa
 CREATE TABLE IF NOT EXISTS runs(user_id INTEGER, client_id TEXT, rid TEXT, name TEXT, bot TEXT, host TEXT, os TEXT, status TEXT, spec TEXT, seen {real},
   PRIMARY KEY(user_id,client_id,rid));
 CREATE TABLE IF NOT EXISTS run_commands(id {pk}, user_id INTEGER, client_id TEXT, rid TEXT, action TEXT, data TEXT, created {real}, by_user TEXT, token TEXT);
+CREATE TABLE IF NOT EXISTS spaces(id {pk}, owner_id INTEGER NOT NULL, slug TEXT NOT NULL, title TEXT DEFAULT '', description TEXT DEFAULT '', kind TEXT NOT NULL,
+  visibility TEXT NOT NULL DEFAULT 'public', filename TEXT DEFAULT '', size {bigint} DEFAULT 0, sha256 TEXT DEFAULT '', rev INTEGER DEFAULT 1,
+  settings TEXT DEFAULT '', tags TEXT DEFAULT '', views {bigint} DEFAULT 0, created {real}, updated {real}, UNIQUE(owner_id,slug));
+CREATE INDEX IF NOT EXISTS spaces_views ON spaces(views);
+CREATE TABLE IF NOT EXISTS space_access(space_id INTEGER, principal_type TEXT, principal_id INTEGER, access TEXT, PRIMARY KEY(space_id,principal_type,principal_id));
 """
 
 # Every permission the app checks. Admins grant these to roles in the UI.
@@ -177,7 +182,7 @@ class Conn:
 
 
 class DB:
-    ID_TABLES = {"users", "groups", "packages", "versions", "events", "audit_log", "run_commands"}
+    ID_TABLES = {"users", "groups", "packages", "versions", "events", "audit_log", "run_commands", "spaces"}
 
     def __init__(self, settings=None, path=None):
         from .config import Settings

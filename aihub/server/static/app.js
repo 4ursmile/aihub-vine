@@ -1243,6 +1243,77 @@ function Heatmap({ grid }) {
   return html`<div class="heat" role="img" aria-label="Activity by weekday and hour, UTC"><span></span>${[0, 6, 12, 18].map((h) => html`<span key=${h} class="xs mut3" style=${`grid-column:${h + 2} / span 6`}>${String(h).padStart(2, "0")}:00</span>`)}${cells}</div>`;
 }
 
+// ---------- dashboard PDF report: summary -> trend -> breakdown -> notes. Built as a static HTML string (inline SVG, literal colours),
+// printed from a hidden iframe so the browser's "Save as PDF" produces it; no library, no network, nothing leaves the page.
+const rEsc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const RC = { use: "#0a64d6", install: "#1a8f43", update: "#c26a00", error: "#c9302c", uninstall: "#6b7280", publish: "#7c3aed" };
+function reportHtml(D, f, brand) {
+  const t = D.totals || {}, pv = D.previous || {}, sum = (o) => Object.values(o).reduce((a, b) => a + (+b || 0), 0), n = (v) => Number(v || 0).toLocaleString("en-US");
+  const total = sum(t), prevTotal = sum(pv), errRate = total ? (t.error || 0) / total : 0;
+  const pct = (a, b) => (b ? Math.round((a - b) / b * 100) : null);
+  const chg = (a, b) => { const p = pct(a, b); return p === null ? (a ? "new" : "–") : (p >= 0 ? "▲ " : "▼ ") + Math.abs(p) + "%"; };
+  const cls = (a, b, inv) => { const p = pct(a, b); return p === null || p === 0 ? "" : ((p > 0) !== !!inv) ? "up" : "down"; };
+  const share = (items) => { const s = items.reduce((a, b) => a + b.count, 0); return items.map((i) => ({ ...i, pc: s ? i.count / s : 0 })); };
+  const table = (head, rows) => rows.length ? `<table><thead><tr>${head.map((h, i) => `<th${i ? ' class="r"' : ""}>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>` : `<p class="mut">No data in this period.</p>`;
+  const ranking = (items, label, limit = 10) => table(["#", label, "Events", "Share"], share(items.slice(0, limit)).map((i, k) => `<tr><td class="mut">${k + 1}</td><td>${rEsc(i.name)}<div class="bar"><i style="width:${Math.max(2, i.pc * 100)}%"></i></div></td><td class="r">${n(i.count)}</td><td class="r">${(i.pc * 100).toFixed(1)}%</td></tr>`));
+  const split = (items, label) => table([label, "Events", "Share"], share(items).map((i) => `<tr><td>${rEsc(i.name)}</td><td class="r">${n(i.count)}</td><td class="r">${(i.pc * 100).toFixed(1)}%</td></tr>`));
+  const days = D.daily || [], ks = ["use", "install", "error"].filter((k) => days.some((d) => d[k]));
+  const chart = (() => { if (!days.length || !ks.length) return `<p class="mut">No activity in this period.</p>`;
+    const W = 700, H = 200, P = { l: 38, r: 8, t: 8, b: 22 }, c = days.length, mx = Math.max(1, ...days.map((d) => Math.max(...ks.map((k) => d[k] || 0)))), top = Math.ceil(mx / 4) * 4 || 4;
+    const x = (i) => P.l + (c < 2 ? 0 : i * (W - P.l - P.r) / (c - 1)), y = (v) => P.t + (H - P.t - P.b) * (1 - v / top), step = Math.ceil(c / 8);
+    return `<svg viewBox="0 0 ${W} ${H}" width="100%">${[0, 1, 2, 3, 4].map((i) => `<line x1="${P.l}" x2="${W - P.r}" y1="${y(top * i / 4)}" y2="${y(top * i / 4)}" stroke="#e5e7eb"/><text x="${P.l - 5}" y="${y(top * i / 4) + 3}" text-anchor="end" font-size="9" fill="#6b7280">${rEsc(fmt(top * i / 4))}</text>`).join("")}`
+      + days.map((d, i) => i % step === 0 ? `<text x="${x(i)}" y="${H - 6}" text-anchor="middle" font-size="9" fill="#6b7280">${rEsc(d.date.slice(5))}</text>` : "").join("")
+      + ks.map((k) => `<path d="${days.map((d, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(d[k] || 0).toFixed(1)}`).join("")}" fill="none" stroke="${RC[k]}" stroke-width="1.8" stroke-linejoin="round"/>${c < 3 ? days.map((d, i) => `<circle cx="${x(i)}" cy="${y(d[k] || 0)}" r="3" fill="${RC[k]}"/>`).join("") : ""}`).join("")
+      + `</svg><div class="legend">${ks.map((k) => `<span><i style="background:${RC[k]}"></i>${k}</span>`).join("")}</div>`; })();
+  const WD = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], grid = D.heatmap || [], gmx = Math.max(1, ...grid.flat());
+  const heat = grid.length ? `<table class="heat"><thead><tr><th></th>${Array.from({ length: 24 }, (_, h) => `<th>${h % 3 ? "" : String(h).padStart(2, "0")}</th>`).join("")}</tr></thead><tbody>${grid.map((row, d) => `<tr><th>${WD[d].slice(0, 3)}</th>${row.map((v) => `<td style="background:rgba(10,100,214,${v ? (0.12 + 0.8 * v / gmx).toFixed(2) : 0})"></td>`).join("")}</tr>`).join("")}</tbody></table><p class="mut small">Weekday by hour, UTC. Darker means more events.</p>` : "";
+  // key findings: plain sentences computed from the same numbers, so the summary and the tables cannot disagree
+  const peak = days.reduce((a, d) => (sum(Object.fromEntries(Object.entries(d).filter(([k]) => k !== "date"))) > (a.v || 0) ? { d: d.date, v: sum(Object.fromEntries(Object.entries(d).filter(([k]) => k !== "date"))) } : a), {});
+  let pd = 0, ph = 0, pvv = 0; grid.forEach((row, d) => row.forEach((v, h) => { if (v > pvv) { pvv = v; pd = d; ph = h; } }));
+  const tp = share(D.top_packages || []), top3 = tp.slice(0, 3).reduce((a, b) => a + b.pc, 0), os = share(D.by_os || []), idn = share(D.by_identity || []);
+  const F = [];
+  F.push(`${n(total)} events were recorded (${chg(total, prevTotal)} vs the previous period of the same length), from ${n(D.active_users)} active people on ${n(D.clients)} devices across ${n(D.active_packages)} packages.`);
+  if (t.use) F.push(`Tools were called ${n(t.use)} times${pv.use !== undefined ? ` (${chg(t.use, pv.use || 0)})` : ""}; ${n(t.install || 0)} installs and ${n(t.publish || 0)} publishes.`);
+  if (total) F.push(`Errors make up ${(errRate * 100).toFixed(1)}% of events (${n(t.error || 0)}, ${chg(t.error || 0, pv.error || 0)} vs prior)${errRate > 0.05 ? ", above the 5% level worth investigating" : ", within a healthy range"}.`);
+  if (peak.d) F.push(`Busiest day: ${peak.d} with ${n(peak.v)} events.${pvv ? ` Busiest slot: ${WD[pd]} around ${String(ph).padStart(2, "0")}:00 UTC.` : ""}`);
+  if (tp.length) F.push(`The most used package is ${tp[0].name} (${(tp[0].pc * 100).toFixed(0)}% of package usage); the top ${Math.min(3, tp.length)} account for ${(top3 * 100).toFixed(0)}%${top3 > 0.8 && tp.length > 3 ? ", so usage is concentrated" : ""}.`);
+  if (os.length) F.push(`Most common OS: ${os[0].name} (${(os[0].pc * 100).toFixed(0)}%).`);
+  const anon = idn.find((i) => /anon/i.test(i.name)); if (anon) F.push(`${(anon.pc * 100).toFixed(0)}% of events come from anonymous (not signed-in) users.`);
+  const filt = DASH_KEYS.filter((k) => f[k]).map((k) => `${DASH_LABEL[k]}: ${rEsc(f[k])}`);
+  const kpi = (l, a, b, inv) => `<div class="kpi"><span>${l}</span><b>${n(a)}</b><em class="${cls(a, b, inv)}">${chg(a, b)} vs prior</em></div>`;
+  const now = new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC";
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${rEsc((brand.name || "AI Hub") + " usage report " + D.filters.from + " to " + D.filters.to)}</title><style>
+@page{size:A4;margin:16mm 14mm}*{box-sizing:border-box}body{font:12px/1.5 -apple-system,"Segoe UI",Helvetica,Arial,sans-serif;color:#111827;margin:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+header{border-bottom:3px solid #0a64d6;padding-bottom:10px;margin-bottom:14px}h1{font-size:24px;margin:0}h2{font-size:15px;margin:22px 0 8px;padding-bottom:4px;border-bottom:1px solid #d1d5db}h2 b{color:#0a64d6;margin-right:6px}h3{font-size:12px;margin:14px 0 6px}
+.meta{color:#6b7280;font-size:11px;margin-top:4px}.mut{color:#6b7280}.small{font-size:10px}.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:10px 0}.kpi{border:1px solid #d1d5db;border-radius:6px;padding:8px;break-inside:avoid}
+.kpi span{display:block;font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.04em}.kpi b{display:block;font-size:20px}.kpi em{font-style:normal;font-size:10px;color:#6b7280}.up{color:#1a8f43!important}.down{color:#c9302c!important}
+ul{margin:6px 0;padding-left:18px}li{margin:3px 0}table{width:100%;border-collapse:collapse;margin:4px 0;break-inside:auto}tr{break-inside:avoid}th,td{padding:4px 6px;border-bottom:1px solid #e5e7eb;text-align:left;vertical-align:top}th{font-size:10px;color:#6b7280;text-transform:uppercase;background:#f3f4f6}.r{text-align:right}
+.bar{height:4px;background:#e5e7eb;border-radius:2px;margin-top:3px}.bar i{display:block;height:4px;background:#0a64d6;border-radius:2px}.legend{display:flex;gap:14px;font-size:10px;color:#6b7280}.legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:18px}.cols>div{break-inside:avoid}.heat td{height:13px;padding:0;border:1px solid #fff;background:#f3f4f6}.heat th{padding:1px 2px;font-size:8px;background:none;border:0}
+section{break-inside:auto}footer{margin-top:22px;border-top:1px solid #d1d5db;padding-top:6px;color:#6b7280;font-size:10px}.pb{break-before:page}
+</style></head><body>
+<header><div class="meta">${rEsc(brand.name || "AI Hub")}</div><h1>Usage report</h1><div class="meta">Period ${rEsc(D.filters.from)} to ${rEsc(D.filters.to)} (UTC) · Generated ${now}${filt.length ? " · Filters: " + filt.join(", ") : " · No filters (all activity)"}</div></header>
+<section><h2><b>1</b>Executive summary</h2>
+<div class="kpis">${kpi("Tool calls", t.use || 0, pv.use || 0)}${kpi("Active people", D.active_users, D.active_users_prev)}${kpi("Installs", t.install || 0, pv.install || 0)}${kpi("Publishes", t.publish || 0, pv.publish || 0)}${kpi("Errors", t.error || 0, pv.error || 0, true)}</div>
+<h3>Key findings</h3><ul>${F.map((x) => `<li>${rEsc(x)}</li>`).join("")}</ul></section>
+<section><h2><b>2</b>Activity over time</h2>${chart}
+<h3>Totals by event kind</h3>${table(["Event", "This period", "Previous", "Change"], Object.keys(RC).map((k) => `<tr><td>${k}</td><td class="r">${n(t[k])}</td><td class="r">${n(pv[k])}</td><td class="r ${cls(t[k] || 0, pv[k] || 0, k === "error")}">${chg(t[k] || 0, pv[k] || 0)}</td></tr>`))}
+<h3>When people work</h3>${heat}</section>
+<section class="pb"><h2><b>3</b>Breakdown: what is used</h2><div class="cols"><div><h3>Most used packages</h3>${ranking(D.top_packages || [], "Package")}</div><div><h3>Most used components</h3>${ranking(D.top_components || [], "Component")}</div></div>
+<h3>Top rated packages (all time)</h3>${table(["Package", "Reviews", "Average"], (D.top_reviewed || []).slice(0, 8).map((x) => `<tr><td>${rEsc(x.name)}</td><td class="r">${n(x.reviews)}</td><td class="r">${rEsc(x.avg)}</td></tr>`))}</section>
+<section><h2><b>4</b>Breakdown: who uses it</h2><div class="cols"><div><h3>Top developers</h3>${ranking(D.top_developers || [], "Developer", 8)}</div><div><h3>Top people</h3>${ranking(D.top_users || [], "Person", 8)}</div></div>
+<div class="cols"><div><h3>Signed in vs anonymous</h3>${split(D.by_identity || [], "Identity")}</div><div><h3>Devices</h3>${ranking(D.by_host || [], "Device", 8)}</div></div></section>
+<section><h2><b>5</b>Breakdown: how it is used</h2><div class="cols"><div><h3>By type</h3>${split(D.by_type || [], "Type")}</div><div><h3>By tool</h3>${split(D.by_source || [], "Tool")}</div></div>
+<h3>By operating system</h3>${split(D.by_os || [], "OS")}</section>
+<section><h2><b>6</b>Notes</h2><ul class="small"><li>Counts are events received by the hub in the period; "previous" is the preceding period of equal length.</li><li>All times are UTC. Percent changes against a zero baseline are shown as "new".</li><li>Rankings merge one person across accounts when "localize users" is on in Admin settings.</li></ul></section>
+<footer>${rEsc(brand.name || "AI Hub")} · generated from the live dashboard on ${now}</footer></body></html>`;
+}
+function printReport(D, f) {
+  const fr = document.createElement("iframe"); fr.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0"; fr.setAttribute("aria-hidden", "true");
+  fr.onload = () => { try { fr.contentWindow.focus(); fr.contentWindow.print(); } finally { setTimeout(() => fr.remove(), 60000); } };
+  fr.srcdoc = reportHtml(D, f, store.brand || {}); document.body.appendChild(fr);
+}
+
 function Dashboard() {
   const { me } = useStore(); const f = dashParams(); const [tick, setTick] = useState(0); const [open, setOpen] = useState(false);
   const go = (patch) => nav(dashHash({ ...f, page: 1, ...patch }));
@@ -1262,7 +1333,7 @@ function Dashboard() {
   const seriesOn = Object.keys(series).filter((k) => series[k]);
   return html`<div class="stack"><div class="row"><h1>Dashboard</h1><span class="sp"></span>
       <div class="seg" role="group" aria-label="Period">${[7, 30, 90, 365].map((n) => html`<button key=${n} class=${!custom && f.days === n ? "on" : ""} onClick=${() => go({ days: n, from: "", to: "" })}>${n === 365 ? "1y" : n + "d"}</button>`)}<button class=${custom ? "on" : ""} onClick=${() => setOpen(!open)} aria-expanded=${open}>Custom</button></div>
-      <button class="btn sec sm" onClick=${() => setTick(tick + 1)} title="Reload now">Refresh</button><button class="btn sec sm" onClick=${exportCsv} disabled=${!D}>Export CSV</button></div>
+      <button class="btn sec sm" onClick=${() => setTick(tick + 1)} title="Reload now">Refresh</button><button class="btn sec sm" onClick=${exportCsv} disabled=${!D}>Export CSV</button><button class="btn sec sm" onClick=${() => printReport(D, f)} disabled=${!D} title="Open the print dialog; choose Save as PDF">Export PDF</button></div>
     ${(open || custom) && html`<div class="row filters" role="group" aria-label="Date range"><label class="sm mut" for="df">From</label><input id="df" class="field" type="date" value=${f.from || (D && D.filters.from) || ""} max=${D && D.filters.to} onChange=${(e) => go({ from: e.target.value, to: f.to || (D && D.filters.to) || "" })} /><label class="sm mut" for="dt">To</label><input id="dt" class="field" type="date" value=${f.to || (D && D.filters.to) || ""} onChange=${(e) => go({ to: e.target.value, from: f.from || (D && D.filters.from) || "" })} />${custom && html`<button class="btn sec sm" onClick=${() => go({ from: "", to: "" })}>Back to presets</button>`}</div>`}
     <div class="row filters" role="group" aria-label="Filters">
       <form class="row" style="gap:6px" onSubmit=${(e) => { e.preventDefault(); go({ q: qd.trim() }); }}><input class="field" type="search" placeholder="Search package or component" aria-label="Search package or component" value=${qd} onInput=${(e) => setQd(e.target.value)} style="width:15rem" /></form>
@@ -1449,6 +1520,232 @@ function UsageHub() {
 }
 
 // Top-right menu: a trigger plus a small panel of links. On phones the panel is always open inside the burger menu (CSS).
+// ---------- spaces: documents, slides, reports, PDFs, sheets, dashboards. Address author@space-name, link #/s/author@space-name
+const SKIND = { doc: "Doc", slides: "Slides", report: "Report", pdf: "PDF", sheet: "Sheet", dashboard: "Dashboard", html: "HTML page" };
+const SK_ORDER = ["slides", "doc", "report", "dashboard", "sheet", "pdf", "html"];
+const SK_HELP = ".pptx or an .html deck · .docx .md .txt · .html report or dashboard (or a .zip site) · .xlsx .csv · .pdf";
+const hashQ = () => new URLSearchParams((location.hash.split("?")[1] || ""));
+const setHashQ = (k, v) => { const [p, q] = location.hash.split("?"), ps = new URLSearchParams(q || ""); v == null ? ps.delete(k) : ps.set(k, v); history.replaceState(null, "", (p || "#/") + (ps.toString() ? "?" + ps : "")); };
+const sendFile = (method, path, file, onProg) => new Promise((ok, no) => {          // raw body with upload progress
+  const x = new XMLHttpRequest(); x.open(method, U("/api/v1" + path)); if (tok()) x.setRequestHeader("Authorization", "Bearer " + tok());
+  x.setRequestHeader("Content-Type", "application/octet-stream");
+  x.upload.onprogress = (e) => e.lengthComputable && onProg && onProg(e.loaded / e.total);
+  x.onload = () => { let j = {}; try { j = JSON.parse(x.responseText); } catch {} x.status < 300 ? ok(j) : no(new Error(typeof j.detail === "string" ? j.detail : x.statusText || "Upload failed")); };
+  x.onerror = () => no(new Error("Network error")); x.send(file);
+});
+const slugOf = (n) => String(n || "").replace(/\.(tar\.gz|[^.]+)$/i, "").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "").slice(0, 64);
+const SpCard = ({ s, i = 0 }) => html`<a class="card sp-card" style=${"--i:" + Math.min(i, 12) + ";--h:" + hue(s.slug)} href=${"#/s/" + s.ref}>
+  <div class="sp-tile"><b>${SKIND[s.kind] || s.kind}</b>${s.visibility === "private" && html`<span class="badge orange">private</span>`}</div>
+  <div class="sp-body"><h3>${s.title}</h3><p class="sp-ref">${s.ref}</p><p>${s.description || ""}</p>
+    <div class="meta"><span>${fmt(s.views)} views</span><span>${ago(s.updated)}</span></div></div></a>`;
+function SpCarousel({ items }) {
+  const [i, setI] = useState(0), [hold, setHold] = useState(false), n = items.length;
+  useEffect(() => { if (reduced || hold || n < 2) return; const t = setInterval(() => setI((x) => (x + 1) % n), 6500); return () => clearInterval(t); }, [hold, n]);
+  useEffect(() => { const f = () => setHold(document.hidden); document.addEventListener("visibilitychange", f); return () => document.removeEventListener("visibilitychange", f); }, []);
+  if (!n) return null;
+  return html`<section class="sp-car" aria-roledescription="carousel" aria-label="Top spaces" onMouseEnter=${() => setHold(true)} onMouseLeave=${() => setHold(false)} onFocusIn=${() => setHold(true)} onFocusOut=${() => setHold(false)}>
+    <div class="sp-car-track" style=${"transform:translateX(-" + i * 100 + "%)"}>${items.map((s, k) => html`<a key=${s.ref} class="sp-slide" style=${"--h:" + hue(s.slug)} href=${"#/s/" + s.ref} aria-hidden=${k !== i} tabindex=${k === i ? 0 : -1}>
+      <div class="sp-slide-in"><span class="badge">${SKIND[s.kind]}</span><h2>${s.title}</h2><p>${s.description || s.ref}</p><div class="meta"><span>${s.ref}</span><span>${fmt(s.views)} views</span></div></div></a>`)}</div>
+    ${n > 1 && html`<div class="sp-car-ctl"><button class="btn sec sm" aria-label="Previous" onClick=${() => setI((i + n - 1) % n)}>‹</button>${items.map((s, k) => html`<button key=${s.ref} class=${"sp-dot" + (k === i ? " on" : "")} aria-label=${"Show " + s.title} onClick=${() => setI(k)}></button>`)}<button class="btn sec sm" aria-label="Next" onClick=${() => setI((i + 1) % n)}>›</button></div>`}</section>`;
+}
+function SpaceForm({ onDone, space }) {         // create a space (or, with `space`, send a new version of it) from the browser
+  const [file, setFile] = useState(null), [name, setName] = useState(""), [title, setTitle] = useState(""), [kind, setKind] = useState("auto"), [vis, setVis] = useState("public");
+  const [view, setView] = useState("fit"), [pct, setPct] = useState(null), [drag, setDrag] = useState(false), [desc, setDesc] = useState("");
+  const pick = (f) => { if (!f) return; setFile(f); if (!space && !name) setName(slugOf(f.name)); if (!space && !title) setTitle(f.name.replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ")); };
+  const go = async (e) => {
+    e.preventDefault(); if (!file) return toast("Choose a file first", 1);
+    const q = new URLSearchParams({ filename: encodeURIComponent(file.name) });
+    if (kind !== "auto") q.set("kind", kind);
+    if (!space) { if (name) q.set("name", name); if (title) q.set("title", title); if (desc) q.set("description", desc); q.set("visibility", vis); q.set("view", view); }
+    setPct(0);
+    try { const r = space ? await sendFile("PUT", "/spaces/" + space + "/content?" + q, file, setPct) : await sendFile("POST", "/spaces?" + q, file, setPct); toast(r.created ? "Space published" : "Space updated"); onDone(r.space); }
+    catch (er) { toast(er.message, 1); setPct(null); }
+  };
+  return html`<form class="card sp-form" onSubmit=${go}>
+    <label class=${"sp-drop" + (drag ? " on" : "")} onDragOver=${(e) => { e.preventDefault(); setDrag(true); }} onDragLeave=${() => setDrag(false)} onDrop=${(e) => { e.preventDefault(); setDrag(false); pick(e.dataTransfer.files[0]); }}>
+      <input type="file" onChange=${(e) => pick(e.target.files[0])} />
+      <b>${file ? file.name : "Drop a file here or click to choose"}</b><span>${file ? (file.size / 1048576).toFixed(1) + " MB" : SK_HELP}</span></label>
+    ${!space && html`<div class="sp-grid2">
+      <label>Name<input class="field" value=${name} placeholder="q3-review" onInput=${(e) => setName(slugOf(e.target.value))} /><small>Your link will be <code>${(store.me && store.me.username) || "you"}@${name || "name"}</code></small></label>
+      <label>Title<input class="field" value=${title} onInput=${(e) => setTitle(e.target.value)} /></label></div>
+      <label>Description<input class="field" value=${desc} placeholder="One line shown on cards" onInput=${(e) => setDesc(e.target.value)} /></label>`}
+    <div class="sp-grid2"><label>Kind<select class="field" value=${kind} onChange=${(e) => setKind(e.target.value)}><option value="auto">Detect from the file</option>${SK_ORDER.map((k) => html`<option value=${k}>${SKIND[k]}</option>`)}</select></label>
+      ${!space && html`<label>Opens as<select class="field" value=${view} onChange=${(e) => setView(e.target.value)}><option value="fit">Fit the screen</option><option value="canvas">Canvas (inside the page)</option><option value="full">Full screen</option></select></label>`}</div>
+    ${!space && html`<div class="row"><div class="seg" role="group" aria-label="Who can see it">${["public", "private"].map((v) => html`<button type="button" class=${vis === v ? "on" : ""} onClick=${() => setVis(v)}>${v === "public" ? "Public link" : "Private"}</button>`)}</div>
+      <span class="sp-hint">${vis === "public" ? "Anyone with the link, signed in or not." : "Only you, plus people and groups you share it with."}</span></div>`}
+    ${pct != null && html`<div class="ubar" style="position:static"><i style=${"width:" + Math.round(pct * 100) + "%"}></i></div>`}
+    <div class="row"><button class="btn" disabled=${pct != null}>${pct != null ? "Uploading…" : space ? "Upload new version" : "Publish space"}</button><span class="sp-hint">or from a terminal: <code>aihub space publish ${file ? file.name : "FILE"}</code></span></div></form>`;
+}
+function Spaces() {
+  const { me } = useStore(); const qs = hashQ();
+  const [q, setQ] = useState(qs.get("q") || ""), [kind, setKind] = useState(qs.get("kind") || ""), [tab, setTab] = useState(qs.get("tab") || "all"), [mk, setMk] = useState(qs.get("new") === "1");
+  const dq = debounced(q), find = !!(dq || kind || tab === "mine");
+  const ov = useLoad(() => api("/spaces/overview"), []);
+  const res = useLoad(() => find ? api("/spaces?" + new URLSearchParams({ q: dq, kind, sort: dq ? "top" : "new", limit: 60, ...(tab === "mine" ? { mine: "true" } : {}) })) : Promise.resolve(null), [dq, kind, tab, me && me.username]);
+  useReveal();
+  const kinds = (ov.d && ov.d.kinds) || {};
+  return html`<div class="stack"><div class="kn-head"><div><h1>Spaces</h1><p class="lead">Slides, docs, reports, sheets and dashboards your team can open straight from a link.</p></div>
+      ${me && can("publish") && html`<button class="btn" aria-expanded=${mk} onClick=${() => setMk(!mk)}>${mk ? "Close" : "New space"}</button>`}</div>
+    ${mk && html`<${SpaceForm} onDone=${(s) => nav("/s/" + s.ref)} />`}
+    <div class="sp-find"><${Search} value=${q} onInput=${setQ} ph="Find a space: title, author, tag…" />
+      <div class="sp-chips">${me && html`<button class=${"chip" + (tab === "mine" ? " on" : "")} onClick=${() => setTab(tab === "mine" ? "all" : "mine")}>Mine</button>`}
+        <button class=${"chip" + (!kind ? " on" : "")} onClick=${() => setKind("")}>All</button>${SK_ORDER.filter((k) => kinds[k] || kind === k).map((k) => html`<button key=${k} class=${"chip" + (kind === k ? " on" : "")} onClick=${() => setKind(kind === k ? "" : k)}>${SKIND[k]} <i>${kinds[k] || 0}</i></button>`)}</div></div>
+    ${find ? (res.d ? (res.d.items.length ? html`<div class="grid">${res.d.items.map((s, i) => html`<${SpCard} key=${s.ref} s=${s} i=${i} />`)}</div>` : html`<${Empty} t="No spaces found" d=${tab === "mine" ? "You have not published any yet. Use New space or aihub space publish." : "Try other words, or clear the filters."} />`) : res.e ? html`<${Err} e=${res.e} />` : html`<${Skels} n=${6} />`)
+      : ov.d ? (!ov.d.top.length ? html`<${Empty} t="No spaces yet" d=${me ? "Publish the first one with New space, or: aihub space publish deck.pptx" : "Sign in to publish the first one."} />` : html`
+        <${SpCarousel} items=${ov.d.carousel} />
+        <section><h2 class="sp-h">Top spaces</h2><div class="grid">${ov.d.top.slice(0, 6).map((s, i) => html`<${SpCard} key=${s.ref} s=${s} i=${i} />`)}</div></section>
+        <section><h2 class="sp-h">Recently updated</h2><div class="grid">${ov.d.recent.slice(0, 6).map((s, i) => html`<${SpCard} key=${s.ref} s=${s} i=${i} />`)}</div></section>`)
+      : ov.e ? html`<${Err} e=${ov.e} />` : html`<${Skels} n=${6} />`}</div>`;
+}
+// ---- viewers
+const SI = { canvas: "M3 5h14v10H3zM6 17.5h8", fit: "M3 10h14M6 7l-3 3 3 3M14 7l3 3-3 3", full: "M4 8V4h4M16 8V4h-4M4 12v4h4M16 12v4h-4", link: "M8.5 11.5l3-3M7.5 9L6 10.5a2.8 2.8 0 004 4L11.5 13M12.5 11L14 9.5a2.8 2.8 0 00-4-4L8.5 7", expand: "M11 4h5v5M16 4l-6 6M8 5H4v11h11v-4", down: "M10 3v9M6 9l4 4 4-4M4 16h12", gear: "M10 7a3 3 0 100 6 3 3 0 000-6zM10 2v2M10 16v2M2 10h2M16 10h2M4.6 4.6l1.4 1.4M14 14l1.4 1.4M4.6 15.4L6 14M14 6l1.4-1.4", share: "M15 5.5a2 2 0 100-.01M5 10a2 2 0 100-.01M15 14.5a2 2 0 100-.01M6.8 9l6.4-3M6.8 11l6.4 3", trash: "M4 6h12M8 6V4h4v2M6 6l1 10h8l1-10" };
+const SIc = ({ d }) => html`<svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d=${d} /></svg>`;
+const TRN = ["fade", "slide", "zoom", "flip"];
+// One slide = one sandboxed iframe on a fixed-size stage, keyed by slide number so a frame is never remounted; the neighbours load in the background.
+// Kept deliberately plain: switching slides only flips which frame is visible (a 150 ms fade, or none).
+function SpFrame({ d, idx, k, on }) {
+  const s = d.slides[idx], body = d.source === "html" ? s.html.replace(/^<section class="/, '<section class="active present is-active current ') : s.html;
+  return html`<div class=${"sp-fr " + (on ? "cur" : "off")}><div class="sp-fr-in" style=${`width:${d.w}px;height:${d.h}px;transform:translate(-50%,-50%) scale(${k})`}>
+    <iframe sandbox="" scrolling="no" tabindex="-1" title=${"Slide " + (idx + 1)} width=${d.w} height=${d.h} srcdoc=${`<!doctype html><meta charset="utf-8"><base target="_blank"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;position:relative;font-family:sans-serif}${d.css}</style><body>${body}</body>`}></iframe></div></div>`;
+}
+function SlidePlayer({ d, st, mode }) {
+  const n = d.slides.length, wrap = useRef(), [k, setK] = useState(1), [i, setI] = useState(() => Math.min(n - 1, Math.max(0, (+hashQ().get("slide") || 1) - 1)));
+  const [play, setPlay] = useState(+st.autoplay > 0), down = useRef(null), last = useRef(0), swiped = useRef(false);
+  useEffect(() => { const el = wrap.current; if (!el) return; let raf = 0; const f = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { const r = el.getBoundingClientRect(); if (r.width) setK(mode === "canvas" ? 1 : Math.min(r.width / d.w, r.height / d.h)); }); };
+    f(); const ro = new ResizeObserver(f); ro.observe(el); return () => { cancelAnimationFrame(raf); ro.disconnect(); }; }, [d, mode]);
+  const [hid, setHid] = useState(() => document.hidden);
+  useEffect(() => { const f = () => setHid(document.hidden); document.addEventListener("visibilitychange", f); return () => document.removeEventListener("visibilitychange", f); }, []);
+  const go = useCallback((to, auto) => {
+    if (!auto) setPlay(false);                                               // any manual move stops auto-advance (it used to keep running over the user's choice)
+    const now = Date.now(); if (now - last.current < 160) return;            // one step per gesture: a held key or a long swipe cannot run through the deck
+    const t = st.loop ? (to + n) % n : Math.max(0, Math.min(n - 1, to)); if (t === i) return;
+    last.current = now; setI(t); setHashQ("slide", t ? t + 1 : null);
+  }, [i, n, st.loop]);
+  useEffect(() => { if (!play || hid || !(+st.autoplay > 0)) return; const t = setTimeout(() => { if (i >= n - 1 && !st.loop) setPlay(false); else go(i + 1, true); }, st.autoplay * 1000); return () => clearTimeout(t); }, [play, hid, i, st.autoplay, go]);
+  useEffect(() => {
+    const key = (e) => { if (e.repeat || /^(INPUT|TEXTAREA|SELECT)$/.test((e.target || {}).tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
+      const m = { ArrowRight: 1, ArrowDown: 1, PageDown: 1, " ": 1, ArrowLeft: -1, ArrowUp: -1, PageUp: -1 }[e.key];
+      if (m) { e.preventDefault(); go(i + m); } else if (e.key === "Home") go(0); else if (e.key === "End") go(n - 1); };
+    addEventListener("keydown", key); return () => removeEventListener("keydown", key);
+  }, [go, i, n]);
+  const up = (e) => { const dx = e.clientX - (down.current ?? e.clientX); down.current = null; swiped.current = Math.abs(dx) > 40; if (swiped.current) go(i + (dx < 0 ? 1 : -1)); };
+  const hit = (e) => { if (swiped.current) { swiped.current = false; return; } const r = e.currentTarget.getBoundingClientRect(), left = e.clientX - r.left < r.width / 3; go(i + (left ? -1 : 1)); };
+  const shown = [...new Set([i - 1, i, i + 1].map((x) => (st.loop ? (x + n) % n : x)).filter((x) => x >= 0 && x < n))];
+  const sty = mode === "canvas" ? `width:${d.w}px;height:${d.h}px` : mode === "fit" ? `aspect-ratio:${d.w}/${d.h};width:min(100%,calc((100vh - 140px) * ${d.w / d.h}));margin:0 auto` : "";
+  return html`<div class=${"sp-player sp-p-" + mode}><div class="sp-cv"><div class=${"sp-slides sp-r-" + mode + (reduced || st.transition === "none" ? " nofx" : "")} ref=${wrap} style=${sty}>
+      ${shown.map((x) => html`<${SpFrame} key=${x} d=${d} idx=${x} k=${k} on=${x === i} />`)}
+      <div class="sp-hit" onClick=${hit} onPointerDown=${(e) => { down.current = e.clientX; }} onPointerUp=${up} onPointerCancel=${() => { down.current = null; }}></div>
+      <div class="sp-pill" role="group" aria-label="Slide controls"><button aria-label="Previous slide" disabled=${i === 0 && !st.loop} onClick=${() => go(i - 1)}>‹</button><span aria-live="polite">${i + 1} <i>/</i> ${n}</span>
+        <button aria-label="Next slide" disabled=${i === n - 1 && !st.loop} onClick=${() => go(i + 1)}>›</button>
+        ${+st.autoplay > 0 && html`<button class="pp" aria-label=${play ? "Pause" : "Play"} onClick=${() => setPlay(!play)}>${play ? "❚❚" : "▶"}</button>`}</div>
+      <div class="sp-prog"><i style=${"width:" + ((i + 1) / n) * 100 + "%"}></i></div></div></div></div>`;
+}
+function SheetView({ d }) {
+  const [t, setT] = useState(0), [f, setF] = useState(""), [lim, setLim] = useState(300); const sh = d.sheets[t] || { rows: [] }, fl = f.trim().toLowerCase();
+  const head = sh.rows[0] || [], body = sh.rows.slice(1).filter((r) => !fl || r.some((c) => String(c).toLowerCase().includes(fl))), w = Math.max(head.length, ...body.slice(0, 50).map((r) => r.length));
+  return html`<div class="sp-sheet"><div class="row">${d.sheets.length > 1 && html`<div class="seg">${d.sheets.map((s, i) => html`<button key=${i} class=${t === i ? "on" : ""} onClick=${() => { setT(i); setLim(300); }}>${s.name}</button>`)}</div>`}
+      <input class="field" type="search" style="max-width:260px" placeholder="Filter rows" value=${f} onInput=${(e) => { setF(e.target.value); setLim(300); }} /><span class="sp-hint">${body.length} rows${sh.cut ? ` (first ${sh.rows.length} of ${sh.total})` : ""}</span></div>
+    <div class="sp-tw"><table><thead><tr><th class="n">#</th>${Array.from({ length: w }, (_, c) => html`<th key=${c}>${head[c] || ""}</th>`)}</tr></thead>
+      <tbody>${body.slice(0, lim).map((r, ri) => html`<tr key=${ri}><td class="n">${ri + 2}</td>${Array.from({ length: w }, (_, c) => html`<td key=${c}>${r[c] || ""}</td>`)}</tr>`)}</tbody></table>
+      ${body.length > lim && html`<button class="btn sec sm" onClick=${() => setLim(lim + 500)}>Show more</button>`}</div></div>`;
+}
+function FrameView({ s }) {
+  const u = useLoad(() => api("/spaces/" + s.ref + "/viewurl"), [s.ref, s.rev]);
+  if (!u.d) return u.e ? html`<${Err} e=${u.e} />` : html`<div class="skel" style="height:60vh"></div>`;
+  return html`<iframe class="sp-frame" title=${s.title} src=${u.d.url} allow="fullscreen" allowfullscreen sandbox=${s.kind === "pdf" ? null : "allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-downloads allow-modals"}></iframe>`;
+}
+function SpaceShare({ s }) {
+  const [tick, setTick] = useState(0), [pick, setPick] = useState({}), [flt, setFlt] = useState(""), [acc, setAcc] = useState("view"), [busy, setBusy] = useState(false);
+  const a = useLoad(() => api("/spaces/" + s.ref + "/access"), [s.ref, tick]);
+  const all = useLoad(() => api("/groups/lookup?limit=500"), [s.ref]);
+  const have = new Set(((a.d && a.d.access) || []).map((x) => x.type + ":" + x.name)), q = flt.trim().toLowerCase();
+  const cand = [...((all.d && all.d.groups) || []).map((n) => ({ type: "group", name: n, label: n })), ...((all.d && all.d.users) || []).map((u) => ({ type: "user", name: u.username, label: u.display_name ? u.display_name + " (" + u.username + ")" : u.username }))]
+    .filter((c) => c.name !== s.owner && !have.has(c.type + ":" + c.name) && (!q || c.label.toLowerCase().includes(q)));
+  const key = (c) => c.type + ":" + c.name, chosen = Object.keys(pick).filter((k) => pick[k]);
+  const toggle = (c) => setPick({ ...pick, [key(c)]: !pick[key(c)] });
+  const allOn = cand.length > 0 && cand.every((c) => pick[key(c)]);
+  const sel = () => { const n = { ...pick }; cand.forEach((c) => { n[key(c)] = !allOn; }); setPick(n); };
+  const share = async () => { setBusy(true);
+    try { const items = chosen.map((k) => { const [type, ...r] = k.split(":"); return { type, name: r.join(":") }; });
+      try { await api("/spaces/" + s.ref + "/access", { method: "PUT", body: { items, access: acc } }); }
+      catch (er) { if (!/type must be/.test(er.message)) throw er;            // an older hub only knows {type, name}: share one by one
+        for (const it of items) await api("/spaces/" + s.ref + "/access", { method: "PUT", body: { ...it, access: acc } }); }
+      toast("Shared with " + items.length); setPick({}); setTick(tick + 1); }
+    catch (er) { toast(er.message, 1); } setBusy(false); };
+  const rm = async (x) => { try { await api("/spaces/" + s.ref + "/access/" + x.type + "/" + encodeURIComponent(x.name), { method: "DELETE" }); setTick(tick + 1); } catch (er) { toast(er.message, 1); } };
+  return html`<div class="sp-panel"><h3>Who can open it</h3><p class="sp-hint">${s.visibility === "public" ? "Public: anyone with the link. Sharing below only matters if you make it private." : "Private: you, plus these people and groups."}</p>
+    <div class="row"><input class="field" style="max-width:240px" placeholder="Filter people and groups" value=${flt} onInput=${(e) => setFlt(e.target.value)} />
+      <button class="btn sec sm" type="button" onClick=${sel} disabled=${!cand.length}>${allOn ? "Clear" : "Select all"}</button></div>
+    <ul class="sp-acl" style="max-height:260px;overflow:auto">${all.d ? cand.map((c) => html`<li key=${key(c)}><label style="display:flex;gap:8px;align-items:center;flex:1;cursor:pointer"><input type="checkbox" checked=${!!pick[key(c)]} onChange=${() => toggle(c)} /><b>${c.label}</b><span class="badge">${c.type}</span></label></li>`) : html`<li>Loading…</li>`}${all.d && !cand.length && html`<li class="sp-hint">Nobody left to pick.</li>`}</ul>
+    <div class="row"><select class="field sm" value=${acc} onChange=${(e) => setAcc(e.target.value)}><option value="view">can view</option><option value="edit">can edit</option></select>
+      <button class="btn sm" onClick=${share} disabled=${!chosen.length || busy}>${busy ? "Sharing…" : chosen.length ? "Share with " + chosen.length : "Share"}</button></div>
+    <h3 style="margin-top:16px">Already shared</h3>
+    <ul class="sp-acl">${((a.d && a.d.access) || []).map((x) => html`<li key=${x.type + x.name}><b>${x.name}</b><span class="badge">${x.type}</span><span class="badge ${x.access === "edit" ? "orange" : "blue"}">${x.access}</span><button class="btn sec sm" onClick=${() => rm(x)}>Remove</button></li>`)}</ul></div>`;
+}
+function SpaceSettings({ s, onSaved }) {
+  const st = s.settings || {}, [f, setF] = useState({ title: s.title, description: s.description, tags: s.tags.join(", "), view: st.view || "fit", transition: st.transition || "auto", autoplay: st.autoplay || 0, loop: !!st.loop, visibility: s.visibility });
+  const [nv, setNv] = useState(false); const up = (k) => (e) => setF({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
+  const save = async (e) => { e.preventDefault(); try { const b = { ...f, autoplay: +f.autoplay || 0 }; if (!s.can_manage) delete b.visibility; onSaved(await api("/spaces/" + s.ref, { method: "PATCH", body: b })); toast("Saved"); } catch (er) { toast(er.message, 1); } };
+  return html`<div class="sp-panel"><form class="stack" onSubmit=${save}><h3>Settings</h3>
+    <div class="sp-grid2"><label>Title<input class="field" value=${f.title} onInput=${up("title")} /></label><label>Tags<input class="field" value=${f.tags} placeholder="finance, q3" onInput=${up("tags")} /></label></div>
+    <label>Description<input class="field" value=${f.description} onInput=${up("description")} /></label>
+    <div class="sp-grid2"><label>Default size when opened<select class="field" value=${f.view} onChange=${up("view")}><option value="fit">Fit the screen</option><option value="canvas">Canvas (inside the page)</option><option value="full">Full screen</option></select></label>
+      ${s.can_manage && html`<label>Visibility<select class="field" value=${f.visibility} onChange=${up("visibility")}><option value="public">Public link</option><option value="private">Private</option></select></label>`}</div>
+    ${s.kind === "slides" && html`<div class="sp-grid2"><label>Transition<select class="field" value=${f.transition} onChange=${up("transition")}><option value="auto">As in the file</option><option value="none">None</option><option value="fade">Fade</option><option value="slide">Slide</option><option value="zoom">Zoom</option><option value="flip">Flip</option></select></label>
+      <label>Auto-advance (seconds, 0 = off)<input class="field" type="number" min="0" max="3600" value=${f.autoplay} onInput=${up("autoplay")} /></label></div>
+      <label class="sp-check"><input type="checkbox" checked=${f.loop} onChange=${up("loop")} /> Start over after the last slide</label>`}
+    <div class="row"><button class="btn">Save</button><button type="button" class="btn sec" onClick=${() => setNv(!nv)}>${nv ? "Cancel" : "Upload a new version"}</button></div></form>
+    ${nv && html`<${SpaceForm} space=${s.ref} onDone=${(x) => { setNv(false); onSaved(x); }} />`}</div>`;
+}
+function SpacePage({ sref: rf }) {
+  const { me } = useStore(); const [tick, setTick] = useState(0), [panel, setPanel] = useState(null), [local, setLocal] = useState(null), [ask, setAsk] = useState(false);
+  const m = useLoad(() => api("/spaces/" + rf), [rf, tick, me && me.username]);
+  const s = local && m.d && local.rev >= m.d.rev ? { ...m.d, ...local } : m.d;
+  const [mode, setMode] = useState(null), stage = useRef(), [pre, setPre] = useState(null);
+  const eff = mode || hashQ().get("mode") || (s && s.settings.view) || "fit";
+  const needData = s && ["slides", "doc", "sheet"].includes(s.kind);
+  const data = useLoad(() => needData ? api("/spaces/" + rf + "/data") : Promise.resolve(null), [rf, s && s.rev, needData]);
+  useEffect(() => { api("/spaces/" + rf + "/view", { method: "POST" }).catch(() => {}); }, [rf]);
+  useEffect(() => { document.body.classList.toggle("sp-full", eff === "full"); return () => document.body.classList.remove("sp-full"); }, [eff]);
+  useEffect(() => {          // Fit = wide focus mode: the page column opens up to almost the full width and the hub bar hides (move to the top edge, or tap the handle, to bring it back)
+    const b = document.body; if (eff !== "fit" || !s) return;
+    b.classList.add("sp-wide");
+    const mv = (e) => { const nav = e.clientY < 14 || (b.classList.contains("nav-peek") && e.clientY < 90); b.classList.toggle("nav-peek", nav); };
+    const fin = (e) => { if (e.target.closest && e.target.closest(".nav")) b.classList.add("nav-peek"); };
+    addEventListener("mousemove", mv); addEventListener("focusin", fin);
+    return () => { removeEventListener("mousemove", mv); removeEventListener("focusin", fin); b.classList.remove("sp-wide", "nav-peek"); };
+  }, [eff, !!s]);
+  useEffect(() => { const f = () => { if (!document.fullscreenElement && eff === "full") { setMode(pre || "fit"); setPre(null); } }; document.addEventListener("fullscreenchange", f); return () => document.removeEventListener("fullscreenchange", f); }, [eff, pre]);
+  useEffect(() => { const k = (e) => { if (e.key === "Escape" && eff === "full") pick(pre || "fit"); }; addEventListener("keydown", k); return () => removeEventListener("keydown", k); }, [eff, pre]);
+  if (!s) return m.e ? html`<${Empty} t="Space not found" d=${me ? "It may be private, or the address is wrong. " + m.e : "It may be private: sign in, then open the link again."} />` : html`<div class="skel" style="height:60vh"></div>`;
+  const pick = (v) => {
+    if (v === eff) return;
+    if (v === "full") { setPre(eff); const el = stage.current; if (el && el.requestFullscreen) el.requestFullscreen().catch(() => {}); }   // inside the click, or the browser refuses
+    else { setPre(null); if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); }
+    setMode(v);
+  };
+  const link = (extra) => location.origin + location.pathname.replace(/\/$/, "/") + "#/s/" + s.ref + (extra ? "?" + extra : "");
+  const download = async () => { try { const r = await fetch(U("/api/v1/spaces/" + s.ref + "/file"), { headers: tok() ? { Authorization: "Bearer " + tok() } : {} }); if (!r.ok) throw new Error("Download failed"); saveBlob(await r.blob(), s.filename || s.slug); } catch (e) { toast(e.message, 1); } };
+  const del = async () => { try { await api("/spaces/" + s.ref, { method: "DELETE" }); toast("Space deleted"); nav("/spaces"); } catch (e) { toast(e.message, 1); setAsk(false); } };
+  const body = !needData ? html`<${FrameView} s=${s} />` : data.d ? (s.kind === "slides" ? html`<${SlidePlayer} key=${s.rev} d=${data.d} st=${s.settings || {}} mode=${eff} />` : s.kind === "sheet" ? html`<${SheetView} d=${data.d} />` : html`<article class="sp-doc" dangerouslySetInnerHTML=${{ __html: data.d.html }}></article>`) : data.e ? html`<${Err} e=${data.e} />` : html`<div class="skel" style="height:50vh"></div>`;
+  const Ib = ({ d, label, on, onClick, cls = "" }) => html`<button class=${"sp-ib " + cls + (on ? " on" : "")} title=${label} aria-label=${label} aria-pressed=${on == null ? null : !!on} onClick=${onClick}><${SIc} d=${d} /><span class="lb">${label}</span></button>`;
+  return html`<div class=${"stack sp-page sp-m-" + eff}>
+    ${eff === "fit" && html`<button class="sp-peek" aria-label="Show the hub menu" onClick=${() => document.body.classList.toggle("nav-peek")}><svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 8l5 5 5-5"/></svg></button>`}
+    <div class="sp-head"><a class="sp-back" href="#/spaces">‹ Spaces</a><h1>${s.title}</h1>
+      <p class="sp-ref"><${Avatar} p=${{ username: s.owner, display_name: s.owner_name, avatar_url: s.owner_avatar }} size=${18} /> ${s.ref}<span class="badge blue">${SKIND[s.kind]}</span>${s.visibility === "private" && html`<span class="badge orange">private</span>`}<span>${fmt(s.views)} views · updated ${ago(s.updated)}</span></p>
+      ${s.description && html`<p class="sp-desc">${s.description}</p>`}</div>
+    <div class="sp-tools" role="toolbar" aria-label="Space tools">
+      <div class="sp-modes" role="group" aria-label="Size">${[["canvas", "Canvas", SI.canvas], ["fit", "Fit width", SI.fit], ["full", "Full screen", SI.full]].map(([v, l, d]) => html`<button key=${v} class=${eff === v ? "on" : ""} aria-pressed=${eff === v} onClick=${() => pick(v)}><${SIc} d=${d} /><span class="lb">${l}</span></button>`)}</div>
+      <span class="sp-sep"></span>
+      <${Ib} d=${SI.link} label="Copy link" onClick=${() => copy(link())} /><${Ib} d=${SI.expand} label="Full screen link" onClick=${() => copy(link("mode=full"))} /><${Ib} d=${SI.down} label="Download" onClick=${download} />
+      ${(s.can_edit || s.can_manage) && html`<span class="sp-sep"></span>`}
+      ${s.can_edit && html`<${Ib} d=${SI.gear} label="Settings" on=${panel === "set"} onClick=${() => setPanel(panel === "set" ? null : "set")} />`}
+      ${s.can_manage && html`<${Ib} d=${SI.share} label="Share" on=${panel === "share"} onClick=${() => setPanel(panel === "share" ? null : "share")} />`}
+      ${s.can_manage && (ask ? html`<span class="sp-ask">Delete <b>${s.ref}</b> for everyone?<button class="btn sec sm" onClick=${() => setAsk(false)}>Cancel</button><button class="btn danger sm" onClick=${del}>Delete</button></span>` : html`<${Ib} d=${SI.trash} label="Delete" cls="warn" onClick=${() => setAsk(true)} />`)}</div>
+    ${panel === "set" && s.can_edit && html`<${SpaceSettings} s=${s} onSaved=${(x) => { setLocal(x); setTick(tick + 1); setPanel(null); }} />`}
+    ${panel === "share" && s.can_manage && html`<${SpaceShare} s=${s} />`}
+    <div class=${"sp-stage sp-k-" + s.kind + " sp-s-" + eff} ref=${stage}>${eff === "full" && html`<div class="sp-fl"><button class="btn sec sm" onClick=${() => pick(pre || "fit")}>Exit full screen</button></div>`}${body}</div></div>`;
+}
 function NavMenu({ label, lead, items }) {
   const [open, setOpen] = useState(false); const ref = useRef();
   useEffect(() => {
@@ -1471,6 +1768,8 @@ function App() {
   const place = () => { const n = lk.current, i = ind.current; if (!n || !i) return; const a = n.querySelector("a.on"); if (!a) { i.style.opacity = 0; return; } i.style.opacity = 1; i.style.transform = `translateX(${a.offsetLeft}px) scaleX(${a.offsetWidth})`; };
   useEffect(() => { place(); }, [path]);
   const first = useRef(true);
+  const bare = new URLSearchParams(s.route.split("?")[1] || "").get("bare") === "1" && seg[0] === "s";   // a space link without the hub header and footer (for embedding)
+  useEffect(() => { document.body.classList.toggle("bare", bare); return () => document.body.classList.remove("bare"); }, [bare]);
   const [menu, setMenu] = useState(false);
   useEffect(() => { setMenu(false); }, [s.route]);
   useEffect(() => { if (!menu) return; const k = (e) => { if (e.key === "Escape") setMenu(false); }; addEventListener("keydown", k); return () => removeEventListener("keydown", k); }, [menu]);
@@ -1500,10 +1799,10 @@ function App() {
   const navGroup = (label, items) => items.length > 1 ? html`<${NavMenu} label=${label} items=${items} />` : items.length ? html`<a class=${items[0].on ? "on" : ""} href=${items[0].href}>${items[0].label}</a>` : "";
   const br = s.brand || {}, ct = br.contact || {};
   const page = { "": html`<${Home} />`, browse: html`<${Browse} key=${s.route} />`, package: html`<${Package} name=${seg[1]} key=${seg[1]} />`, rankings: html`<${Rankings} />`, docs: html`<${Docs} slug=${seg[1]} key=${seg[1]} />`, start: html`<${Start} />`,
-    login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, knowledge: html`<${Knowledge} />`, dashboard: html`<${Dashboard} />`, usage: html`<${UsageHub} />`, running: html`<${Running} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
+    login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, knowledge: html`<${Knowledge} />`, dashboard: html`<${Dashboard} />`, usage: html`<${UsageHub} />`, running: html`<${Running} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />`, spaces: html`<${Spaces} key=${s.route.split("?")[0]} />`, s: html`<${SpacePage} sref=${decodeURIComponent(seg[1] || "")} key=${seg[1]} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
   return html`<div><a class="skip" href="#/" onClick=${(e) => { e.preventDefault(); const m = document.getElementById("main"); if (m) m.focus(); }}>Skip to content</a>${br.announcement && html`<div class="announce" role="status" dangerouslySetInnerHTML=${{ __html: br.announcement }}></div>`}<header class="nav"><div class="nav-in"><a class="brand glow" href="#/">${br.logo_url && html`<img decoding="async" class="logo" src=${br.logo_url} alt="" />`}<span>${br.name || "AI Hub"}</span></a>
     <button type="button" class="burger" aria-label="Menu" aria-expanded=${menu} aria-controls="menu" onClick=${() => setMenu(!menu)}><i></i><i></i><i></i></button>
-    <div id="menu" class=${"menu" + (menu ? " open" : "")} onClick=${(e) => { if (e.target.closest && e.target.closest("a")) setMenu(false); }}><nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
+    <div id="menu" class=${"menu" + (menu ? " open" : "")} onClick=${(e) => { if (e.target.closest && e.target.closest("a")) setMenu(false); }}><nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("spaces") || on("s")} href="#/spaces">Spaces</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
     <div class="r">${s.me ? html`${navGroup("Workspace", ws)}${navGroup("Manage", mg)}<${NavMenu} label=${shown(s.me)} lead=${html`<${Avatar} p=${s.me} size=${22} />`} items=${[{ k: "account", label: "Account", href: "#/account", on: seg[0] === "account" }, { k: "out", label: "Sign out", href: "#/", onClick: logout }]} />` :
       html`${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}<a href="#/login">Sign in</a>`}</div></div></div></header>
     <main id="main" tabindex="-1">${seg[0] === "login" || seg[0] === "register" ? html`<div class="page au-page" key="auth">${page}</div>` : html`<div class="page" key=${path}>${page}</div>`}</main>

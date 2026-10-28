@@ -2,9 +2,10 @@
 from . import naming, version
 
 import os
+import json
 import re
 
-TYPES = ("skill", "agent", "mcp", "tool", "setup", "bot", "service")
+TYPES = ("skill", "agent", "mcp", "tool", "setup", "bot", "service", "workflow", "node")
 RUNNABLE = ("bot", "service")     # types `aihub run` starts; their [bot] / [service] table has the same shape
 RESTARTS = ("no", "on-failure", "always")
 OSES = ("macos", "linux", "windows")
@@ -47,6 +48,38 @@ def lint(m: dict, root: str):
         missing = [o for o in (m["requires"]["os"] or OSES) if ("install_" + o) not in m["scripts"]]
         if missing:
             warns.append("type=%s but no install script for: %s" % (typ, ", ".join(missing)))
+    if typ == "workflow":
+        wd = inside("works")
+        files = sorted(f for f in (os.listdir(wd) if wd and os.path.isdir(wd) else []) if f.endswith(".work.json"))
+        if not files:
+            errs.append('type="workflow" needs at least one works/NAME.work.json (export it from aihub-ui: Works > Share)')
+        for f in files:
+            try:
+                with open(os.path.join(wd, f), encoding="utf-8") as fh:
+                    w = json.load(fh)
+                if not isinstance(w, dict) or not isinstance(w.get("nodes"), list) or not w["nodes"]:
+                    errs.append("works/%s has no nodes" % f)
+            except (OSError, ValueError) as e:
+                errs.append("works/%s is not valid JSON: %s" % (f, e))
+    if typ == "node":
+        nd = inside("nodes")
+        files = sorted(f for f in (os.listdir(nd) if nd and os.path.isdir(nd) else []) if f.endswith(".node.json"))
+        if not files:
+            errs.append('type="node" needs at least one nodes/NAME.node.json (see ui-nodes)')
+        for f in files:
+            try:
+                with open(os.path.join(nd, f), encoding="utf-8") as fh:
+                    n = json.load(fh)
+                if not isinstance(n, dict) or not n.get("id") or n.get("kind") not in ("trigger", "action"):
+                    errs.append('nodes/%s needs "id" and "kind" (trigger|action)' % f)
+                elif not isinstance(n.get("run"), list) or not n["run"]:
+                    errs.append('nodes/%s needs "run" as a list' % f)
+                else:
+                    for a in n["run"]:
+                        if isinstance(a, str) and a.startswith("nodes/") and not os.path.isfile(os.path.join(base, a)):
+                            warns.append("nodes/%s runs %s which does not exist" % (f, a))
+            except (OSError, ValueError) as e:
+                errs.append("nodes/%s is not valid JSON: %s" % (f, e))
     if typ in RUNNABLE:
         run = m[typ]["run"]
         if not run:
@@ -105,9 +138,16 @@ def runnable(m: dict) -> dict:
     return (m.get(typ) if typ in RUNNABLE else None) or m["bot"]
 
 
+def _url_file(v) -> str:
+    """Relative path inside ~/.aihub, else "" (never raises, never leaves ~/.aihub)."""
+    v = str(v or "").strip().replace("\\", "/")
+    return v if v and not v.startswith("/") and ".." not in v.split("/") and len(v) < 120 else ""
+
+
 def _bot(b, restart="") -> dict:
     """[bot] / [service] run = "bot.py", title, onboard, env = [{name, hint, required, secret}], restart, schedule (run defaults),
-    unique (true: `aihub run` allows only one run of the package at a time on a machine).
+    unique (true: `aihub run` allows only one run of the package at a time on a machine),
+    url_file (a file under ~/.aihub holding the address the service serves, e.g. "ui/url.txt": `aihub run` shows it and opens it in the browser).
     Display fields never raise: a bad entry is dropped."""
     if not isinstance(b, dict):
         b = {}
@@ -120,7 +160,7 @@ def _bot(b, restart="") -> dict:
                         "secret": bool(e.get("secret", False)), "default": str(e.get("default", ""))})
     r = str(b.get("restart", "")).strip()
     return {"run": str(b.get("run", "")).strip(), "title": str(b.get("title", "")), "onboard": str(b.get("onboard", "")).strip(), "env": env,
-            "restart": r if r in RESTARTS else restart, "schedule": str(b.get("schedule", "")).strip(), "unique": b.get("unique") is True}
+            "restart": r if r in RESTARTS else restart, "schedule": str(b.get("schedule", "")).strip(), "unique": b.get("unique") is True, "url_file": _url_file(b.get("url_file"))}
 
 
 def normalize(d: dict) -> dict:

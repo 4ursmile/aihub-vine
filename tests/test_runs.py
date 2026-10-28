@@ -288,6 +288,26 @@ class ServiceType(unittest.TestCase):
         self.assertEqual(M.lint(m, d)[0], [])
         self.assertEqual(m["service"]["env"][0]["default"], "8080")
 
+    def test_page_service_address_is_shown_and_opened_when_already_running(self):
+        from aihub.core import manifest as M
+        from aihub.cli import ui
+        m = M.parse('[package]\nname="pg"\nversion="1.0.0"\ntype="service"\n[service]\nrun="s.py"\nunique=true\nurl_file="ui/url.txt"\n')
+        self.assertEqual(M.runnable(m)["url_file"], "ui/url.txt")
+        for bad in ("../x", "/etc/passwd", "a/../../b"):
+            m["service"]["url_file"] = M._url_file(bad)
+            self.assertEqual(m["service"]["url_file"], "")
+        m["service"]["url_file"] = "ui/url.txt"
+        self.assertFalse(runs.show_link(m))                                             # no address file yet
+        os.makedirs(os.path.join(self.home, "ui"))
+        with open(os.path.join(self.home, "ui", "url.txt"), "w") as f:
+            f.write("http://127.0.0.1:8765/?t=KEY\n")
+        with mock.patch.object(ui, "INTERACTIVE", True), mock.patch.object(runs, "open_url", return_value=True) as op:
+            self.assertTrue(runs.show_link(m))
+            op.assert_called_once_with("http://127.0.0.1:8765/?t=KEY")
+        with mock.patch.object(ui, "INTERACTIVE", False), mock.patch.object(runs, "open_url") as op:
+            self.assertTrue(runs.show_link(m))                                          # not a terminal: shown, not opened
+            op.assert_not_called()
+
     def test_installed_service_runs_with_its_own_env(self):
         from aihub.cli import installer
         from aihub.core import manifest as M

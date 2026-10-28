@@ -1,0 +1,8 @@
+[package]
+name = "aihub-nodes-teams"
+version = "1.0.0"
+type = "node"
+description = "Works nodes for Microsoft Teams: start a work from a Teams message (regex filter first) and send a message to a Teams channel."
+tags = ["aihub", "ui", "works", "nodes", "teams"]
+readme = "README.md"
+license = "MIT"

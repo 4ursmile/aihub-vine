@@ -1,0 +1,137 @@
+{
+ "title": "Repo briefing",
+ "description": "Reads a GitHub repo (README through your Vault login + live stats over HTTP), remembers earlier briefings, and has Claude write a briefing for you.",
+ "enabled": false,
+ "keep": 25,
+ "nodes": [
+  {
+   "id": "a",
+   "type": "start.manual",
+   "x": 39,
+   "y": 152,
+   "label": "Ask",
+   "config": {
+    "inputs": "slug|Repository (owner/name)|text|anthropics/anthropic-cookbook|*\nfocus|Focus|select|overview,risks,onboarding,what changed\nlanguage|Answer in|select|English,Vietnamese,French,Spanish\nnotes|Anything to look for|textarea"
+   }
+  },
+  {
+   "id": "g",
+   "type": "git.read",
+   "x": 254,
+   "y": 56,
+   "label": "README (git, Vault login)",
+   "config": {
+    "url": "https://github.com/{{data.slug}}.git",
+    "ref": "",
+    "path": "README.md",
+    "parse": "text",
+    "max_chars": 9000
+   }
+  },
+  {
+   "id": "h",
+   "type": "io.request",
+   "x": 254,
+   "y": 256,
+   "label": "Repo stats (GitHub API)",
+   "config": {
+    "method": "GET",
+    "url": "https://api.github.com/repos/{{data.slug}}",
+    "headers": "Accept: application/vnd.github+json",
+    "body_type": "json",
+    "body": "",
+    "pretty": true,
+    "fail_on_error": true,
+    "timeout": 20
+   }
+  },
+  {
+   "id": "j",
+   "type": "flow.template",
+   "x": 468,
+   "y": 152,
+   "label": "Gather",
+   "config": {
+    "template": "Repository: {{data.slug}}\nFocus: {{data.focus}}\nExtra notes: {{data.notes}}\n\nSources (README text, then GitHub API JSON):\n{{input}}"
+   }
+  },
+  {
+   "id": "m",
+   "type": "flow.memory",
+   "x": 683,
+   "y": 152,
+   "label": "Earlier briefings",
+   "config": {
+    "source": "work",
+    "limit": 3,
+    "chars": 4000,
+    "mode": "prepend"
+   }
+  },
+  {
+   "id": "c",
+   "type": "ai.claude",
+   "x": 898,
+   "y": 152,
+   "label": "Write the briefing",
+   "config": {
+    "prompt": "You are a staff engineer writing a one-screen briefing for a busy teammate.\nAnswer in {{data.language}}. Focus: {{data.focus}}.\n\nUse the sources below. Structure:\n1. **What it is** - two sentences.\n2. **Health** - stars, activity, license, open issues (from the JSON), one line each in a small table.\n3. **{{data.focus}}** - 3-5 bullets, concrete, from the README.\n4. **Changes since the earlier briefings** - only if earlier ones are included; say 'first briefing' otherwise.\n5. **Next step** - one suggestion.\n\nNo preamble.\n\n{{input}}",
+    "model": "sonnet",
+    "effort": "medium",
+    "mode": "edits",
+    "fresh": false
+   }
+  },
+  {
+   "id": "o",
+   "type": "flow.output",
+   "x": 1112,
+   "y": 152,
+   "label": "Briefing",
+   "config": {
+    "title": "Repo briefing",
+    "template": "{{input}}"
+   }
+  },
+  {
+   "id": "n",
+   "type": "flow.note",
+   "x": 898,
+   "y": 336,
+   "label": "Tip",
+   "config": {
+    "text": "Add 'Send to Teams' after the Claude node to post this briefing to a channel, or a Start: schedule node to run it every Monday."
+   }
+  }
+ ],
+ "edges": [
+  {
+   "from": "a",
+   "to": "g"
+  },
+  {
+   "from": "a",
+   "to": "h"
+  },
+  {
+   "from": "g",
+   "to": "j"
+  },
+  {
+   "from": "h",
+   "to": "j"
+  },
+  {
+   "from": "j",
+   "to": "m"
+  },
+  {
+   "from": "m",
+   "to": "c"
+  },
+  {
+   "from": "c",
+   "to": "o"
+  }
+ ]
+}
