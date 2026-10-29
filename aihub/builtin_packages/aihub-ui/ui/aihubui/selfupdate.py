@@ -1,4 +1,4 @@
-"""Keeps aihub-ui itself current. A thread asks the hub for the newest aihub-ui every UI_UPDATE_MINUTES (default 360); when there is one, and
+"""Keeps aihub-ui itself current. A thread asks the hub for the newest aihub-ui every UI_UPDATE_MINUTES (default 60); when there is one, and
 NOTHING is running (no chat answering, no work run, no install terminal) for IDLE_FOR seconds, it runs `aihub update aihub-ui` and restarts the service.
 Pref `auto_update`: on (default) | notify (only say so on the Settings card) | off. A restart is a clean exit under `aihub run` (the supervisor restarts a
 service, restart = always) and an in-place exec otherwise. A failed update waits for the next round; the running copy is never touched until it succeeded."""
@@ -19,9 +19,9 @@ _now = threading.Event()
 
 def every():
     try:
-        return max(int(os.environ.get("UI_UPDATE_MINUTES") or 360), 5) * 60
+        return max(int(os.environ.get("UI_UPDATE_MINUTES") or 60), 5) * 60
     except ValueError:
-        return 21600
+        return 3600
 
 
 def vkey(v):
