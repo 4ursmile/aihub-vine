@@ -10,3 +10,8 @@ license = "MIT"
 [[skills]]
 name = "aihub-knowledge"
 path = "skills/aihub-knowledge"
+
+[git]
+url = "https://github.com/4ursmile/aihub-vine"
+branch = "git_db"
+subdir = "aihub/builtin_packages/aihub-knowledge"

@@ -12,3 +12,8 @@ os = ["windows"]                       # COM automation of classic Outlook exist
 
 [python]
 requires = ["pywin32"]                 # installed into ~/.aihub/venvs/aihub-nodes-outlook; aihub-ui runs this node with that python
+
+[git]
+url = "https://github.com/4ursmile/aihub-vine"
+branch = "git_db"
+subdir = "aihub/builtin_packages/aihub-nodes-outlook"

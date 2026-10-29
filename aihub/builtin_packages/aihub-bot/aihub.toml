@@ -37,3 +37,8 @@ default = "builtin"
 # name = "files"
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+
+[git]
+url = "https://github.com/4ursmile/aihub-vine"
+branch = "git_db"
+subdir = "aihub/builtin_packages/aihub-bot"

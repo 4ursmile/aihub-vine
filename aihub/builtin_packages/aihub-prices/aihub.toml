@@ -6,3 +6,8 @@ description = "Model price table (USD per 1M tokens) used by `aihub usage` to es
 tags = ["aihub", "usage", "prices"]
 readme = "README.md"
 license = "MIT"
+
+[git]
+url = "https://github.com/4ursmile/aihub-vine"
+branch = "git_db"
+subdir = "aihub/builtin_packages/aihub-prices"

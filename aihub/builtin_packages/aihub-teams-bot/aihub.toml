@@ -80,3 +80,8 @@ name = "BOT_MODEL"
 hint = "model id for the builtin harness"
 required = false
 default = "claude-sonnet-5-5"
+
+[git]
+url = "https://github.com/4ursmile/aihub-vine"
+branch = "git_db"
+subdir = "aihub/builtin_packages/aihub-teams-bot"

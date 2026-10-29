@@ -6,3 +6,8 @@ description = "Works nodes for Microsoft Teams: start a work from a Teams messag
 tags = ["aihub", "ui", "works", "nodes", "teams"]
 readme = "README.md"
 license = "MIT"
+
+[git]
+url = "https://github.com/4ursmile/aihub-vine"
+branch = "git_db"
+subdir = "aihub/builtin_packages/aihub-nodes-teams"
