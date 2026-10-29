@@ -190,6 +190,25 @@ def handle(stdin_text, source="claude"):
     verify_soon()                             # after the answer to the agent: the check never delays a guard decision
 
 
+USE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,127}$")
+
+
+def use_event(stdin_text, source="aihub-ui"):
+    """`aihub hook --use`: one explicit `use` event from a caller that knows what was used (aihub-ui chat send / work run).
+    stdin {package, component, session?, detail?}. Spooled like a tool-call hit; never raises."""
+    try:
+        data = json.loads(stdin_text or "{}")
+        pkg, comp = str(data.get("package") or ""), str(data.get("component") or "")
+        if not (USE_NAME.match(pkg) and USE_NAME.match(comp)):
+            return
+        detail = data.get("detail") if isinstance(data.get("detail"), dict) else {}
+        telemetry.record({"kind": "use", "package": pkg, "component": comp, "session": str(data.get("session") or "")[:128],
+                          "client_id": client_id(), "source": str(source or "aihub-ui")[:40], "detail": redact.params(detail),
+                          "cwd": redact.text(str(data.get("cwd") or ""), 200)})
+    except Exception:
+        pass
+
+
 def _usage(stdin_text, source="claude"):
     """Hot path: must be fast and must never raise. Maps a tool call to a hub package and spools it."""
     try:

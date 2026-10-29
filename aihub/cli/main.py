@@ -688,8 +688,9 @@ def cmd_welcome(a):
     if not paths.load("credentials.json", {}).get("token"):
         ui.out()
         ui.note("an account is optional: `aihub login` shows your name in usage reports")
-    _offer_ui(ask)
-    _mark_welcomed()
+    _mark_welcomed()                                    # BEFORE the offer: the `aihub install` it spawns must not run the welcome again
+    if getattr(a, "offer_ui", True):
+        _offer_ui(ask)
     ui.celebrate("All set")
     ui.out()
     ui.out("  " + ui.dim("Try these next"))
@@ -704,6 +705,8 @@ def _offer_ui(ask):
     import shutil
     """welcome: guide to the local UI (service package aihub-ui): install, then run. Asks only on a terminal; never fails the welcome."""
     ui.out()
+    if "aihub-ui" in installer.state()["packages"]:
+        return
     ui.info("aihub-ui is a local chat UI for Claude. Install: aihub install aihub-ui   Run: aihub run aihub-ui")
     if not ask:
         return
@@ -734,7 +737,10 @@ def cmd_hook(a):
         raw = sys.stdin.buffer.read().decode("utf-8", "replace")      # Windows text stdin is cp1252 and chokes on UTF-8 payloads
     except Exception:
         raw = ""
-    hooks.handle(raw, a.source)
+    if getattr(a, "use", False):
+        hooks.use_event(raw, a.source)                              # aihub-ui: chat send / work run, counted like a tool use
+    else:
+        hooks.handle(raw, a.source)
 
 
 def cmd_usage(a):
@@ -1660,7 +1666,8 @@ def build_parser():
     add("hook", cmd_hook, "Record one AI-tool usage event from standard input.",
         "Read a tool-call event as JSON from standard input, match it to an installed package component, and queue usage telemetry. Intended for integration hooks: it spools one event and exits without blocking the AI tool.",
         "Example:\n  printf '{}' | aihub hook --source claude",
-        arg("--source", default="claude", metavar="TOOL", help="Source label recorded with the event (default: claude)."))
+        arg("--source", default="claude", metavar="TOOL", help="Source label recorded with the event (default: claude)."),
+        arg("--use", action="store_true", help="Standard input is one explicit use event {package, component, session, detail} (used by aihub-ui)."))
     add("vault", cmd_vault, "Add, edit or remove git remotes and their logins.",
         "Manage the git hosts the CLI fetches the index and packages from. Logins go to the git credential helper (Keychain, DPAPI, Secret Service or a 0600 file); vault.json keeps only host and user name. On a terminal, bare 'aihub vault' opens a menu and missing values are prompted for (token hidden). In scripts give the token on standard input.",
         "Examples:\n  aihub vault\n  aihub vault add https://git.example.com --user sam\n  aihub vault test https://git.example.com\n  printf %s \"$TOKEN\" | aihub vault edit git.example.com --token-stdin\n  aihub vault remove git.example.com --yes",
@@ -2004,7 +2011,7 @@ def _main(a, ap, hooks, policy, tls):
             cmd_menu()
             return 0
         if ui.INTERACTIVE and a.cmd not in ("hook", "flush", "usage-sync", "auto-update", "welcome", "config", "credential", "vault", "policy", "run") and not os.path.exists(paths.p(".welcomed")):
-            cmd_welcome(argparse.Namespace(yes=False))
+            cmd_welcome(argparse.Namespace(yes=False, offer_ui=a.cmd not in ("install", "download", "sync")))   # the user is already installing
         if a.cmd == "credential" or a.cmd == "auto-update" and a.background or a.cmd == "run" and a.target == "_supervise":
             return a.fn(a)              # git calls this on every fetch / the detached update worker: no welcome, updater or network
         if a.cmd not in ("hook", "flush", "usage-sync", "credential"):

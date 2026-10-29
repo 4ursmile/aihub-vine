@@ -3,7 +3,8 @@
 Claude Code turns are already in Claude's own session logs, which `aihub usage-sync` totals per day and uploads. Free chat talks to the
 API directly, so nothing is logged for it: `note()` appends one line (numbers and the model name only) to ~/.aihub/ui/usage.jsonl, which
 the CLI reads as the tool `aihub-ui`. Then `kick()` starts ONE `aihub usage-sync` after a short quiet window (a burst of turns, or a work
-with many AI nodes, becomes a single upload). Nothing here may raise or block a turn."""
+with many AI nodes, becomes a single upload). `use()` counts a chat send / finished work run as a `use` event of a package (the hub's
+use numbers) through `aihub hook --use`, so it rides the CLI's telemetry spool. Nothing here may raise or block a turn."""
 import json
 import os
 import subprocess
@@ -34,6 +35,22 @@ def note(sid, engine, model, u):
     except (OSError, TypeError, ValueError):
         pass
     kick()
+
+
+def use(component, package="aihub-ui", session="", detail=None):
+    """One `use` event for the hub's counts (component: chat, work:<id>). Fire and forget, in a thread."""
+    ev = {"package": package or "aihub-ui", "component": component, "session": str(session or ""), "detail": detail or {}}
+    t = threading.Thread(target=_use, args=(json.dumps(ev),), daemon=True)
+    t.start()
+    return t
+
+
+def _use(line):
+    try:
+        subprocess.run(A.command() + ["hook", "--use", "--source", "aihub-ui"], input=line, text=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=30, env=dict(os.environ, AIHUB_NO_UPDATE="1"))
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def kick():

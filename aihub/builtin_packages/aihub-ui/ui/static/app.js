@@ -2,7 +2,7 @@
 import { html, render, useState, useEffect, useRef, useCallback } from "https://cdn.jsdelivr.net/npm/htm@3.1.1/preact/standalone.module.js";
 import { Ic } from "./icons.js";
 import { toast, guard, setToaster, Seg, Pop, Switch, Modal, ask, AskHost } from "./ui.js";
-import { Md, AskCard, setWorkMaker } from "./blocks.js";
+import { Md, AskCard, setWorkMaker, setBlockSharer } from "./blocks.js";
 import * as OUI from "./openui.js";
 import { runInstall } from "./term.js";
 import { Viewer, Themes } from "./slides.js";
@@ -64,7 +64,7 @@ const UI_CMDS = [
   { name: "create-work", description: "Describe a work; it is designed and opened in Works (also /workflow)", action: "workflow" },
   { name: "workflow", description: "Same as /create-work", action: "workflow" },
 ];
-const SLASH_ICON = { theme: "palette", work: "flow", ui: "slash", command: "terminal", skill: "sparkles", plugin: "plug", package: "package" };
+const SLASH_ICON = { theme: "palette", chat: "chat", tool: "bolt", work: "flow", ui: "slash", command: "terminal", skill: "sparkles", plugin: "plug", package: "package" };
 
 function Pill({ icon, label, active, onClick, title }) {
   return html`<button class=${"pill" + (active ? " on" : "")} onClick=${onClick} title=${title}>${Ic(icon, 15)}<span>${label}</span><span class="chev">${Ic("down", 12)}</span></button>`;
@@ -97,7 +97,7 @@ function EnginePick({ value, onChange, close, mcpAll, mcpOn, onMcp }) {
   return html`<h5>Engine</h5>${ENGINES.map(([k, ic, name, d]) => html`<button class=${"opt" + (k === value ? " on" : "")} onClick=${() => { onChange(k); close(); }}><span class="oi">${Ic(ic, 16)}</span><span class="grow"><b>${name}</b><span class="d">${d}</span></span><span class="ck">${Ic("check", 16)}</span></button>`)}
     ${value === "free" && html`<h5 style="margin-top:8px">Tools for free chat (MCP)</h5>
       ${!mcpAll ? html`<p class="mute small" style="padding:4px 10px">Looking for MCP servers…</p>` : !mcpAll.length ? html`<p class="mute small" style="padding:4px 10px">No MCP servers found. Install an MCP package (Packages) or add one under MCP servers.</p>`
-        : mcpAll.map((m) => html`<label class="opt mcpopt"><input type="checkbox" checked=${mcpOn.includes(m.name)} onChange=${(e) => onMcp(e.target.checked ? [...mcpOn, m.name] : mcpOn.filter((x) => x !== m.name))}/><span class="grow"><b>${m.name}</b><span class="d">${m.origin}</span></span></label>`)}
+        : mcpAll.map((m) => html`<label class="opt mcpopt"><input type="checkbox" disabled=${m.off} checked=${mcpOn.includes(m.name) && !m.off} onChange=${(e) => onMcp(e.target.checked ? [...mcpOn, m.name] : mcpOn.filter((x) => x !== m.name))}/><span class="grow"><b>${m.name}</b><span class="d">${m.off ? "switched off on the MCP page" : m.origin}</span></span></label>`)}
       <div class="small mute" style="padding:4px 10px">Servers you tick run for each answer and the model may call their tools without asking. Leave them off for plain chat.</div>`}
     <div class="small mute" style="padding:6px 10px 4px">You can switch at any message: the earlier text carries over, tool calls do not.</div>`;
 }
@@ -121,7 +121,7 @@ function SlashMenu({ items, idx, pick }) {
   useEffect(() => { const e = ref.current && ref.current.children[idx]; if (e && e.scrollIntoView) e.scrollIntoView({ block: "nearest" }); }, [idx]);
   if (!items.length) return null;
   return html`<div class="slash" ref=${ref}>${items.map((c, i) => html`<button class=${"opt" + (i === idx ? " hi" : "")} onMouseDown=${(e) => { e.preventDefault(); pick(c); }}><span class="oi">${Ic(SLASH_ICON[c.source] || "slash", 14)}</span>
-    <span class="grow"><b>${c.source === "theme" ? "@" : "/"}${c.name}</b><span class="d">${(c.description || "").slice(0, 110)}</span></span><span class="src">${c.sw ? html`<span class="swatch sm">${["bg", "accent", "fg"].map((k) => html`<i style=${`background:${c.sw[k]}`}></i>`)}</span>` : c.source === "ui" ? "" : c.source}</span></button>`)}</div>`;
+    <span class="grow"><b>${["theme", "chat", "tool"].includes(c.source) ? "@" : "/"}${c.name}</b><span class="d">${(c.description || "").slice(0, 110)}</span></span><span class="src">${c.sw ? html`<span class="swatch sm">${["bg", "accent", "fg"].map((k) => html`<i style=${`background:${c.sw[k]}`}></i>`)}</span>` : c.source === "ui" ? "" : c.source}</span></button>`)}</div>`;
 }
 
 // ---------- working folder: file tree, editor, diff, dialogs
@@ -257,11 +257,22 @@ function Working({ act, since, live, steps, ctx, win, free, onStop, onDirect }) 
     ${live.think && html`<div class="w-think"><a class="w-tt" onClick=${() => setOpenR(!openR)}>${Ic(openR ? "down" : "right", 12)} Reasoning <span class="mute">${words(live.think)} words</span></a>${openR && html`<div class="w-tb" ref=${rb}>${live.think.slice(-1400)}</div>`}</div>`}
     <div class="w-stats"><span>${Ic("clock", 12)} ${fmtT(sec)}</span>${(!free || steps.length > 0) && html`<span>${Ic("terminal", 12)} ${done}/${steps.length} step${steps.length === 1 ? "" : "s"}</span>`}${live.think && html`<span>${Ic("sparkles", 12)} ${num(live.think.length / 4)} reasoning tokens (est.)</span>`}${writing && html`<span>${Ic("edit", 12)} ${num(live.text.length / 4)} answer tokens (est.)</span>`}${ctx > 0 && html`<span>${Ic("layers", 12)} context ${num(ctx)}${win ? " · " + pct + "%" : ""}</span>`}</div></div>`;
 }
+// /create-work (/workflow) in a chat: Claude designs the work, which takes a minute; this shows it is on its way
+function GenBar({ gen }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
+  const sec = Math.max(0, Math.round((now - gen.since) / 1000)), step = sec < 8 ? "Reading the request" : sec < 30 ? "Designing nodes and data flow" : sec < 60 ? "Checking and repairing the work" : "Almost there";
+  return html`<div class="genbar" role="status" aria-live="polite"><div class="genbar-h">${Ic("flow", 15)}<b>Creating the workflow</b><span class="mute small grow">${gen.text.slice(0, 90)}</span><span class="mute small">${sec}s</span></div>
+    <div class="genbar-track"><i></i></div><div class="mute small">${step}…</div></div>`;
+}
+
 function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash }) {
   const [s, setS] = useState(null), [hist, setHist] = useState([]), [files, setFiles] = useState([]), [sig, setSig] = useState("");
   const [live, setLive] = useState({ text: "", think: "" }), [busy, setBusy] = useState(false), [text, setText] = useState("");
   const [model, setModel] = useState(pref("model", "")), [effort, setEffort] = useState(pref("effort", "")), [mode, setMode] = useState(pref("mode", "auto"));
   const [ctx, setCtx] = useState(0), [pop, setPop] = useState(null), [sidx, setSidx] = useState(0), [signin, setSignin] = useState(false);
+  const [ment, setMent] = useState(null), [gen, setGen] = useState(null);                 // @ menu data (loaded on first @), /workflow being designed
+  useEffect(() => setMent(null), [id]);
   const [att, setAtt] = useState([]), [tab, setTab] = useState("files"), [open, setOpen] = useState(false), [prev, setPrev] = useState(""), [els, setEls] = useState([]);
   const [engine, setEngine] = useState(pref("engine", "claude")), busyRef = useRef(false), engineNow = useRef("claude"), [mcpAll, setMcpAll] = useState(null), [freeIds, setFreeIds] = useState(null);
   const [split, setSplit] = useState(pref("split", "0") === "1"), [dlg, setDlg] = useState(null), [dirInfo, setDirInfo] = useState({ dir: "", def: "" });
@@ -285,12 +296,20 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash }) {
   const showEl = (e) => { setEls((l) => [...l, e].slice(-8)); setTab("elements"); setOpen(true); };
   const sm = /^\/([\w:.-]*)$/.exec(text), pool = sm ? [...UI_CMDS.map((c) => ({ ...c, source: "ui" })), ...works.map((x) => ({ name: "work:" + x.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""), description: "Run work: " + x.title, source: "work", wid: x.id })), ...slash.packages, ...slash.claude] : [];
   const items = sm ? pool.filter((c) => c.name.toLowerCase().includes(sm[1].toLowerCase())).sort((a, b) => (b.name.toLowerCase().startsWith(sm[1].toLowerCase()) ? 1 : 0) - (a.name.toLowerCase().startsWith(sm[1].toLowerCase()) ? 1 : 0)).slice(0, 40) : [];
-  const mm = !sm && /(?:^|\s)@([\w:-]*)$/.exec(text), mitems = mm ? themes.filter((t) => ("theme:" + t.id + " " + t.name).toLowerCase().includes(mm[1].toLowerCase())).slice(0, 12).map((t) => ({ name: "theme:" + t.id, description: t.name + " - colors " + t.colors.accent + ", fonts " + t.fonts.head.split(",")[0], source: "theme", sw: t.colors })) : [];
+  const mm = !sm && /(?:^|\s)@([\w:-]*)$/.exec(text), mq = mm ? mm[1].toLowerCase() : "";
+  // @ menu: themes, other chats (@chat:<id>, add :N for its last N messages) and tools (@tool:<name>: skills, commands, MCP servers)
+  useEffect(() => { if (!mm || ment) return; setMent({ chats: [], tools: [] });
+    Promise.all([api("sessions").catch(() => ({ sessions: [] })), api("mcp").catch(() => ({ packages: [], claude: [], ui: [] }))]).then(([ss, mc]) => setMent({
+      chats: (ss.sessions || []).filter((x) => x.id !== id).map((x) => ({ name: "chat:" + x.id, description: (x.title || "Chat") + " · its last 40 messages; type :N after it for another limit", source: "chat", key: (x.title || "").toLowerCase() })),
+      tools: [...new Map([...[...(mc.packages || []), ...(mc.claude || []), ...(mc.ui || [])].map((x) => [x.name, "MCP server"]), ...[...slash.packages, ...slash.claude].map((x) => [x.name, x.description || x.source])]).entries()]
+        .map(([n, d]) => ({ name: "tool:" + n, description: String(d || "tool"), source: "tool", key: n.toLowerCase() })) })); }, [!!mm]);
+  const mitems = mm ? [...themes.map((t) => ({ name: "theme:" + t.id, description: t.name + " - colors " + t.colors.accent + ", fonts " + t.fonts.head.split(",")[0], source: "theme", sw: t.colors, key: t.name.toLowerCase() })),
+    ...(ment ? [...ment.chats, ...ment.tools] : [])].filter((c) => (c.name + " " + c.key).toLowerCase().includes(mq)).slice(0, 30) : [];
   const menuItems = sm ? items : mitems;
   useEffect(() => setSidx(0), [sm && sm[1], mm && mm[1]]);
 
   const runUi = (a) => { setText(""); if (a === "clear") newChat(); else if (a === "canvas") setOpen((o) => !o); else if (a === "ctx" || a === "model" || a === "effort" || a === "mode") setPop(a); };
-  const pickSlash = (c) => { if (c.source === "theme") { setText(text.replace(/@[\w:-]*$/, "@" + c.name + " ")); ta.current && ta.current.focus(); return; } if (c.source === "ui" && c.action !== "send" && c.action !== "workflow") return runUi(c.action); setText("/" + c.name + " "); ta.current && ta.current.focus(); };
+  const pickSlash = (c) => { if (["theme", "chat", "tool"].includes(c.source)) { setText(text.replace(/@[\w:-]*$/, "@" + c.name + " ")); ta.current && ta.current.focus(); return; } if (c.source === "ui" && c.action !== "send" && c.action !== "workflow") return runUi(c.action); setText("/" + c.name + " "); ta.current && ta.current.focus(); };
 
   const upWr = (key, p) => setWr((l) => l.map((x) => (x.key === key ? { ...x, ...p } : x)));
   const startWork = guard(async (key, wk, data, text) => {
@@ -310,7 +329,8 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash }) {
     setWr((l) => [...l, { key, wk, phase: wk.inputs && wk.inputs.length ? "input" : "run", text: input || "" }]);
     if (!(wk.inputs && wk.inputs.length)) startWork(key, wk, {}, input || "run from chat");
   });
-  const genWork = guard(async (t) => { setText(""); toast("Designing the workflow, this takes a minute..."); const r = await post("works/generate", { prompt: t }); toast("Created " + r.work.title + " (switched off)"); location.hash = "#/works/" + r.work.id; });
+  const genWork = guard(async (t) => { setText(""); setGen({ text: t, since: Date.now() });
+    try { const r = await post("works/generate", { prompt: t }); toast("Created " + r.work.title + " (switched off)"); location.hash = "#/works/" + r.work.id; } finally { setGen(null); } });
   const send = guard(async (override, opts = {}) => {
     let t = (override !== undefined ? override : text).trim();
     if (!t || busyRef.current) return;
@@ -394,6 +414,8 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash }) {
     if (!confirm("Reload soul and notes into this chat? It starts a fresh Claude session and the next turn rewrites the prompt cache.")) return;
     const extra = await OUI.languagePrompt(); await post("sessions/update", { id, refresh_memory: true, extra }); toast("Memory reloaded"); load();
   });
+  const shareRef = useRef(null);                                       // chat blocks share through this chat (blocks.js setBlockSharer)
+  useEffect(() => { setBlockSharer((content, filename) => shareRef.current && shareRef.current(filename, false, content)); return () => setBlockSharer(null); }, []);
   if (!s) return html`<div class="empty"><div>${Ic("sparkles", 28)}<div>Loading…</div></div></div>`;
   const src = (p) => `/w/${id}/${sig}/${p.split("/").map(encodeURIComponent).join("/")}`;
   const pickList = engine === "free" && freeIds && freeIds.length ? (() => { const base = boot.models.models, have = new Set(base.map((m) => m.id)); return [...base, ...freeIds.filter((x) => !have.has(x.id)).map((x) => ({ id: x.id, label: x.id, kind: x.kind, note: x.kind === "image" ? "Image generation model from your API." : x.kind === "tts" ? "Text-to-speech model from your API." : "Available to your API key.", group: "settings", window: win }))]; })() : boot.models.models;
@@ -407,7 +429,8 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash }) {
     : canPrev(prev) ? html`<iframe key=${prev + files.length + fver} sandbox="allow-scripts allow-forms allow-modals allow-popups" src=${src(prev)}></iframe>`
     : html`<div class="empty"><div>${Ic("file", 26)}<div>No preview for this kind of file.<br/>Use Edit to read it.</div></div></div>`)
     : html`<div class="empty"><div>${Ic("eye", 26)}<div>Select a file in Files,<br/>or let Claude write an .html one.</div></div></div>`;
-  const share = guard(async (path, bundle) => { const r = await shareToSpace(post, id, path, { bundle, signedIn: boot.context.signed_in }); if (r && r.url) { try { await navigator.clipboard.writeText(r.url); toast("Link copied: " + r.url); } catch (e) {} } });
+  const share = guard(async (path, bundle, content = null) => { const r = await shareToSpace(post, id, path, { bundle, content, signedIn: boot.context.signed_in }); if (r && r.url) { try { await navigator.clipboard.writeText(r.url); toast("Link copied: " + r.url); } catch (e) {} } if (r && content != null) refreshFiles(); });
+  shareRef.current = share;
   const editEl = prev && html`<${Editor} key=${prev} id=${id} path=${prev} ver=${fver} onSaved=${refreshFiles}/>`, diffEl = prev && html`<${DiffView} key=${prev} id=${id} path=${prev} ver=${fver}/>`;
   return html`<div class="chatwrap">${signin && html`<${SignIn} close=${() => setSignin(false)}/>`}
     <div class="chat">
@@ -437,6 +460,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash }) {
           : e.k === "note" ? html`<div class="note-line">${Ic("info", 14)} ${e.text}</div>`
           : e.k === "compact" ? html`<div class="note-line">${Ic("compact", 14)} Context compacted · ${num(e.pre)} → ${num(e.post)} tokens (${e.trigger})</div>`
           : e.k === "error" ? html`<div class="msg"><span class="tag bad">${Ic("alert", 12)} error</span> ${linkify(e.text)} ${e.auth && html`<button class="btn" onClick=${() => setSignin(true)}>Sign in</button>`}</div>` : null)}
+        ${gen && html`<${GenBar} gen=${gen}/>`}
         ${live.text && html`<div class="msg bot"><div class="body"><${Md} live=${true} text=${live.text} onRender=${showEl}/></div></div>`}
         ${wr.map((r) => html`<${WorkCard} key=${r.key} r=${r} busy=${busy} submit=${(d) => startWork(r.key, r.wk, d, r.text)} cancel=${() => setWr((l) => l.filter((x) => x.key !== r.key))} toChat=${(t) => sendRef.current(t)}/>`)}
         ${busy && html`<${Working} act=${act} since=${since} live=${live} steps=${steps} ctx=${ctx} win=${win} free=${engine === "free"} onStop=${stop} onDirect=${answerNow}/>`}
@@ -584,12 +608,27 @@ function Services() {
 }
 
 // ---------- MCP
+function McpFree() {
+  const [list, setList] = useState(null), [tests, setTests] = useState({}), [busy, setBusy] = useState("");
+  const load = guard(async () => setList((await api("mcp/free")).servers));
+  useEffect(() => { load(); }, []);
+  const set = (body) => post("mcp/settings", body).then((r) => setList(r.servers)).catch((e) => toast(e.message));
+  const test = async (name) => { setBusy(name); try { setTests((t) => ({ ...t, [name]: { ...(t[name] || {}), wait: true } })); const r = await post("mcp/test", { name }); setTests((t) => ({ ...t, [name]: r })); } catch (e) { setTests((t) => ({ ...t, [name]: { ok: false, error: e.message, tools: [] } })); } finally { setBusy(""); } };
+  return html`<div><h2>Free chat tools</h2><p class="sub">Which MCP servers and tools Free chat may use. “Allowed” is the master switch; “On in new chats” ticks it for every new free chat. Test starts the server, lists its tools and lets you hide single tools. In a chat you can also just ask the model to retry, enable or disable a server or tool.</p>
+    ${!list ? html`<p class="mute">Loading…</p>` : !list.length ? html`<p class="mute">No stdio MCP server found.</p>` : list.map((s) => { const t = tests[s.name]; return html`<div class="card" key=${s.name}><div class="row"><div class="grow"><b>${s.name}</b> <span class="tag">${s.origin}</span>${s.tools_off.length ? html` <span class="tag">${s.tools_off.length} tool${s.tools_off.length > 1 ? "s" : ""} hidden</span>` : ""}<div class="mute small mono">${s.command}</div></div>
+        <label class="row small" style="gap:6px"><${Switch} on=${!s.off} label="Allowed" onChange=${(v) => set({ name: s.name, off: !v })}/>Allowed</label>
+        <label class="row small" style="gap:6px"><${Switch} on=${s.default && !s.off} label="On in new chats" onChange=${(v) => set({ name: s.name, default: v })}/>On in new chats</label>
+        <button class="btn" disabled=${busy === s.name} onClick=${() => test(s.name)}>${busy === s.name ? "Starting…" : t && t.ok === false ? "Retry" : "Test"}</button></div>
+        ${t && !t.wait && (t.ok ? html`<div style="margin-top:8px">${t.tools.map((x) => html`<label class="opt mcpopt" key=${x.name}><input type="checkbox" checked=${!s.tools_off.includes(x.name)} onChange=${(e) => set({ name: s.name, tool: x.name, tool_off: !e.target.checked })}/><span class="grow"><b>${x.name}</b><span class="d">${x.description}</span></span></label>`)}${!t.tools.length && html`<p class="mute small">The server runs but lists no tools.</p>`}</div>` : html`<p class="small" style="color:var(--bad,#c0392b);margin-top:8px">Could not start: ${t.error}</p>`)}</div>`; })}</div>`;
+}
+
 function Mcp() {
   const [d, setD] = useState({ packages: [], claude: [], ui: [] }), [f, setF] = useState({ name: "", command: "", args: "" });
   const load = guard(async () => setD(await api("mcp")));
   useEffect(() => { load(); }, []);
   const row = (n, sub, extra) => html`<div class="card row"><span class="nico" style="width:32px;height:32px;border-radius:9px;background:var(--soft2);display:grid;place-items:center">${Ic("plug", 16)}</span><div class="grow"><b>${n}</b><div class="mute small mono">${sub}</div></div>${extra}</div>`;
   return html`<div class="page"><h1>MCP servers</h1><p class="sub">Every server Claude Code knows is available in chat, including the ones aihub packages register.</p>
+    <${McpFree}/>
     <h2>From packages</h2>${d.packages.map((p) => row(p.name, p.enabled ? "enabled" : "disabled", html`<button class="btn" onClick=${guard(async () => { await post(p.enabled ? "disable" : "enable", { name: p.package }); load(); })}>${p.enabled ? "Disable" : "Enable"}</button>`))}${!d.packages.length && html`<p class="mute">None installed.</p>`}
     <h2>In Claude Code (~/.claude.json)</h2>${d.claude.map((s) => row(s.name, s.url || s.command + " " + s.args.join(" "), html`<span class="tag">${s.type}</span>`))}${!d.claude.length && html`<p class="mute">None.</p>`}
     <h2>Only for this UI's chats</h2>${d.ui.map((s) => row(s.name, s.command + " " + s.args.join(" "), html`<button class="btn bad" onClick=${guard(async () => { await post("mcp/remove", { name: s.name }); load(); })}>${Ic("trash", 14)}</button>`))}
@@ -638,7 +677,7 @@ const summary = (n) => { const c = n.config || {}; return String(c.prompt || c.u
 function Palette({ cat, onPick, close, more }) {
   const [q, setQ] = useState(""), [hi, setHi] = useState(0), ref = useRef();
   useEffect(() => ref.current && ref.current.focus(), []);
-  const all = Object.values(cat).filter((s) => !q || (s.title + " " + s.desc + " " + s.group + " " + s.type).toLowerCase().includes(q.toLowerCase()));
+  const all = Object.values(cat).filter((s) => !s.hidden && (!q || (s.title + " " + s.desc + " " + s.group + " " + s.type).toLowerCase().includes(q.toLowerCase())));
   const groups = {}; all.forEach((s) => (groups[s.group] ||= []).push(s));
   const flat = Object.values(groups).flat();
   const key = (e) => { if (e.key === "ArrowDown") { e.preventDefault(); setHi((i) => Math.min(flat.length - 1, i + 1)); } else if (e.key === "ArrowUp") { e.preventDefault(); setHi((i) => Math.max(0, i - 1)); } else if (e.key === "Enter" && flat[hi]) onPick(flat[hi].type); };
@@ -1043,6 +1082,17 @@ function FilePicker({ start, ext = ".json", title = "Choose a file", onPick, clo
     <div class="row" style="margin-top:14px"><span class="grow mono small" style="overflow:hidden;text-overflow:ellipsis">${sel ? full(sel) : d.path}</span><button class="btn" onClick=${close}>Cancel</button>${dirs ? html`<button class="btn acc" onClick=${() => onPick(d.path)}>Use this folder</button>` : html`<button class="btn acc" disabled=${!sel} onClick=${() => onPick(full(sel))}>Use this file</button>`}</div><//>`;
 }
 const WINDOWS = [[200000, "200K tokens"], [500000, "500K tokens"], [1000000, "1M tokens (default)"], [2000000, "2M tokens"]];
+function UpdateCard({ prefs, savePrefs }) {
+  const [u, setU] = useState(null), [busy, setBusy] = useState(false);
+  const load = () => api("update").then((r) => setU(r.update)).catch(() => {});
+  useEffect(() => { load(); const t = setInterval(load, 20000); return () => clearInterval(t); }, []);
+  const check = async () => { setBusy(true); try { setU((await post("update/check", {})).update); } catch (e) { toast(e.message); } finally { setBusy(false); } };
+  return html`<div class="card"><div class="row"><div class="grow"><b>Keep AI Hub UI up to date</b><div class="mute small">Checks for a newer aihub-ui every few hours. “Update and restart” waits until nothing is running (no chat answering, no work, no install), then updates and restarts this service; open pages reconnect.</div>
+      ${u && html`<div class="small" style="margin-top:6px">Installed ${u.installed || "?"}${u.latest ? " · newest " + u.latest : ""}${u.newer ? html` · <b>update available</b>` : ""}${u.waiting ? " · waiting: " + u.waiting : ""}${u.error ? html`<span style="color:var(--bad,#c0392b)"> · ${u.error}</span>` : ""}${u.restarting ? " · restarting…" : ""}</div>`}</div>
+      <select value=${prefs.auto_update || "on"} onChange=${(e) => savePrefs({ auto_update: e.target.value })}><option value="on">Update and restart</option><option value="notify">Only tell me</option><option value="off">Off</option></select>
+      <button class="btn" disabled=${busy} onClick=${check}>${busy ? "Checking…" : "Check now"}</button></div></div>`;
+}
+
 function Settings({ boot, reload, prefs, savePrefs, focus }) {
   const [sec, setSec] = useState({ names: [] }), [f, setF] = useState({ name: "", value: "" }), [lg, setLg] = useState({ username: "", password: "" }), card = useRef(), userIn = useRef(), [cw, setCw] = useState(String(prefs.window || 1000000)), [fm, setFm] = useState(prefs.free_model || "");
   useEffect(() => setCw(String(prefs.window || 1000000)), [prefs.window]);
@@ -1057,6 +1107,8 @@ function Settings({ boot, reload, prefs, savePrefs, focus }) {
       : html`<form class="row" onSubmit=${(e) => { e.preventDefault(); guard(async () => { await post("login", lg); setLg({ username: "", password: "" }); reload(); })(); }}><input ref=${userIn} placeholder="username" autocomplete="username" value=${lg.username} onInput=${(e) => setLg({ ...lg, username: e.target.value })}/><input type="password" autocomplete="current-password" placeholder="password" value=${lg.password} onInput=${(e) => setLg({ ...lg, password: e.target.value })}/>
         <button class="btn acc" type="submit" disabled=${!lg.username || !lg.password}>Sign in</button><span class="mute small">hub: ${c.hub}</span></form>`}
       <p class="mute small">Shared with the terminal: <code>aihub login</code> and this page use the same account.</p></div>
+    <h2>Updates</h2>
+    <${UpdateCard} prefs=${prefs} savePrefs=${savePrefs}/>
     <h2>Chats</h2>
     <div class="card"><div class="row"><div class="grow"><b>aihub policy guard in these chats</b><div class="mute small">${prefs.policy === "off" ? "Off for testing: the guard hook is skipped for chats started here. Your terminal and the global policy are untouched." : "On: tool calls in these chats are checked like in your terminal."}</div></div><${Switch} on=${prefs.policy === "on"} label="Policy guard" onChange=${(v) => savePrefs({ policy: v ? "on" : "off" })}/></div></div>
     <div class="card"><div class="row"><div class="grow"><b>Auto-compact</b><div class="mute small">Summarise older turns near the limit. Applies to chats and Claude nodes.</div></div><${Switch} on=${prefs.autocompact} label="Auto-compact" onChange=${(v) => savePrefs({ autocompact: v })}/></div>

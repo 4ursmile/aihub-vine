@@ -1,0 +1,25 @@
+{
+  "id": "outlook-send",
+  "title": "Send email (Outlook)",
+  "kind": "action",
+  "group": "Mail",
+  "description": "Sends mail with the Outlook desktop app (Windows, classic Outlook). Can also save a draft or open the window. Empty fields take the standard mail keys (to, cc, bcc, subject, body, attachments) from the node before, for example inside a Loop.",
+  "run": ["{python}", "{pkg}/nodes/outlook_send.py"],
+  "timeout": 120,
+  "templated": ["to", "cc", "bcc", "subject", "body", "attachments"],
+  "takes": ["to", "cc", "bcc", "subject", "body", "attachments"],
+  "outputs": ["to", "subject", "attachments", "action"],
+  "out": "text",
+  "out_note": "what was sent",
+  "guide": "Sends mail through the Outlook desktop app on Windows (classic Outlook, COM automation).\n1. Install the package: aihub install aihub-nodes-outlook. It creates its own Python environment with pywin32; nothing else to install.\n2. Outlook must be installed and signed in (the 'new Outlook' has no COM). Action 'draft' only saves it, 'display' opens the window so you press Send.\n3. Leave a field empty to take the same-named key from the node before it ({{data.to}}, {{data.subject}} ...): a Loop over a JSON list of {to, subject, body} objects sends one mail per object.\n4. Attachments: one file path per line ({{input}} or an earlier node's OUTPUT path works too). Key and secret files are refused.",
+  "fields": [
+    {"name": "to", "label": "To (; or , between)", "type": "text", "default": "", "help": "Empty = {{data.to}} from the node before."},
+    {"name": "cc", "label": "Cc", "type": "text", "default": ""},
+    {"name": "bcc", "label": "Bcc", "type": "text", "default": ""},
+    {"name": "subject", "label": "Subject", "type": "text", "default": "", "help": "Empty = {{data.subject}} from the node before."},
+    {"name": "body", "label": "Body", "type": "textarea", "default": "", "help": "Empty = {{data.body}}, else the text coming in."},
+    {"name": "format", "label": "Body format", "type": "select", "options": ["text", "html"], "default": "text"},
+    {"name": "attachments", "label": "Attachments (one path per line)", "type": "textarea", "default": ""},
+    {"name": "action", "label": "Action", "type": "select", "options": ["send", "draft", "display"], "default": "send", "help": "draft = save in Outlook's Drafts; display = open the window, you press Send."}
+  ]
+}

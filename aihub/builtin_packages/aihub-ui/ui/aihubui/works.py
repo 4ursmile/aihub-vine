@@ -77,11 +77,14 @@ SPACE_GUIDE = """Publishes a file or folder to the hub as a Space (document, sli
 - Private by default; choose public to let anyone with the link read it. Needs `aihub login` to the hub.
 Output: the space reference and its link."""
 
-EMAIL_GUIDE = """Sends mail through the Outlook desktop app on Windows (classic Outlook, COM automation through pywin32).
-1. Install once with the python that runs the UI service:  python -m pip install pywin32
-2. Outlook must be installed and signed in (the 'new Outlook' has no COM). Action 'draft' only saves it, 'display' opens the window so you press Send.
-3. Attachments: one file path per line ({{input}} or an earlier node's OUTPUT path works too). Key and secret files are refused.
-4. Other systems: the node stops with a clear message; use a Claude task with a mail skill instead."""
+MAIL_PKG_NODE = "pkg:aihub-nodes-outlook/outlook-send"
+MAIL_KEYS = ("to", "cc", "bcc", "subject", "body", "attachments")      # the standard data keys of a mail node (docs/ui-nodes.md, Node contract)
+LOOP_GUIDE = """Repeats the nodes after it for every item of a list, for example one mail per sender.
+1. Put the list in the node before (a Claude task that answers one address per line, an HTTP request, a Read file ...), or type it in "The list".
+2. Everything connected after the loop runs once per item, in order. Inside: {{input}} and {{data.item}} are the item; {{data.index}} (from 1) and {{data.total}}.
+3. A JSON list of objects such as [{"to": "a@x.com", "subject": "Hi A"}, ...] puts every key in {{data.<key>}}; nodes that take such a key (Send email takes to, subject, body ...) use it when their own field is empty.
+4. Add "End loop (collect)" after the last node of the body when something must run once afterwards (a summary, Output). Without it the loop is the last thing in its branch.
+Limits: items are capped (default 100, max 1000), nested loops are not supported, a failed item stops the loop unless you choose "continue"."""
 
 BUILTIN = {
     "start.manual": {"title": "Start: manual", "kind": "trigger", "group": "Start", "desc": "Run it with the Run button, or from a chat with /work:NAME. Inputs (optional) become a form in the chat; later nodes read them as {{data.name}}.",
@@ -91,7 +94,7 @@ BUILTIN = {
     "start.webhook": {"title": "Start: webhook", "kind": "trigger", "group": "Start", "desc": "POST text or JSON {text, data} to the node's local URL (127.0.0.1 only).", "fields": []},
     "ai.claude": {"title": "Claude task", "kind": "action", "group": "AI", "desc": "Runs Claude Code with the prompt. Use {{input}}, {{trigger}}, {{data.key}}. Skills, agents and MCP tools of aihub are available (send mail, post a message ...).",
                   "fields": [{"name": "prompt", "label": "Prompt", "type": "textarea", "required": True, "default": ""}, {"name": "model", "label": "Model", "type": "model", "default": ""},
-                             {"name": "effort", "label": "Effort", "type": "effort", "default": ""}, {"name": "mode", "label": "Permission mode", "type": "mode", "default": "edits"},
+                             {"name": "effort", "label": "Effort", "type": "effort", "default": ""}, {"name": "mode", "label": "Permission mode", "type": "mode", "default": "auto"},
                              {"name": "fresh", "label": "Fresh chat (do not share context with earlier Claude nodes)", "type": "checkbox", "default": False}]},
     "flow.filter": {"title": "Filter (regex)", "kind": "action", "group": "Flow", "desc": "Passes the text on only when it matches; otherwise this branch ends.",
                     "fields": [{"name": "regex", "label": "Regex", "type": "text", "required": True, "default": ""}, {"name": "invert", "label": "Pass when it does NOT match", "type": "checkbox", "default": False}]},
@@ -170,14 +173,27 @@ BUILTIN = {
                                  {"name": "title", "label": "Title", "type": "text", "default": ""},
                                  {"name": "description", "label": "One line description", "type": "text", "default": ""},
                                  {"name": "visibility", "label": "Who can open it", "type": "select", "options": ["private", "public"], "default": "private"}]},
-    "send.email": {"title": "Send email (Outlook)", "kind": "action", "group": "Mail", "desc": "Sends mail with the Outlook desktop app through win32com (Windows, classic Outlook). Can also save a draft or open the window.",
-                   "run": ["{python}", "{pkg}/nodes/send_email.py"], "timeout": 120, "templated": ["to", "cc", "bcc", "subject", "body", "attachments"], "guide": EMAIL_GUIDE,
-                   "fields": [{"name": "to", "label": "To (; or , between)", "type": "text", "default": ""}, {"name": "cc", "label": "Cc", "type": "text", "default": ""}, {"name": "bcc", "label": "Bcc", "type": "text", "default": ""},
-                              {"name": "subject", "label": "Subject", "type": "text", "default": "", "required": True},
-                              {"name": "body", "label": "Body", "type": "textarea", "default": "{{input}}"},
+    "send.email": {"title": "Send email (moved)", "kind": "action", "group": "Mail", "legacy": True, "hidden": True,
+                   "desc": "Outlook mail moved to the package aihub-nodes-outlook (aihub install aihub-nodes-outlook). With it installed this node keeps working.",
+                   "run": ["{python}", "{pkg}/nodes/moved.py"], "timeout": 20, "templated": ["to", "cc", "bcc", "subject", "body", "attachments"], "takes": list(MAIL_KEYS),
+                   "fields": [{"name": "to", "label": "To", "type": "text", "default": ""}, {"name": "cc", "label": "Cc", "type": "text", "default": ""}, {"name": "bcc", "label": "Bcc", "type": "text", "default": ""},
+                              {"name": "subject", "label": "Subject", "type": "text", "default": ""}, {"name": "body", "label": "Body", "type": "textarea", "default": ""},
                               {"name": "format", "label": "Body format", "type": "select", "options": ["text", "html"], "default": "text"},
                               {"name": "attachments", "label": "Attachments (one path per line)", "type": "textarea", "default": ""},
-                              {"name": "action", "label": "Action", "type": "select", "options": ["send", "draft", "display"], "default": "send", "help": "draft = save in Outlook's Drafts; display = open the window, you press Send."}]},
+                              {"name": "action", "label": "Action", "type": "select", "options": ["send", "draft", "display"], "default": "send"}]},
+    "flow.loop": {"title": "Loop (for each)", "kind": "action", "group": "Flow", "guide": LOOP_GUIDE,
+                  "desc": "Runs everything after it ONCE PER ITEM of a list (senders, files, rows ...), one item after the other, until an End loop node. Each pass sees {{input}} / {{data.item}} = the item, {{data.index}}, {{data.total}}; a JSON object item also puts its keys in {{data.<key>}}.",
+                  "fields": [{"name": "items", "label": "The list", "type": "textarea", "default": "{{input}}", "help": "Usually the text of the node before. Lines, a comma list, a regex split or a JSON list (strings or objects)."},
+                             {"name": "split", "label": "How the list is written", "type": "select", "options": ["lines", "comma", "json", "regex"], "default": "lines"},
+                             {"name": "regex", "label": "Separator regex (split = regex)", "type": "text", "default": ""},
+                             {"name": "unique", "label": "Skip repeated items", "type": "checkbox", "default": True},
+                             {"name": "limit", "label": "At most this many items", "type": "number", "default": 100, "help": "1-1000. More items than this stops the loop before it starts."},
+                             {"name": "delay", "label": "Pause between items (seconds)", "type": "number", "default": 0, "help": "For mail or APIs with rate limits."},
+                             {"name": "on_error", "label": "When one item fails", "type": "select", "options": ["stop", "continue"], "default": "stop"},
+                             {"name": "fresh_chat", "label": "Claude / Free chat nodes start a fresh chat for every item", "type": "checkbox", "default": True}]},
+    "flow.endloop": {"title": "End loop (collect)", "kind": "action", "group": "Flow",
+                     "desc": "Closes a Loop. Runs once after the last item with the result of every pass (the last text of each) as {{input}}; {{data.results}} is the JSON list, {{data.count}} / {{data.failed}} the numbers.",
+                     "fields": [{"name": "join", "label": "Join the results as", "type": "select", "options": ["json", "lines", "blank line"], "default": "lines"}]},
     "flow.note": {"title": "Note", "kind": "action", "group": "Flow", "desc": "A comment on the canvas. Passes its input through.", "fields": [{"name": "text", "label": "Note", "type": "textarea", "default": ""}]},
 }
 
@@ -208,6 +224,8 @@ BUILTIN_IO = {
     "io.path": ("path", "the path(s), not the content", "", ""),
     "space.publish": ("url", "the space reference and link", "path", "a file or folder path: a path node before it, or a Claude task that ends with OUTPUT: /full/path"),
     "send.email": ("text", "what was sent", "", ""),
+    "flow.loop": ("text", "the current item, once per pass", "", ""),
+    "flow.endloop": ("text", "the results of all passes", "", ""),
     "send.teams": ("text", "what was sent", "", ""),
 }
 
@@ -225,6 +243,24 @@ def _default_assist(typ, spec):
             f["assist"] = list(ASSIST)
         elif not f.get("secret") and (f["type"] == "textarea" or f["name"] in spec.get("templated", [])):
             f["assist"] = ["input", "data"]
+
+
+def _names(v):
+    return {str(x) for x in v if isinstance(x, str)} if isinstance(v, list) else set()
+
+
+def python_of(spec):
+    """The interpreter a package node runs with: the package's own venv (its [python] requires, e.g. pywin32) when it has one, else the UI's."""
+    v = spec.get("venv")
+    if v:
+        p = os.path.join(v, "Scripts", "python.exe") if os.name == "nt" else os.path.join(v, "bin", "python")
+        if os.path.exists(p):
+            return p
+    return sys.executable
+
+
+def _argv(spec):
+    return [python_of(spec) if x == "{python}" else x.replace("{pkg}", spec["dir"]) for x in spec["run"]]
 
 
 def _valid_spec(pkg, path, raw):
@@ -247,7 +283,9 @@ def _valid_spec(pkg, path, raw):
                 "timeout": min(max(int(raw.get("timeout", 120)), 5), 3600), "guide": str(raw.get("guide", ""))[:4000],
                 "out": raw.get("out") if raw.get("out") in OUT_KINDS else "text", "out_note": str(raw.get("out_note", ""))[:160],
                 "needs": raw.get("needs") if raw.get("needs") in OUT_KINDS else "", "needs_note": str(raw.get("needs_note", ""))[:160],
-                "outputs": [str(o)[:40] for o in raw.get("outputs", []) if isinstance(o, str) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", o)][:20] if isinstance(raw.get("outputs"), list) else []}
+                "outputs": [str(o)[:40] for o in raw.get("outputs", []) if isinstance(o, str) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", o)][:20] if isinstance(raw.get("outputs"), list) else [],
+                "takes": [f["name"] for f in fields if f["name"] in _names(raw.get("takes")) and not f["secret"]][:20],
+                "venv": str(pkg.get("venv") or ""), "templated": [x for x in raw.get("templated", []) if isinstance(x, str)][:20] if isinstance(raw.get("templated"), list) else []}
         return spec
     except (KeyError, TypeError, ValueError):
         return None
@@ -275,6 +313,9 @@ def catalogue(force=False):
                     spec = None
                 if spec:
                     out[spec["type"]] = spec
+    ext = out.get(MAIL_PKG_NODE)
+    if ext:                                                              # old works keep their send.email node: it now runs the external package
+        out["send.email"] = dict(ext, type="send.email", legacy=True, hidden=True, title="Send email (Outlook)", group="Mail")
     try:
         for nid in sorted(os.listdir(local_dir())):
             d = local_dir(nid)
@@ -305,7 +346,7 @@ def catalogue(force=False):
 
 
 def public(spec):
-    return {k: v for k, v in spec.items() if k not in ("run", "dir")}
+    return {k: v for k, v in spec.items() if k not in ("run", "dir", "venv")}
 
 
 UI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -593,7 +634,7 @@ def pointer_text(cdata, inputs, limit=30000):
 
 
 def run_package_node(spec, cfg, inputs, ctx, wd):
-    argv = [sys.executable if x == "{python}" else x.replace("{pkg}", spec["dir"]) for x in spec["run"]]
+    argv = _argv(spec)
     payload = json.dumps({"config": cfg, "input": "\n\n".join(text_of(i) for i in inputs), "inputs": inputs, "run": ctx, "workdir": wd}, ensure_ascii=False)
     try:
         p = subprocess.run(argv, input=payload, capture_output=True, text=True, timeout=spec["timeout"], cwd=spec["dir"],
@@ -616,12 +657,75 @@ def run_package_node(spec, cfg, inputs, ctx, wd):
     return ev, (res.get("log") or "")
 
 
+LOOP, ENDLOOP = "flow.loop", "flow.endloop"
+LOOP_MAX = 1000
+
+
+def split_items(text, mode, regex=""):
+    """The list a Loop walks: lines | comma | regex | json (a JSON list of strings or objects, also inside a ```json fence). -> list."""
+    t = (text or "").strip()
+    if mode == "json":
+        for cand in (t, t[t.find("["):t.rfind("]") + 1] if "[" in t else ""):
+            try:
+                v = json.loads(cand)
+            except ValueError:
+                continue
+            if isinstance(v, dict):
+                v = v["items"] if isinstance(v.get("items"), list) else [v]
+            if isinstance(v, list):
+                return v
+        raise RuntimeError('the list is not JSON: expected ["a@x.com", ...] or [{"to": "a@x.com"}, ...]')
+    if mode == "comma":
+        parts = re.split(r"[,;\n]+", t)
+    elif mode == "regex":
+        try:
+            parts = re.split(regex or r"\n", t)
+        except re.error as e:
+            raise RuntimeError("bad separator regex: %s" % e)
+    else:
+        parts = t.splitlines()
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def item_parts(item):
+    """One list entry -> (text, extra data keys). An object keeps its keys as {{data.<key>}}; its text is the JSON."""
+    if isinstance(item, str):
+        return item, {}
+    if isinstance(item, dict):
+        return json.dumps(item, ensure_ascii=False), {k: v for k, v in item.items() if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(k))}
+    return json.dumps(item, ensure_ascii=False), {}
+
+
+def loop_bodies(nodes, edges):
+    """-> ({loop id: [body ids]}, {end id: loop id}). The body = every node after the loop up to (not including) an End loop node."""
+    kids = {}
+    for e in edges:
+        kids.setdefault(e["from"], []).append(e["to"])
+    bodies, ends = {}, {}
+    for n in nodes.values():
+        if n.get("type") != LOOP:
+            continue
+        body, todo = [], list(kids.get(n["id"], []))
+        while todo:
+            i = todo.pop(0)
+            if i in body or i == n["id"] or i not in nodes:
+                continue
+            if nodes[i].get("type") == ENDLOOP:
+                ends.setdefault(i, n["id"])
+                continue
+            body.append(i)
+            todo.extend(kids.get(i, []))
+        bodies[n["id"]] = body
+    return bodies, ends
+
+
 class Engine:
     """Runs works, fires cron triggers, supervises package trigger processes. One thread per work executes its runs in order."""
 
     def __init__(self, box):
         self.box = box
         self.queues = {}
+        self.running = 0                       # runs executing now (the UI waits for 0 before it restarts for an update)
         self.fired = {}
         self.procs = {}                       # (work, node) -> {"p": Popen, "sig": str}
         self.lock = threading.Lock()
@@ -654,11 +758,16 @@ class Engine:
                 run, event = q.get(timeout=5)
             except queue.Empty:
                 continue
+            with self.lock:
+                self.running += 1
             try:
                 self._execute(run, event)
             except Exception as e:                                           # never kill the worker
                 run.update(status="failed", ended=time.time(), error=str(e)[:300])
                 _save_run(run)
+            finally:
+                with self.lock:
+                    self.running -= 1
 
     def _execute(self, run, event):
         work = store.get_work(run["work"])
@@ -676,6 +785,10 @@ class Engine:
         lock = threading.RLock()                                            # run record, shared chats and `outs` are touched by several nodes at once
         busy = {"claude": False, "free": False}                             # the shared chat is in use: a parallel AI node gets a chat of its own
         names = names_of(work, cat)
+        bodies, ends = loop_bodies(nodes, work["edges"])
+        inbody = {b for v in bodies.values() for b in v}                  # run by their loop, once per item, not by the scheduler
+        ctx_of = {}                                                         # node id -> the template context of its current step
+        collected = {}                                                      # End loop id -> {"texts", "results", "failed"} of its loop
 
         def save():
             with lock:
@@ -685,7 +798,71 @@ class Engine:
             with lock:
                 rec.update(kw)
 
-        def step(nid):
+        def do_loop(lid, cfg, cdata, rec, outs):
+            """Run the loop's body once per item, one pass after the other. -> the loop node's own output (a summary)."""
+            nonlocal failed
+            body = [b for b in order if b in bodies.get(lid, ())]
+            if any(nodes[b].get("type") == LOOP for b in body):
+                raise RuntimeError("a loop inside a loop is not supported: end the first one with End loop")
+            raw = split_items(render(cfg.get("items") or "{{input}}", ctx_of[lid]), cfg.get("split") or "lines", cfg.get("regex") or "")
+            seen, items = set(), []
+            for it in raw:
+                key = item_parts(it)[0]
+                if cfg.get("unique", True) and key in seen:
+                    continue
+                seen.add(key)
+                items.append(it)
+            try:
+                cap = min(max(int(cfg.get("limit") or 100), 1), LOOP_MAX)
+                gap = min(max(float(cfg.get("delay") or 0), 0), 3600)
+            except (TypeError, ValueError):
+                cap, gap = 100, 0
+            if len(items) > cap:
+                raise RuntimeError("%d items, more than the limit of %d (raise 'At most this many items', up to %d)" % (len(items), cap, LOOP_MAX))
+            end_ids = [e for e, l in ends.items() if l == lid]
+            texts, bad, lines, k = [], 0, [], 0
+            for k, it in enumerate(items, 1):
+                if self.stop.is_set():
+                    break
+                text, extra = item_parts(it)
+                it_outs = dict(outs)
+                it_outs[lid] = {"text": text, "data": dict(cdata, **extra, item=text, index=k, total=len(items))}
+                if cfg.get("fresh_chat", True):
+                    fresh()
+                with lock:
+                    before = failed
+                    failed = False
+                last = None
+                for b in body:
+                    step(b, it_outs)
+                    if it_outs.get(b) is not None:
+                        last = b
+                with lock:
+                    this_bad, failed = failed, before
+                    recs = [run["nodes"].get(b) or {} for b in body]
+                    err = next((r.get("error") for r in recs if r.get("status") == "error"), "")
+                res = text_of(it_outs[last]) if last else ""
+                short = text.replace("\n", " ")[:60]
+                if this_bad:
+                    bad += 1
+                    lines.append("%d. %s: FAILED %s" % (k, short, str(err)[:160]))
+                else:
+                    texts.append(res)
+                    lines.append("%d. %s: ok" % (k, short))
+                upd(rec, note="%d/%d done%s" % (k, len(items), ", %d failed" % bad if bad else ""), log="\n".join(lines)[-1500:])
+                save()
+                if this_bad and cfg.get("on_error") != "continue":
+                    with lock:
+                        failed = True
+                    raise RuntimeError("item %d (%s) failed: %s" % (k, short, str(err)[:200]))
+                if gap and k < len(items) and self.stop.wait(gap):
+                    break
+            for e in end_ids:
+                collected[e] = {"texts": texts, "failed": bad}
+            upd(rec, note="%d item(s), %d failed" % (len(items), bad) if items else "the list is empty: nothing to repeat")
+            return {"text": "%d item(s) repeated, %d failed" % (len(items), bad), "data": dict(cdata, count=len(items), failed=bad)}
+
+        def step(nid, outs=outs):
             nonlocal sess, sess_free, failed
             n = nodes[nid]
             spec = cat.get(n.get("type"))
@@ -694,6 +871,8 @@ class Engine:
                     run["nodes"][nid] = {"status": "ok", "output": text_of(event)[:2000]}
                 return
             got = [(u, outs[u]) for u in ins[nid] if outs.get(u) is not None]
+            if n.get("type") == ENDLOOP and ends.get(nid) in outs:             # the closing node of a loop sees the results of all passes
+                got = [(ends[nid], collected[nid])] if nid in collected else []
             inputs = [o for _, o in got]
             if not inputs:
                 return
@@ -714,6 +893,7 @@ class Engine:
             for k, (u, o) in enumerate(got, 1):                            # {{in.1}} / {{in.<node>}}: one parent's text
                 inmap[str(k)] = inmap[names[u][1]] = text_of(o)
             ctx = dict(ctx_base, input=text, data=cdata, **{"in": inmap})
+            ctx_of[nid] = ctx
             with lock:
                 rec = run["nodes"][nid] = {"status": "running", "t0": time.time(), "input": text[:2000], "paths": _pointers(cdata, inputs),
                                            "inputs": [{"from": u, "label": names[u][0], "kind": (cat.get((nodes.get(u) or {}).get("type")) or {}).get("out", "text"), "text": text_of(o)[:1200]} for u, o in got]}
@@ -721,7 +901,16 @@ class Engine:
             cfg = with_secrets(work["id"], n, spec, self.box)
             mine = []                                                      # shared chats this node holds (released when it ends)
             try:
-                if n["type"] == "flow.filter":
+                if n["type"] == LOOP:
+                    out = do_loop(nid, cfg, cdata, rec, outs)
+                elif n["type"] == ENDLOOP:
+                    out = inputs[-1]
+                    if nid in collected:
+                        c = collected[nid]
+                        sep = {"json": None, "lines": "\n", "blank line": "\n\n"}.get(cfg.get("join") or "lines", "\n")
+                        out = {"text": json.dumps(c["texts"], ensure_ascii=False, indent=1) if sep is None else sep.join(c["texts"]),
+                               "data": dict(cdata, results=c["texts"], count=len(c["texts"]), failed=c["failed"])}
+                elif n["type"] == "flow.filter":
                     try:
                         hit = re.search(cfg.get("regex") or "", plain[:20000], re.I | re.M) is not None
                     except re.error as e:
@@ -747,7 +936,7 @@ class Engine:
                             busy["claude"] = True
                             mine.append("claude")
                         if sess is None or cfg.get("fresh") or not solo:
-                            s = store.create_session("Work: %s" % work["title"], "", chat.build_system())
+                            s = store.update_session(store.create_session("Work: %s" % work["title"], "", chat.build_system(chat.freechat.WORK_RULES))["id"], work=True)
                             sess = s if sess is None else sess
                             cur = s
                         else:
@@ -765,7 +954,7 @@ class Engine:
                     if not prompt.strip():
                         raise RuntimeError("empty prompt")
                     reply, err = "", None
-                    for ev in chat.turn(cur, prompt, str(cfg.get("model") or ""), str(cfg.get("effort") or ""), cfg.get("mode") if cfg.get("mode") in chat.MODES else "edits",
+                    for ev in chat.turn(cur, prompt, str(cfg.get("model") or ""), str(cfg.get("effort") or ""), cfg.get("mode") if cfg.get("mode") in chat.MODES else "auto",
                                          extra_env=self.box.get_all(), **({"add_dirs": dirs} if (dirs := pointer_dirs(cdata, inputs)) else {})):
                         if ev["k"] == "msg":
                             reply = "\n".join(b["text"] for b in ev["blocks"] if b["type"] == "text") or reply
@@ -784,7 +973,7 @@ class Engine:
                             busy["free"] = True
                             mine.append("free")
                         if sess_free is None or cfg.get("fresh") or not solo:
-                            made = store.update_session(store.create_session("Work: %s" % work["title"], "", chat.build_system())["id"], engine="free",
+                            made = store.update_session(store.create_session("Work: %s" % work["title"], "", chat.build_system())["id"], engine="free", work=True,
                                                         mcp=[x.strip() for x in str(cfg.get("mcp") or "").split(",") if x.strip()][:20])
                             sess_free = made if sess_free is None else sess_free
                         else:
@@ -810,6 +999,10 @@ class Engine:
                     tpl = spec.get("templated") or ()
                     if tpl:
                         cfg = {k: (render(v, ctx) if k in tpl and isinstance(v, str) else v) for k, v in cfg.items()}
+                    for k in spec.get("takes") or ():                       # standard keys: an empty field takes {{data.<same name>}} from the node before
+                        v = cdata.get(k)
+                        if not str(cfg.get(k) or "").strip() and v not in (None, "", [], {}):
+                            cfg[k] = "\n".join(str(x) for x in v) if isinstance(v, list) else v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
                     out, log = run_package_node(spec, cfg, inputs, {"id": run["id"], "work": work["id"], "node": nid}, store.work_dir(run["chat"]) if run["chat"] else os.path.expanduser("~"))
                     if log:
                         upd(rec, log=log[-1500:])
@@ -827,10 +1020,15 @@ class Engine:
                     busy[k] = False
             save()
 
-        done, left, futs = set(), list(order), {}                           # independent branches run side by side; a node waits for ALL its parents
+        def fresh():
+            nonlocal sess, sess_free
+            sess = sess_free = None                                          # the next Claude / Free node of a pass opens a chat of its own
+
+        ext = {l: [u for b in v for u in ins[b] if u not in v and u != l] for l, v in bodies.items()}      # parents of a loop body that sit outside it
+        done, left, futs = set(), [i for i in order if i not in inbody], {}                           # independent branches run side by side; a node waits for ALL its parents
         with cf.ThreadPoolExecutor(WORKERS, thread_name_prefix="work-node") as ex:
             while left or futs:
-                ready = [i for i in left if all(u in done for u in ins[i])]
+                ready = [i for i in left if all(u in done for u in ins[i] + ext.get(i, []))]
                 if not ready and not futs:
                     ready = left[:1]                                        # a cycle: go on in order, as before
                 for i in ready:
@@ -840,6 +1038,7 @@ class Engine:
                 for f in fin:
                     i = futs.pop(f)
                     done.add(i)
+                    done.update(bodies.get(i, ()))
                     if f.exception():
                         with lock:
                             run["nodes"][i] = {"status": "error", "error": str(f.exception())[:600]}
@@ -852,6 +1051,8 @@ class Engine:
         try:
             from . import hubusage
             hubusage.kick()                                       # a finished run is counted on the hub (its AI nodes are chat turns too)
+            hubusage.use("work:" + str(work.get("id")), package=work.get("package") or "aihub-ui", session=run.get("id") or "",
+                         detail={"title": work.get("title", ""), "status": run["status"], "trigger": str((nodes.get(run["trigger"]) or {}).get("type") or "")})
         except Exception:
             pass
         _save_run(run)
@@ -911,7 +1112,7 @@ class Engine:
                 self.fire(w, n, {"text": cfg.get("text") or "scheduled run"}, "schedule")
 
     def _spawn(self, key, w, n, spec, cfg, sig, fails):
-        argv = [sys.executable if x == "{python}" else x.replace("{pkg}", spec["dir"]) for x in spec["run"]]
+        argv = _argv(spec)
         try:
             p = subprocess.Popen(argv, cwd=spec["dir"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
                                  env=dict(os.environ, AIHUB_NODE=spec["type"]), start_new_session=True)
@@ -974,12 +1175,15 @@ DATA: every node hands on text, plus a small data dict. In any text field (promp
 - {{trigger}} = the text that started the run. {{data.key}} = the inputs of start.manual (its "inputs" field: one per line `name|Label|type|options or default|*`, * = required, type text/textarea/number/select/checkbox) and the data keys other nodes list (git.pull / io.path: path).
 - A Claude prompt without {{input}} / {{in.x}} still receives the incoming text first ("Input: ..."), so only write {{input}} to place it yourself.
 - PATHS, not content: git.pull / io.path output a path. The Claude task after them opens the files itself (give it {{input}} or {{data.path}} and say what to analyse).
-- Claude only answers with text. When a later node needs a FILE or FOLDER (space.publish, send.email attachments), the Claude prompt must say: write the result to a file (a dashboard or site: a folder with index.html) and end the answer with the last line `OUTPUT: /full/path`. space.publish then needs no File field; set a Space name (lower-case slug).
+- Claude only answers with text. When a later node needs a FILE or FOLDER (space.publish, mail attachments), the Claude prompt must say: write the result to a file (a dashboard or site: a folder with index.html) and end the answer with the last line `OUTPUT: /full/path`. space.publish then needs no File field; set a Space name (lower-case slug).
 - The answer of the whole run: add a flow.output node (title + template such as {{input}}); without one the last text is the answer.
 
+- LOOPS: flow.loop repeats everything after it once per item of a list (one mail per sender). Feed it a list (a Claude node that answers one item per line, or a JSON list of objects such as [{"to","subject","body"}]); inside, {{data.item}} / {{input}} is the item, {{data.index}}, and an object's keys are {{data.<key>}} (send mail nodes take to / subject / body from them when their fields are empty). Close it with flow.endloop when something must run once afterwards. No loop inside a loop.
+
 SHAPES
+- ai.claude (list the recipients, one per line) -> flow.loop -> ai.claude (write the mail for {{data.item}}) -> a mail node -> flow.endloop -> flow.output.
 - git.pull -> ai.claude (analyse, build dashboard/index.html, end with OUTPUT:) -> space.publish.
-- start.cron -> io.request / git.read -> ai.claude -> send.email or send.teams.
+- start.cron -> io.request / git.read -> ai.claude -> send.teams (or the mail node pkg:aihub-nodes-outlook/outlook-send when it is in the list).
 - start.manual -> [git.read, io.request] in parallel -> ai.claude (prompt names {{in.<a>}} and {{in.<b>}}) -> flow.output.
 - Keep it as small as the request allows: 3 to 7 nodes.
 
@@ -995,6 +1199,8 @@ Node types (out = what it hands on, needs = what it requires from before):
 def _gen_catalogue():
     lines = []
     for t, sp in catalogue().items():
+        if sp.get("hidden"):
+            continue
         fl = ", ".join("%s%s%s" % (f["name"], "*" if f.get("required") else "", "=" + "/".join(f["options"]) if f.get("options") else "") for f in sp["fields"])
         io = " | out: %s%s%s" % (sp.get("out", "text"), " (%s)" % sp["out_note"] if sp.get("out_note") else "", " | needs: " + sp["needs"] if sp.get("needs") else "")
         lines.append("- %s (%s, %s): %s%s | fields: %s" % (t, sp["kind"], sp["group"], sp["desc"][:160], io, fl or "-"))

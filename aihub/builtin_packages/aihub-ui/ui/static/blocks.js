@@ -25,6 +25,40 @@ function head(icon, label, ...actions) {
   const a = el("span", "bk-acts"); a.append(...actions); h.append(l, a); return h;
 }
 
+// ---------- zoom (the block fills the window; Esc, the backdrop or Close puts it back) and share (the block as a page, to a Space)
+let shareBlock = null;
+export const setBlockSharer = (fn) => { shareBlock = fn; };
+const nudge = () => requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));      // echarts / leaflet re-measure
+function zoom(box) {
+  if (box.closest(".bk-zoom")) { box.closest(".bk-zoom")._close(); return; }
+  const ph = document.createComment("zoomed"), ov = el("div", "bk-zoom"); box.replaceWith(ph); ov.append(box); document.body.append(ov);
+  const key = (e) => { if (e.key === "Escape") close(); };
+  const close = () => { document.removeEventListener("keydown", key); if (ph.parentNode) ph.replaceWith(box); else box.remove(); ov.remove(); nudge(); };
+  ov._close = close; ov.onclick = (e) => { if (e.target === ov) close(); }; document.addEventListener("keydown", key); nudge();
+}
+const PAGE_CSS = ":root{--surface:#fff;--line:#e4e2dc;--mute:#6b6a65}body{margin:0;padding:24px;font:14px system-ui,sans-serif;background:#fff;color:#1f1e1c}svg,img{max-width:100%;height:auto}.ct{font:11px system-ui;fill:#6b6a65}.cg{stroke:#e4e2dc}";
+const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+export const pageOf = (title, body) => `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${PAGE_CSS}</style></head><body><h1 style="font-size:20px">${esc(title)}</h1>${body}</body></html>`;
+// what a drawn block looks like now, as a page: its SVG, or its canvas as an image (null when neither, e.g. a map)
+function snapshot(node, title) {
+  const svg = node.querySelector("svg"), cv = node.querySelector("canvas");
+  if (svg && svg.getBoundingClientRect().width > 40) return pageOf(title, svg.outerHTML);
+  if (cv) try { return pageOf(title, `<img alt="${esc(title)}" src="${cv.toDataURL("image/png")}">`); } catch (e) { /* tainted */ }
+  return null;
+}
+const fname = (t) => (String(t || "block").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 50) || "block");
+function zoomBtn(box) { return btn("expand", "Zoom", () => zoom(box)); }
+function shareBtn(get) {          // get() -> {content, filename} or null
+  return shareBlock && btn("upload", "Share", () => { const v = get(); if (v && v.content) shareBlock(v.content, v.filename); else toast("Nothing to share yet"); });
+}
+// a Preact-drawn block (chart, diagram) gets a small bar of its own: the component owns its inner node
+function richBar(d, title, canShare) {
+  const bar = el("div", "bk-float"); bar.append(zoomBtn(d));
+  const s = canShare && shareBtn(() => { const c = snapshot(d, title); return c && { content: c, filename: fname(title) + ".html" }; });
+  if (s) bar.append(s);
+  d.append(bar);
+}
+
 function shellBlock(code) {
   const box = el("div", "bk term");
   const body = el("pre", "term-body"); const lines = code.replace(/\n$/, "").split("\n");
@@ -37,6 +71,8 @@ function codeBlock(pre, code, lang, onRender) {          // replaces PRE by the 
   const box = el("div", "bk cb"); const acts = [];
   if (onRender && ["html", "svg", "openui"].includes(lang)) acts.push(btn("play", "Render", () => onRender({ lang, code: code.textContent })));
   acts.push(copyBtn(() => code.textContent));
+  if (lang === "html" || lang === "svg") { const s = shareBtn(() => ({ content: lang === "svg" ? pageOf("Graphic", code.textContent) : code.textContent, filename: (lang === "svg" ? "graphic" : "page") + ".html" })); if (s) acts.push(s); }
+  acts.push(zoomBtn(box));
   if (lang && hljs.getLanguage(lang)) try { hljs.highlightElement(code); } catch (e) { /* plain */ }
   if (code.textContent.length > 1200) box.classList.add("long");                    // a report or page: keep the chat short, scroll inside
   pre.replaceWith(box); box.append(head("code", lang || "code", ...acts), pre);
@@ -46,7 +82,7 @@ function tableBlock(t) {
   const csv = () => rows().map((r) => r.map((c) => '"' + c.replace(/"/g, '""') + '"').join(",")).join("\n");
   const n = t.querySelectorAll("tbody tr").length;
   const scroll = el("div", "tb-scroll"); t.replaceWith(box); scroll.append(t);
-  box.append(head("table", n + (n === 1 ? " row" : " rows"), copyBtn(csv)), scroll);
+  box.append(head("table", n + (n === 1 ? " row" : " rows"), ...[copyBtn(csv), shareBtn(() => ({ content: csv(), filename: "table.csv" })), zoomBtn(box)].filter(Boolean)), scroll);
   t.querySelectorAll("th").forEach((th, i) => { th.classList.add("sortable"); let dir = 1; th.onclick = () => {
     const body = t.tBodies[0]; const arr = [...body.rows]; const val = (r) => r.cells[i].textContent.trim();
     arr.sort((a, b) => { const x = parseFloat(val(a).replace(/[^0-9.-]/g, "")), y = parseFloat(val(b).replace(/[^0-9.-]/g, "")); return (isNaN(x) || isNaN(y) ? val(a).localeCompare(val(b)) : x - y) * dir; });
@@ -68,7 +104,11 @@ export function Md({ text, live, onRender, onSend }) {
     const open = live && isLast && unclosed(t); const pres = [...holder.querySelectorAll("pre")];
     pres.forEach((pre, idx) => {
       const code = pre.querySelector("code"); if (!code) return;
-      if (open && idx === pres.length - 1) return;                         // the fence still being written stays plain: no flicker
+      if (open && idx === pres.length - 1) {                                // the fence still being written: a short box that follows the tail, so it never overflows the screen
+        const lg = ((code.className.match(/language-(\S+)/) || [])[1] || "code").toLowerCase(), n = code.textContent.split("\n").length;
+        const box = el("div", "bk cb writing"); pre.replaceWith(box); box.append(head("code", `Writing ${lg}… ${n} line${n === 1 ? "" : "s"}`), pre);
+        requestAnimationFrame(() => { pre.scrollTop = pre.scrollHeight; }); return;
+      }
       const lang = ((code.className.match(/language-(\S+)/) || [])[1] || "").toLowerCase();
       if (lang === "workflow") {
         let spec; try { spec = JSON.parse(code.textContent); } catch (e) { return; }
@@ -76,17 +116,19 @@ export function Md({ text, live, onRender, onSend }) {
         rich = true; const d = el("div", "bk rich"); pre.replaceWith(d); mounted.push(d); render(html`<${WorkCard} spec=${spec} locked=${live}/>`, d); return;
       }
       if (DIAGRAMS[lang]) {                                                   // mermaid / dot / echarts / map: drawn from code by a CDN library
-        rich = true; const d = el("div", "bk rich"); pre.replaceWith(d); mounted.push(d); render(html`<${Diagram} lang=${lang} code=${code.textContent}/>`, d); return;
+        rich = true; const d = el("div", "bk rich"), m = el("div"); d.append(m); pre.replaceWith(d); mounted.push(m); render(html`<${Diagram} lang=${lang} code=${code.textContent}/>`, m);
+        if (!live) richBar(d, lang === "map" ? "Map" : "Diagram", lang !== "map"); return;
       }
       if (lang === "chart" || lang === "form" || lang === "ask") {
         let spec; try { spec = JSON.parse(code.textContent); } catch (e) { return; }
-        rich = true; const d = el("div", "bk rich"); pre.replaceWith(d); mounted.push(d);
-        render(lang === "chart" ? html`<${Chart} spec=${spec}/>` : lang === "ask" ? html`<${AskCard} spec=${spec} onSend=${onSend} locked=${live || !onSend}/>` : html`<${FormBlock} spec=${spec} onSend=${onSend} disabled=${live}/>`, d); return;
+        rich = true; const d = el("div", "bk rich"), m = el("div"); d.append(m); pre.replaceWith(d); mounted.push(m);
+        if (lang === "chart" && !live) richBar(d, spec.title || "Chart", true);
+        render(lang === "chart" ? html`<${Chart} spec=${spec}/>` : lang === "ask" ? html`<${AskCard} spec=${spec} onSend=${onSend} locked=${live || !onSend}/>` : html`<${FormBlock} spec=${spec} onSend=${onSend} disabled=${live}/>`, m); return;
       }
       if (lang === "svg") rich = true;
       if (lang === "svg" && !live) {                                      // a graphic is shown in the answer itself, no side canvas
         const clean = DOMPurify.sanitize(code.textContent, { USE_PROFILES: { svg: true, svgFilters: true } });
-        if (clean.includes("<svg")) { const box = el("div", "bk svgbox"); box.append(head("chart", "Graphic", copyBtn(() => code.textContent)));
+        if (clean.includes("<svg")) { const box = el("div", "bk svgbox"); box.append(head("chart", "Graphic", ...[copyBtn(() => code.textContent), shareBtn(() => ({ content: pageOf("Graphic", clean), filename: "graphic.html" })), zoomBtn(box)].filter(Boolean)));
           const v = el("div", "svgv"); v.innerHTML = clean; box.append(v); pre.replaceWith(box); return; }
       }
       if (SHELL.has(lang)) pre.replaceWith(shellBlock(code.textContent)); else codeBlock(pre, code, lang, onRender);

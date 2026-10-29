@@ -527,3 +527,85 @@ class UsageAndSpaces(unittest.TestCase):
             self.hu.kick()
             self.assertEqual(t.call_count, 1)
         self.hu._timer = None
+
+    def test_use_event_goes_through_aihub_hook_use(self):
+        with mock.patch.object(self.hu.subprocess, "run") as run:
+            self.hu.use("chat", session="s1", detail={"engine": "free"}).join(5)
+        args, kw = run.call_args
+        self.assertEqual(args[0][-4:], ["hook", "--use", "--source", "aihub-ui"])
+        self.assertEqual(json.loads(kw["input"]), {"package": "aihub-ui", "component": "chat", "session": "s1", "detail": {"engine": "free"}})
+
+    def test_cli_hook_use_records_one_use_event(self):
+        from aihub.cli import hooks
+        with mock.patch.object(hooks.telemetry, "record") as rec:
+            hooks.use_event(json.dumps({"package": "git-data-dashboard", "component": "work:ab12", "session": "r1", "detail": {"status": "done"}}))
+            hooks.use_event(json.dumps({"package": "bad name!", "component": "chat"}))
+            hooks.use_event("not json")
+        self.assertEqual(rec.call_count, 1)
+        ev = rec.call_args[0][0]
+        self.assertEqual((ev["kind"], ev["package"], ev["component"], ev["source"]), ("use", "git-data-dashboard", "work:ab12", "aihub-ui"))
+
+    def test_bundle_inlines_what_the_page_loads(self):
+        from aihubui import spacebundle
+        root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(root, "data"))
+        w = lambda p, t: open(os.path.join(root, p), "w").write(t)
+        w("data/sales.json", '{"a": 1}')
+        w("app.js", "fetch('data/sales.json').then(r => r.json())")
+        w("style.css", "body{background:url(logo.png)}")
+        w("logo.png", "PNG")
+        w("page.html", '<html><head><link rel="stylesheet" href="style.css"></head><body><img src="logo.png">'
+                       '<script src="app.js"></script><script src="https://cdn.jsdelivr.net/npm/x@1/x.js"></script>'
+                       '<script src="../outside.js"></script></body></html>')
+        text, used, skipped = spacebundle.bundle(os.path.join(root, "page.html"), root)
+        self.assertEqual(sorted(used), ["app.js", "data/sales.json", "logo.png", "style.css"])
+        self.assertNotIn('src="app.js"', text)
+        self.assertIn("fetch('data/sales.json')", text)                     # the call stays; the shim answers it
+        self.assertIn('"data/sales.json":["application/json"', text)
+        self.assertIn("url(data:image/png;base64,", text)
+        self.assertIn('src="https://cdn.jsdelivr.net/npm/x@1/x.js"', text)
+        self.assertIn('src="../outside.js"', text)                           # outside the chat folder: never read
+        self.assertEqual(skipped, [])
+
+    def test_share_bundles_a_page_and_saves_a_block(self):
+        import server
+        root = tempfile.mkdtemp()
+        open(os.path.join(root, "rows.csv"), "w").write("a,b\n1,2\n")
+        open(os.path.join(root, "report.html"), "w").write("<html><head></head><body><script>d3.csv('rows.csv')</script></body></html>")
+        sent = []
+
+        def run(args, **k):
+            sent.append((args, open(args[2]).read() if os.path.isfile(args[2]) else ""))
+            return {"ok": True, "data": {"space": {"ref": "me@r"}, "url": "u", "created": True}}
+        with mock.patch.object(server, "_chat_of", return_value={"id": "c1"}), mock.patch.object(server.store, "session_dir", return_value=root), \
+                mock.patch.object(server.A, "run", side_effect=run):
+            r = server.space_publish(None, {}, {"id": "c1", "path": "report.html", "name": "r"})
+            self.assertEqual(r["bundled"], ["rows.csv"])
+            self.assertIn('"rows.csv":["text/csv"', sent[0][1])
+            self.assertNotEqual(sent[0][0][2], os.path.join(root, "report.html"))      # a bundled copy, the chat file is untouched
+            self.assertFalse(os.path.exists(sent[0][0][2]))                            # temp copy removed after the upload
+            r = server.space_publish(None, {}, {"id": "c1", "content": "<svg></svg>", "filename": "My chart.html"})
+            self.assertEqual(r["path"], "shared/My-chart.html")
+            self.assertTrue(os.path.isfile(os.path.join(root, "shared", "My-chart.html")))
+            with self.assertRaises(server.Err):
+                server.space_publish(None, {}, {"id": "c1", "content": "x", "filename": "a.exe"})
+
+    def test_mentions_bring_another_chats_history_and_tools(self):
+        import server
+        rows = [{"k": "user", "text": "q%d" % i} if i % 2 == 0 else {"k": "msg", "blocks": [{"type": "text", "text": "a%d" % i}]} for i in range(10)]
+        get = lambda cid: {"id": cid, "title": "Sales"} if cid in ("aaaa1111", "bbbb2222") else None
+        with mock.patch.object(server.store, "get_session", side_effect=get), mock.patch.object(server.store, "history", return_value=rows):
+            more, tools = server.mentions({"id": "bbbb2222"}, "see @chat:aaaa1111:3 and @chat:bbbb2222 @chat:cccc3333 with @tool:git-mcp")
+        self.assertIn('chat "Sales" (@chat:aaaa1111, last 3 messages)', more)
+        self.assertIn("User: q8", more)
+        self.assertNotIn("q6", more)                                       # limit: only the last 3 messages
+        self.assertEqual(more.count("[History of the chat"), 1)            # itself and unknown chats skipped
+        self.assertEqual(tools, ["git-mcp"])
+        self.assertEqual(server.mentions({"id": "x"}, "plain text"), ("", []))
+
+    def test_work_chats_never_ask(self):
+        from aihubui import freechat
+        with mock.patch("builtins.open", side_effect=OSError):
+            self.assertIn("Never ask anything", freechat.system_text({"id": "w", "work": True}))
+            self.assertNotIn("Unattended run", freechat.system_text({"id": "c"}))
+        self.assertIn("```form block", freechat.FREE_HELP)                    # interactive chats are guided to ask with a form

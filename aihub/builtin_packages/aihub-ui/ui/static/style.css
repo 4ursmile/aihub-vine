@@ -245,6 +245,7 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--accent)
 .thinkd{margin:6px 0;border:1px solid var(--line);border-radius:10px;background:var(--soft);font-size:13px}.thinkd summary{cursor:pointer;padding:6px 11px;display:flex;gap:7px;align-items:center;color:var(--ink2)}.thinkb{padding:4px 14px 10px;color:var(--mute);font-style:italic;white-space:pre-wrap;line-height:1.6;max-height:300px;overflow:auto}
 @media(prefers-reduced-motion:reduce){.work2 .wbar,.w-head .spark,.spin{animation:none}}
 .bk.cb.long pre{max-height:190px;overflow:auto}
+.bk.cb.writing pre{max-height:7.5em;overflow:hidden;margin:0}
 .mcpopt{align-items:center;cursor:pointer}.mcpopt input{flex:none;margin:0 2px}
 
 /* answers never replay entry animations: blocks are rebuilt while text streams */
@@ -305,3 +306,13 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--accent)
 .dg-svg{padding:14px;display:grid;place-items:center;background:var(--surface);overflow:auto}.dg-svg svg{max-width:100%;height:auto;max-height:560px}
 .dg-host{height:380px;background:var(--surface)}.dg-host.off{display:none}.dg-map-host{height:340px;z-index:0}.dg-busy{padding:18px;color:var(--mute);font-size:13px}
 .dg-err{padding:12px 14px}.dg-err pre{margin:8px 0 0;max-height:200px;overflow:auto;font:12px var(--mono);background:var(--soft);padding:8px;border-radius:8px}
+/* block zoom + share (blocks.js zoom / richBar) */
+.bk.rich{position:relative}.bk-float{position:absolute;top:6px;right:8px;display:flex;gap:2px;padding:2px;border-radius:9px;background:var(--surface);border:1px solid var(--line);opacity:0;transition:opacity .15s;z-index:2}.bk.rich:hover .bk-float,.bk-float:focus-within,.bk-zoom .bk-float{opacity:1}
+.bk-zoom{position:fixed;inset:0;z-index:60;background:#14141399;backdrop-filter:blur(3px);display:grid;padding:4vh 4vw;animation:fade .2s}
+.bk-zoom>.bk{margin:0;width:100%;height:100%;max-width:none;overflow:auto;display:flex;flex-direction:column;background:var(--surface);box-shadow:var(--shl);animation:pop .28s var(--ease)}
+.bk-zoom>.bk>pre,.bk-zoom .tb-scroll,.bk-zoom .svgv{flex:1;max-height:none!important}.bk-zoom .svgbox svg,.bk-zoom .chart>svg{max-height:none;height:100%}.bk-zoom>.bk.long>pre{max-height:none}
+@media (prefers-reduced-motion:reduce){.bk-zoom,.bk-zoom>.bk{animation:none}}
+/* /create-work progress in a chat (app.js GenBar) */
+.genbar{margin:10px 0;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--surface);display:grid;gap:8px}.genbar-h{display:flex;gap:8px;align-items:center}.genbar-h .grow{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.genbar-track{height:4px;border-radius:4px;background:var(--soft2);overflow:hidden}.genbar-track i{display:block;height:100%;width:35%;border-radius:4px;background:var(--accent);animation:genbar 1.4s var(--ease) infinite}
+@keyframes genbar{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}@media (prefers-reduced-motion:reduce){.genbar-track i{animation:none;width:100%;opacity:.5}}

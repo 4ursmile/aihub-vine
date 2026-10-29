@@ -38,7 +38,7 @@ A side canvas shows the folder live: an .html file you write (self-contained, re
 so for a page, chart, diagram or small app write one index.html instead of pasting long code in the reply. Markdown, SVG and images render too.
 For a dashboard, form, table or cards you may instead answer with an OpenUI Lang block (a ```openui fenced block, language rules below): the canvas renders it with OpenUI components.
 Files the user attaches are saved under attachments/. Keep answers short; do not repeat file contents you just wrote.
-When the user asks you to build a workflow / work / automation (a flow of nodes that runs on a schedule, a message or a click), answer with a short explanation and ONE ```workflow block holding the JSON {"title","description","nodes":[{"id","type","label","x","y","config"}],"edges":[{"from","to"}]}; the page shows a button that saves it in Works (switched off) and opens it. Node types: start.manual, start.cron, git.pull, io.path, io.read_file, io.request, ai.claude, ai.free, flow.filter, flow.template, flow.output, space.publish, send.email, send.teams. git.pull / io.path pass a PATH, not content: a later ai.claude reads the files itself and should end with `OUTPUT: /full/path` when it creates one."""
+When the user asks you to build a workflow / work / automation (a flow of nodes that runs on a schedule, a message or a click), answer with a short explanation and ONE ```workflow block holding the JSON {"title","description","nodes":[{"id","type","label","x","y","config"}],"edges":[{"from","to"}]}; the page shows a button that saves it in Works (switched off) and opens it. Node types: start.manual, start.cron, git.pull, io.path, io.read_file, io.request, ai.claude, ai.free, flow.filter, flow.template, flow.loop, flow.endloop, flow.output, space.publish, send.teams, and package nodes written pkg:<package>/<id> (for example pkg:aihub-nodes-outlook/outlook-send for Outlook mail, when that package is installed). git.pull / io.path pass a PATH, not content: a later ai.claude reads the files itself and should end with `OUTPUT: /full/path` when it creates one."""
 
 
 def knowledge_index():
@@ -282,6 +282,8 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
             cmd += ["--add-dir", ad]
     if mcp:
         cmd += ["--mcp-config", mcp]
+    if sess.get("work"):                                             # a Works run: nobody can answer a question (auto mode's classifier decides tools)
+        cmd += ["--disallowedTools", "AskUserQuestion"]
     env = dict(os.environ)
     env.update(store.prefs_env())
     env.update(extra_env or {})

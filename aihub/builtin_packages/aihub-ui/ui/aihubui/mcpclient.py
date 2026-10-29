@@ -79,7 +79,9 @@ def sources():
 
 
 def public():
-    return [{"name": n, "origin": s["origin"], "command": s["command"]} for n, s in sorted(sources().items())]
+    st = store.mcp_state()
+    return [{"name": n, "origin": s["origin"], "command": s["command"], "off": n in st["off"], "default": n in st["default_on"], "tools_off": st["tools_off"].get(n, [])}
+            for n, s in sorted(sources().items())]
 
 
 class Server:
@@ -163,48 +165,143 @@ class Server:
                 pass
 
 
+META = "aihub_mcp"
+META_SPEC = {"name": META, "input_schema": {"type": "object", "required": ["action"], "properties": {
+    "action": {"type": "string", "enum": ["status", "retry", "enable", "disable"]},
+    "server": {"type": "string", "description": "MCP server name"},
+    "tool": {"type": "string", "description": "optional: one tool of that server (enable / disable only that tool)"}}},
+    "description": "Manage the MCP servers and tools of THIS chat. status = which servers run, which failed and why, which tools are off. retry = start a server again (after a failure). "
+                   "disable / enable = switch a whole server, or one tool of it (give `tool`), off or on for this chat. Use it when the user asks for any of this, or when a tool failed because its server is down."}
+
+
 class Toolbox:
-    """The tools of the chosen servers, named for the Messages API (`server__tool`, a-z 0-9 _ -, max 64)."""
+    """The tools of the chosen servers, named for the Messages API (`server__tool`, a-z 0-9 _ -, max 64).
+    Besides them the model gets `aihub_mcp` (status / retry / enable / disable) so a user can say "retry the github server" or "turn off the delete tool" in the chat.
+    OFF = servers never used in free chat (MCP settings); TOOLS_OFF = {server: [tool]} hidden from the model; PERSIST(kind, server, tool, on) saves a change for this chat."""
 
-    def __init__(self, names):
-        self.servers, self.notes, self.map, self.specs = [], [], {}, []
-        src = sources()
-        todo = [(n, src[n]) for n in names if n in src]
-        for n in names:
-            if n not in src:
-                self.notes.append("MCP server %s is not installed or enabled any more" % n)
-        started = []
-
-        def go(n, spec):
-            s = Server(n, spec)
-            try:
-                s.start()
-                started.append(s)
-            except Exception as e:
-                s.close()
-                self.notes.append("MCP server %s: %s" % (n, str(e)[:240]))
-        ts = [threading.Thread(target=go, args=a, daemon=True) for a in todo]
+    def __init__(self, names, off=(), tools_off=None, persist=None):
+        self.names = list(dict.fromkeys(names))
+        self.had = bool(self.names)                                  # something was switched on: aihub_mcp stays, even when every server is off
+        self.off = set(off)
+        self.tools_off = {k: set(v) for k, v in (tools_off or {}).items()}
+        self.persist = persist
+        self.src = sources()
+        self.servers, self.errors, self.map, self.specs, self.notes = {}, {}, {}, [], []
+        ts = []
+        for n in self.names:
+            why = self._blocked(n)
+            if why:
+                self.errors[n] = why
+            else:
+                ts.append(threading.Thread(target=self._start, args=(n,), daemon=True))
         [t.start() for t in ts]
         [t.join(START_TIMEOUT + 5) for t in ts]
-        for s in sorted(started, key=lambda x: x.name):
-            self.servers.append(s)
+        self.rebuild()
+        self.notes = ["MCP server %s: %s (ask me to retry it, or open the MCP page)" % (n, e) for n, e in self.errors.items()]
+
+    def _blocked(self, n):
+        if n in self.off:
+            return "switched off in the MCP settings"
+        if n not in self.src:
+            return "not installed or enabled any more"
+        return ""
+
+    def _start(self, n):
+        old = self.servers.pop(n, None)
+        if old:
+            old.close()
+        s = Server(n, self.src[n])
+        try:
+            s.start()
+            self.servers[n] = s
+            self.errors.pop(n, None)
+        except Exception as e:
+            s.close()
+            self.errors[n] = str(e)[:240]
+
+    def rebuild(self):
+        self.map, specs = {}, []
+        for n in sorted(self.servers):
+            s = self.servers[n]
             for t in s.tools:
-                api = NAME.sub("_", "%s__%s" % (s.name, t["name"]))[:64]
-                while api in self.map:
+                if t["name"] in self.tools_off.get(n, ()):
+                    continue
+                api = NAME.sub("_", "%s__%s" % (n, t["name"]))[:64]
+                while api in self.map or api == META:
                     api = api[:60] + "_%d" % len(self.map)
                 self.map[api] = (s, t["name"])
-                self.specs.append({"name": api, "description": (str(t.get("description") or "") + " (MCP server %s)" % s.name)[:1000],
-                                   "input_schema": t.get("inputSchema") if isinstance(t.get("inputSchema"), dict) else {"type": "object", "properties": {}}})
+                specs.append({"name": api, "description": (str(t.get("description") or "") + " (MCP server %s)" % n)[:1000],
+                              "input_schema": t.get("inputSchema") if isinstance(t.get("inputSchema"), dict) else {"type": "object", "properties": {}}})
+        if self.had:
+            specs.append(META_SPEC)
+        self.specs = specs
+
+    def _meta(self, a):
+        act, srv, tool = str(a.get("action") or ""), str(a.get("server") or "").strip(), str(a.get("tool") or "").strip()
+        if act == "status" or not srv:
+            if act not in ("status", ""):
+                return "give `server`", True
+            lines = []
+            for n in self.names:
+                if n in self.servers:
+                    ts = [t["name"] for t in self.servers[n].tools]
+                    off = [t for t in ts if t in self.tools_off.get(n, ())]
+                    lines.append("%s: running, %d tool(s)%s: %s" % (n, len(ts), ", off: " + ", ".join(off) if off else "", ", ".join(ts)[:600]))
+                else:
+                    lines.append("%s: NOT running - %s" % (n, self.errors.get(n, "unknown")))
+            rest = [n for n in self.src if n not in self.names]
+            return "\n".join(lines or ["no MCP server is on for this chat"]) + ("\nAvailable but off in this chat: " + ", ".join(rest) if rest else ""), False
+        if act not in ("retry", "enable", "disable"):
+            return "unknown action " + act, True
+        if srv not in self.src and srv not in self.names:
+            return "no MCP server called %s (known: %s)" % (srv, ", ".join(sorted(self.src)) or "none"), True
+        if tool and act != "retry":
+            known = [t["name"] for t in self.servers[srv].tools] if srv in self.servers else []
+            if known and tool not in known:
+                return "%s has no tool %s (tools: %s)" % (srv, tool, ", ".join(known)), True
+            (self.tools_off.setdefault(srv, set()).discard if act == "enable" else self.tools_off.setdefault(srv, set()).add)(tool)
+            self._save("tool", srv, tool, act == "enable")
+            self.rebuild()
+            return "%s tool %s of %s for this chat" % ("enabled" if act == "enable" else "disabled", tool, srv), False
+        if act == "disable":
+            if srv in self.names:
+                self.names.remove(srv)
+            old = self.servers.pop(srv, None)
+            old and old.close()
+            self.errors.pop(srv, None)
+            self._save("server", srv, "", False)
+            self.rebuild()
+            return "server %s is off for this chat" % srv, False
+        why = self._blocked(srv)
+        if why:
+            return "cannot start %s: %s" % (srv, why), True
+        if srv not in self.names:
+            self.names.append(srv)
+            self._save("server", srv, "", True)
+        self._start(srv)
+        self.rebuild()
+        if srv in self.servers:
+            return "%s is running with %d tool(s)" % (srv, len(self.servers[srv].tools)), False
+        return "%s still fails: %s" % (srv, self.errors.get(srv, "unknown error")), True
+
+    def _save(self, kind, srv, tool, on):
+        if self.persist:
+            try:
+                self.persist(kind, srv, tool, on)
+            except Exception:
+                pass
 
     def call(self, api, args):
         """-> (text, is_error). Tool output is returned as data for the model; images and other content are named, not passed."""
+        if api == META:
+            return self._meta(args if isinstance(args, dict) else {})
         s, name = self.map.get(api, (None, None))
         if not s:
             return "unknown tool " + api, True
         try:
             r = s.request("tools/call", {"name": name, "arguments": args if isinstance(args, dict) else {}}, CALL_TIMEOUT)
         except RuntimeError as e:
-            return str(e), True
+            return "%s (if the server died, call aihub_mcp with action retry and server %s)" % (e, s.name), True
         parts = []
         for c in r.get("content") or []:
             if isinstance(c, dict) and c.get("type") == "text":
@@ -216,5 +313,20 @@ class Toolbox:
         return "\n".join(parts)[:20000], bool(r.get("isError"))
 
     def close(self):
-        for s in self.servers:
+        for s in list(self.servers.values()):
             s.close()
+
+
+def probe(name):
+    """Start one server, list its tools, stop it. -> {"ok", "error", "tools": [{name, description}]} (the MCP page's Test button)."""
+    spec = sources().get(name)
+    if not spec:
+        return {"ok": False, "error": "not installed or enabled", "tools": []}
+    s = Server(name, spec)
+    try:
+        s.start()
+        return {"ok": True, "error": "", "tools": [{"name": t["name"], "description": str(t.get("description") or "")[:200]} for t in s.tools]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300], "tools": []}
+    finally:
+        s.close()

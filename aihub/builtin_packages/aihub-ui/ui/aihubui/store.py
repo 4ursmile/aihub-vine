@@ -545,6 +545,8 @@ def clean_work(w):
     edges = [{"from": e["from"], "to": e["to"]} for e in list(w.get("edges", []))[:400] if isinstance(e, dict) and e.get("from") in ids and e.get("to") in ids and e["from"] != e["to"]]
     w = {"id": wid, "title": str(w.get("title") or "Untitled")[:80], "enabled": bool(w.get("enabled")), "nodes": nodes, "edges": edges, "updated": time.time(),
          "description": " ".join(str(w.get("description") or "").split())[:300]}
+    if re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", str(src.get("package") or "")):
+        w["package"] = src["package"]                               # imported from a workflow package: its runs count as uses of it
     try:
         w["keep"] = min(500, max(1, int(src.get("keep") or 40)))
     except (TypeError, ValueError):
@@ -572,12 +574,35 @@ def ui_mcp():
     return _read(os.path.join(ui_dir(), "mcp.json"), {"mcpServers": {}})
 
 
+def _names(v):
+    return [str(x)[:64] for x in v if isinstance(x, str)][:100] if isinstance(v, list) else []
+
+
+def mcp_state():
+    """Free chat MCP settings: `off` = servers never used in free chat, `default_on` = ticked in new free chats, `tools_off` = {server: [tool]} never offered."""
+    d = _read(os.path.join(ui_dir(), "mcp_state.json"), {})
+    d = d if isinstance(d, dict) else {}
+    t = d.get("tools_off") if isinstance(d.get("tools_off"), dict) else {}
+    return {"off": _names(d.get("off")), "default_on": _names(d.get("default_on")), "tools_off": {str(k)[:64]: _names(v) for k, v in t.items() if _names(v)}}
+
+
+def save_mcp_state(new):
+    d = mcp_state()
+    for k in ("off", "default_on"):
+        if k in new:
+            d[k] = _names(new[k])
+    if isinstance(new.get("tools_off"), dict):
+        d["tools_off"] = {str(k)[:64]: _names(v) for k, v in new["tools_off"].items() if _names(v)}
+    _write(os.path.join(ui_dir(), "mcp_state.json"), d)
+    return d
+
+
 def save_ui_mcp(d):
     _write(os.path.join(ui_dir(), "mcp.json"), d)
 
 
 # ---- preferences (not secret): policy guard for UI chats, auto-compact
-PREF_DEFAULTS = {"policy": "off", "autocompact": True, "compact_pct": 80, "claude_settings": "", "window": 1_000_000, "free_model": "", "model_picker": True, "alerts": []}
+PREF_DEFAULTS = {"policy": "off", "autocompact": True, "compact_pct": 80, "claude_settings": "", "window": 1_000_000, "free_model": "", "model_picker": True, "alerts": [], "auto_update": "on"}
 ALERT_PERIODS = ("today", "week", "month", "quarter", "last")
 
 
@@ -630,6 +655,8 @@ def save_prefs(new):
                 raise ValueError("cannot use %s: %s" % (full, e))
             c = full
         d["claude_settings"] = c
+    if new.get("auto_update") in ("on", "notify", "off"):
+        d["auto_update"] = new["auto_update"]
     if isinstance(new.get("model_picker"), bool):
         d["model_picker"] = new["model_picker"]
     try:

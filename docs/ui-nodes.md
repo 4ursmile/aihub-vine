@@ -132,7 +132,7 @@ and prints **one JSON line** as the last thing on stdout:
 - `output` is a string or a JSON value (stringified for downstream). `data` is a dict that travels along as `{{data.key}}`.
 - `{"ok": false, "error": "why"}` or a non-zero exit fails the node: the branch stops and the run is `failed`. Write diagnostics to stderr.
 - `{"output": {"skip": true}}` ends the branch quietly (like a filter that did not match).
-- Template placeholders inside your own `config` values (`{{input}}`) are **not** expanded for you; do it in the program (the example does).
+- Template placeholders inside your own `config` values (`{{input}}`) are **not** expanded for you unless the node lists those fields in `"templated": ["to", "subject"]` (then the engine fills `{{input}}`, `{{trigger}}`, `{{data.x}}` before the program starts); otherwise do it in the program (the example does).
 - `workdir` is the run's chat folder when a Claude node ran before you, else your home folder. Files written there show in the chat's canvas.
 
 ### Trigger nodes: a process that stays up
@@ -287,8 +287,56 @@ Data moves between nodes as **pointers**: a path, never the content, so parquet,
 | `ai.claude` | Gets pointers in `{{input}}` and `{{data.path}}`; the folders are added with `--add-dir`, so Claude opens the files itself. End a node that creates a file with `OUTPUT: /full/path`. |
 | `ai.free` Free chat | Direct API call (no Claude Code). Optional MCP servers (tool loop); "paste the text of small files" is opt-in (30 KB). |
 | `space.publish` Publish to Space | `aihub space publish` of a file or folder (index.html) as doc / slides / report / pdf / sheet / dashboard / html. Same name = new revision. Private unless set. Path empty = the last existing path of the input. |
-| `send.email` Send email (Outlook) | Classic Outlook through pywin32 COM (Windows): send, draft or display; attachments are paths. Other systems get a clear error. |
+| `send.email` (legacy) | Moved to the package `aihub-nodes-outlook` (see below). Old works keep working once it is installed; without it the node fails with the install command. |
 
 `data` of upstream nodes is merged into `{{data.x}}` of the next node (later inputs win). Example: `ui/samples/git-data-dashboard.work.json` (git data -> Claude builds `dashboard/` -> Space).
 
 **Generate a work**: Works page "Generate a workflow" box, `/workflow <description>` in a chat (both `POST /api/works/generate`), or an answer with a ```` ```workflow ```` JSON block (button -> `POST /api/works/make`). Generated works only use known node types, have secrets emptied and are saved switched off (`works.checked_work`).
+
+
+## Node contract: inputs and outputs (standard keys)
+
+Every node reads one document and hands on `{text, data}` (see "Action nodes"). To make nodes combine without glue, follow these conventions:
+
+| Part | Rule |
+| --- | --- |
+| **Input** | `config` (the node's own fields), `input` / `inputs` (text and `data` of the parents), `workdir`. Declare each setting as a field; give it a `help` that says what an empty value does. |
+| **`takes`** | `"takes": ["to", "subject", "body"]` in the `*.node.json`: when such a field is EMPTY, the engine fills it from `{{data.<same name>}}` of the nodes before (a list becomes one value per line). This is how a Loop over `[{"to": ..., "subject": ...}]` drives a node without any `{{data.x}}` typed into fields. Secret fields are never filled. |
+| **`templated`** | Fields in which `{{input}}`, `{{trigger}}`, `{{data.key}}` are expanded before the program starts. |
+| **Output** | `output` (text for the next node), `data` (a dict that travels as `{{data.key}}`), `log`. List the keys in `"outputs": [...]` so the editor suggests them; `"out": "text|path|json|url"` plus `"out_note"` say what kind of thing `output` is, `"needs"` / `"needs_note"` what must come before. |
+| **Standard data keys** | Mail: `to`, `cc`, `bcc`, `subject`, `body`, `attachments` (a list of file paths); mail triggers also give `from`, `from_name`, `received`, `message_id`. Files and repos: `path` (one pointer), `paths`. HTTP: `status`, `json`. Loop: `item`, `index`, `total`. Use these names so nodes of different packages fit together. |
+| **Environment** | A package whose node needs libraries declares `[python] requires` in `aihub.toml`; the node then runs with the package's own venv (`{python}` = that interpreter, otherwise the UI's). An OS limit goes in `[requires] os = [...]` so the install refuses other systems. A program still checks for what it needs and fails with the fix in `error`. |
+| **Errors** | `{"ok": false, "error": "what to do"}`. Never include a secret. |
+
+## Loop and End loop
+
+`flow.loop` (Loop, for each) repeats every node after it once per item of a list, one item after the other:
+
+- **The list**: field *The list* (default `{{input}}`), written as `lines`, `comma`, `regex` (separator) or `json` (a list of strings or objects, also inside a ```` ```json ```` fence). Repeated items are skipped (untick *Skip repeated items*). `limit` (default 100, max 1000) refuses longer lists up front; `delay` pauses between items (rate limits); `on_error` = `stop` (default; the run fails at the first bad item) or `continue`.
+- **Inside a pass**: `{{input}}` and `{{data.item}}` = the item, `{{data.index}}` (from 1), `{{data.total}}`. An object item also puts its keys in `{{data.<key>}}`, so `[{"to": "a@x.com", "body": "Hi A"}]` feeds a mail node through `takes`.
+- **Body**: everything connected after the loop, up to an `flow.endloop`. Claude / Free chat nodes start a fresh chat for every pass (untick *fresh chat* to share one; long lists then grow the context).
+- **End loop (collect)**: runs ONCE after the last pass. `{{input}}` = the last text of each pass joined (`lines`, `blank line` or `json`), `{{data.results}}` = the list, `{{data.count}}`, `{{data.failed}}`. Without it nothing runs after the loop.
+- Not supported: a loop inside a loop. Passes run in order, not in parallel. The loop node's log lists every pass with ok / FAILED.
+
+Example: *Start* -> *Claude* ("list the senders of last week, one address per line") -> *Loop* -> *Claude* ("write a thank-you mail for `{{data.item}}`") -> *Send email (Outlook)* (To empty; put `{{data.item}}` in To) -> *End loop* -> *Output*.
+
+## The Outlook package (`aihub-nodes-outlook`, Windows)
+
+The Outlook nodes are not built in. `aihub install aihub-nodes-outlook` refuses other systems (`requires.os = ["windows"]`), creates `~/.aihub/venvs/aihub-nodes-outlook` with `pywin32` and the UI runs these nodes with that python. Needs classic Outlook, signed in (the new Outlook has no COM).
+
+| Node | What it does |
+| --- | --- |
+| **Start: Outlook mail received** (`outlook-receive`, trigger) | Polls a folder (default every 20 s) and starts a run per NEW mail (only mail that arrives while the work is On) that matches ALL filled conditions, each a case-insensitive regex: *Sender* (tested on `Name <address>`), *Subject*, *Headers* (raw internet headers, e.g. `^List-Id:.*alerts`), *Content* (the body). Options: unread only, mark as read, save attachments. Event text = subject, sender and body; data = `from`, `from_name`, `subject`, `to`, `cc`, `body`, `received`, `attachments`, `message_id`. The generic *Only start when the text matches* filter still applies. |
+| **Send email (Outlook)** (`outlook-send`) | Send, save as draft or display. Empty `to` / `cc` / `bcc` / `subject` / `body` / `attachments` take the standard keys from the node before (`takes`); a blank body uses the incoming text. |
+
+Example: *Start: mail received* (Sender `@customer\.com`, Subject `^\[urgent\]`) -> *Claude* ("draft a reply to `{{data.body}}`") -> *Send email* (To `{{data.from}}`, Subject `Re: {{data.subject}}`, Action draft).
+
+## Free chat and MCP servers
+
+Free chat can use stdio MCP servers (from installed packages, the UI's own list, Claude Code's user servers). **MCP servers page > Free chat tools**: *Allowed* (master switch), *On in new chats* (ticked automatically the first time a chat switches to Free chat), *Test / Retry* (starts the server, lists its tools, shows the error when it fails) and a switch per tool to hide it from the model. Stored in `~/.aihub/ui/mcp_state.json`; the engine menu of a chat ticks servers for that chat and shows servers that are switched off.
+
+The model also gets the tool `aihub_mcp` (`status`, `retry`, `enable`, `disable`; optional `server`, `tool`). So in a chat you can say "the github server failed, try again", "turn off the delete tools of filesystem" or "which tools do you have?" and the model does it; a change is kept for that chat (`mcp`, `mcp_off` fields). A server switched off on the MCP page cannot be re-enabled by the model. A failed start is noted in the chat; a tool error that looks like a dead server tells the model to retry.
+
+## Updating aihub-ui by itself
+
+A thread (`aihubui/selfupdate.py`) asks the hub for the newest `aihub-ui` every `UI_UPDATE_MINUTES` (default 360). Settings > Updates (pref `auto_update`): **Update and restart** (default), **Only tell me**, **Off**; *Check now* forces a check. With a newer version it waits until nothing runs for 60 s (no chat answering, no free chat, no work run, no install terminal), runs `aihub update aihub-ui`, then restarts: a clean exit when started by `aihub run` (the supervisor restarts the service, same address and key) or an in-place exec otherwise. A failed update is reported on the card and tried again later; the running copy is not touched until the update succeeded. `GET /api/update`, `POST /api/update/check`.

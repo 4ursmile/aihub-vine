@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Send email through the Outlook desktop app (classic / "legacy" Outlook) with pywin32 COM automation. Windows only.
-Needs `pip install pywin32` and Outlook signed in. Action: send, save a draft, or just show the window. JSON on stdin, JSON on stdout."""
+Runs in this package's own environment (pywin32 comes from aihub.toml [python] requires) and needs Outlook signed in.
+Action: send, save a draft, or just show the window. JSON on stdin, JSON on stdout."""
 import json
 import os
 import re
@@ -48,7 +49,7 @@ try:
     import pythoncom
     import win32com.client
 except ImportError:
-    done(ok=False, error="pywin32 is missing: run  python -m pip install pywin32  with the python that runs the UI service")
+    done(ok=False, error="pywin32 is missing in %s. Reinstall the package so its environment is rebuilt:  aihub uninstall aihub-nodes-outlook && aihub install aihub-nodes-outlook" % sys.executable)
 pythoncom.CoInitialize()
 try:
     app = win32com.client.Dispatch("Outlook.Application")

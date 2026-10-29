@@ -1,0 +1,23 @@
+{
+  "id": "outlook-receive",
+  "title": "Start: Outlook mail received",
+  "kind": "trigger",
+  "group": "Mail",
+  "description": "Starts a run for each new mail in an Outlook folder that matches your conditions (regex on sender, subject, headers and content). Windows, classic Outlook. Only mail that arrives while the work is On.",
+  "run": ["{python}", "{pkg}/nodes/outlook_receive.py"],
+  "outputs": ["from", "from_name", "subject", "to", "cc", "body", "received", "attachments", "message_id"],
+  "out": "text",
+  "out_note": "Subject, sender and body; {{data.from}}, {{data.subject}}, {{data.body}}, {{data.attachments}}",
+  "guide": "Watches an Outlook folder (polled) and starts the work for each NEW mail that matches ALL the conditions you fill in (regex, case-insensitive; empty = no condition).\n- Sender: tested against 'Name <address>'.\n- Header: the raw transport headers (X-..., List-Id, Received ...), for example ^X-Priority: 1.\n- Content: the mail body.\nThe event text is the subject, sender and body; {{data.from}} / {{data.subject}} / {{data.body}} / {{data.attachments}} (saved file paths, when ticked) reach the next nodes, so a Send email node can answer {{data.from}} directly. The generic 'Only start when the text matches' filter still applies on top.",
+  "fields": [
+    {"name": "folder", "label": "Folder", "type": "select", "options": ["inbox", "junk", "sent", "drafts"], "default": "inbox"},
+    {"name": "from_regex", "label": "Sender matches (regex)", "type": "text", "default": "", "help": "Example: @example\\.com>|^Alice"},
+    {"name": "subject_regex", "label": "Subject matches (regex)", "type": "text", "default": ""},
+    {"name": "header_regex", "label": "Headers match (regex)", "type": "text", "default": "", "help": "Raw internet headers, e.g. ^List-Id:.*alerts"},
+    {"name": "body_regex", "label": "Content matches (regex)", "type": "text", "default": ""},
+    {"name": "unread_only", "label": "Only unread mail", "type": "checkbox", "default": true},
+    {"name": "mark_read", "label": "Mark the mail as read when it starts a run", "type": "checkbox", "default": false},
+    {"name": "save_attachments", "label": "Save attachments (paths in {{data.attachments}})", "type": "checkbox", "default": false},
+    {"name": "poll", "label": "Check every (seconds)", "type": "number", "default": 20, "help": "5-3600"}
+  ]
+}

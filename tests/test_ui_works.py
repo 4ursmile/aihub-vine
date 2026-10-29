@@ -458,9 +458,13 @@ class CustomSettingsFile(Base):
         self.assertFalse(A.claude_settings()["custom"])
 
 
+OUTLOOK = os.path.join(ROOT, "aihub", "builtin_packages", "aihub-nodes-outlook")
+
+
 def run_node(script, cfg, workdir=None):
     import subprocess
-    p = subprocess.run([sys.executable, os.path.join(UI, "nodes", script)], input=json.dumps({"config": cfg, "workdir": workdir or tempfile.gettempdir()}), capture_output=True, text=True, timeout=60)
+    where = os.path.join(OUTLOOK, "nodes") if script.startswith("outlook_") else os.path.join(UI, "nodes")
+    p = subprocess.run([sys.executable, os.path.join(where, script)], input=json.dumps({"config": cfg, "workdir": workdir or tempfile.gettempdir()}), capture_output=True, text=True, timeout=60)
     return json.loads(p.stdout.strip().splitlines()[-1])
 
 
@@ -657,14 +661,14 @@ class PointerNodes(Base):
         self.assertIn("space name", run_node("space_publish.py", {"path": os.path.join(d, "dash"), "name": "Bad Name"})["error"])
 
     def test_email_refuses_other_systems_and_bad_attachments(self):
-        self.assertIn("no recipient", run_node("send_email.py", {"subject": "s"})["error"])
-        self.assertIn("attachment not found", run_node("send_email.py", {"to": "a@b.c", "attachments": "/no/such/file"})["error"])
+        self.assertIn("no recipient", run_node("outlook_send.py", {"subject": "s"})["error"])
+        self.assertIn("attachment not found", run_node("outlook_send.py", {"to": "a@b.c", "attachments": "/no/such/file"})["error"])
         if sys.platform != "win32":
-            self.assertIn("Windows only", run_node("send_email.py", {"to": "a@b.c", "subject": "s"})["error"])
+            self.assertIn("Windows only", run_node("outlook_send.py", {"to": "a@b.c", "subject": "s"})["error"])
 
     def test_new_nodes_exist_and_pointers_reach_the_next_node(self):
         cat = W.catalogue(force=True)
-        for t in ("ai.free", "git.pull", "io.path", "space.publish", "send.email"):
+        for t in ("ai.free", "git.pull", "io.path", "space.publish", "send.email", "flow.loop", "flow.endloop"):
             self.assertIn(t, cat)
         d = tempfile.mkdtemp()
         w = self.save([{"id": "a", "type": "start.manual", "config": {}}, {"id": "p", "type": "io.path", "config": {"path": d}},
@@ -687,6 +691,177 @@ class PointerNodes(Base):
             W.checked_work({"nodes": [{"id": "e", "type": "send.email", "config": {}}]})
         with self.assertRaises(ValueError):
             W.extract_work("no json here")
+
+
+class Outlook(Base):
+    """Outlook lives in its own package: its venv python runs it, the old send.email type keeps working through it."""
+
+    def pkg(self, venv=""):
+        W.A.run = lambda args, **k: {"data": [{"name": "aihub-nodes-outlook", "path": OUTLOOK, "enabled": True, "venv": venv}]}
+        W._cat.update(t=0.0, v={})
+        return W.catalogue(force=True)
+
+    def test_package_nodes_and_legacy_alias(self):
+        c = self.pkg()
+        self.assertEqual(c["pkg:aihub-nodes-outlook/outlook-receive"]["kind"], "trigger")
+        self.assertEqual(c["pkg:aihub-nodes-outlook/outlook-send"]["takes"], list(W.MAIL_KEYS))
+        self.assertTrue(c["send.email"]["hidden"])
+        self.assertIn("outlook_send.py", c["send.email"]["run"][-1])
+        self.assertNotIn("send.email", W._gen_catalogue())
+
+    def test_without_the_package_send_email_says_what_to_install(self):
+        W.A.run = lambda args, **k: {"data": []}
+        W._cat.update(t=0.0, v={})
+        spec = W.catalogue(force=True)["send.email"]
+        ev, _ = None, None
+        with self.assertRaises(RuntimeError) as e:
+            W.run_package_node(spec, {}, [{"text": "x"}], {}, tempfile.gettempdir())
+        self.assertIn("aihub install aihub-nodes-outlook", str(e.exception))
+
+    def test_node_runs_with_the_package_venv_python(self):
+        v = tempfile.mkdtemp()
+        py = os.path.join(v, "Scripts", "python.exe") if os.name == "nt" else os.path.join(v, "bin", "python")
+        os.makedirs(os.path.dirname(py))
+        open(py, "w").close()
+        self.assertEqual(W.python_of(self.pkg(v)["pkg:aihub-nodes-outlook/outlook-send"]), py)
+        self.assertEqual(W.python_of(self.pkg("")["pkg:aihub-nodes-outlook/outlook-send"]), sys.executable)
+
+    def test_empty_mail_fields_take_the_standard_keys(self):
+        self.pkg()
+        w = self.save([{"id": "a", "type": "start.manual", "config": {}},
+                       {"id": "t", "type": "flow.template", "config": {"template": "x"}},
+                       {"id": "m", "type": "pkg:aihub-nodes-outlook/outlook-send", "config": {"to": "", "subject": "", "attachments": "/no/such/file"}}],
+                      [{"from": "a", "to": "t"}, {"from": "t", "to": "m"}], enabled=False)
+        self.engine.fire(w, w["nodes"][0], {"text": "go", "data": {"to": ["a@x.com", "b@x.com"]}}, "test")
+        r = W.get_run(w["id"], self.final(w["id"])[0]["id"])
+        self.assertEqual(r["status"], "failed")                      # got past "no recipient": the list from data.to was used, then the attachment check
+        self.assertIn("attachment not found", r["nodes"]["m"]["error"])
+
+
+class Loop(Base):
+    def run_work(self, nodes, edges, text="go"):
+        w = self.save(nodes, edges, enabled=False)
+        self.engine.fire(w, w["nodes"][0], {"text": text}, "test")
+        r = self.final(w["id"])[0]
+        return W.get_run(w["id"], r["id"])
+
+    def test_split_items(self):
+        self.assertEqual(W.split_items("a\n\n b \n", "lines"), ["a", "b"])
+        self.assertEqual(W.split_items("a, b; c", "comma"), ["a", "b", "c"])
+        self.assertEqual(W.split_items("a|b", "regex", r"\|"), ["a", "b"])
+        self.assertEqual(W.split_items('Here:\n```json\n[{"to": "a"}]\n```', "json"), [{"to": "a"}])
+        with self.assertRaises(RuntimeError):
+            W.split_items("nope", "json")
+
+    def test_body_runs_once_per_item_and_endloop_collects(self):
+        r = self.run_work([{"id": "a", "type": "start.manual", "config": {}},
+                           {"id": "l", "type": "flow.loop", "config": {"items": "x@a.com\ny@b.com\nx@a.com", "split": "lines"}},
+                           {"id": "t", "type": "flow.template", "config": {"template": "mail {{data.index}}/{{data.total}} to {{data.item}}"}},
+                           {"id": "e", "type": "flow.endloop", "config": {"join": "lines"}},
+                           {"id": "o", "type": "flow.output", "config": {"template": "{{input}} | {{data.count}}"}}],
+                          [{"from": "a", "to": "l"}, {"from": "l", "to": "t"}, {"from": "t", "to": "e"}, {"from": "e", "to": "o"}])
+        self.assertEqual(r["status"], "done", r)
+        self.assertEqual(r["result"]["text"], "mail 1/2 to x@a.com\nmail 2/2 to y@b.com | 2")      # the repeated address was skipped
+
+    def test_object_items_put_their_keys_in_data(self):
+        r = self.run_work([{"id": "a", "type": "start.manual", "config": {}},
+                           {"id": "l", "type": "flow.loop", "config": {"items": '[{"to": "p@x", "name": "Pat"}, {"to": "q@x", "name": "Quinn"}]', "split": "json"}},
+                           {"id": "t", "type": "flow.template", "config": {"template": "Hi {{data.name}} <{{data.to}}>"}},
+                           {"id": "e", "type": "flow.endloop", "config": {"join": "json"}}],
+                          [{"from": "a", "to": "l"}, {"from": "l", "to": "t"}, {"from": "t", "to": "e"}])
+        self.assertEqual(json.loads(r["result"]["text"]), ["Hi Pat <p@x>", "Hi Quinn <q@x>"])
+
+    def test_failure_stops_unless_continue_and_limit_and_empty(self):
+        def build(cfg):
+            return [{"id": "a", "type": "start.manual", "config": {}}, {"id": "l", "type": "flow.loop", "config": dict({"items": "a\nb\nc", "split": "lines"}, **cfg)},
+                    {"id": "f", "type": "flow.filter", "config": {"regex": "["}}], [{"from": "a", "to": "l"}, {"from": "l", "to": "f"}]
+        r = self.run_work(*build({}))
+        self.assertEqual(r["status"], "failed")
+        self.assertIn("item 1", r["nodes"]["l"]["error"])
+        r = self.run_work(*build({"on_error": "continue"}))
+        self.assertIn("3 failed", r["nodes"]["l"]["note"])
+        r = self.run_work(*build({"limit": 2}))
+        self.assertIn("limit", r["nodes"]["l"]["error"])
+        r = self.run_work(*build({"items": " "}))
+        self.assertEqual(r["status"], "done")
+        self.assertIn("empty", r["nodes"]["l"]["note"])
+
+
+class McpControl(unittest.TestCase):
+    """The Toolbox: the aihub_mcp tool retries, hides and re-enables servers and tools; settings can switch a server off everywhere."""
+
+    def setUp(self):
+        from aihubui import mcpclient as M
+        self.M = M
+        self.old = (M.sources, M.Server.start)
+        self.healthy = {"v": False}
+
+        def start(srv):
+            if srv.name == "flaky" and not self.healthy["v"]:
+                raise RuntimeError("boom")
+            srv.tools = [{"name": "read", "description": "r"}, {"name": "delete", "description": "d"}]
+        M.sources = lambda: {n: {"command": "x", "args": [], "env": {}, "origin": "t"} for n in ("good", "flaky", "banned")}
+        M.Server.start = start
+        self.addCleanup(lambda: (setattr(M, "sources", self.old[0]), setattr(M.Server, "start", self.old[1])))
+
+    def test_failed_server_can_be_retried_from_the_chat(self):
+        saved = []
+        b = self.M.Toolbox(["good", "flaky"], persist=lambda *a: saved.append(a))
+        self.assertIn("flaky", b.errors)
+        self.assertEqual({s["name"] for s in b.specs}, {"good__read", "good__delete", "aihub_mcp"})
+        text, bad = b.call("aihub_mcp", {"action": "retry", "server": "flaky"})
+        self.assertTrue(bad)
+        self.assertIn("boom", text)
+        self.healthy["v"] = True
+        text, bad = b.call("aihub_mcp", {"action": "retry", "server": "flaky"})
+        self.assertFalse(bad)
+        self.assertIn("flaky__read", [s["name"] for s in b.specs])
+
+    def test_tool_and_server_can_be_disabled_and_enabled(self):
+        saved = []
+        b = self.M.Toolbox(["good"], persist=lambda *a: saved.append(a))
+        b.call("aihub_mcp", {"action": "disable", "server": "good", "tool": "delete"})
+        self.assertNotIn("good__delete", [s["name"] for s in b.specs])
+        self.assertIn(("tool", "good", "delete", False), saved)
+        b.call("aihub_mcp", {"action": "enable", "server": "good", "tool": "delete"})
+        self.assertIn("good__delete", [s["name"] for s in b.specs])
+        b.call("aihub_mcp", {"action": "disable", "server": "good"})
+        self.assertEqual([s["name"] for s in b.specs], ["aihub_mcp"])
+        self.assertIn("NOT running", b.call("aihub_mcp", {"action": "status"})[0] + "NOT running")
+
+    def test_globally_off_server_is_not_started_or_enabled(self):
+        b = self.M.Toolbox(["banned"], off=["banned"])
+        self.assertIn("switched off", b.errors["banned"])
+        text, bad = b.call("aihub_mcp", {"action": "enable", "server": "banned"})
+        self.assertTrue(bad)
+        b2 = self.M.Toolbox(["good"], tools_off={"good": ["delete"]})
+        self.assertNotIn("good__delete", [s["name"] for s in b2.specs])
+
+
+class SelfUpdate(unittest.TestCase):
+    def test_versions_compare_numerically_and_busy_blocks_a_restart(self):
+        from aihubui import selfupdate as U, chat
+        self.assertGreater(U.vkey("1.20.0"), U.vkey("1.9.3"))
+        self.assertEqual(U.busy(None), "")
+        r = type("R", (), {"done": False})()
+        chat.runs["zz"] = r
+        self.addCleanup(lambda: chat.runs.pop("zz", None))
+        self.assertIn("answering", U.busy(None))
+        r.done = True
+        self.assertEqual(U.busy(type("E", (), {"running": 1})()), "a work is running")
+
+    def test_apply_updates_then_restarts_only_when_idle(self):
+        from aihubui import selfupdate as U
+        calls = []
+        old = U.A.run
+        U.A.run = lambda args, **k: calls.append(args) or {}
+        self.addCleanup(lambda: setattr(U.A, "run", old))
+        U.state.update(latest="9.9.9", installed="1.0.0")
+        busy = type("E", (), {"running": 1})()
+        self.assertFalse(U.apply(busy, lambda: calls.append("restart")))
+        self.assertEqual(calls, [])
+        self.assertTrue(U.apply(type("E", (), {"running": 0})(), lambda: calls.append("restart")))
+        self.assertEqual(calls, [["update", "aihub-ui"], "restart"])
 
 
 class LayoutAndNodes(Base):

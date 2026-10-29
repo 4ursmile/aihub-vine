@@ -78,7 +78,7 @@
     "prompt": "You are a staff engineer writing a one-screen briefing for a busy teammate.\nAnswer in {{data.language}}. Focus: {{data.focus}}.\n\nUse the sources below. Structure:\n1. **What it is** - two sentences.\n2. **Health** - stars, activity, license, open issues (from the JSON), one line each in a small table.\n3. **{{data.focus}}** - 3-5 bullets, concrete, from the README.\n4. **Changes since the earlier briefings** - only if earlier ones are included; say 'first briefing' otherwise.\n5. **Next step** - one suggestion.\n\nNo preamble.\n\n{{input}}",
     "model": "sonnet",
     "effort": "medium",
-    "mode": "edits",
+    "mode": "auto",
     "fresh": false
    }
   },
