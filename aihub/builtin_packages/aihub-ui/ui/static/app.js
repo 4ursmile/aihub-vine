@@ -10,6 +10,24 @@ import { UsagePage, AlertBar, useAlerts } from "./usage.js";
 import { shareToSpace } from "./space.js";
 
 // ---------- api
+// Accent palettes of the hub (same names as the hub's Settings > Site): [light, dark] -> accent, hover, tinted background.
+const PALETTE = {
+  blue: [["#0071e3", "#005bb8", "#e6f0fc"], ["#0a84ff", "#409cff", "#1d2b3d"]], indigo: [["#5856d6", "#4745b0", "#ececfa"], ["#8886f5", "#a3a2f7", "#2a2a44"]],
+  purple: [["#a03fd0", "#8431ae", "#f3e8fa"], ["#bf5af2", "#cc7cf5", "#34264a"]], pink: [["#cc2d65", "#a82454", "#fae6ed"], ["#ff375f", "#ff6482", "#44222c"]],
+  red: [["#d70015", "#b00011", "#fbe6e8"], ["#ff453a", "#ff6961", "#44231f"]], orange: [["#b35000", "#8f4000", "#faeedf"], ["#ff9f0a", "#ffb340", "#40301a"]],
+  claude: [["#b9573a", "#9c4630", "#fbeee8"], ["#d97757", "#e8896b", "#3b2d27"]], green: [["#17803a", "#126630", "#e3f4e8"], ["#30d158", "#5ddc7c", "#1d3a27"]],
+  teal: [["#087c7c", "#066363", "#e1f3f3"], ["#40c8e0", "#6dd5e8", "#1c3a40"]],
+};
+const FAVICON = "data:image/svg+xml," + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='#14141f'/><path d='M6 26 16 6l10 20M10.5 19.5H16' fill='none' stroke='#ff6a3d' stroke-width='3.2' stroke-linejoin='miter' stroke-linecap='square'/><path d='M19.5 19.5h3' stroke='#19e6d2' stroke-width='3.2'/></svg>");
+function applyBrand(b) {
+  if (!b || !b.theme) return;
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches, [a, h, bg] = PALETTE[b.theme][dark ? 1 : 0] ? PALETTE[b.theme][dark ? 1 : 0] : PALETTE.claude[0], st = document.documentElement.style;
+  if (b.theme !== "claude") { st.setProperty("--accent", a); st.setProperty("--accent2", h); st.setProperty("--accentbg", bg); st.setProperty("--on", dark ? "#000" : "#fff"); }
+  else ["--accent", "--accent2", "--accentbg", "--on"].forEach((k) => st.removeProperty(k));       // the built-in palette already is Claude orange
+  if (b.name) document.title = b.name;
+  if (b.logo) { const l = document.querySelector("link[rel=icon]"); if (l) l.href = b.logo; }
+}
+
 async function api(path, { method = "GET", body, signal } = {}) {
   const r = await fetch("/api/" + path, { method, signal, headers: method === "GET" ? {} : { "Content-Type": "application/json", "X-AIHub-UI": "1" }, body: body === undefined ? undefined : JSON.stringify(body) });
   const d = await r.json().catch(() => ({}));
@@ -296,20 +314,22 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash }) {
   const showEl = (e) => { setEls((l) => [...l, e].slice(-8)); setTab("elements"); setOpen(true); };
   const sm = /^\/([\w:.-]*)$/.exec(text), pool = sm ? [...UI_CMDS.map((c) => ({ ...c, source: "ui" })), ...works.map((x) => ({ name: "work:" + x.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""), description: "Run work: " + x.title, source: "work", wid: x.id })), ...slash.packages, ...slash.claude] : [];
   const items = sm ? pool.filter((c) => c.name.toLowerCase().includes(sm[1].toLowerCase())).sort((a, b) => (b.name.toLowerCase().startsWith(sm[1].toLowerCase()) ? 1 : 0) - (a.name.toLowerCase().startsWith(sm[1].toLowerCase()) ? 1 : 0)).slice(0, 40) : [];
-  const mm = !sm && /(?:^|\s)@([\w:-]*)$/.exec(text), mq = mm ? mm[1].toLowerCase() : "";
+  const mm = !sm && /(?:^|\s)@([\w:.@\/-]*)$/.exec(text), mq = mm ? mm[1].toLowerCase() : "";
   // @ menu: themes, other chats (@chat:<id>, add :N for its last N messages) and tools (@tool:<name>: skills, commands, MCP servers)
   useEffect(() => { if (!mm || ment) return; setMent({ chats: [], tools: [] });
     Promise.all([api("sessions").catch(() => ({ sessions: [] })), api("mcp").catch(() => ({ packages: [], claude: [], ui: [] }))]).then(([ss, mc]) => setMent({
       chats: (ss.sessions || []).filter((x) => x.id !== id).map((x) => ({ name: "chat:" + x.id, description: (x.title || "Chat") + " · its last 40 messages; type :N after it for another limit", source: "chat", key: (x.title || "").toLowerCase() })),
       tools: [...new Map([...[...(mc.packages || []), ...(mc.claude || []), ...(mc.ui || [])].map((x) => [x.name, "MCP server"]), ...[...slash.packages, ...slash.claude].map((x) => [x.name, x.description || x.source])]).entries()]
         .map(([n, d]) => ({ name: "tool:" + n, description: String(d || "tool"), source: "tool", key: n.toLowerCase() })) })); }, [!!mm]);
-  const mitems = mm ? [...themes.map((t) => ({ name: "theme:" + t.id, description: t.name + " - colors " + t.colors.accent + ", fonts " + t.fonts.head.split(",")[0], source: "theme", sw: t.colors, key: t.name.toLowerCase() })),
+  const [srcs, setSrcs] = useState([]);
+  useEffect(() => { if (!mm) { setSrcs([]); return; } const t = setTimeout(() => api("works/sources?q=" + encodeURIComponent(mm[1])).then((d) => setSrcs(d.items || [])).catch(() => setSrcs([])), 150); return () => clearTimeout(t); }, [mm && mm[1]]);
+  const mitems = mm ? [...srcs, ...themes.map((t) => ({ name: "theme:" + t.id, description: t.name + " - colors " + t.colors.accent + ", fonts " + t.fonts.head.split(",")[0], source: "theme", sw: t.colors, key: t.name.toLowerCase() })),
     ...(ment ? [...ment.chats, ...ment.tools] : [])].filter((c) => (c.name + " " + c.key).toLowerCase().includes(mq)).slice(0, 30) : [];
   const menuItems = sm ? items : mitems;
   useEffect(() => setSidx(0), [sm && sm[1], mm && mm[1]]);
 
   const runUi = (a) => { setText(""); if (a === "clear") newChat(); else if (a === "canvas") setOpen((o) => !o); else if (a === "ctx" || a === "model" || a === "effort" || a === "mode") setPop(a); };
-  const pickSlash = (c) => { if (["theme", "chat", "tool"].includes(c.source)) { setText(text.replace(/@[\w:-]*$/, "@" + c.name + " ")); ta.current && ta.current.focus(); return; } if (c.source === "ui" && c.action !== "send" && c.action !== "workflow") return runUi(c.action); setText("/" + c.name + " "); ta.current && ta.current.focus(); };
+  const pickSlash = (c) => { if (["theme", "chat", "tool", "space", "knowledge"].includes(c.source)) { setText(text.replace(/@[\w:.@\/-]*$/, "@" + c.name + " ")); ta.current && ta.current.focus(); return; } if (c.source === "ui" && c.action !== "send" && c.action !== "workflow") return runUi(c.action); setText("/" + c.name + " "); ta.current && ta.current.focus(); };
 
   const upWr = (key, p) => setWr((l) => l.map((x) => (x.key === key ? { ...x, ...p } : x)));
   const startWork = guard(async (key, wk, data, text) => {
@@ -755,9 +775,9 @@ function PromptBox({ f, val, set, ctx, one }) {
     if (assist.includes("file") && (m = /(^|\s)@([^\s]*)$/.exec(before))) {
       clearTimeout(tm.current);
       tm.current = setTimeout(async () => {
-        const d = await api("works/mentions?q=" + encodeURIComponent(m[2])).catch(() => ({ items: [] }));
+        const [d, sc] = await Promise.all([api("works/mentions?q=" + encodeURIComponent(m[2])).catch(() => ({ items: [] })), /^[\w:.@-]*$/.test(m[2]) ? api("works/sources?q=" + encodeURIComponent(m[2])).catch(() => ({ items: [] })) : { items: [] }]);
         if (my !== seq.current) return;
-        setPop({ from: pos - m[2].length - 1, to: pos, items: d.items.map((i) => ({ label: "@" + i.path, insert: "@" + i.path + (i.dir ? "" : " "), hint: i.dir ? "folder" : "file", dir: i.dir })), kind: "file", q: "", hi: 0, ...caretPos(el, pos) });
+        setPop({ from: pos - m[2].length - 1, to: pos, items: [...sc.items.slice(0, 12).map((i) => ({ label: "@" + i.name, insert: "@" + i.name + " ", hint: i.source === "space" ? "space" : "note" })), ...d.items.map((i) => ({ label: "@" + i.path, insert: "@" + i.path + (i.dir ? "" : " "), hint: i.dir ? "folder" : "file", dir: i.dir }))], kind: "file", q: "", hi: 0, ...caretPos(el, pos) });
       }, 90);
       return;
     }
@@ -815,6 +835,7 @@ function Field({ f, v, set, boot, stored, ctx }) {
   const common = { value: val, onInput: (e) => set(e.target.value) };
   return html`<div class="field"><label>${f.label}${f.required ? " *" : ""}</label>
     ${(f.type === "textarea" || (f.type === "text" && !f.secret)) && f.assist && f.assist.length && ctx ? html`<${PromptBox} f=${f} val=${String(val)} set=${set} ctx=${ctx} one=${f.type === "text"}/>`
+    : f.type === "folder" ? html`<div class="row" style="gap:6px">${f.assist && f.assist.length && ctx ? html`<div class="grow"><${PromptBox} f=${f} val=${String(val)} set=${set} ctx=${ctx} one=${true}/></div>` : html`<input class="grow" type="text" ...${common}/>`}<button class="btn" type="button" onClick=${async () => { const p = await nativePick({ dirs: true, start: String(val).replace(/^@/, ""), title: "Choose a working folder" }); if (p) set(p); }}>${Ic("folder", 14)} Browse…</button></div>`
     : f.type === "textarea" ? html`<textarea rows="5" ...${common}></textarea>`
     : f.type === "checkbox" ? html`<${Switch} on=${!!val} onChange=${set} label=${f.label}/>`
     : f.type === "model" ? html`<select value=${val} onChange=${(e) => set(e.target.value)}>${boot.models.models.map((m) => html`<option value=${m.id}>${m.label}${m.real ? " · " + m.real : ""}</option>`)}</select>`
@@ -1145,6 +1166,9 @@ function App() {
   const [q, setQ] = useState(""), [hits, setHits] = useState(null);
   const [prefs, setPrefs] = useState({ policy: "off", autocompact: true, compact_pct: 80, window: 1000000 }), [slash, setSlash] = useState({ claude: [], packages: [] });
   setToaster(setMsg);
+  const [brand, setBrand] = useState({});
+  useEffect(() => { api("brand").then((b) => { setBrand(b || {}); applyBrand(b); }).catch(() => {}); }, []);
+  const hubName = brand.name || "AI Hub", Logo = (n) => brand.logo ? html`<img class="logoimg" src=${brand.logo} width=${n} height=${n} alt=""/>` : Ic("logo", n);
   const reloadBoot = () => api("boot").then(setBoot).catch((e) => setErr(e.message));
   const reloadSess = () => api("sessions").then(setSess).catch(() => {});
   const alerts = useAlerts(api);
@@ -1180,7 +1204,7 @@ function App() {
     const n = v.name.trim(); if (sess.folders.includes(n)) return toast("That project already exists"); await post("folders", { folders: [...sess.folders, n] }); reloadSess(); });
   const c = boot.context;
   return html`<div class="shell"><aside class="side">
-      <div class="brand"><span class="logo">${Ic("logo", 16)}</span>AI Hub</div>
+      <div class="brand"><span class=${"logo" + (brand.logo ? " img" : "")}>${Logo(brand.logo ? 26 : 16)}</span>${hubName}</div>
       <button class="newchat" onClick=${() => newChat()}>${Ic("plus", 16)} New chat</button>
       <div class="nav">${NAV.map(([k, ic, l]) => html`<a class=${page === k ? "on" : ""} href=${"#/" + k}>${Ic(ic, 17)}${l}</a>`)}</div>
       <div class="sq">${Ic("search", 14)}<input placeholder="Search chats" value=${q} onInput=${(e) => setQ(e.target.value)} onKeyDown=${(e) => e.key === "Escape" && setQ("")}/>${q && html`<a class="ibtn" style="width:22px;height:22px" title="Clear" onClick=${() => setQ("")}>${Ic("x", 13)}</a>`}</div>
@@ -1192,7 +1216,7 @@ function App() {
     <main class="main"><${AlertBar} alerts=${alerts}/>${page === "chat" && arg ? html`<${Chat} key=${arg} id=${arg} boot=${boot} refresh=${reloadSess} newChat=${() => newChat()} prefs=${prefs} savePrefs=${savePrefs} slash=${slash}/>`
       : page === "packages" ? html`<${Packages}/>` : page === "services" ? html`<${Services}/>` : page === "mcp" ? html`<${Mcp}/>`
       : page === "works" ? html`<${Works} boot=${boot} openId=${arg}/>` : page === "knowledge" ? html`<${Knowledge}/>` : page === "usage" ? html`<${UsagePage} api=${api} prefs=${prefs} savePrefs=${savePrefs}/>` : page === "settings" || page === "vault" ? html`<${Settings} boot=${boot} reload=${reloadBoot} prefs=${prefs} savePrefs=${savePrefs} focus=${arg}/>`
-      : html`<div class="hello"><div>${Ic("logo", 36)}<h1>AI Hub</h1><p>Chat with Claude Code, manage packages, services, MCP servers and logins.</p><button class="btn acc" onClick=${() => newChat()}>${Ic("plus", 14)} New chat</button></div></div>`}</main>
+      : html`<div class="hello"><div>${Logo(36)}<h1>${hubName}</h1><p>Chat with Claude Code, manage packages, services, MCP servers and logins.</p><button class="btn acc" onClick=${() => newChat()}>${Ic("plus", 14)} New chat</button></div></div>`}</main>
     ${msg && html`<div class="toast">${msg}</div>`}<${AskHost}/></div>`;
 }
 render(html`<${App}/>`, document.getElementById("app"));

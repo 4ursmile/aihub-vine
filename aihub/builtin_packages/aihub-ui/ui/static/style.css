@@ -316,3 +316,5 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--accent)
 .genbar{margin:10px 0;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--surface);display:grid;gap:8px}.genbar-h{display:flex;gap:8px;align-items:center}.genbar-h .grow{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .genbar-track{height:4px;border-radius:4px;background:var(--soft2);overflow:hidden}.genbar-track i{display:block;height:100%;width:35%;border-radius:4px;background:var(--accent);animation:genbar 1.4s var(--ease) infinite}
 @keyframes genbar{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}@media (prefers-reduced-motion:reduce){.genbar-track i{animation:none;width:100%;opacity:.5}}
+
+.brand .logo.img{background:none;overflow:hidden}.logoimg{object-fit:contain;border-radius:8px;display:block}

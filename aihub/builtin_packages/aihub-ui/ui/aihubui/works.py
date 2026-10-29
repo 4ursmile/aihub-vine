@@ -26,7 +26,7 @@ import threading
 import time
 import uuid
 
-from . import aihub as A, chat, store
+from . import aihub as A, chat, sources, store
 from .secretbox import write_private
 
 MARK = "__stored__"                      # what a stored secret looks like inside the work file
@@ -35,7 +35,7 @@ WORKERS = 4                              # nodes of one run that may run at the 
 OUT_KINDS = ("text", "path", "json", "url")
 NODE_ID = re.compile(r"^[a-z][a-z0-9_.-]{0,40}$")
 KINDS = ("trigger", "action")
-FIELD_TYPES = ("text", "textarea", "number", "checkbox", "select", "password", "model", "effort", "mode")
+FIELD_TYPES = ("text", "textarea", "number", "checkbox", "select", "password", "model", "effort", "mode", "folder")
 FILTER = {"name": "filter", "label": "Only start when the text matches (regex)", "type": "text", "default": "", "help": "Checked first; empty = every event starts a run."}
 
 TEAMS_OUT_GUIDE = """Send a message to Teams (no app registration, no admin consent):
@@ -95,6 +95,8 @@ BUILTIN = {
     "ai.claude": {"title": "Claude task", "kind": "action", "group": "AI", "desc": "Runs Claude Code with the prompt. Use {{input}}, {{trigger}}, {{data.key}}. Skills, agents and MCP tools of aihub are available (send mail, post a message ...).",
                   "fields": [{"name": "prompt", "label": "Prompt", "type": "textarea", "required": True, "default": ""}, {"name": "model", "label": "Model", "type": "model", "default": ""},
                              {"name": "effort", "label": "Effort", "type": "effort", "default": ""}, {"name": "mode", "label": "Permission mode", "type": "mode", "default": "auto"},
+                             {"name": "cwd", "label": "Working folder (optional)", "type": "folder", "default": "", "assist": ["input", "data", "file"],
+                              "help": "Claude opens in this folder. Type @ to pick one, or use {{data.path}} from the node before. Empty = a private folder. A node with a folder runs in a chat of its own."},
                              {"name": "fresh", "label": "Fresh chat (do not share context with earlier Claude nodes)", "type": "checkbox", "default": False}]},
     "flow.filter": {"title": "Filter (regex)", "kind": "action", "group": "Flow", "desc": "Passes the text on only when it matches; otherwise this branch ends.",
                     "fields": [{"name": "regex", "label": "Regex", "type": "text", "required": True, "default": ""}, {"name": "invert", "label": "Pass when it does NOT match", "type": "checkbox", "default": False}]},
@@ -930,19 +932,28 @@ class Engine:
                     upd(rec, note="%d chars remembered" % len(mem))
                     out = {"text": mem if cfg.get("mode") == "memory only" or not mem else "Remembered context:\n%s\n\nCurrent input:\n%s" % (mem, text), "data": cdata}
                 elif n["type"] == "ai.claude":
+                    folder = render(str(cfg.get("cwd") or ""), ctx).strip()
+                    if folder.startswith("@"):                              # a mention (@/path) picked from the list
+                        folder = folder[1:].strip()
+                    if folder:
+                        try:
+                            folder = store.check_cwd(folder)
+                        except ValueError as e:
+                            raise RuntimeError("working folder: %s" % e)
                     with lock:
-                        solo = not busy["claude"]                           # the shared chat is free; else this parallel node talks in a chat of its own
+                        solo = not folder and not busy["claude"]            # the shared chat is free; else this parallel node talks in a chat of its own
                         if solo:
                             busy["claude"] = True
                             mine.append("claude")
                         if sess is None or cfg.get("fresh") or not solo:
-                            s = store.update_session(store.create_session("Work: %s" % work["title"], "", chat.build_system(chat.freechat.WORK_RULES))["id"], work=True)
-                            sess = s if sess is None else sess
+                            s = store.update_session(store.create_session("Work: %s" % work["title"], "", chat.build_system(chat.freechat.WORK_RULES), cwd=folder)["id"], work=True)
+                            sess = s if sess is None and not folder else sess
                             cur = s
                         else:
                             cur = store.get_session(sess["id"])
                         run["chat"] = run["chat"] or cur["id"]
                     prompt = render(cfg.get("prompt", ""), ctx)
+                    prompt += sources.resolve(prompt, folder or store.session_dir(cur["id"]))
                     known = said.setdefault(cur["id"], set())
                     if text and not uses_input(cfg.get("prompt")):
                         if text.strip() in known:                           # this chat already holds it (a previous reply or input): do not repeat it
@@ -980,6 +991,7 @@ class Engine:
                             made = sess_free
                         run["chat"] = run["chat"] or made["id"]
                     prompt = render(cfg.get("prompt", ""), ctx)
+                    prompt += sources.resolve(prompt, store.session_dir(made["id"]))
                     if text and not uses_input(cfg.get("prompt")):
                         prompt = "Input:\n%s\n\nTask: %s" % (text, prompt)
                     if cfg.get("read_pointers"):

@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from aihubui import aihub as A, auth, chat, freechat, hubusage, mcpclient, selfupdate, spacebundle, store, term, usagereport, works as W    # noqa: E402
+from aihubui import aihub as A, auth, chat, freechat, hubusage, mcpclient, selfupdate, sources, spacebundle, store, term, usagereport, works as W    # noqa: E402
 from aihubui.secretbox import Box, write_private                  # noqa: E402
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -259,6 +259,46 @@ def boot(h, q, b):
     doc = cli(lambda: A.run(["list"]))
     return {"context": _ctx(doc), "models": A.models(), "modes": list(chat.MODES), "efforts": list(chat.EFFORT),
             "claude": A.claude_settings(), "port": ADDR["port"], "cli": A.command()[-1]}
+
+
+BRAND = {"at": 0, "hub": None, "doc": {}}
+PALETTES = ("blue", "indigo", "purple", "pink", "red", "orange", "claude", "green", "teal")
+
+
+def brand(h, q, b):
+    """Name, accent palette and logo of the signed-in hub (its public /meta), cached 5 minutes. Nothing here is secret; no
+    login is sent. An unreachable hub just gives the defaults."""
+    hub = (_ctx(cli(lambda: A.run(["list"]))).get("hub") or "").rstrip("/")
+    if not hub:
+        return {}
+    if BRAND["hub"] == hub and time.time() - BRAND["at"] < 300:
+        return BRAND["doc"]
+    import ssl
+    import urllib.request
+    doc = {}
+    for ctx in (None, ssl._create_unverified_context()):       # many hubs run a private CA: metadata only, no credentials
+        try:
+            with urllib.request.urlopen(urllib.request.Request(hub + "/api/v1/meta", headers={"Accept": "application/json"}), timeout=6, context=ctx) as r:
+                m = json.loads(r.read(1 << 20).decode("utf-8", "replace"))
+            logo = m.get("logo_url") or ""
+            doc = {"name": str(m.get("name") or "")[:40], "theme": m.get("theme") if m.get("theme") in PALETTES else "blue", "logo": ""}
+            if logo.startswith("/"):                          # inlined: the page's CSP only allows data: images
+                sp = urlsplit(hub)
+                try:
+                    with urllib.request.urlopen(sp.scheme + "://" + sp.netloc + logo, timeout=6, context=ctx) as lr:
+                        mime = (lr.headers.get_content_type() or "").lower()
+                        raw = lr.read(400_001)
+                    if mime in ("image/png", "image/jpeg", "image/webp", "image/gif") and len(raw) <= 400_000:   # no svg: stays inert
+                        doc["logo"] = "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode())
+                except Exception:
+                    pass
+            break
+        except ssl.SSLError:
+            continue
+        except Exception:
+            break
+    BRAND.update(at=time.time(), hub=hub, doc=doc)
+    return doc
 
 
 def packages(h, q, b):
@@ -889,7 +929,13 @@ def mentions(s, text):
     tools = list(dict.fromkeys(MENTION_TOOL.findall(text)))[:6]
     if tools:
         out.append("[The user points you to these tools for this request: %s. Use them (skill, command or MCP server of that name) where they fit.]" % ", ".join(tools))
-    return ("\n\n" + "\n\n".join(out)) if out else "", tools
+    more = sources.resolve(text, store.session_dir(s["id"]))
+    return (("\n\n" + "\n\n".join(out)) if out else "") + more, tools
+
+
+def works_sources(h, q, b):
+    """@ menu entries for Spaces and Knowledge notes; `q` = what is typed after @."""
+    return {"items": sources.suggest(q.get("q") or "")}
 
 
 def chat_send(h, q, b):
@@ -1667,7 +1713,7 @@ def works_mentions(h, q, b):
 
 
 ROUTES = {
-    ("GET", "boot"): boot, ("GET", "packages"): packages, ("GET", "search"): search, ("GET", "info"): info,
+    ("GET", "boot"): boot, ("GET", "brand"): brand, ("GET", "packages"): packages, ("GET", "search"): search, ("GET", "info"): info,
     ("POST", "install"): install, ("POST", "term/start"): term_start, ("GET", "term/read"): term_read, ("GET", "fs/list"): fs_list, ("POST", "fs/pick"): fs_pick, ("POST", "term/write"): term_write, ("POST", "uninstall"): _simple("uninstall", flags=("--force",)), ("POST", "update"): update_all,
     ("POST", "enable"): _simple("enable", flags=("--yes",)), ("POST", "disable"): _simple("disable"),
     ("GET", "services"): services, ("POST", "services/action"): service_action, ("GET", "services/logs"): service_logs,
@@ -1684,7 +1730,7 @@ ROUTES = {
     ("GET", "works"): works, ("GET", "works/get"): work_get, ("POST", "works/save"): work_save, ("POST", "works/delete"): work_delete,
     ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import,
     ("GET", "works/run"): work_run_get, ("GET", "nodes/local"): nodes_local, ("GET", "nodes/starter"): nodes_starter, ("POST", "nodes/save"): nodes_save, ("POST", "nodes/delete"): nodes_delete,
-    ("GET", "nodes/export-info"): nodes_export_info, ("POST", "nodes/export"): nodes_export, ("GET", "nodes/packages"): nodes_packages, ("POST", "works/layout"): works_layout, ("GET", "works/mentions"): works_mentions, ("GET", "works/hook"): work_hook,
+    ("GET", "nodes/export-info"): nodes_export_info, ("POST", "nodes/export"): nodes_export, ("GET", "nodes/packages"): nodes_packages, ("POST", "works/layout"): works_layout, ("GET", "works/mentions"): works_mentions, ("GET", "works/sources"): works_sources, ("GET", "works/hook"): work_hook,
     ("GET", "auth"): auth_status, ("POST", "auth/check"): auth_check, ("POST", "auth/login"): auth_login,
     ("GET", "secrets"): secrets_list, ("PUT", "secrets"): secret_put, ("POST", "secrets/remove"): secret_remove,
 }

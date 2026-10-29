@@ -122,7 +122,7 @@ A grey-and-white neutral field with one accent and three status hues.
 - **Blue Lift** (#0066cc light, #409cff dark): hover state of the primary button only.
 
 ### Secondary (admin accents)
-`data-accent` on `:root` swaps `--blue` for indigo (#5856d6), purple (#a03fd0), pink (#cc2d65), red (#d70015), orange (#b35000), green (#17803a) or teal (#087c7c), each with a brighter dark-mode twin. Components must work with any of them.
+`data-accent` on `:root` swaps `--blue` for indigo (#5856d6), purple (#a03fd0), pink (#cc2d65), red (#d70015), orange (#b35000), claude orange (#b9573a), green (#17803a) or teal (#087c7c), each with a brighter dark-mode twin. Components must work with any of them.
 
 ### Tertiary (status)
 - **Go Green** (#17803a / #30d158): success, live indicator, switch on-state, high-strength meter.

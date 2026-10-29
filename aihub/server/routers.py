@@ -989,7 +989,7 @@ def a_reg_set(body: dict, request: Request, u=admin):
     return {"ok": True}
 
 
-THEME_COLORS = ("blue", "indigo", "purple", "pink", "red", "orange", "green", "teal")
+THEME_COLORS = ("blue", "indigo", "purple", "pink", "red", "orange", "claude", "green", "teal")
 
 
 # All admin-editable settings in one place: key -> (allowed values, label, help). Add a row to add a setting.

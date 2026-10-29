@@ -25,6 +25,7 @@
 :root[data-accent=pink]{--blue:#cc2d65;--blue-h:color-mix(in srgb,#cc2d65 85%,#000)}
 :root[data-accent=red]{--blue:#d70015;--blue-h:color-mix(in srgb,#d70015 85%,#000)}
 :root[data-accent=orange]{--blue:#b35000;--blue-h:color-mix(in srgb,#b35000 85%,#000)}
+:root[data-accent=claude]{--blue:#b9573a;--blue-h:color-mix(in srgb,#b9573a 85%,#000)}
 :root[data-accent=green]{--blue:#17803a;--blue-h:color-mix(in srgb,#17803a 85%,#000)}
 :root[data-accent=teal]{--blue:#087c7c;--blue-h:color-mix(in srgb,#087c7c 85%,#000)}
 @media(prefers-color-scheme:dark){
@@ -33,6 +34,7 @@
 :root[data-accent=pink]{--blue:#ff375f;--blue-h:color-mix(in srgb,#ff375f 85%,#fff)}
 :root[data-accent=red]{--blue:#ff453a;--blue-h:color-mix(in srgb,#ff453a 85%,#fff)}
 :root[data-accent=orange]{--blue:#ff9f0a;--blue-h:color-mix(in srgb,#ff9f0a 85%,#fff)}
+:root[data-accent=claude]{--blue:#d97757;--blue-h:color-mix(in srgb,#d97757 85%,#fff)}
 :root[data-accent=green]{--blue:#30d158;--blue-h:color-mix(in srgb,#30d158 85%,#fff)}
 :root[data-accent=teal]{--blue:#40c8e0;--blue-h:color-mix(in srgb,#40c8e0 85%,#fff)}
 }
