@@ -1,5 +1,5 @@
 // Inline SVG icons (24 grid, 1.75 stroke). No emoji, no icon font, no network.
-import { html } from "https://cdn.jsdelivr.net/npm/htm@3.1.1/preact/standalone.module.js";
+import { html } from "./vendor/preact-htm.js";
 const P = {
   logo: '<g stroke-width="2.6" stroke-linejoin="miter" stroke-linecap="square"><path d="M3.5 21 12 3l8.5 18M7.6 15.5H12"/><path d="M15.5 15.5h2.2" opacity=".55"/></g>',
   chat: '<path d="M21 11.5a8.4 8.4 0 0 1-12.2 7.5L3 20.5l1.6-5A8.5 8.5 0 1 1 21 11.5z"/>',

@@ -1,5 +1,5 @@
 // Canvas viewer for slide decks and documents (files written with the aihub-slides conventions) + the Themes settings section.
-import { html, useState, useEffect, useRef } from "https://cdn.jsdelivr.net/npm/htm@3.1.1/preact/standalone.module.js";
+import { html, useState, useEffect, useRef } from "./vendor/preact-htm.js";
 import { Ic } from "./icons.js";
 import { toast, guard, Pop, Modal, ask } from "./ui.js";
 import { toPptx, toDocx, toMarkdown, safeName, loadJSZip } from "./export.js";

@@ -166,20 +166,26 @@ def services():
 
 def _json(path):
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             return json.load(f)
     except (OSError, ValueError):
         return {}
 
 
+def user_path(raw):
+    """A path as a person types or pastes it: quotes (Windows "Copy as path"), ~ and %VAR% / $VAR expanded, made absolute."""
+    c = str(raw or "").strip().strip("\"'").strip()
+    return os.path.abspath(os.path.expanduser(os.path.expandvars(c))) if c else ""
+
+
 def settings_path():
     """The Claude settings.json the UI follows: the custom file chosen in Settings (pref `claude_settings`), else ~/.claude/settings.json."""
     try:
-        with open(os.path.join(HOME(), "ui", "prefs.json"), encoding="utf-8") as f:
+        with open(os.path.join(HOME(), "ui", "prefs.json"), encoding="utf-8-sig") as f:
             c = str((json.load(f) or {}).get("claude_settings") or "").strip()
     except (OSError, ValueError, AttributeError):
         c = ""
-    return (os.path.abspath(os.path.expanduser(c)), True) if c else (os.path.join(CLAUDE_HOME(), "settings.json"), False)
+    return (user_path(c), True) if c else (os.path.join(CLAUDE_HOME(), "settings.json"), False)
 
 
 def settings_files():
@@ -221,7 +227,7 @@ def claude_settings():
 
 def _pref(name, default=None):
     try:
-        with open(os.path.join(HOME(), "ui", "prefs.json"), encoding="utf-8") as f:
+        with open(os.path.join(HOME(), "ui", "prefs.json"), encoding="utf-8-sig") as f:
             return (json.load(f) or {}).get(name, default)
     except (OSError, ValueError, AttributeError):
         return default

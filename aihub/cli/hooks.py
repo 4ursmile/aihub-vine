@@ -183,9 +183,9 @@ def handle(stdin_text, source="claude"):
             pass
         verify_soon()
         return
-    hit = _guard(stdin_text)
+    hit = None if os.environ.get("AIHUB_NO_GUARD") else _guard(stdin_text)     # aihub-ui chats with the guard off: still counted below
     _usage(stdin_text, source)
-    if not hit:
+    if not hit and not os.environ.get("AIHUB_NO_GUARD"):
         _judge(stdin_text)
     verify_soon()                             # after the answer to the agent: the check never delays a guard decision
 

@@ -191,7 +191,9 @@ class H(BaseHTTPRequestHandler):
             return self._send(404, b"not found", "text/plain")
         with open(p, "rb") as f:
             data = f.read()
-        self._send(200, data, mimetypes.guess_type(p)[0] or "application/octet-stream", {"Content-Security-Policy": CSP})
+        ext = os.path.splitext(p)[1].lower()           # fixed: the OS table (Windows registry) may call .js text/plain, and browsers refuse such a module
+        ctype = STATIC_TYPES.get(ext) or mimetypes.guess_type(p)[0] or "application/octet-stream"
+        self._send(200, data, ctype, {"Content-Security-Policy": CSP})
 
     def _workfile(self, path):
         parts = path.split("/", 4)                        # '', 'w', sid, sig, rest
@@ -261,6 +263,8 @@ def boot(h, q, b):
             "claude": A.claude_settings(), "port": ADDR["port"], "cli": A.command()[-1]}
 
 
+STATIC_TYPES = {".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+                ".html": "text/html; charset=utf-8", ".json": "application/json", ".svg": "image/svg+xml", ".wasm": "application/wasm"}
 BRAND = {"at": 0, "hub": None, "doc": {}}
 PALETTES = ("blue", "indigo", "purple", "pink", "red", "orange", "claude", "green", "teal")
 
@@ -280,18 +284,7 @@ def brand(h, q, b):
         try:
             with urllib.request.urlopen(urllib.request.Request(hub + "/api/v1/meta", headers={"Accept": "application/json"}), timeout=6, context=ctx) as r:
                 m = json.loads(r.read(1 << 20).decode("utf-8", "replace"))
-            logo = m.get("logo_url") or ""
-            doc = {"name": str(m.get("name") or "")[:40], "theme": m.get("theme") if m.get("theme") in PALETTES else "blue", "logo": ""}
-            if logo.startswith("/"):                          # inlined: the page's CSP only allows data: images
-                sp = urlsplit(hub)
-                try:
-                    with urllib.request.urlopen(sp.scheme + "://" + sp.netloc + logo, timeout=6, context=ctx) as lr:
-                        mime = (lr.headers.get_content_type() or "").lower()
-                        raw = lr.read(400_001)
-                    if mime in ("image/png", "image/jpeg", "image/webp", "image/gif") and len(raw) <= 400_000:   # no svg: stays inert
-                        doc["logo"] = "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode())
-                except Exception:
-                    pass
+            doc = {"name": str(m.get("name") or "")[:40], "theme": m.get("theme") if m.get("theme") in PALETTES else "blue"}
             break
         except ssl.SSLError:
             continue
@@ -393,11 +386,14 @@ def _native_cmd(dirs, ext, start, title):
         script = "POSIX path of (choose %s with prompt %s default location POSIX file %s)" % (what, _applescript(title), _applescript(start))
         return ["osascript", "-e", 'tell application "System Events" to activate', "-e", script]
     if os.name == "nt":
-        ps = ("Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.%s; " % ("FolderBrowserDialog" if dirs else "OpenFileDialog")
-              + ("$f.SelectedPath = '%s'; " if dirs else "$f.InitialDirectory = '%s'; ") % start.replace("'", "''")
+        ps = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; "
+              "$o = New-Object System.Windows.Forms.Form; $o.TopMost = $true; $o.ShowInTaskbar = $false; $o.StartPosition = 'CenterScreen'; $o.Size = New-Object System.Drawing.Size(1, 1); $o.Show(); $o.Activate(); "
+              "$f = New-Object System.Windows.Forms.%s; " % ("FolderBrowserDialog" if dirs else "OpenFileDialog")
+              + ("$f.SelectedPath = '%s'; $f.Description = '%s'; " if dirs else "$f.InitialDirectory = '%s'; $f.Title = '%s'; ") % (start.replace("'", "''"), title.replace("'", "''"))
               + (("$f.Filter = '%s files|*%s|All files|*.*'; " % (ext.lstrip("."), ext)) if ext and not dirs else "")
-              + "if ($f.ShowDialog() -eq 'OK') { " + ("$f.SelectedPath" if dirs else "$f.FileName") + " }")
-        return ["powershell", "-NoProfile", "-STA", "-Command", ps]
+              + "$r = $f.ShowDialog($o); $o.Close(); if ($r -eq 'OK') { " + ("$f.SelectedPath" if dirs else "$f.FileName") + " }")
+        exe = shutil.which("powershell") or shutil.which("pwsh") or "powershell"
+        return [exe, "-NoProfile", "-STA", "-WindowStyle", "Hidden", "-Command", ps]
     if shutil.which("zenity"):
         return ["zenity", "--file-selection", "--title", title, "--filename", start + os.sep] + (["--directory"] if dirs else [])
     if shutil.which("kdialog"):
@@ -414,13 +410,15 @@ def fs_pick(h, q, b):
     if not cmd:
         return {"unsupported": True}
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
+                           creationflags=0x08000000 if os.name == "nt" else 0)      # no console window flashing on Windows
     except (OSError, subprocess.SubprocessError):
         return {"unsupported": True}
     path = r.stdout.strip().splitlines()[-1].strip() if r.returncode == 0 and r.stdout.strip() else ""
     if r.returncode != 0 and not path and "User canceled" not in r.stderr and r.stderr.strip() and "(-128)" not in r.stderr:
         return {"unsupported": True}
-    return {"path": path.rstrip("/") if len(path) > 1 else path}
+    path = path.lstrip("\ufeff")
+    return {"path": path.rstrip("/\\") if len(path) > 3 else path}      # keeps "C:\\" whole
 
 
 def fs_list(h, q, b):
@@ -432,7 +430,7 @@ def fs_list(h, q, b):
     p = os.path.realpath(os.path.expanduser(raw))
     if not os.path.isdir(p):
         p = os.path.dirname(p) if os.path.isdir(os.path.dirname(p)) else home
-    if p != home and not p.startswith(home + os.sep):
+    if not dirs_only and not store.inside(p, home):
         p = home
     hide = {".ssh", ".gnupg", ".aws", ".kube", "Library", ".Trash", "node_modules", ".git"}
     items = []
@@ -453,8 +451,10 @@ def fs_list(h, q, b):
     except OSError as e:
         raise Err("cannot read this folder: %s" % e.strerror)
     items.sort(key=lambda i: (not i["dir"], i["name"].lower()))
-    return {"path": p, "home": home, "parent": os.path.dirname(p) if p != home else None, "items": items,
-            "places": [{"name": "Home", "path": home}] + ([{"name": ".claude", "path": os.path.join(home, ".claude")}] if os.path.isdir(os.path.join(home, ".claude")) else [])}
+    drives = [{"name": d + ":", "path": d + ":\\"} for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" if os.name == "nt" and os.path.isdir(d + ":\\")] if dirs_only else []
+    up = os.path.dirname(p)
+    return {"path": p, "home": home, "parent": up if up != p and (dirs_only or store.inside(p, home) and os.path.normcase(p) != os.path.normcase(home)) else None, "items": items,
+            "places": [{"name": "Home", "path": home}] + drives + ([{"name": ".claude", "path": os.path.join(home, ".claude")}] if os.path.isdir(os.path.join(home, ".claude")) else [])}
 
 
 def term_read(h, q, b):
@@ -1695,7 +1695,7 @@ def works_mentions(h, q, b):
     typed = (q.get("q") or "").replace("\\", "/")
     base, _, part = typed.rpartition("/")
     folder = os.path.realpath(os.path.join(home, os.path.expanduser(base) if base.startswith("~") else base.lstrip("/"))) if base else home
-    if folder != home and not folder.startswith(home + os.sep):
+    if not store.inside(folder, home):
         return {"items": []}
     hide = {".ssh", ".gnupg", ".aws", ".kube", "Library", ".Trash", "node_modules", ".git"}
     items = []

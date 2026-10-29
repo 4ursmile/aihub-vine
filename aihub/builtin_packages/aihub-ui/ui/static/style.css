@@ -307,7 +307,7 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--accent)
 .dg-host{height:380px;background:var(--surface)}.dg-host.off{display:none}.dg-map-host{height:340px;z-index:0}.dg-busy{padding:18px;color:var(--mute);font-size:13px}
 .dg-err{padding:12px 14px}.dg-err pre{margin:8px 0 0;max-height:200px;overflow:auto;font:12px var(--mono);background:var(--soft);padding:8px;border-radius:8px}
 /* block zoom + share (blocks.js zoom / richBar) */
-.bk.rich{position:relative}.bk-float{position:absolute;top:6px;right:8px;display:flex;gap:2px;padding:2px;border-radius:9px;background:var(--surface);border:1px solid var(--line);opacity:0;transition:opacity .15s;z-index:2}.bk.rich:hover .bk-float,.bk-float:focus-within,.bk-zoom .bk-float{opacity:1}
+.bk.rich{position:relative}.bk-float{position:absolute;top:44px;right:8px;display:flex;gap:2px;padding:2px;border-radius:9px;background:var(--surface);border:1px solid var(--line);opacity:0;transition:opacity .15s;z-index:2}.bk.rich:hover .bk-float,.bk-float:focus-within,.bk-zoom .bk-float{opacity:1}
 .bk-zoom{position:fixed;inset:0;z-index:60;background:#14141399;backdrop-filter:blur(3px);display:grid;padding:4vh 4vw;animation:fade .2s}
 .bk-zoom>.bk{margin:0;width:100%;height:100%;max-width:none;overflow:auto;display:flex;flex-direction:column;background:var(--surface);box-shadow:var(--shl);animation:pop .28s var(--ease)}
 .bk-zoom>.bk>pre,.bk-zoom .tb-scroll,.bk-zoom .svgv{flex:1;max-height:none!important}.bk-zoom .svgbox svg,.bk-zoom .chart>svg{max-height:none;height:100%}.bk-zoom>.bk.long>pre{max-height:none}

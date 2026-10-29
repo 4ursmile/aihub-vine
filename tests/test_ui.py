@@ -124,7 +124,7 @@ class Prefs(unittest.TestCase):
         self.addCleanup(lambda: os.environ.pop("AIHUB_HOME", None) if self.old is None else os.environ.__setitem__("AIHUB_HOME", self.old))
 
     def test_defaults_clamp_and_env(self):
-        self.assertEqual(store.prefs_env(), {"AIHUB_JUDGE": "1", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"})     # policy off for UI chats, auto-compact at 80% of a 1M window
+        self.assertEqual(store.prefs_env(), {"AIHUB_NO_GUARD": "1", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"})     # policy off for UI chats, auto-compact at 80% of a 1M window
         store.save_prefs({"policy": "on", "compact_pct": 5})
         self.assertEqual(store.prefs_env(), {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "40", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"})                        # clamped, guard back on
         store.save_prefs({"autocompact": False, "policy": "bogus"})
@@ -405,7 +405,7 @@ class FreeChat(unittest.TestCase):
 
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, sys
-open(os.environ["FAKE_OUT"], "w").write(json.dumps({k: os.environ.get(k) for k in ("AIHUB_JUDGE", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "DISABLE_AUTO_COMPACT")}) + "\n" + " ".join(sys.argv[1:]))
+open(os.environ["FAKE_OUT"], "w").write(json.dumps({k: os.environ.get(k) for k in ("AIHUB_NO_GUARD", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "DISABLE_AUTO_COMPACT")}) + "\n" + " ".join(sys.argv[1:]))
 sys.stdin.read()
 def out(o): print(json.dumps(o), flush=True)
 out({"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}], "usage": {"input_tokens": 3, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 200}}})
@@ -465,7 +465,7 @@ class ChatTurn(unittest.TestCase):
         self.assertEqual((evs[2]["pre"], evs[2]["post"]), (1203, 300))
         self.assertEqual(store.get_session(s["id"])["ctx"], 300)                       # after the compaction
         seen = open(env["FAKE_OUT"]).read().split("\n")
-        self.assertEqual(json.loads(seen[0]), {"AIHUB_JUDGE": "1", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80", "DISABLE_AUTO_COMPACT": None})
+        self.assertEqual(json.loads(seen[0]), {"AIHUB_NO_GUARD": "1", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80", "DISABLE_AUTO_COMPACT": None})
         for flag in ("--model haiku", "--effort high", "--permission-mode plan", "--append-system-prompt-file"):
             self.assertIn(flag, seen[1])
 

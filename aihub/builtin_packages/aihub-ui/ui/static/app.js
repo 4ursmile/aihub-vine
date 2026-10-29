@@ -1,5 +1,5 @@
 // AI Hub UI. Preact + htm, marked, DOMPurify, highlight.js and OpenUI come from jsDelivr (pinned). No build step, no npm.
-import { html, render, useState, useEffect, useRef, useCallback } from "https://cdn.jsdelivr.net/npm/htm@3.1.1/preact/standalone.module.js";
+import { html, render, useState, useEffect, useRef, useCallback } from "./vendor/preact-htm.js";
 import { Ic } from "./icons.js";
 import { toast, guard, setToaster, Seg, Pop, Switch, Modal, ask, AskHost } from "./ui.js";
 import { Md, AskCard, setWorkMaker, setBlockSharer } from "./blocks.js";
@@ -25,7 +25,6 @@ function applyBrand(b) {
   if (b.theme !== "claude") { st.setProperty("--accent", a); st.setProperty("--accent2", h); st.setProperty("--accentbg", bg); st.setProperty("--on", dark ? "#000" : "#fff"); }
   else ["--accent", "--accent2", "--accentbg", "--on"].forEach((k) => st.removeProperty(k));       // the built-in palette already is Claude orange
   if (b.name) document.title = b.name;
-  if (b.logo) { const l = document.querySelector("link[rel=icon]"); if (l) l.href = b.logo; }
 }
 
 async function api(path, { method = "GET", body, signal } = {}) {
@@ -1092,10 +1091,10 @@ function FilePicker({ start, ext = ".json", title = "Choose a file", onPick, clo
   const go = guard(async (p) => { setD(await api("fs/list?ext=" + encodeURIComponent(ext) + (dirs ? "&dirs=1" : "") + "&path=" + encodeURIComponent(p || ""))); setSel(""); });
   useEffect(() => { go(start); }, []);
   if (!d) return html`<${Modal} close=${close}><h1>${title}</h1><div class="shine">Loading…</div><//>`;
-  const parts = d.path.slice(d.home.length).split(/[\\/]/).filter(Boolean); let acc = d.home;
+  const under = d.path.toLowerCase().startsWith(d.home.toLowerCase()), parts = d.path.slice(under ? d.home.length : 0).split(/[\\/]/).filter(Boolean); let acc = under ? d.home : "";
   const sep = d.path.includes("\\") ? "\\" : "/", full = (n) => d.path + (d.path.endsWith(sep) ? "" : sep) + n;
   return html`<${Modal} wide=${true} close=${close}><h1>${title}</h1>
-    <div class="crumbs"><a onClick=${() => go(d.home)}>${Ic("folder", 13)} Home</a>${parts.map((p) => { acc = acc + sep + p; const here = acc; return html`<span class="mute">/</span><a onClick=${() => go(here)}>${p}</a>`; })}</div>
+    <div class="crumbs"><a onClick=${() => go(d.home)}>${Ic("folder", 13)} Home</a>${parts.map((p) => { acc = acc ? acc + (acc.endsWith(sep) ? "" : sep) + p : (/^[A-Za-z]:$/.test(p) ? p + sep : sep + p); const here = acc; return html`<span class="mute">/</span><a onClick=${() => go(here)}>${p}</a>`; })}</div>
     <div class="row small" style="gap:8px;margin:6px 0">${d.places.map((pl) => html`<button class="btn" style="padding:3px 10px" onClick=${() => go(pl.path)}>${pl.name}</button>`)}<span class="mute">${dirs ? "Only folders are shown." : "Only files ending " + ext + " are shown. Contents are never displayed."}</span></div>
     <div class="fpl">${d.parent && html`<div class="fpr" onClick=${() => go(d.parent)}>${Ic("up", 15)}<span class="grow">..</span></div>`}
       ${d.items.map((i) => html`<div class=${"fpr" + (sel === i.name ? " on" : "")} onClick=${() => (i.dir ? go(full(i.name)) : setSel(i.name))} onDblClick=${() => !i.dir && onPick(full(i.name))}>${Ic(i.dir ? "folder" : "file", 15)}<span class="grow">${i.name}</span>${!i.dir && html`<span class="mute small">${num(i.size)}B</span>`}</div>`)}
@@ -1168,7 +1167,7 @@ function App() {
   setToaster(setMsg);
   const [brand, setBrand] = useState({});
   useEffect(() => { api("brand").then((b) => { setBrand(b || {}); applyBrand(b); }).catch(() => {}); }, []);
-  const hubName = brand.name || "AI Hub", Logo = (n) => brand.logo ? html`<img class="logoimg" src=${brand.logo} width=${n} height=${n} alt=""/>` : Ic("logo", n);
+  const hubName = brand.name || "AI Hub", Logo = (n) => Ic("logo", n);
   const reloadBoot = () => api("boot").then(setBoot).catch((e) => setErr(e.message));
   const reloadSess = () => api("sessions").then(setSess).catch(() => {});
   const alerts = useAlerts(api);
@@ -1204,7 +1203,7 @@ function App() {
     const n = v.name.trim(); if (sess.folders.includes(n)) return toast("That project already exists"); await post("folders", { folders: [...sess.folders, n] }); reloadSess(); });
   const c = boot.context;
   return html`<div class="shell"><aside class="side">
-      <div class="brand"><span class=${"logo" + (brand.logo ? " img" : "")}>${Logo(brand.logo ? 26 : 16)}</span>${hubName}</div>
+      <div class="brand"><span class="logo">${Logo(16)}</span>${hubName}</div>
       <button class="newchat" onClick=${() => newChat()}>${Ic("plus", 16)} New chat</button>
       <div class="nav">${NAV.map(([k, ic, l]) => html`<a class=${page === k ? "on" : ""} href=${"#/" + k}>${Ic(ic, 17)}${l}</a>`)}</div>
       <div class="sq">${Ic("search", 14)}<input placeholder="Search chats" value=${q} onInput=${(e) => setQ(e.target.value)} onKeyDown=${(e) => e.key === "Escape" && setQ("")}/>${q && html`<a class="ibtn" style="width:22px;height:22px" title="Clear" onClick=${() => setQ("")}>${Ic("x", 13)}</a>`}</div>

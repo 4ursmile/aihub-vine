@@ -1,8 +1,8 @@
 // Diagrams drawn from CODE in an answer, by libraries loaded lazily from jsDelivr (pinned): ```mermaid (flowchart, sequence, mindmap, ER, gantt,
 // class, state, timeline, pie, git graph...), ```dot / ```graphviz (Graphviz), ```echarts (any ECharts option as JSON: graph, tree, treemap, sankey,
 // radar, heatmap, scatter...), ```map (Leaflet: markers, lines, GeoJSON on OpenStreetMap tiles). A library is fetched only when a block needs it.
-import { html, useState, useEffect, useRef } from "https://cdn.jsdelivr.net/npm/htm@3.1.1/preact/standalone.module.js";
-import DOMPurify from "https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.es.mjs";
+import { html, useState, useEffect, useRef } from "./vendor/preact-htm.js";
+import DOMPurify from "./vendor/purify.js";
 import { Ic } from "./icons.js";
 
 const CDN = "https://cdn.jsdelivr.net/npm/";

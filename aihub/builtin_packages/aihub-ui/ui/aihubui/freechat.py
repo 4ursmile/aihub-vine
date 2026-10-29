@@ -19,7 +19,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import auth, mcpclient, store
+from . import auth, hubusage, mcpclient, store
 from .aihub import HOME, settings_files
 
 DEFAULT_MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}
@@ -349,6 +349,18 @@ def _persist_mcp(sid, kind, server, tool, on):
         store.update_session(sid, mcp_off={k: v for k, v in off.items() if v})
 
 
+def _count_mcp(box, api, sid):
+    """Free chat calls MCP servers itself (no Claude Code hook sees it): a call to a server that comes from an installed package is one
+    `use` event of that package, like the hook sends for Claude Code. Never raises."""
+    try:
+        srv = box.map.get(api, (None, None))[0]
+        origin = (box.src.get(srv.name) or {}).get("origin", "") if srv else ""
+        if origin.startswith("package "):
+            hubusage.use("mcp:" + srv.name, package=origin[8:], session=sid, detail={"tool": api[:80], "engine": "free"})
+    except Exception:
+        pass
+
+
 def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None, files=None):
     """Generator of UI events for one message in free chat. Same events and history as chat.turn. With MCP servers switched on for the chat
     (session field `mcp`) it runs the usual tool loop: the model asks for a tool, we call the MCP server, the result goes back, until it answers."""
@@ -466,6 +478,7 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
                 if state["cancel"].is_set():
                     break
                 out, bad = box.call(name, args)
+                _count_mcp(box, name, sid)
                 ev = {"k": "tool_result", "id": cid, "text": out[:4000], "error": bad}
                 store.append(sid, ev)
                 yield ev

@@ -6,10 +6,11 @@
 <title>AI Hub</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%2314141f%27/%3E%3Cpath d=%27M6 26 16 6l10 20M10.5 19.5H16%27 fill=%27none%27 stroke=%27%23ff6a3d%27 stroke-width=%273.2%27 stroke-linejoin=%27miter%27 stroke-linecap=%27square%27/%3E%3Cpath d=%27M19.5 19.5h3%27 stroke=%27%2319e6d2%27 stroke-width=%273.2%27/%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="vendor/github-dark.css">
 </head>
 <body>
 <div id="app"></div>
+<script>addEventListener("error",function(e){var a=document.getElementById("app");if(a&&!a.firstChild&&e&&e.message)a.innerHTML="<pre style='padding:24px;font:13px monospace;white-space:pre-wrap'>AI Hub UI could not start: "+e.message.replace(/</g,"&lt;")+"\nTry a hard refresh (Ctrl/Cmd+Shift+R) or restart: aihub run aihub-ui</pre>"});</script>
 <script type="module" src="app.js"></script>
 </body>
 </html>

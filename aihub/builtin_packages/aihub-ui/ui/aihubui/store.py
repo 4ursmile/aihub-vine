@@ -37,10 +37,10 @@ def session_dir(sid):
 
 def check_cwd(path):
     """Absolute, existing (made when missing) folder for a chat to work in. Raises ValueError with a message for the page."""
-    raw = str(path or "").strip()
+    raw = str(path or "").strip().strip("\"'").strip()
     if not raw:
         raise ValueError("give a folder path")
-    full = os.path.abspath(os.path.expanduser(raw))
+    full = os.path.abspath(os.path.expanduser(os.path.expandvars(raw)))
     if os.path.dirname(full) == full:
         raise ValueError("pick a folder, not the root of the disk")
     if os.path.exists(full) and not os.path.isdir(full):
@@ -78,7 +78,7 @@ def folder_dir(name):
 
 def _read(path, default):
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             return json.load(f)
     except (OSError, ValueError):
         return default
@@ -297,11 +297,17 @@ def delete_event(sid, index):
 
 # ---- files of a chat's working folder
 
+def inside(p, root):
+    """P is ROOT or below it (case-insensitive on Windows, where C:\\Users and c:\\users are the same folder)."""
+    p, root = os.path.normcase(os.path.normpath(p)), os.path.normcase(os.path.normpath(root))
+    return p == root or p.startswith(root.rstrip("\\/") + os.sep)
+
+
 def safe_join(root, rel):
     """Absolute path of REL inside ROOT, or None when it escapes (.., absolute, symlink out)."""
     root = os.path.realpath(root)
     p = os.path.realpath(os.path.join(root, rel.lstrip("/")))
-    return p if p == root or p.startswith(root + os.sep) else None
+    return p if inside(p, root) else None
 
 
 SKIP_DIRS = {"node_modules", "__pycache__", ".git", ".venv", "venv", ".idea", ".vscode", "target", ".next", ".cache"}
@@ -644,11 +650,12 @@ def save_prefs(new):
     if "claude_settings" in new:
         c = str(new["claude_settings"] or "").strip()
         if c:
-            full = os.path.abspath(os.path.expanduser(c))
+            from .aihub import user_path
+            full = user_path(c)
             if not full.lower().endswith(".json") or not os.path.isfile(full):
                 raise ValueError("that is not an existing .json file: %s" % full)
             try:
-                with open(full, encoding="utf-8") as f:
+                with open(full, encoding="utf-8-sig") as f:
                     if not isinstance(json.loads(f.read(2_000_000)), dict):
                         raise ValueError("it must hold a JSON object")
             except (OSError, ValueError) as e:
@@ -681,11 +688,12 @@ def save_prefs(new):
 
 def prefs_env():
     """Environment the Claude process of a chat or work node gets from the UI preferences.
-    policy off: AIHUB_JUDGE=1 makes aihub's hook return at once for THIS process only (the global policy and the terminal are untouched)."""
+    policy off: AIHUB_NO_GUARD=1 makes aihub's hook skip the guard and the judge for THIS process only (the global policy and the terminal are
+    untouched). Usage counting (skill / agent / MCP `use` events, token upload) stays on: do NOT use AIHUB_JUDGE here, it silences those too."""
     p = prefs()
     env = {}
     if p["policy"] == "off":
-        env["AIHUB_JUDGE"] = "1"
+        env["AIHUB_NO_GUARD"] = "1"
     env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(p["window"])
     if p["autocompact"]:
         env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(p["compact_pct"])

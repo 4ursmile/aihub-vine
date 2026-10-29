@@ -237,6 +237,33 @@ def _result_text(c):
     return "\n".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text") if isinstance(c, list) else ""
 
 
+def mcp_config():
+    """Path of an --mcp-config file for `claude -p`, or None. The chat runs in its own folder, so servers Claude Code keeps per
+    PROJECT (~/.claude.json `projects.<dir>.mcpServers`, the default scope of `claude mcp add`) would never load here: they are
+    merged in (user scope and the UI list win), so what works in a terminal also works in the chat."""
+    merged = {}
+    try:
+        with open(os.path.join(os.path.expanduser("~"), ".claude.json"), encoding="utf-8") as f:
+            d = json.load(f)
+        for proj in (d.get("projects") or {}).values():
+            for n, v in ((proj or {}).get("mcpServers") or {}).items():
+                if isinstance(v, dict):
+                    merged[n] = v
+        for n, v in (d.get("mcpServers") or {}).items():
+            if isinstance(v, dict):
+                merged[n] = v
+    except (OSError, ValueError, AttributeError):
+        pass
+    for n, v in (store.ui_mcp().get("mcpServers") or {}).items():
+        if isinstance(v, dict):
+            merged[n] = v
+    if not merged:
+        return None
+    path = os.path.join(store.ui_dir(), "mcp.effective.json")
+    store._write(path, {"mcpServers": merged})
+    return path
+
+
 def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None, add_dirs=None):
     """Generator of UI events for one user message. Stores them in the chat history as it goes."""
     sid = sess["id"]
@@ -280,6 +307,7 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
     for ad in add_dirs or ():                                        # folders a Works pointer names: Claude may read them
         if os.path.isdir(ad):
             cmd += ["--add-dir", ad]
+    mcp = mcp_config() or mcp
     if mcp:
         cmd += ["--mcp-config", mcp]
     if sess.get("work"):                                             # a Works run: nobody can answer a question (auto mode's classifier decides tools)

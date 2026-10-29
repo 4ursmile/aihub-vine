@@ -1,5 +1,5 @@
 // Small UI primitives: toast, popover, segmented control with a sliding indicator, switch, modal.
-import { html, useState, useEffect, useRef, useLayoutEffect } from "https://cdn.jsdelivr.net/npm/htm@3.1.1/preact/standalone.module.js";
+import { html, useState, useEffect, useRef, useLayoutEffect } from "./vendor/preact-htm.js";
 import { Ic } from "./icons.js";
 
 let toastSet = null;

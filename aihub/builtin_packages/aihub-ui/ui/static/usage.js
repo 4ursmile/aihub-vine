@@ -1,6 +1,6 @@
 // Usage page + price alerts. Data: GET /api/usage (local session logs + this UI's free chat, priced with the hub price table).
 // Every answer turn and work run is also uploaded to the hub (server side, hubusage.py).
-import { html, useState, useEffect } from "https://cdn.jsdelivr.net/npm/htm@3.1.1/preact/standalone.module.js";
+import { html, useState, useEffect } from "./vendor/preact-htm.js";
 import { Ic } from "./icons.js";
 import { toast, guard, Seg } from "./ui.js";
 

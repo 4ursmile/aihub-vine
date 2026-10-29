@@ -1,8 +1,8 @@
 // Markdown answer with rich blocks rendered in place: shell sessions, code, tables, charts (```chart) and forms (```form).
-import { html, render, useState, useEffect, useRef } from "https://cdn.jsdelivr.net/npm/htm@3.1.1/preact/standalone.module.js";
-import { marked } from "https://cdn.jsdelivr.net/npm/marked@12.0.2/lib/marked.esm.js";
-import DOMPurify from "https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.es.mjs";
-import hljs from "https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/es/highlight.min.js";
+import { html, render, useState, useEffect, useRef } from "./vendor/preact-htm.js";
+import { marked } from "./vendor/marked.js";
+import DOMPurify from "./vendor/purify.js";
+import hljs from "./vendor/highlight.js";
 import { Ic } from "./icons.js";
 import { toast } from "./ui.js";
 import { Diagram, DIAGRAMS } from "./diagram.js";
