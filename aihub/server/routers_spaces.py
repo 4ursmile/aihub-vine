@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from starlette.concurrency import run_in_threadpool
 
 from ..core import archive
-from . import basepath, spaceconv
+from . import basepath, spaceconv, spacepreview
 from .deps import current_user, require_perm, require_user, viewer_of
 from .routers import _avatar_url, _clean
 from .spaceconv import SLUG, SpaceError, TRANSITIONS
@@ -245,6 +245,7 @@ def _publish(request, u, owner, slug, tmp, size, sha, q):
         shutil.rmtree(work, ignore_errors=True)
         raise HTTPException(400, str(e))
     settings = _settings(q)
+    spacepreview.write(res["kind"], built)
     try:
         deck = None
         if res["kind"] == "slides":
@@ -431,6 +432,23 @@ def space_viewed(ref: str, request: Request, u=Depends(current_user)):
         _seen[k] = now
         R(request).space_view(sp["id"])
     return {"ok": True}
+
+
+@r.get("/spaces/{ref}/preview")
+def space_preview(ref: str, request: Request, u=Depends(current_user)):
+    """A few lines of text for the card (empty object when the kind has nothing to show). Cheap: one small file, ETag per revision."""
+    sp, _ = _load(request, ref, u)
+    etag = '"p%d-%d"' % (sp["id"], sp["rev"])
+    hd = {"ETag": etag, "Cache-Control": "private, max-age=300"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=hd)
+    st = S(request)
+    raw = st.read(sp["id"], "preview.json")
+    if raw is None:                                           # published before previews existed: make it once
+        d = st.dir(sp["id"])
+        spacepreview.write(sp["kind"], d)
+        raw = st.read(sp["id"], "preview.json") or b"{}"
+    return Response(raw, media_type="application/json", headers=hd)
 
 
 @r.get("/spaces/{ref}/data")

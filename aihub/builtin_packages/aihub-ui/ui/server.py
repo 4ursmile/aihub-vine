@@ -43,7 +43,7 @@ CSP = ("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'sel
        "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 PREVIEW_CSP = ("sandbox allow-scripts allow-forms allow-modals allow-popups; default-src 'self' 'unsafe-inline' data: blob:; "
                "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-               "img-src 'self' data: blob: https://cdn.jsdelivr.net; font-src 'self' data: https://cdn.jsdelivr.net; connect-src 'none'; frame-ancestors 'self'")
+               "img-src 'self' data: blob: https://cdn.jsdelivr.net; font-src 'self' data: https://cdn.jsdelivr.net; connect-src https:; frame-ancestors 'self'")
 
 
 PAGE = (b"<!doctype html><meta charset=utf-8><title>AI Hub UI</title><body style='font:16px/1.6 system-ui;max-width:640px;margin:12vh auto;padding:0 1.5rem;color:#141413;background:#faf9f5'>"
@@ -1171,7 +1171,7 @@ def mentions(s, text):
         w = store.get_work(wid)
         if w:
             out.append(store.work_brief(w))
-    more = sources.resolve(text, store.session_dir(s["id"])) + sources.file_mentions(text, store.session_dir(s["id"]))
+    more = sources.resolve(text, store.session_dir(s["id"])) + sources.file_mentions(text, store.session_dir(s["id"])) + sources.folder_mentions(text, store.session_dir(s["id"]))
     return (("\n\n" + "\n\n".join(out)) if out else "") + more, tools
 
 

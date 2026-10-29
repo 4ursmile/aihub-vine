@@ -86,11 +86,13 @@ const UI_CMDS = [
   { name: "effort", description: "Set the thinking effort", action: "effort" },
   { name: "mode", description: "Set the permission mode", action: "mode" },
   { name: "context", description: "Context window and auto-compact", action: "ctx" },
+  { name: "engine", description: "Switch engine: Claude Code or Free chat (/engine free, /engine claude)", action: "engine" },
+  { name: "mcp", description: "MCP servers: see what is connected and choose what this chat may use", action: "mcp" },
   { name: "canvas", description: "Show or hide the canvas", action: "canvas" },
   { name: "create-work", description: "Describe a work; it is designed and opened in Works (also /workflow)", action: "workflow" },
   { name: "workflow", description: "Same as /create-work", action: "workflow" },
 ];
-const SLASH_ICON = { theme: "palette", chat: "chat", tool: "bolt", work: "flow", ui: "slash", command: "terminal", skill: "sparkles", plugin: "plug", package: "package" };
+const SLASH_ICON = { folder: "folder", file: "file", theme: "palette", chat: "chat", tool: "bolt", work: "flow", ui: "slash", command: "terminal", skill: "sparkles", plugin: "plug", package: "package" };
 
 function Pill({ icon, label, active, onClick, title }) {
   return html`<button class=${"pill" + (active ? " on" : "")} onClick=${onClick} title=${title}>${Ic(icon, 15)}<span>${label}</span><span class="chev">${Ic("down", 12)}</span></button>`;
@@ -119,13 +121,29 @@ function ModePick({ modes, value, onChange, close }) {
 }
 const ENGINES = [["claude", "terminal", "Claude Code", "The full harness: tools, files in the working folder, skills, agents and MCP servers."],
   ["free", "zap", "Free chat", "Our own light harness: straight to the model, answers fast. No shell or files; it can use the MCP servers you tick below. Needs ANTHROPIC_API_KEY (Settings > Encrypted secrets) or your Claude settings env / key helper."]];
+const MCP_TONE = { package: "package", claude: "terminal", ui: "sliders" };
+function McpPanel({ servers, on, onChange, engine, compact }) {
+  const [q, setQ] = useState("");
+  if (!servers) return html`<div class="mcp-empty"><div class="shine">Looking for MCP servers…</div></div>`;
+  if (!servers.length) return html`<div class="mcp-empty">${Ic("plug", 26)}<b>No MCP servers yet</b><span>Install an MCP package or add one on the <a href="#/mcp">MCP servers</a> page.</span></div>`;
+  const live = servers.filter((m) => !m.off && on.includes(m.name)).length, shown = servers.filter((m) => !q || (m.name + " " + (m.origin || "")).toLowerCase().includes(q.toLowerCase()));
+  const toggle = (m, v) => onChange(v ? [...on, m.name] : on.filter((x) => x !== m.name));
+  return html`<div class=${"mcp" + (compact ? " compact" : "")}>
+    <div class="mcp-head"><span class="mcp-sum"><i class=${"dot" + (live ? " live" : "")}></i><b>${engine === "free" ? live + " of " + servers.length + " on for this chat" : servers.length + " server" + (servers.length === 1 ? "" : "s")}</b></span>
+      ${servers.length > 6 && html`<label class="mcp-q">${Ic("search", 13)}<input placeholder="Filter" value=${q} onInput=${(e) => setQ(e.target.value)}/></label>`}</div>
+    <div class="mcp-grid">${shown.map((m) => { const act = engine === "free" && !m.off && on.includes(m.name);
+      return html`<div class=${"mcp-card" + (act ? " on" : "") + (m.off ? " off" : "")} key=${m.name}>
+        <span class="mcp-ico">${Ic("plug", 17)}<i class=${"dot" + (m.off ? " off" : act || engine !== "free" ? " live" : "")}></i></span>
+        <span class="grow"><b>${m.name}</b><span class="d">${m.off ? "Switched off on the MCP page" : m.command ? String(m.command).slice(0, 70) : "MCP server"}</span>
+          <span class="mcp-tags"><span class="tag">${m.origin || "server"}</span>${(m.tools_off || []).length > 0 && html`<span class="tag">${m.tools_off.length} hidden</span>`}${m.default && !m.off && html`<span class="tag acc">default</span>`}</span></span>
+        ${engine === "free" ? html`<${Switch} on=${act} label=${"Use " + m.name} onChange=${(v) => !m.off && toggle(m, v)}/>` : html`<span class="tag acc">${Ic("check", 11)} ready</span>`}</div>`; })}</div>
+    ${!shown.length && html`<p class="mute small" style="padding:8px 4px">No server matches.</p>`}
+    <p class="mcp-note">${engine === "free" ? "Ticked servers start for each answer; the model may call their tools without asking." : "Claude Code uses every server it knows. Switch to Free chat (/engine free) to choose per chat."}</p></div>`;
+}
 function EnginePick({ value, onChange, close, mcpAll, mcpOn, onMcp }) {
   return html`<h5>Engine</h5>${ENGINES.map(([k, ic, name, d]) => html`<button class=${"opt" + (k === value ? " on" : "")} onClick=${() => { onChange(k); close(); }}><span class="oi">${Ic(ic, 16)}</span><span class="grow"><b>${name}</b><span class="d">${d}</span></span><span class="ck">${Ic("check", 16)}</span></button>`)}
-    ${value === "free" && html`<h5 style="margin-top:8px">Tools for free chat (MCP)</h5>
-      ${!mcpAll ? html`<p class="mute small" style="padding:4px 10px">Looking for MCP servers…</p>` : !mcpAll.length ? html`<p class="mute small" style="padding:4px 10px">No MCP servers found. Install an MCP package (Packages) or add one under MCP servers.</p>`
-        : mcpAll.map((m) => html`<label class="opt mcpopt"><input type="checkbox" disabled=${m.off} checked=${mcpOn.includes(m.name) && !m.off} onChange=${(e) => onMcp(e.target.checked ? [...mcpOn, m.name] : mcpOn.filter((x) => x !== m.name))}/><span class="grow"><b>${m.name}</b><span class="d">${m.off ? "switched off on the MCP page" : m.origin}</span></span></label>`)}
-      <div class="small mute" style="padding:4px 10px">Servers you tick run for each answer and the model may call their tools without asking. Leave them off for plain chat.</div>`}
-    <div class="small mute" style="padding:6px 10px 4px">You can switch at any message: the earlier text carries over, tool calls do not.</div>`;
+    ${value === "free" && html`<h5 style="margin-top:8px">Tools for free chat (MCP)</h5><div style="padding:0 6px"><${McpPanel} servers=${mcpAll} on=${mcpOn} onChange=${onMcp} engine="free" compact=${true}/></div>`}
+    <div class="small mute" style="padding:6px 10px 4px">You can switch at any message (or type /engine): the earlier text carries over, tool calls do not.</div>`;
 }
 function Ring({ pct, size = 22 }) {
   const r = (size - 4) / 2, c = 2 * Math.PI * r;
@@ -147,7 +165,7 @@ function SlashMenu({ items, idx, pick }) {
   useEffect(() => { const e = ref.current && ref.current.children[idx]; if (e && e.scrollIntoView) e.scrollIntoView({ block: "nearest" }); }, [idx]);
   if (!items.length) return null;
   return html`<div class="slash" ref=${ref}>${items.map((c, i) => html`<button class=${"opt" + (i === idx ? " hi" : "")} onMouseDown=${(e) => { e.preventDefault(); pick(c); }}><span class="oi">${Ic(SLASH_ICON[c.source] || "slash", 14)}</span>
-    <span class="grow"><b>${["theme", "chat", "tool", "file"].includes(c.source) ? "@" : "/"}${c.name}</b><span class="d">${(c.description || "").slice(0, 110)}</span></span><span class="src">${c.sw ? html`<span class="swatch sm">${["bg", "accent", "fg"].map((k) => html`<i style=${`background:${c.sw[k]}`}></i>`)}</span>` : c.source === "ui" ? "" : c.source}</span></button>`)}</div>`;
+    <span class="grow"><b>${["theme", "chat", "tool", "file", "folder"].includes(c.source) ? "@" : "/"}${c.name}</b><span class="d">${(c.description || "").slice(0, 110)}</span></span><span class="src">${c.sw ? html`<span class="swatch sm">${["bg", "accent", "fg"].map((k) => html`<i style=${`background:${c.sw[k]}`}></i>`)}</span>` : c.source === "ui" ? "" : c.source}</span></button>`)}</div>`;
 }
 
 // ---------- working folder: file tree, editor, diff, dialogs
@@ -407,13 +425,17 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const [srcs, setSrcs] = useState([]);
   useEffect(() => { if (!mm) { setSrcs([]); return; } let on = true; const t = setTimeout(() => api("works/sources?nodes=1&q=" + encodeURIComponent(mm[1])).then((d) => on && setSrcs(d.items || [])).catch(() => on && setSrcs([])), 150); return () => { on = false; clearTimeout(t); }; }, [mm && mm[1]]);
   const fileItems = mm && pfiles ? pfiles.filter((p) => p.toLowerCase().includes(mq.replace(/^file:/, ""))).sort((a, b) => (b.split("/").pop().toLowerCase().startsWith(mq.replace(/^file:/, "")) ? 1 : 0) - (a.split("/").pop().toLowerCase().startsWith(mq.replace(/^file:/, "")) ? 1 : 0)).slice(0, 8).map((p) => ({ name: "file:" + p, description: "file in the working folder", source: "file", key: "" })) : [];
-  const mitems = mm ? [...fileItems, ...srcs, ...themes.map((t) => ({ name: "theme:" + t.id, description: t.name + " - colors " + t.colors.accent + ", fonts " + t.fonts.head.split(",")[0], source: "theme", sw: t.colors, key: t.name.toLowerCase() })),
+  const fq = mq.replace(/^folder:/, ""), dirItems = mm && pfiles ? [...new Set(pfiles.flatMap((p) => { const a = p.split("/").slice(0, -1); return a.map((_, i) => a.slice(0, i + 1).join("/")); }))].filter((d) => d.toLowerCase().includes(fq)).sort((a, b) => (b.split("/").pop().toLowerCase().startsWith(fq) ? 1 : 0) - (a.split("/").pop().toLowerCase().startsWith(fq) ? 1 : 0) || a.length - b.length).slice(0, 5).map((d) => ({ name: "folder:" + d, description: "folder in the working folder (its file list is shared)", source: "folder", key: "" })) : [];
+  const mitems = mm ? [...fileItems, ...dirItems, ...srcs, ...themes.map((t) => ({ name: "theme:" + t.id, description: t.name + " - colors " + t.colors.accent + ", fonts " + t.fonts.head.split(",")[0], source: "theme", sw: t.colors, key: t.name.toLowerCase() })),
     ...(ment ? [...ment.chats, ...ment.tools] : [])].filter((c) => (c.name + " " + c.key).toLowerCase().includes(mq)).slice(0, 30) : [];
   const menuItems = dismissed === text ? [] : sm ? items : mitems;
   useEffect(() => setSidx(0), [sm && sm[1], mm && mm[1]]);
 
-  const runUi = (a) => { setText(""); if (a === "clear") newChat(); else if (a === "canvas") setOpen((o) => !o); else if (a === "ctx" || a === "model" || a === "effort" || a === "mode") setPop(a); };
-  const pickSlash = (c) => { if (["theme", "chat", "tool", "space", "knowledge", "file", "node", "work"].includes(c.source)) { setText(text.replace(/@[\w:.@\/-]*$/, "@" + c.name + " ")); ta.current && ta.current.focus(); return; } if (c.source === "ui" && c.action !== "send" && c.action !== "workflow") return runUi(c.action); setText("/" + c.name + " "); ta.current && ta.current.focus(); };
+  const runUi = (a) => { setText(""); if (a === "clear") newChat(); else if (a === "canvas") setOpen((o) => !o); else if (a === "mcp") openMcp(); else if (a === "engine") setPop("engine"); else if (a === "ctx" || a === "model" || a === "effort" || a === "mode") setPop(a); };
+  const openMcp = () => { setDlg("mcp"); api("mcp/free").then((d) => setMcpAll(d.servers)).catch(() => setMcpAll([])); };
+  const setEng = (v) => { setEngine(v); post("sessions/update", { id, engine: v }).catch(() => {}); };
+  const saveMcp = (list) => post("sessions/update", { id, mcp: list }).then((r) => setS(r.session)).catch((e) => toast(e.message));
+  const pickSlash = (c) => { if (["theme", "chat", "tool", "space", "knowledge", "file", "folder", "node", "work"].includes(c.source)) { setText(text.replace(/@[\w:.@\/-]*$/, "@" + c.name + " ")); ta.current && ta.current.focus(); return; } if (c.source === "ui" && c.action !== "send" && c.action !== "workflow") return runUi(c.action); setText("/" + c.name + " "); ta.current && ta.current.focus(); };
 
   const upWr = (key, p) => setWr((l) => l.map((x) => (x.key === key ? { ...x, ...p } : x)));
   const startWork = guard(async (key, wk, data, text) => {
@@ -450,7 +472,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     if (!t || busyRef.current) return;
     if (engine === "free" && /^\/compact\b/.test(t)) return toast("Free chat has no compaction: switch to Claude Code, or start a new chat.");
     const m = override === undefined && /^\/([\w:.-]+)\s*([\s\S]*)$/.exec(t);
-    if (m) { const ui = UI_CMDS.find((c) => c.name === m[1]); if (m[1] === "workflow" || m[1] === "create-work") { if (!m[2]) return toast("Describe the work after /create-work, for example: /create-work pull data from git, build a dashboard, publish it as a space"); return genWork(m[2]); } if (ui && ui.action !== "send" && !m[2]) return runUi(ui.action); const wk = works.find((x) => "work:" + x.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") === m[1]); if (wk) return runWork(wk, m[2]); const pk = slash.packages.find((c) => c.name === m[1]); if (pk) t = pk.prompt.replace(/\$ARGUMENTS/g, m[2]); }
+    if (m) { const ui = UI_CMDS.find((c) => c.name === m[1]); if (m[1] === "workflow" || m[1] === "create-work") { if (!m[2]) return toast("Describe the work after /create-work, for example: /create-work pull data from git, build a dashboard, publish it as a space"); return genWork(m[2]); } if (m[1] === "engine" && m[2]) { const w = m[2].trim().toLowerCase(), e = /^(free|api|light)/.test(w) ? "free" : /^(claude|code|cc)/.test(w) ? "claude" : ""; if (!e) return toast("Use /engine claude or /engine free"); if (busyRef.current) return toast("Wait for the answer to finish first"); setText(""); setEng(e); return toast("Engine: " + (e === "free" ? "Free chat" : "Claude Code")); } if (ui && ui.action !== "send" && !m[2]) return runUi(ui.action); const wk = works.find((x) => "work:" + x.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") === m[1]); if (wk) return runWork(wk, m[2]); const pk = slash.packages.find((c) => c.name === m[1]); if (pk) t = pk.prompt.replace(/\$ARGUMENTS/g, m[2]); }
     if (mode === "bypass" && engine !== "free" && !confirm("Bypass checks lets Claude run any tool without asking. Continue?")) return;
     const typed = override === undefined, atts = typed ? att : [], draft = text;       // the draft comes back if the server never starts the turn
     if (typed) { setText(""); setAtt([]); if (ta.current) ta.current.style.height = "auto"; }
@@ -604,7 +626,11 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   if (!s) return missing ? html`<div class="empty"><div>${Ic("alert", 28)}<h1>Chat not found</h1><p class="mute">${missing}</p><div class="row" style="justify-content:center;gap:8px"><button class="btn acc" onClick=${newChat}>${Ic("plus", 14)} New chat</button><button class="btn" onClick=${load}>${Ic("refresh", 14)} Try again</button></div></div></div>` : html`<div class="empty"><div>${Ic("sparkles", 28)}<div>Loading…</div></div></div>`;
   return html`<div class="chatwrap">${signin && html`<${SignIn} close=${() => setSignin(false)}/>`}
     <div class="chat">
-      ${pickF && html`<${FilePicker} ext="" title="Choose a file to mention" start=${dirInfo.dir || ""} onPick=${(p) => { setPickF(false); const d = (dirInfo.dir || "").replace(/\\/g, "/").replace(/\/+$/, ""), q = p.replace(/\\/g, "/"); setText((t) => (t && !/\s$/.test(t) ? t + " " : t) + "@file:" + (d && q.startsWith(d + "/") ? q.slice(d.length + 1) : q) + " "); ta.current && ta.current.focus(); }} close=${() => setPickF(false)}/>`}
+      ${pickF && html`<${FilePicker} ext="" title=${pickF === "dir" ? "Choose a folder to mention" : "Choose a file to mention"} start=${dirInfo.dir || ""} dirs=${pickF === "dir"} onPick=${(p) => { const kind = pickF === "dir" ? "@folder:" : "@file:"; setPickF(false); const d = (dirInfo.dir || "").replace(/\\/g, "/").replace(/\/+$/, ""), q = p.replace(/\\/g, "/"); setText((t) => (t && !/\s$/.test(t) ? t + " " : t) + kind + (d && q.startsWith(d + "/") ? q.slice(d.length + 1) : q) + " "); ta.current && ta.current.focus(); }} close=${() => setPickF(false)}/>`}
+      ${dlg === "mcp" && html`<${Modal} wide=${true} close=${() => setDlg(null)}><div class="row"><h1 class="grow" style="margin:0">MCP servers</h1><button class="ibtn" aria-label="Close" onClick=${() => setDlg(null)}>${Ic("x", 17)}</button></div>
+        <p class="sub" style="margin-top:4px">Engine: <b>${engine === "free" ? "Free chat" : "Claude Code"}</b> · <button class="linkbtn" onClick=${() => setEng(engine === "free" ? "claude" : "free")}>switch to ${engine === "free" ? "Claude Code" : "Free chat"}</button></p>
+        <${McpPanel} servers=${mcpAll} on=${s.mcp || []} onChange=${saveMcp} engine=${engine}/>
+        <div class="row" style="margin-top:14px"><a class="btn" href="#/mcp">${Ic("sliders", 14)} Manage servers</a><span class="grow"></span><button class="btn acc" onClick=${() => setDlg(null)}>Done</button></div><//>`}
       ${dlg === "dir" && html`<${WorkDirDialog} s=${s} cur=${dirInfo.dir} busy=${busy} close=${() => setDlg(null)} saved=${(n) => { setDlg(null); setS(n); load(); refresh(); }}/>`}
       ${dlg === "soul" && html`<${SoulDialog} s=${s} busy=${busy} close=${() => setDlg(null)} saved=${(n) => { setDlg(null); setS(n); load(); }}/>`}
       <div class="chat-top"><button class="ibtn burger" title="Chats and pages" aria-label="Chats and pages" onClick=${onMenu}>${Ic("menu", 18)}</button><b class="grow ctitle" title="Rename" onClick=${rename}>${s.title}</b><button class="ibtn" title="Rename chat" aria-label="Rename chat" onClick=${rename}>${Ic("edit", 16)}</button>
@@ -633,8 +659,9 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
             onPaste=${(e) => { const f = [...e.clipboardData.files]; if (f.length) { e.preventDefault(); pick(f); } }} onKeyDown=${onKey}></textarea>
           <div class="tools">
             <button class="ibtn" title="Attach files" aria-label="Attach files" onClick=${() => fileIn.current && fileIn.current.click()}>${Ic("clip", 17)}</button><input type="file" multiple hidden ref=${fileIn} onChange=${(e) => { pick(e.target.files); e.target.value = ""; }}/>
-            <button class="ibtn" title="Choose a file from this project (adds @file:path)" aria-label="Choose a file from this project (adds @file:path)" onClick=${() => setPickF(true)}>${Ic("folder", 17)}</button>
-            <${Pop} open=${pop === "engine"} setOpen=${(v) => setPop(v ? "engine" : null)} button=${html`<${Pill} icon=${engine === "free" ? "zap" : "terminal"} label=${engine === "free" ? "Free chat" + ((s.mcp || []).length ? " · " + s.mcp.length + " tool" + (s.mcp.length > 1 ? "s" : "") : "") : "Claude Code"} active=${pop === "engine" || engine === "free"} title="Engine" onClick=${() => { setPop(pop === "engine" ? null : "engine"); if (!mcpAll) api("mcp/free").then((d) => setMcpAll(d.servers)).catch(() => setMcpAll([])); }}/>`}><${EnginePick} mcpAll=${mcpAll} mcpOn=${s.mcp || []} onMcp=${(list) => post("sessions/update", { id, mcp: list }).then((r) => setS(r.session)).catch((e) => toast(e.message))} value=${engine} onChange=${(v) => { setEngine(v); post("sessions/update", { id, engine: v }).catch(() => {}); }} close=${() => setPop(null)}/><//>
+            <button class="ibtn" title="Choose a file from this project (adds @file:path)" aria-label="Choose a file from this project (adds @file:path)" onClick=${() => setPickF("file")}>${Ic("file", 17)}</button>
+            <button class="ibtn" title="Choose a folder from this project (adds @folder:path)" aria-label="Choose a folder from this project (adds @folder:path)" onClick=${() => setPickF("dir")}>${Ic("folder", 17)}</button>
+            <${Pop} open=${pop === "engine"} setOpen=${(v) => setPop(v ? "engine" : null)} button=${html`<${Pill} icon=${engine === "free" ? "zap" : "terminal"} label=${engine === "free" ? "Free chat" + ((s.mcp || []).length ? " · " + s.mcp.length + " tool" + (s.mcp.length > 1 ? "s" : "") : "") : "Claude Code"} active=${pop === "engine" || engine === "free"} title="Engine" onClick=${() => { setPop(pop === "engine" ? null : "engine"); if (!mcpAll) api("mcp/free").then((d) => setMcpAll(d.servers)).catch(() => setMcpAll([])); }}/>`}><${EnginePick} mcpAll=${mcpAll} mcpOn=${s.mcp || []} onMcp=${saveMcp} value=${engine} onChange=${setEng} close=${() => setPop(null)}/><//>
             ${engine !== "free" && html`<${Pop} open=${pop === "mode"} setOpen=${(v) => setPop(v ? "mode" : null)} button=${html`<${Pill} icon=${MODE_INFO[mode][0]} label=${MODE_INFO[mode][1]} active=${pop === "mode"} title="Permission mode" onClick=${() => setPop(pop === "mode" ? null : "mode")}/>`}><${ModePick} modes=${boot.modes} value=${mode} onChange=${setMode} close=${() => setPop(null)}/><//>`}
             <${Pop} open=${pop === "effort"} setOpen=${(v) => setPop(v ? "effort" : null)} button=${html`<${Pill} icon="gauge" label=${effort ? effort[0].toUpperCase() + effort.slice(1) : "Effort"} active=${pop === "effort"} title="Thinking effort" onClick=${() => setPop(pop === "effort" ? null : "effort")}/>`}><${EffortPick} value=${effort} onChange=${setEffort}/><//>
             <span class="grow" style="flex:1"></span>
@@ -796,7 +823,7 @@ function Mcp() {
   const [d, setD] = useState({ packages: [], claude: [], ui: [] }), [f, setF] = useState({ name: "", command: "", args: "" });
   const load = guard(async () => setD(await api("mcp")));
   useEffect(() => { load(); }, []);
-  const row = (n, sub, extra) => html`<div class="card row"><span class="nico" style="width:32px;height:32px;border-radius:9px;background:var(--soft2);display:grid;place-items:center">${Ic("plug", 16)}</span><div class="grow"><b>${n}</b><div class="mute small mono">${sub}</div></div>${extra}</div>`;
+  const row = (n, sub, extra) => html`<div class="mcp-card" style="margin:8px 0"><span class="mcp-ico">${Ic("plug", 17)}</span><div class="grow"><b>${n}</b><span class="d">${sub}</span></div>${extra}</div>`;
   return html`<div class="page"><h1>MCP servers</h1><p class="sub">Every server Claude Code knows is available in chat, including the ones aihub packages register.</p>
     <${McpFree}/>
     <h2>From packages</h2>${d.packages.map((p) => row(p.name, p.enabled ? "enabled" : "disabled", html`<button class="btn" onClick=${guard(async () => { await post(p.enabled ? "disable" : "enable", { name: p.package }); load(); })}>${p.enabled ? "Disable" : "Enable"}</button>`))}${!d.packages.length && html`<p class="mute">None installed.</p>`}
@@ -1315,11 +1342,35 @@ function Settings({ boot, reload, prefs, savePrefs, focus }) {
 }
 
 // ---------- shell
+// ---------- Spotlight: centered search over pages and chats (Cmd/Ctrl+K)
+function Spotlight({ close, go, sessions, nav }) {
+  const [q, setQ] = useState(""), [hits, setHits] = useState(null), [idx, setIdx] = useState(0), box = useRef(), t = q.trim(), lc = t.toLowerCase();
+  useEffect(() => { const off = escPush(close); return off; }, []);
+  useEffect(() => { if (t.length < 2) { setHits(null); return; } let live = true; const h = setTimeout(() => api("sessions/search?q=" + encodeURIComponent(t)).then((d) => live && setHits(d.results)).catch(() => live && setHits([])), 180); return () => { live = false; clearTimeout(h); }; }, [t]);
+  const pages = nav.filter(([k, , l]) => !lc || (k + " " + l).toLowerCase().includes(lc)).map(([k, ic, l]) => ({ key: "p" + k, icon: ic, title: l, sub: "Page", to: k }));
+  const chats = (t.length >= 2 ? hits || [] : sessions.slice(0, 8)).map((c) => ({ key: "c" + c.id, icon: "chat", title: c.title, sub: c.snippet || (c.folder ? "Project " + c.folder : "Chat"), snip: !!c.snippet, to: "chat/" + c.id }));
+  const rows = [...(t.length >= 2 ? chats : pages.slice(0, t ? 6 : 0)), ...(t.length >= 2 ? pages.slice(0, 4) : chats)];
+  useEffect(() => setIdx(0), [t, hits]);
+  useEffect(() => { const e = box.current && box.current.querySelector(".sp-row.hi"); if (e && e.scrollIntoView) e.scrollIntoView({ block: "nearest" }); }, [idx]);
+  const key = (e) => { if (e.key === "ArrowDown") { e.preventDefault(); setIdx((i) => Math.min(rows.length - 1, i + 1)); } else if (e.key === "ArrowUp") { e.preventDefault(); setIdx((i) => Math.max(0, i - 1)); } else if (e.key === "Enter" && rows[idx]) { e.preventDefault(); go(rows[idx].to); close(); } };
+  const head = (r, i) => (i === 0 || (rows[i - 1].to.startsWith("chat/") !== r.to.startsWith("chat/"))) && html`<div class="sp-h">${r.to.startsWith("chat/") ? (t.length >= 2 ? "Chats" : "Recent chats") : "Pages"}</div>`;
+  return html`<div class="spot" onPointerDown=${(e) => e.target === e.currentTarget && close()}><div class="spot-box" role="dialog" aria-modal="true" aria-label="Search">
+    <div class="spot-in">${Ic("search", 20)}<input autofocus placeholder="Search chats and pages" aria-label="Search chats and pages" value=${q} onInput=${(e) => setQ(e.target.value)} onKeyDown=${key}/><kbd>esc</kbd></div>
+    <div class="spot-list" ref=${box}>${rows.map((r, i) => html`${head(r, i)}<button class=${"sp-row" + (i === idx ? " hi" : "")} key=${r.key} onMouseMove=${() => setIdx(i)} onClick=${() => { go(r.to); close(); }}><span class="oi">${Ic(r.icon, 16)}</span><span class="grow"><b>${t.length >= 2 ? hilite(r.title, t) : r.title}</b><span class=${"d"}>${r.snip && t.length >= 2 ? hilite(r.sub, t) : r.sub}</span></span><span class="sp-go">${Ic("right", 14)}</span></button>`)}
+      ${!rows.length && html`<p class="mute" style="padding:22px;text-align:center">${t.length >= 2 && !hits ? "Searching…" : "Nothing matches."}</p>`}</div>
+    <div class="spot-foot"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>↵</kbd> open</span><span class="grow"></span><span>${t.length >= 2 ? "Titles and what was said" : "Type 2+ letters to search messages"}</span></div></div></div>`;
+}
+const SORTS = [["recent", "Recent activity"], ["created", "Newest first"], ["oldest", "Oldest first"], ["name", "Name A–Z"]];
+const sortChats = (list, how) => { const l = [...list]; if (how === "created") l.sort((a, b) => (b.created || 0) - (a.created || 0)); else if (how === "oldest") l.sort((a, b) => (a.created || 0) - (b.created || 0)); else if (how === "name") l.sort((a, b) => String(a.title).localeCompare(String(b.title), undefined, { sensitivity: "base", numeric: true })); else l.sort((a, b) => (b.updated || 0) - (a.updated || 0)); return l; };
 const NAV = [["packages", "package", "Packages"], ["services", "server", "Services"], ["mcp", "plug", "MCP servers"], ["works", "flow", "Works"], ["knowledge", "book", "Knowledge"], ["usage", "chart", "Usage"]];
 function App() {
   const [sw, setSw] = useState(() => +pref("sidew", "272") || 272);
   const [boot, setBoot] = useState(null), [sess, setSess] = useState({ folders: [], sessions: [] }), [route, setRoute] = useState(location.hash.slice(2) || "chat"), [msg, setMsg] = useState(""), [err, setErr] = useState("");
-  const [q, setQ] = useState(""), [hits, setHits] = useState(null), [drawer, setDrawer] = useState(false);      // <=860px: the sidebar is a drawer
+  const [spotOpen, setSpotOpen] = useState(false), [sortBy, setSortBy] = useState(() => pref("chatsort", "recent")), [sortPop, setSortPop] = useState(false), [drawer, setDrawer] = useState(false);
+  const [folded, setFolded] = useState(() => { try { return JSON.parse(pref("chatfold", "[]")) || []; } catch (e) { return []; } });
+  const fold = (k) => setFolded((l) => { const n = l.includes(k) ? l.filter((x) => x !== k) : [...l, k]; setPref("chatfold", JSON.stringify(n)); return n; });
+  const chooseSort = (k) => { setSortBy(k); setPref("chatsort", k); setSortPop(false); };
+  useEffect(() => { const h = (e) => { if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") { e.preventDefault(); setSpotOpen(true); } }; addEventListener("keydown", h); return () => removeEventListener("keydown", h); }, []);      // <=860px: the sidebar is a drawer
   const [prefs, setPrefs] = useState({ policy: "off", autocompact: true, compact_pct: 80, window: 1000000 }), [slash, setSlash] = useState({ claude: [], packages: [] });
   setToaster(setMsg);
   const [brand, setBrand] = useState({});
@@ -1332,11 +1383,6 @@ function App() {
   const alerts = useAlerts(api);
   const savePrefs = guard(async (p) => { const r = await put("prefs", p); setPrefs(r.prefs); return r.prefs; });
   useEffect(() => { OUI.warm(); reloadBoot(); reloadSess(); api("prefs").then((d) => setPrefs(d.prefs)).catch(() => {}); api("slash").then(setSlash).catch(() => {}); const h = () => setRoute(location.hash.slice(2) || "chat"); addEventListener("hashchange", h); return () => removeEventListener("hashchange", h); }, []);
-  useEffect(() => {                                                    // search chats: titles and what was said
-    const t = q.trim(); if (t.length < 2) { setHits(null); return; }
-    let live = true; const h = setTimeout(() => api("sessions/search?q=" + encodeURIComponent(t)).then((d) => live && setHits(d.results)).catch(() => {}), 220);
-    return () => { live = false; clearTimeout(h); };
-  }, [q]);
   useInterval(reloadSess, sess.sessions.some((x) => x.busy || running[x.id]) ? 4000 : null);      // chats answering in the background
   const go = (r) => { setDrawer(false); location.hash = "#/" + r; };
   useEffect(() => { setDrawer(false); }, [route]);
@@ -1345,7 +1391,7 @@ function App() {
   if (err) return html`<div class="empty"><div>${Ic("alert", 28)}<h1>AI Hub UI</h1><p>${err}</p><p class="mute">Open the address from <code>~/.aihub/ui/url.txt</code>.</p></div></div>`;
   if (!boot) return html`<div class="empty"><div>${Ic("logo", 30)}<div>Starting…</div></div></div>`;
   const [page, arg] = route.split("/");
-  const groups = [["", sess.sessions.filter((s) => !s.folder)], ...sess.folders.map((f) => [f, sess.sessions.filter((s) => s.folder === f)])];
+  const groups = [["", sortChats(sess.sessions.filter((s) => !s.folder), sortBy)], ...sess.folders.map((f) => [f, sortChats(sess.sessions.filter((s) => s.folder === f), sortBy)])];
   const move = guard(async (s) => {
     const v = await ask({ title: "Move chat", text: s.title, submit: "Move", fields: [
       { name: "folder", label: "Project", type: "select", value: s.folder || "", options: [{ value: "", label: "No project" }, ...sess.folders.map((f) => ({ value: f, label: f })), { value: "\u0000new", label: "New project…" }] },
@@ -1366,13 +1412,16 @@ function App() {
   return html`<div class="shell" style=${"--sw:" + sw + "px"}>${drawer && html`<div class="sdback" onClick=${() => setDrawer(false)}></div>`}<aside class=${"side" + (drawer ? " open" : "")}><${Grip} cls="sd-grip" value=${() => sw} onChange=${setSw} onDone=${(v) => setPref("sidew", String(Math.round(v)))} min=${200} max=${460} sign=${1} reset=${() => { setSw(272); setPref("sidew", "272"); }}/>
       <div class="brand"><span class="logo">${Logo(16)}</span>${hubName}</div>
       <button class="newchat" onClick=${() => newChat()}>${Ic("plus", 16)} New chat</button>
+      <div class="nav"><button class="srow" onClick=${() => { setDrawer(false); setSpotOpen(true); }} aria-label="Search chats and pages">${Ic("search", 17)}<span class="grow">Search</span><kbd>${/Mac|iP/.test(navigator.platform) ? "⌘K" : "Ctrl K"}</kbd></button></div>
       <div class="nav" onClick=${() => setDrawer(false)}>${NAV.map(([k, ic, l]) => html`<a class=${page === k ? "on" : ""} href=${"#/" + k}>${Ic(ic, 17)}${l}</a>`)}</div>
-      <div class="sq">${Ic("search", 14)}<input placeholder="Search chats" aria-label="Search chats" value=${q} onInput=${(e) => setQ(e.target.value)} onKeyDown=${(e) => e.key === "Escape" && setQ("")}/>${q && html`<button class="ibtn" style="width:22px;height:22px" title="Clear" aria-label="Clear search" onClick=${() => setQ("")}>${Ic("x", 13)}</button>`}</div>
-      <div class="hist">${q.trim().length >= 2 ? html`<h6><span>${hits ? hits.length + " result" + (hits.length === 1 ? "" : "s") : "Searching…"}</span></h6>${(hits || []).map((h) => html`<div class=${"item hit" + (arg === h.id ? " on" : "")}><button class="rowmain" onClick=${() => go("chat/" + h.id)}>${Ic("chat", 15)}<span class="t2"><b>${hilite(h.title, q.trim())}</b>${h.snippet && html`<span class="mute small">${hilite(h.snippet, q.trim())}</span>`}${h.folder && html`<span class="mute small">project ${h.folder}</span>`}</span></button></div>`)}${hits && !hits.length && html`<p class="mute small" style="padding:8px 10px">No chat matches.</p>`}` : groups.map(([f, items]) => !!(f || items.length) && html`<h6><span title=${(sess.folder_dirs || {})[f] ? "Working folder: " + sess.folder_dirs[f] : ""}>${f || "Chats"}${(sess.folder_dirs || {})[f] ? html` ${Ic("folder", 13)}` : ""}</span>${f && html`<span class="hbtns"><button class="ibtn" style="width:28px;height:28px" title="New chat in this project" aria-label=${"New chat in " + f} onClick=${() => newChat(f)}>${Ic("plus", 17)}</button><button class="ibtn" style="width:28px;height:28px" title="Delete project" aria-label=${"Delete project " + f} onClick=${() => delProject(f)}>${Ic("trash", 17)}</button></span>`}</h6>${items.map((s) => html`<div class=${"item" + (arg === s.id ? " on" : "")}><button class="rowmain" onClick=${() => go("chat/" + s.id)} aria-current=${arg === s.id ? "page" : undefined}>${s.busy || running[s.id] ? html`<span class="runDot" role="img" title="Answering…" aria-label="Answering"></span>` : Ic("chat", 15)}<span class="t">${s.title}</span></button>
+      <div class="hist">${groups.map(([f, items]) => !!(f || items.length) && html`<h6 class="gh"><button class="gtoggle" aria-expanded=${!folded.includes(f)} title=${folded.includes(f) ? "Expand" : "Collapse"} onClick=${() => fold(f)}><span class=${"chev" + (folded.includes(f) ? " shut" : "")}>${Ic("down", 12)}</span><span class="gname" title=${(sess.folder_dirs || {})[f] ? "Working folder: " + sess.folder_dirs[f] : ""}>${f || "Chats"}</span>${(sess.folder_dirs || {})[f] ? Ic("folder", 12) : ""}<span class="cnt">${items.length}</span></button>
+          <span class="hbtns">${!f && html`<${Pop} open=${sortPop} setOpen=${setSortPop} up=${false} align="right" width=${200} button=${html`<button class="ibtn" style="width:28px;height:28px" title=${"Sort: " + (SORTS.find((x) => x[0] === sortBy) || SORTS[0])[1]} aria-label="Sort chats" onClick=${() => setSortPop(!sortPop)}>${Ic("filter", 16)}</button>`}><h5>Sort by</h5>${SORTS.map(([k, l]) => html`<button class=${"opt" + (k === sortBy ? " on" : "")} style="padding:7px 10px" onClick=${() => chooseSort(k)}><span class="grow"><b style="font-weight:500">${l}</b></span><span class="ck">${Ic("check", 15)}</span></button>`)}<//>`}
+          ${f && html`<button class="ibtn" style="width:28px;height:28px" title="New chat in this project" aria-label=${"New chat in " + f} onClick=${() => newChat(f)}>${Ic("plus", 17)}</button><button class="ibtn" style="width:28px;height:28px" title="Delete project" aria-label=${"Delete project " + f} onClick=${() => delProject(f)}>${Ic("trash", 17)}</button>`}</span></h6>
+        ${!folded.includes(f) && items.map((s) => html`<div class=${"item" + (arg === s.id ? " on" : "")}><button class="rowmain" onClick=${() => go("chat/" + s.id)} aria-current=${arg === s.id ? "page" : undefined}>${s.busy || running[s.id] ? html`<span class="runDot" role="img" title="Answering…" aria-label="Answering"></span>` : Ic("chat", 15)}<span class="t">${s.title}</span></button>
           <button class="x" title="Rename" aria-label=${"Rename " + s.title} onClick=${() => rename(s)}>${Ic("edit", 18)}</button><button class="x" title="Move to project" aria-label=${"Move " + s.title + " to a project"} onClick=${() => move(s)}>${Ic("folder", 18)}</button><button class="x" title="Delete" aria-label=${"Delete " + s.title} onClick=${() => delChat(s)}>${Ic("trash", 18)}</button></div>`)}`)}
         <h6><span></span><button class="linkbtn" onClick=${newFolder}>${Ic("folder", 14)} New project</button></h6></div>
       <div class="acct item" role="button" tabindex="0" aria-label="Account and settings" onClick=${() => go(c.signed_in ? "settings" : "settings/login")} onKeyDown=${(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(c.signed_in ? "settings" : "settings/login"); } }}><div class="av">${(c.username || "?")[0].toUpperCase()}</div><div class="grow"><b>${c.signed_in ? c.username : "Sign in"}</b><div class="mute small">${c.hub_configured ? c.hub.replace(/^https?:\/\//, "") : "local only"}</div></div>${Ic("sliders", 16)}</div>
-    </aside>
+    </aside>${spotOpen && html`<${Spotlight} close=${() => setSpotOpen(false)} go=${go} sessions=${sortChats(sess.sessions, "recent")} nav=${NAV}/>`}
     <main class="main">${!(page === "chat" && arg) && html`<button class="ibtn burger fab" title="Chats and pages" aria-label="Chats and pages" onClick=${() => setDrawer(true)}>${Ic("menu", 18)}</button>`}<${AlertBar} alerts=${alerts}/>${page === "chat" && arg ? html`<${Chat} key=${arg} id=${arg} onBusy=${markBusy} onMenu=${() => setDrawer(true)} boot=${boot} refresh=${reloadSess} newChat=${() => newChat()} prefs=${prefs} savePrefs=${savePrefs} slash=${slash}/>`
       : page === "packages" ? html`<${Packages}/>` : page === "services" ? html`<${Services}/>` : page === "mcp" ? html`<${Mcp}/>`
       : page === "works" ? html`<${Works} boot=${boot} openId=${arg}/>` : page === "knowledge" ? html`<${Knowledge}/>` : page === "usage" ? html`<${UsagePage} api=${api} prefs=${prefs} savePrefs=${savePrefs}/>` : page === "settings" || page === "vault" ? html`<${Settings} boot=${boot} reload=${reloadBoot} prefs=${prefs} savePrefs=${savePrefs} focus=${arg}/>`

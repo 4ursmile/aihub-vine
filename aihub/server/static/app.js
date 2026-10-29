@@ -208,10 +208,10 @@ function Home() {
   const m = useLoad(() => api("/meta"), []);
   const top = useLoad(() => api("/packages?sort=downloads&per_page=6"), []);
   const recent = useLoad(() => api("/packages?sort=updated&per_page=8"), []);
-  const f = useLoad(() => api("/facets"), []);
+  const spo = useLoad(() => api("/spaces/overview").catch(() => null), []);
   const [bump, setBump] = useState(0);            // new events in the feed -> refresh the numbers (at most once per feed poll)
   const ov = useLoad(() => bump ? api("/stats/overview").catch(() => null) : Promise.resolve(null), [bump]);
-  const o = ov.d || (m.d && m.d.overview) || {}; const cats = (f.d && f.d.categories) || [];
+  const o = ov.d || (m.d && m.d.overview) || {}; const sps = ((spo.d && spo.d.top) || []).slice(0, 6);
   const onNew = useCallback(() => setBump((n) => n + 1), []);
   useReveal();
   return html`<div class="home">
@@ -222,9 +222,10 @@ function Home() {
     <${Highlights} />
     <div class="stats3 rv"><div class="stat" style=${"--n:"+Math.max(3,fmt(Number(o.packages)||0).length)}><b><${Count} to=${o.packages} /></b><span>Packages</span></div><div class="stat" style=${"--n:"+Math.max(3,fmt(Number(o.versions)||0).length)}><b><${Count} to=${o.versions} /></b><span>Releases</span></div>
       <div class="stat" style=${"--n:"+Math.max(3,fmt(Number(o.downloads)||0).length)}><b><${Count} to=${o.downloads} /></b><span>Downloads</span></div><div class="stat" style=${"--n:"+Math.max(3,fmt(Number(o.users)||0).length)}><b><${Count} to=${o.users} /></b><span>People</span></div></div>
-    <div class="gap rv"><h2>Browse by category</h2></div>
-    ${f.loading && !f.d ? html`<div class="bento"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>` : html`<div class="bento">${cats.map((c, n) => html`<a key=${c.id} href=${"#/browse?category=" + c.id} class=${"tile rv t-" + catClass(n)} style=${"--d:" + n * 70 + "ms"}>
-      <div class="tile-in"><h3>${c.label}</h3><p>${c.desc}</p></div><span class="tile-n"><b>${c.count}</b> ${c.count === 1 ? "package" : "packages"}</span></a>`)}</div>`}
+    ${sps.length ? html`<div class="gap row rv"><h2>Space highlights</h2><span class="sp"></span><a href="#/spaces">All spaces</a></div>
+    <div class="bento">${sps.map((s, n) => html`<a key=${s.ref} href=${"#/s/" + s.ref} class=${"tile rv t-" + catClass(n)} style=${"--d:" + n * 70 + "ms"}>
+      <div class="tile-in"><span class="badge">${SKIND[s.kind] || s.kind}</span><h3>${s.title}</h3><p>${s.description || s.ref}</p></div>
+      <span class="tile-n"><b>${fmt(s.views)}</b> views</span>${(n === 0 || n === 5) && html`<${SpPeek} s=${s} />`}</a>`)}</div>` : null}
     <div class="gap row rv"><h2>Popular</h2><span class="sp"></span><a href="#/browse?sort=downloads">See all</a></div>
     <div style="margin-top:20px">${top.loading && !top.d ? html`<${Skels} n=3 />` : top.e ? html`<${Err} e=${top.e} />` :
       top.d.items.length ? html`<div class="grid">${top.d.items.map((p, i) => html`<${Pkg} p=${p} i=${i} key=${p.name} />`)}</div>` :
@@ -1534,8 +1535,21 @@ const sendFile = (method, path, file, onProg) => new Promise((ok, no) => {      
   x.onerror = () => no(new Error("Network error")); x.send(file);
 });
 const slugOf = (n) => String(n || "").replace(/\.(tar\.gz|[^.]+)$/i, "").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "").slice(0, 64);
+const PEEKS = new Map();                              // ref@rev -> promise of the card preview (one tiny request per card, only when it scrolls into view)
+function SpPeek({ s }) {
+  const el = useRef(), [p, setP] = useState(null), key = s.ref + "@" + s.rev;
+  useEffect(() => {
+    if (!el.current || s.kind === "pdf") return;
+    const go = () => { if (!PEEKS.has(key)) PEEKS.set(key, api("/spaces/" + s.ref + "/preview").catch(() => ({}))); let on = 1; PEEKS.get(key).then((d) => on && setP(d)); return () => { on = 0; }; };
+    if (!("IntersectionObserver" in window)) return go();
+    let off; const io = new IntersectionObserver((e) => { if (e[0].isIntersecting) { io.disconnect(); off = go(); } }, { rootMargin: "200px" });
+    io.observe(el.current); return () => { io.disconnect(); off && off(); };
+  }, [key]);
+  const rows = p && p.rows, lines = p && p.lines;
+  return html`<div class=${"sp-peek" + (p ? " in" : "")} ref=${el} aria-hidden="true">${rows ? html`<table>${rows.map((r) => html`<tr>${r.map((c) => html`<td>${c}</td>`)}</tr>`)}</table>` : lines && lines.map((l, k) => html`<div class=${k ? "" : "t"}>${l}</div>`)}</div>`;
+}
 const SpCard = ({ s, i = 0 }) => html`<a class="card sp-card" style=${"--i:" + Math.min(i, 12) + ";--h:" + hue(s.slug)} href=${"#/s/" + s.ref}>
-  <div class="sp-tile"><b>${SKIND[s.kind] || s.kind}</b>${s.visibility === "private" && html`<span class="badge orange">private</span>`}</div>
+  <div class="sp-tile"><${SpPeek} s=${s} /><b>${SKIND[s.kind] || s.kind}</b>${s.visibility === "private" && html`<span class="badge orange">private</span>`}</div>
   <div class="sp-body"><h3>${s.title}</h3><p class="sp-ref">${s.ref}</p><p>${s.description || ""}</p>
     <div class="meta"><span>${fmt(s.views)} views</span><span>${ago(s.updated)}</span></div></div></a>`;
 function SpCarousel({ items }) {
