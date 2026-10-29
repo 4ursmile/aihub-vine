@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -43,8 +44,14 @@ base = ["git", "-c", "core.symlinks=false", "-c", "protocol.allow=never", "-c", 
         "-c", "credential.interactive=never"]
 
 
-def git(args, cwd=None, timeout=280):
-    return subprocess.run(base + args, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+DEADLINE = time.time() + 270                                          # clone + fetch + LFS share one budget, below the node limit
+
+
+def git(args, cwd=None, timeout=None):
+    left = DEADLINE - time.time()
+    if left < 3:
+        raise subprocess.TimeoutExpired(args, 0)
+    return subprocess.run(base + args, cwd=cwd, env=env, capture_output=True, text=True, timeout=min(timeout or 270, left))
 
 
 def explain(err):
@@ -55,6 +62,25 @@ def explain(err):
     return "git failed: " + err.strip()[-300:]
 
 
+os.makedirs(os.path.dirname(dest), exist_ok=True)
+lockf = dest + ".lock"
+lock_fd = None
+while time.time() < DEADLINE:                                         # one fetch per folder at a time (two runs of the same repo)
+    try:
+        lock_fd = os.open(lockf, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        break
+    except FileExistsError:
+        try:
+            if time.time() - os.path.getmtime(lockf) > 300:
+                os.remove(lockf)
+                continue
+        except OSError:
+            pass
+        time.sleep(1)
+    except OSError:
+        break
+if lock_fd is None and time.time() >= DEADLINE:
+    done(ok=False, error="another run is still updating this repository")
 try:
     if os.path.isdir(os.path.join(dest, ".git")):
         what = "updated"
@@ -78,13 +104,20 @@ try:
         done(ok=False, error=explain(r.stderr or r.stdout))
     attrs = os.path.join(dest, ".gitattributes")
     if os.path.isfile(attrs) and "filter=lfs" in open(attrs, encoding="utf-8", errors="replace").read():
-        l = git(["lfs", "pull"], cwd=dest, timeout=280)                  # real files, not pointer stubs
+        l = git(["lfs", "pull"], cwd=dest)                  # real files, not pointer stubs
         if l.returncode != 0:
             done(ok=False, error="the repository uses Git LFS and `git lfs pull` failed (is git-lfs installed?): " + (l.stderr or l.stdout).strip()[-200:])
 except subprocess.TimeoutExpired:
     done(ok=False, error="git timed out (is the host reachable?)")
 except OSError as e:
     done(ok=False, error="cannot run git: %s" % e)
+finally:
+    if lock_fd is not None:
+        os.close(lock_fd)
+        try:
+            os.remove(lockf)
+        except OSError:
+            pass
 
 root = os.path.realpath(dest)
 targets = []

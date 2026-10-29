@@ -1,13 +1,23 @@
 // AI Hub UI. Preact + htm, marked, DOMPurify, highlight.js and OpenUI come from jsDelivr (pinned). No build step, no npm.
-import { html, render, useState, useEffect, useRef, useCallback } from "./vendor/preact-htm.js";
+import { h, html, render, useState, useEffect, useRef, useCallback, useMemo } from "./vendor/preact-htm.js";
 import { Ic } from "./icons.js";
-import { toast, guard, setToaster, Seg, Pop, Switch, Modal, ask, AskHost } from "./ui.js";
-import { Md, AskCard, setWorkMaker, setBlockSharer } from "./blocks.js";
+import { toast, guard, setToaster, Seg, Pop, Switch, Modal, ask, AskHost, escPush, useInterval } from "./ui.js";
+import { Md, AskCard, setWorkMaker, setBlockSharer, setNodeHost } from "./blocks.js";
 import * as OUI from "./openui.js";
-import { runInstall } from "./term.js";
-import { Viewer, Themes } from "./slides.js";
 import { UsagePage, AlertBar, useAlerts } from "./usage.js";
-import { shareToSpace } from "./space.js";
+
+// term.js, slides.js (+ export.js) and space.js load when first needed, not at start
+const runInstall = (...a) => import("./term.js").then((m) => m.runInstall(...a));
+const shareToSpace = (...a) => import("./space.js").then((m) => m.shareToSpace(...a));
+function lazy(load, name) {
+  let C = null, bad = "";
+  return function Lazy(p) {
+    const [, bump] = useState(0);
+    useEffect(() => { if (!C) load().then((m) => { C = m[name]; bump(1); }).catch((x) => { bad = x.message || "could not load"; bump(1); }); }, []);
+    return C ? h(C, p) : bad ? html`<div class="empty"><div>${Ic("alert", 24)}<div>${bad}</div></div></div>` : html`<div class="empty"><div class="shine">Loading…</div></div>`;
+  };
+}
+const Viewer = lazy(() => import("./slides.js"), "Viewer"), Themes = lazy(() => import("./slides.js"), "Themes");
 
 // ---------- api
 // Accent palettes of the hub (same names as the hub's Settings > Site): [light, dark] -> accent, hover, tinted background.
@@ -24,13 +34,12 @@ function applyBrand(b) {
   const dark = matchMedia("(prefers-color-scheme: dark)").matches, [a, h, bg] = PALETTE[b.theme][dark ? 1 : 0] ? PALETTE[b.theme][dark ? 1 : 0] : PALETTE.claude[0], st = document.documentElement.style;
   if (b.theme !== "claude") { st.setProperty("--accent", a); st.setProperty("--accent2", h); st.setProperty("--accentbg", bg); st.setProperty("--on", dark ? "#000" : "#fff"); }
   else ["--accent", "--accent2", "--accentbg", "--on"].forEach((k) => st.removeProperty(k));       // the built-in palette already is Claude orange
-  if (b.name) document.title = b.name;
 }
 
 async function api(path, { method = "GET", body, signal } = {}) {
   const r = await fetch("/api/" + path, { method, signal, headers: method === "GET" ? {} : { "Content-Type": "application/json", "X-AIHub-UI": "1" }, body: body === undefined ? undefined : JSON.stringify(body) });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || r.statusText);
+  if (!r.ok) { const er = new Error(d.error || r.statusText); er.status = r.status; throw er; }
   return d;
 }
 // The system's own file/folder dialog (the server runs on this machine). -> path, "" when cancelled, null when this machine has none.
@@ -138,7 +147,7 @@ function SlashMenu({ items, idx, pick }) {
   useEffect(() => { const e = ref.current && ref.current.children[idx]; if (e && e.scrollIntoView) e.scrollIntoView({ block: "nearest" }); }, [idx]);
   if (!items.length) return null;
   return html`<div class="slash" ref=${ref}>${items.map((c, i) => html`<button class=${"opt" + (i === idx ? " hi" : "")} onMouseDown=${(e) => { e.preventDefault(); pick(c); }}><span class="oi">${Ic(SLASH_ICON[c.source] || "slash", 14)}</span>
-    <span class="grow"><b>${["theme", "chat", "tool"].includes(c.source) ? "@" : "/"}${c.name}</b><span class="d">${(c.description || "").slice(0, 110)}</span></span><span class="src">${c.sw ? html`<span class="swatch sm">${["bg", "accent", "fg"].map((k) => html`<i style=${`background:${c.sw[k]}`}></i>`)}</span>` : c.source === "ui" ? "" : c.source}</span></button>`)}</div>`;
+    <span class="grow"><b>${["theme", "chat", "tool", "file"].includes(c.source) ? "@" : "/"}${c.name}</b><span class="d">${(c.description || "").slice(0, 110)}</span></span><span class="src">${c.sw ? html`<span class="swatch sm">${["bg", "accent", "fg"].map((k) => html`<i style=${`background:${c.sw[k]}`}></i>`)}</span>` : c.source === "ui" ? "" : c.source}</span></button>`)}</div>`;
 }
 
 // ---------- working folder: file tree, editor, diff, dialogs
@@ -148,30 +157,53 @@ function buildTree(files) {
   for (const f of files) { const parts = f.path.split("/"); let n = root; n.n++; for (const d of parts.slice(0, -1)) { n = n.dirs[d] || (n.dirs[d] = { dirs: {}, files: [], n: 0 }); n.n++; } n.files.push({ ...f, name: parts[parts.length - 1] }); }
   return root;
 }
+const kbd = (fn) => (ev) => { if (ev.target === ev.currentTarget && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); fn(ev); } };
 function FileTree({ files, sel, onPick, src }) {
   const [q, setQ] = useState(""), [tog, setTog] = useState({});
   const list = q ? files.filter((f) => f.path.toLowerCase().includes(q.toLowerCase())) : files, tree = buildTree(list), dflt = (depth) => !!q || depth < 1 || files.length <= 60;
   const walk = (n, base, depth) => [
     ...Object.keys(n.dirs).sort().map((d) => { const path = base + d, isOpen = tog[path] ?? dflt(depth);
-      return html`<div class="tr dir" style=${`padding-left:${6 + depth * 14}px`} onClick=${() => setTog({ ...tog, [path]: !isOpen })}>${Ic(isOpen ? "down" : "right", 12)}${Ic("folder", 14)}<span class="t">${d}</span><span class="mute small">${n.dirs[d].n}</span></div>${isOpen && walk(n.dirs[d], path + "/", depth + 1)}`; }),
-    ...n.files.sort((a, b) => a.name.localeCompare(b.name)).map((f) => html`<div class=${"tr" + (sel === f.path ? " on" : "")} style=${`padding-left:${22 + depth * 14}px`} onClick=${() => onPick(f)} title=${f.path}>${Ic("file", 14)}<span class="t">${f.name}</span><span class="mute small">${num(f.size)}B</span>
-      <a class="ibtn" style="width:24px;height:24px" href=${src(f.path) + "?download=1"} download onClick=${(e) => e.stopPropagation()} title="Download">${Ic("download", 13)}</a></div>`)];
+      return html`<div class="tr dir" role="button" tabindex="0" aria-expanded=${isOpen} style=${`padding-left:${6 + depth * 14}px`} onClick=${() => setTog({ ...tog, [path]: !isOpen })} onKeyDown=${kbd(() => setTog({ ...tog, [path]: !isOpen }))}>${Ic(isOpen ? "down" : "right", 12)}${Ic("folder", 14)}<span class="t">${d}</span><span class="mute small">${n.dirs[d].n}</span></div>${isOpen && walk(n.dirs[d], path + "/", depth + 1)}`; }),
+    ...n.files.sort((a, b) => a.name.localeCompare(b.name)).map((f) => html`<div class=${"tr" + (sel === f.path ? " on" : "")} role="button" tabindex="0" style=${`padding-left:${22 + depth * 14}px`} onClick=${() => onPick(f)} onKeyDown=${kbd(() => onPick(f))} title=${f.path}>${Ic("file", 14)}<span class="t">${f.name}</span><span class="mute small">${num(f.size)}B</span>
+      <a class="ibtn" style="width:24px;height:24px" href=${src(f.path) + "?download=1"} download onClick=${(e) => e.stopPropagation()} title="Download" aria-label=${"Download " + f.name}>${Ic("download", 13)}</a></div>`)];
   return html`<div class="ftree">${files.length > 12 && html`<input class="fq" placeholder="Filter files" value=${q} onInput=${(e) => setQ(e.target.value)}/>`}
     ${list.length ? walk(tree, "", 0) : html`<p class="mute small" style="padding:10px">${files.length ? "No file matches." : "No files yet."}</p>`}</div>`;
 }
-function Editor({ id, path, ver, onSaved }) {
+// Drag handle that resizes a panel horizontally: `sign` is +1 when moving right makes the panel wider (left panel), -1 for a panel on the right.
+function Grip({ cls, value, onChange, onDone, min, max, sign, reset }) {
+  const down = (e) => {
+    e.preventDefault(); const x0 = e.clientX, v0 = value(), clamp = (v) => Math.max(min, Math.min(typeof max === "function" ? max() : max, v));
+    document.body.classList.add("dragging");
+    let last; const mv = (m) => onChange((last = clamp(v0 + sign * (m.clientX - x0))));
+    const up = () => { if (last !== undefined && onDone) onDone(last); document.body.classList.remove("dragging"); removeEventListener("pointermove", mv); removeEventListener("pointerup", up); removeEventListener("pointercancel", up); };
+    addEventListener("pointermove", mv); addEventListener("pointerup", up); addEventListener("pointercancel", up);
+  };
+  return html`<div class=${"grip " + cls} role="separator" aria-orientation="vertical" title="Drag to resize (double-click to reset)" onPointerDown=${down} onDblClick=${reset}></div>`;
+}
+function Editor({ id, path, ver, onSaved, dirtyRef }) {
   const [d, setD] = useState(null), [text, setText] = useState(""), [dirty, setDirty] = useState(false), dr = useRef(false);
-  dr.current = dirty;
+  dr.current = dirty; if (dirtyRef) dirtyRef.current = dirty;
+  useEffect(() => () => { if (dirtyRef) dirtyRef.current = false; }, []);
+  useEffect(() => { if (!dirty) return; const b = (e) => { e.preventDefault(); e.returnValue = ""; }; addEventListener("beforeunload", b); return () => removeEventListener("beforeunload", b); }, [dirty]);
+  const fetchIt = () => api(`files/content?id=${id}&path=${encodeURIComponent(path)}`).then((r) => { setD({ ...r, path }); setText(r.text || ""); setDirty(false); }).catch((e) => setD({ err: e.message, path }));
   useEffect(() => {
     if (dr.current && d && d.path === path) return;                        // keep the user's unsaved edits when a turn touches other files
-    api(`files/content?id=${id}&path=${encodeURIComponent(path)}`).then((r) => { setD({ ...r, path }); setText(r.text || ""); setDirty(false); }).catch((e) => setD({ err: e.message, path }));
+    fetchIt();
   }, [id, path, ver]);
-  const save = guard(async () => { await put("files/content", { id, path, text }); setDirty(false); toast("Saved " + baseName(path)); onSaved && onSaved(); });
+  // the server refuses a save when the file changed on disk since it was read (409 changed): reload it, or overwrite it with the edits
+  const save = guard(async (force) => {
+    try { const r = await put("files/content", { id, path, text, ...(force === true || !d.mtime ? {} : { mtime: d.mtime }) }); setD((x) => ({ ...x, mtime: r && r.mtime !== undefined ? r.mtime : x.mtime })); setDirty(false); toast("Saved " + baseName(path)); onSaved && onSaved(); }
+    catch (e) {
+      if (e.status !== 409 && !/changed/i.test(e.message)) throw e;
+      const v = await ask({ title: "File changed on disk", text: baseName(path) + " was modified (by Claude or another program) after you opened it.", submit: "Apply", fields: [{ name: "c", label: "What to do", type: "select", value: "reload", options: [{ value: "reload", label: "Reload from disk (my edits are lost)" }, { value: "over", label: "Overwrite the file with my edits" }] }] });
+      if (!v) return; if (v.c === "reload") { await fetchIt(); toast("Reloaded " + baseName(path)); } else await save(true);
+    }
+  });
   if (!d) return html`<div class="empty"><div class="shine">Loading…</div></div>`;
   if (d.err || d.binary || d.big) return html`<div class="empty"><div>${Ic("file", 26)}<div>${d.err || (d.big ? "Too large to edit here (" + num(d.big) + "B)." : "This is a binary file.")}</div></div></div>`;
   return html`<div class="editor"><textarea spellcheck="false" wrap="off" value=${text} onInput=${(e) => { setText(e.target.value); setDirty(true); }}
       onKeyDown=${(e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); save(); } else if (e.key === "Tab" && !e.shiftKey) { e.preventDefault(); const t = e.target, a = t.selectionStart; t.setRangeText("  ", a, t.selectionEnd, "end"); setText(t.value); setDirty(true); } }}></textarea>
-    <div class="ebar"><span class="mute small grow">${dirty ? "Unsaved changes" : "Saved"} · ${text.split("\n").length} lines</span><button class="btn" disabled=${!dirty} onClick=${() => { setText(d.text || ""); setDirty(false); }}>Revert</button><button class="btn acc" disabled=${!dirty} onClick=${save}>${Ic("check", 13)} Save</button></div></div>`;
+    <div class="ebar"><span class="mute small grow">${dirty ? "Unsaved changes" : "Saved"} · ${text.split("\n").length} lines</span><button class="btn" disabled=${!dirty} onClick=${() => { setText(d.text || ""); setDirty(false); }}>Revert</button><button class="btn acc" disabled=${!dirty} onClick=${() => save()}>${Ic("check", 13)} Save</button></div></div>`;
 }
 function lineDiff(a, b) {
   const A = a === "" ? [] : a.split("\n"), B = b === "" ? [] : b.split("\n");
@@ -230,6 +262,7 @@ function SoulDialog({ s, busy, close, saved }) {
 }
 
 // ---------- chat
+let elSeq = 0;
 const winOf = (models, id) => (models.find((m) => m.id === id) || models[0] || {}).window || 200000;
 function WorkCard({ r, submit, cancel, toChat, busy }) {
   const ins = r.wk.inputs || [], [v, setV] = useState(() => Object.fromEntries(ins.map((f) => [f.name, f.default ?? (f.type === "checkbox" ? false : "")])));
@@ -237,7 +270,7 @@ function WorkCard({ r, submit, cancel, toChat, busy }) {
   const nodes = Object.entries(r.nodes || {}), done = nodes.filter(([, n]) => n.status === "ok" || n.status === "error").length;
   const fin = r.status === "done" || r.status === "failed";
   return html`<div class="msg"><div class="wrun"><div class="bk-head"><span class="bk-title">${Ic("flow", 14)}<span>${r.wk.title}</span></span>
-      ${r.phase === "run" ? html`<span class=${"tag " + (r.status === "done" ? "good" : r.status === "failed" ? "bad" : "")}>${r.status || "starting"}</span>` : html`<a class="ibtn" style="width:24px;height:24px" onClick=${cancel}>${Ic("x", 14)}</a>`}</div>
+      ${r.phase === "run" ? html`<span class=${"tag " + (r.status === "done" ? "good" : r.status === "failed" ? "bad" : "")}>${r.status || "starting"}</span>` : html`<button class="ibtn" style="width:24px;height:24px" title="Remove" aria-label="Remove" onClick=${cancel}>${Ic("x", 14)}</button>`}</div>
     ${r.phase === "input" ? html`<form onSubmit=${(e) => { e.preventDefault(); if (!bad) submit(v); }}><div class="fb-grid">${ins.map((f) => html`<label class=${"fb-f" + (f.type === "textarea" ? " wide" : "")}><span>${f.label}${f.required ? " *" : ""}</span>
         ${f.type === "textarea" ? html`<textarea rows="3" value=${v[f.name]} onInput=${(e) => setV({ ...v, [f.name]: e.target.value })}></textarea>`
         : f.type === "select" ? html`<select value=${v[f.name]} onChange=${(e) => setV({ ...v, [f.name]: e.target.value })}>${f.options.map((o) => html`<option>${o}</option>`)}</select>`
@@ -256,10 +289,12 @@ const words = (t) => (String(t).trim().match(/\S+/g) || []).length;
 const fmtT = (sec) => (sec < 60 ? sec + "s" : Math.floor(sec / 60) + "m " + (sec % 60) + "s");
 // What the assistant is doing right now: phase, a live step list (tools and their results), reasoning as it streams, counters, and the Stop / Answer now buttons.
 function Working({ act, since, live, steps, ctx, win, free, onStop, onDirect }) {
-  const [n, setN] = useState(0), [openR, setOpenR] = useState(true), rb = useRef();
+  const [n, setN] = useState(0), [openR, setOpenR] = useState(true), rb = useRef(), w0 = useRef(0);
   useEffect(() => { const t = setInterval(() => setN((x) => x + 1), 1000); return () => clearInterval(t); }, []);
   useEffect(() => { if (rb.current) rb.current.scrollTop = rb.current.scrollHeight; }, [live.think.length]);
   const sec = Math.max(0, Math.round((Date.now() - since) / 1000)), writing = live.text.length > 0;
+  if (!writing) w0.current = 0; else if (!w0.current) w0.current = Date.now();
+  const wsec = writing ? (Date.now() - w0.current) / 1000 : 0, speed = wsec >= 2 ? Math.round(live.text.length / 4 / wsec) : 0;
   const phase = writing ? "write" : act && act.k === "tool" ? "tool" : "think";
   const label = phase === "write" ? "Writing the answer" : phase === "tool" ? "Running " + act.name : live.think ? "Reasoning" : "Thinking";
   const done = steps.filter((x) => x.state !== "run").length, shown = steps.slice(-6), pct = win ? Math.min(100, Math.round((ctx / win) * 100)) : 0;
@@ -271,8 +306,8 @@ function Working({ act, since, live, steps, ctx, win, free, onStop, onDirect }) 
       <span class=${"ph" + (phase === "write" ? " on" : "")}>${Ic("edit", 12)} Answer</span></div>
     ${shown.length > 0 && html`<div class="w-steps">${steps.length > shown.length && html`<div class="mute small">+ ${steps.length - shown.length} earlier step${steps.length - shown.length > 1 ? "s" : ""}</div>`}
       ${shown.map((x) => html`<div class=${"w-step " + x.state}><span class="wi">${x.state === "ok" ? Ic("check", 13) : x.state === "bad" ? Ic("x", 13) : html`<i class="spin"></i>`}</span><b>${x.name}</b><span class="mute">${x.hint}</span></div>`)}</div>`}
-    ${live.think && html`<div class="w-think"><a class="w-tt" onClick=${() => setOpenR(!openR)}>${Ic(openR ? "down" : "right", 12)} Reasoning <span class="mute">${words(live.think)} words</span></a>${openR && html`<div class="w-tb" ref=${rb}>${live.think.slice(-1400)}</div>`}</div>`}
-    <div class="w-stats"><span>${Ic("clock", 12)} ${fmtT(sec)}</span>${(!free || steps.length > 0) && html`<span>${Ic("terminal", 12)} ${done}/${steps.length} step${steps.length === 1 ? "" : "s"}</span>`}${live.think && html`<span>${Ic("sparkles", 12)} ${num(live.think.length / 4)} reasoning tokens (est.)</span>`}${writing && html`<span>${Ic("edit", 12)} ${num(live.text.length / 4)} answer tokens (est.)</span>`}${ctx > 0 && html`<span>${Ic("layers", 12)} context ${num(ctx)}${win ? " · " + pct + "%" : ""}</span>`}</div></div>`;
+    ${live.think && html`<div class="w-think"><button type="button" class="w-tt lnk" aria-expanded=${openR} onClick=${() => setOpenR(!openR)}>${Ic(openR ? "down" : "right", 12)} Reasoning <span class="mute">${words(live.think)} words</span></button>${openR && html`<div class="w-tb" ref=${rb}>${live.think.slice(-1400)}</div>`}</div>`}
+    <div class="w-stats"><span>${Ic("clock", 12)} ${fmtT(sec)}</span>${(!free || steps.length > 0) && html`<span>${Ic("terminal", 12)} ${done}/${steps.length} step${steps.length === 1 ? "" : "s"}</span>`}${live.think && html`<span>${Ic("sparkles", 12)} ${num(live.think.length / 4)} reasoning tokens (est.)</span>`}${writing && html`<span>${Ic("edit", 12)} ${num(live.text.length / 4)} tokens written (est.)${speed ? " · ~" + num(speed) + " tok/s" : ""}</span>`}${ctx > 0 && html`<span>${Ic("layers", 12)} context ${num(ctx)}${win ? " · " + pct + "%" : ""}</span>`}</div></div>`;
 }
 // /create-work (/workflow) in a chat: Claude designs the work, which takes a minute; this shows it is on its way
 function GenBar({ gen }) {
@@ -283,52 +318,102 @@ function GenBar({ gen }) {
     <div class="genbar-track"><i></i></div><div class="mute small">${step}…</div></div>`;
 }
 
-function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash }) {
+function ChatTerm({ id, close }) {
+  const host = useRef(null), tm = useRef(null), [ended, setEnded] = useState(null), [n, setN] = useState(0), [h, setH] = useState(() => +pref("termh", "280") || 280);
+  useEffect(() => {
+    let gone = false; setEnded(null);
+    (async () => { try { const x = await runInstall(host.current, { shell: true, session: id }, { post, api }, (code) => !gone && setEnded(code)); if (gone) x.stop(); else tm.current = x; } catch (e) { if (!gone) toast(e.message || "Cannot open a terminal"); } })();
+    return () => { gone = true; if (tm.current) { tm.current.stop(); tm.current = null; } };
+  }, [id, n]);
+  const drag = (e) => { e.preventDefault(); const y0 = e.clientY, h0 = h; document.body.classList.add("dragging-y"); const mv = (m) => setH(Math.max(120, Math.min(innerHeight - 220, h0 + y0 - m.clientY))); const up = () => { document.body.classList.remove("dragging-y"); removeEventListener("pointermove", mv); removeEventListener("pointerup", up); removeEventListener("pointercancel", up); }; addEventListener("pointermove", mv); addEventListener("pointerup", up); addEventListener("pointercancel", up); };
+  useEffect(() => { setPref("termh", String(h)); }, [h]);
+  return html`<div class="chatterm" style=${"height:" + h + "px"}><div class="ct-grip" onPointerDown=${drag}></div><div class="ct-h">${Ic("terminal", 14)}<b>Terminal</b><span class="mute small grow">in this chat's working folder${ended != null ? " · exited (" + ended + ")" : ""}</span>${ended != null && html`<button class="btn" onClick=${() => setN(n + 1)}>Restart</button>`}<button class="ibtn" title="Close terminal" aria-label="Close terminal" onClick=${close}>${Ic("x", 14)}</button></div><div class="ct-b" ref=${host}></div></div>`;
+}
+
+function ToolRow({ b, res, hint }) {
+  const [open, setOpen] = useState(false);                                // the JSON is only built while the row is open
+  return html`<details class="tool" onToggle=${(e) => setOpen(e.currentTarget.open)}><summary>${Ic("terminal", 14)}<b>${b.name}</b> <span class="mute" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${hint}</span>${res && res.error ? html`<span class="tag bad">error</span>` : ""}</summary>${open && html`<pre>${JSON.stringify(b.input, null, 2).slice(0, 3000)}${res ? "\n— result —\n" + res.text : ""}</pre>`}</details>`;
+}
+// One poller per generate job, alive until the job ends or is cancelled: a chat switch only re-attaches the progress bar, so the result is announced once.
+const genJobs = new Map();
+function pollGen(job, text, ui) {
+  let j = genJobs.get(job.id);
+  if (j) { j.ui = ui; ui({ text: text || job.prompt || "", since: job.since || Date.now() }); return j; }
+  j = { ui, on: true, cancel() { this.on = false; } }; genJobs.set(job.id, j); ui({ text: text || job.prompt || "", since: job.since || Date.now() });
+  (async () => {
+    try {
+      let bad = 0;
+      while (j.on) {
+        await new Promise((r) => setTimeout(r, 2000)); if (!j.on) return;
+        let d; try { d = (await api("works/generate/status?id=" + job.id)).job; bad = 0; } catch (x) { if (++bad >= 5) throw x; continue; }
+        if (d.state === "done") { toast("Created " + d.work.title + " (switched off)"); location.hash = "#/works/" + d.work.id; return; }
+        if (d.state === "failed") { toast(d.error || "Could not create the workflow"); return; }
+      }
+    } catch (x) { toast(x.message || String(x)); }
+    finally { genJobs.delete(job.id); if (j.ui) j.ui(null); try { localStorage.removeItem("aihub_genjob"); } catch (x) {} }
+  })();
+  return j;
+}
+
+function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onBusy }) {
   const [s, setS] = useState(null), [hist, setHist] = useState([]), [files, setFiles] = useState([]), [sig, setSig] = useState("");
   const [live, setLive] = useState({ text: "", think: "" }), [busy, setBusy] = useState(false), [text, setText] = useState("");
   const [model, setModel] = useState(pref("model", "")), [effort, setEffort] = useState(pref("effort", "")), [mode, setMode] = useState(pref("mode", "auto"));
   const [ctx, setCtx] = useState(0), [pop, setPop] = useState(null), [sidx, setSidx] = useState(0), [signin, setSignin] = useState(false);
+  const [fresh, setFresh] = useState(null);                                           // model list re-read from settings.json (boot is read once)
   const [ment, setMent] = useState(null), [gen, setGen] = useState(null);                 // @ menu data (loaded on first @), /workflow being designed
   useEffect(() => setMent(null), [id]);
   const [att, setAtt] = useState([]), [tab, setTab] = useState("files"), [open, setOpen] = useState(false), [prev, setPrev] = useState(""), [els, setEls] = useState([]);
   const [engine, setEngine] = useState(pref("engine", "claude")), busyRef = useRef(false), engineNow = useRef("claude"), [mcpAll, setMcpAll] = useState(null), [freeIds, setFreeIds] = useState(null);
-  const [split, setSplit] = useState(pref("split", "0") === "1"), [dlg, setDlg] = useState(null), [dirInfo, setDirInfo] = useState({ dir: "", def: "" });
+  const [split, setSplit] = useState(pref("split", "0") === "1"), [dlg, setDlg] = useState(null), [hintOff, setHintOff] = useState(false), [term, setTerm] = useState(false), [cw, setCw] = useState(() => +pref("canvasw", "0") || 0), [rail, setRail] = useState(pref("edrail", "1") === "1"), [ew, setEw] = useState(() => +pref("edw", "200") || 200), dirtyRef = useRef(false), [dirInfo, setDirInfo] = useState({ dir: "", def: "" });
   const [themes, setThemes] = useState([]), [since, setSince] = useState(0), [act, setAct] = useState(null), [wr, setWr] = useState([]), [works, setWorks] = useState([]);
-  const end = useRef(), ctl = useRef(), ta = useRef(), sendRef = useRef();
-  const load = guard(async () => {
-    const d = await api("sessions/get?id=" + id);
-    setS(d.session); if (d.session.started || d.session.engine === "free") setEngine(d.session.engine === "free" ? "free" : "claude"); setDirInfo({ dir: d.dir, def: d.default_dir }); setHist(d.history); setFiles(d.files); setSig(d.sig); setBusy(d.busy); setLive({ text: "", think: "" }); setCtx(d.session.ctx || 0);
+  const end = useRef(), ctl = useRef(), ta = useRef(), sendRef = useRef(), sRef = useRef(null), pendingRef = useRef([]), stick = useRef(true), msgsRef = useRef(), actRef = useRef(null), alive = useRef(true), prevRef = useRef(""), fileIn = useRef(), [stuck, setStuck] = useState(true), [missing, setMissing] = useState(""), [dismissed, setDismissed] = useState(null);
+  sRef.current = s;
+  useEffect(() => () => { alive.current = false; }, []);
+  const load = async () => {
+    let d; try { d = await api("sessions/get?id=" + id); } catch (x) { if (sRef.current) toast(x.message); else setMissing(x.message || "Chat not found"); return; }
+    setMissing(""); setS(d.session); if (d.session.started || d.session.engine === "free") setEngine(d.session.engine === "free" ? "free" : "claude"); setDirInfo({ dir: d.dir, def: d.default_dir }); setHist(d.history); setFiles(d.files); setSig(d.sig); setBusy(d.busy); setLive({ text: "", think: "" }); setCtx(d.session.ctx || 0);
     if (d.session.model !== undefined && d.session.started) setModel(d.session.model);
     if (d.session.started) setEffort(d.session.effort || "");
     setOpen(false); setPrev(""); setEls([]);
     if (d.busy) follow((on, sig) => stream("chat/attach", { id }, on, sig), d.since);          // a turn is still running here: replay it, then go live
-  });
+  };
   useEffect(() => { load(); api("works").then((d) => setWorks(d.works)).catch(() => {}); api("themes").then((d) => setThemes(d.themes)).catch(() => {}); return () => ctl.current && ctl.current.abort(); }, [id]);
-  useEffect(() => { end.current && end.current.scrollIntoView({ block: "end", behavior: "smooth" }); }, [hist.length, live.text.length > 0]);
+  useEffect(() => { setHintOff(false); }, [id]);
+  // stick to the bottom only while the reader is at the bottom; scrolling up lets go, "Jump to latest" or sending takes it back
+  const toEnd = (smooth) => { const m = msgsRef.current; if (m) m.scrollTo({ top: m.scrollHeight, behavior: smooth ? "smooth" : "instant" }); };
+  const onScroll = () => { const m = msgsRef.current; if (!m) return; const near = m.scrollHeight - m.scrollTop - m.clientHeight < 80; stick.current = near; setStuck(near); };
+  const jump = () => { stick.current = true; setStuck(true); toEnd(true); };
+  useEffect(() => { if (stick.current) toEnd(hist.length > 1); }, [hist.length]);
+  useEffect(() => { if (!stick.current) return; const r = requestAnimationFrame(() => toEnd(false)); return () => cancelAnimationFrame(r); }, [live.text.length, live.think.length, busy]);
   useEffect(() => setPref("split", split ? "1" : "0"), [split]);
   useEffect(() => setPref("engine", engine), [engine]);
   useEffect(() => { setPref("model", model); setPref("effort", effort); setPref("mode", mode); }, [model, effort, mode]);
 
   const win = prefs.window || winOf(boot.models.models, model), relPath = (p) => { p = (p || "").replace(/\\/g, "/"); const d = (dirInfo.dir || "").replace(/\\/g, "/").replace(/\/+$/, ""); if (d && p.startsWith(d + "/")) return p.slice(d.length + 1); const m = p.match(/sessions\/[0-9a-f]{8}\/(.+)$/); return m ? m[1] : null; };
-  const showEl = (e) => { setEls((l) => [...l, e].slice(-8)); setTab("elements"); setOpen(true); };
+  const showEl = (e) => { setEls((l) => [...l, { ...e, id: ++elSeq }].slice(-8)); setTab("elements"); setOpen(true); };
   const sm = /^\/([\w:.-]*)$/.exec(text), pool = sm ? [...UI_CMDS.map((c) => ({ ...c, source: "ui" })), ...works.map((x) => ({ name: "work:" + x.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""), description: "Run work: " + x.title, source: "work", wid: x.id })), ...slash.packages, ...slash.claude] : [];
   const items = sm ? pool.filter((c) => c.name.toLowerCase().includes(sm[1].toLowerCase())).sort((a, b) => (b.name.toLowerCase().startsWith(sm[1].toLowerCase()) ? 1 : 0) - (a.name.toLowerCase().startsWith(sm[1].toLowerCase()) ? 1 : 0)).slice(0, 40) : [];
   const mm = !sm && /(?:^|\s)@([\w:.@\/-]*)$/.exec(text), mq = mm ? mm[1].toLowerCase() : "";
   // @ menu: themes, other chats (@chat:<id>, add :N for its last N messages) and tools (@tool:<name>: skills, commands, MCP servers)
-  useEffect(() => { if (!mm || ment) return; setMent({ chats: [], tools: [] });
-    Promise.all([api("sessions").catch(() => ({ sessions: [] })), api("mcp").catch(() => ({ packages: [], claude: [], ui: [] }))]).then(([ss, mc]) => setMent({
+  useEffect(() => { if (!mm || ment) return; setMent({ chats: [], tools: [] }); let on = true;
+    Promise.all([api("sessions").catch(() => ({ sessions: [] })), api("mcp").catch(() => ({ packages: [], claude: [], ui: [] }))]).then(([ss, mc]) => on && setMent({
       chats: (ss.sessions || []).filter((x) => x.id !== id).map((x) => ({ name: "chat:" + x.id, description: (x.title || "Chat") + " · its last 40 messages; type :N after it for another limit", source: "chat", key: (x.title || "").toLowerCase() })),
       tools: [...new Map([...[...(mc.packages || []), ...(mc.claude || []), ...(mc.ui || [])].map((x) => [x.name, "MCP server"]), ...[...slash.packages, ...slash.claude].map((x) => [x.name, x.description || x.source])]).entries()]
-        .map(([n, d]) => ({ name: "tool:" + n, description: String(d || "tool"), source: "tool", key: n.toLowerCase() })) })); }, [!!mm]);
+        .map(([n, d]) => ({ name: "tool:" + n, description: String(d || "tool"), source: "tool", key: n.toLowerCase() })) })); return () => { on = false; }; }, [!!mm]);
+  const [pfiles, setPfiles] = useState(null), [pickF, setPickF] = useState(false);          // files of the working folder for @ (loaded on first @), "choose a file" dialog
+  useEffect(() => setPfiles(null), [id]);
+  useEffect(() => { if (mm && pfiles === null) { setPfiles([]); api("files?id=" + id).then((d) => setPfiles((d.files || []).map((f) => f.path))).catch(() => {}); } }, [!!mm, id]);
   const [srcs, setSrcs] = useState([]);
-  useEffect(() => { if (!mm) { setSrcs([]); return; } const t = setTimeout(() => api("works/sources?q=" + encodeURIComponent(mm[1])).then((d) => setSrcs(d.items || [])).catch(() => setSrcs([])), 150); return () => clearTimeout(t); }, [mm && mm[1]]);
-  const mitems = mm ? [...srcs, ...themes.map((t) => ({ name: "theme:" + t.id, description: t.name + " - colors " + t.colors.accent + ", fonts " + t.fonts.head.split(",")[0], source: "theme", sw: t.colors, key: t.name.toLowerCase() })),
+  useEffect(() => { if (!mm) { setSrcs([]); return; } let on = true; const t = setTimeout(() => api("works/sources?nodes=1&q=" + encodeURIComponent(mm[1])).then((d) => on && setSrcs(d.items || [])).catch(() => on && setSrcs([])), 150); return () => { on = false; clearTimeout(t); }; }, [mm && mm[1]]);
+  const fileItems = mm && pfiles ? pfiles.filter((p) => p.toLowerCase().includes(mq.replace(/^file:/, ""))).sort((a, b) => (b.split("/").pop().toLowerCase().startsWith(mq.replace(/^file:/, "")) ? 1 : 0) - (a.split("/").pop().toLowerCase().startsWith(mq.replace(/^file:/, "")) ? 1 : 0)).slice(0, 8).map((p) => ({ name: "file:" + p, description: "file in the working folder", source: "file", key: "" })) : [];
+  const mitems = mm ? [...fileItems, ...srcs, ...themes.map((t) => ({ name: "theme:" + t.id, description: t.name + " - colors " + t.colors.accent + ", fonts " + t.fonts.head.split(",")[0], source: "theme", sw: t.colors, key: t.name.toLowerCase() })),
     ...(ment ? [...ment.chats, ...ment.tools] : [])].filter((c) => (c.name + " " + c.key).toLowerCase().includes(mq)).slice(0, 30) : [];
-  const menuItems = sm ? items : mitems;
+  const menuItems = dismissed === text ? [] : sm ? items : mitems;
   useEffect(() => setSidx(0), [sm && sm[1], mm && mm[1]]);
 
   const runUi = (a) => { setText(""); if (a === "clear") newChat(); else if (a === "canvas") setOpen((o) => !o); else if (a === "ctx" || a === "model" || a === "effort" || a === "mode") setPop(a); };
-  const pickSlash = (c) => { if (["theme", "chat", "tool", "space", "knowledge"].includes(c.source)) { setText(text.replace(/@[\w:.@\/-]*$/, "@" + c.name + " ")); ta.current && ta.current.focus(); return; } if (c.source === "ui" && c.action !== "send" && c.action !== "workflow") return runUi(c.action); setText("/" + c.name + " "); ta.current && ta.current.focus(); };
+  const pickSlash = (c) => { if (["theme", "chat", "tool", "space", "knowledge", "file", "node", "work"].includes(c.source)) { setText(text.replace(/@[\w:.@\/-]*$/, "@" + c.name + " ")); ta.current && ta.current.focus(); return; } if (c.source === "ui" && c.action !== "send" && c.action !== "workflow") return runUi(c.action); setText("/" + c.name + " "); ta.current && ta.current.focus(); };
 
   const upWr = (key, p) => setWr((l) => l.map((x) => (x.key === key ? { ...x, ...p } : x)));
   const startWork = guard(async (key, wk, data, text) => {
@@ -336,8 +421,8 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash }) {
     const [w, r] = await Promise.all([api("works/get?id=" + wk.id).then((d) => d.work), post("works/run", { id: wk.id, text, data })]);
     if (!r.run) return upWr(key, { phase: "run", status: "failed", err: "The work did not start (it has no Start node)." });
     upWr(key, { labels: Object.fromEntries(w.nodes.map((n) => [n.id, n.label || n.type])) });
-    for (let i = 0; i < 800; i++) {
-      await new Promise((ok) => setTimeout(ok, 1200));
+    for (let i = 0; i < 800 && alive.current; i++) {
+      await new Promise((ok) => setTimeout(ok, 1200)); if (!alive.current) break;
       const d = (await api(`works/run?id=${wk.id}&run=${r.run}`)).run;
       upWr(key, { status: d.status, nodes: d.nodes || {}, result: d.result, err: (Object.values(d.nodes || {}).find((n) => n.error) || {}).error, chat: d.chat });
       if (d.status === "done" || d.status === "failed") break;
@@ -348,60 +433,86 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash }) {
     setWr((l) => [...l, { key, wk, phase: wk.inputs && wk.inputs.length ? "input" : "run", text: input || "" }]);
     if (!(wk.inputs && wk.inputs.length)) startWork(key, wk, {}, input || "run from chat");
   });
+  // The design runs on the server as a job (one poller per job id, see pollGen); this chat only shows its progress while it is open.
   const genWork = guard(async (t) => { setText(""); setGen({ text: t, since: Date.now() });
-    try { const r = await post("works/generate", { prompt: t }); toast("Created " + r.work.title + " (switched off)"); location.hash = "#/works/" + r.work.id; } finally { setGen(null); } });
-  const send = guard(async (override, opts = {}) => {
+    try { const job = (await post("works/generate/start", { prompt: t })).job; try { localStorage.setItem("aihub_genjob", job.id); } catch (e) {} pollGen(job, t, setGen); } catch (e) { setGen(null); throw e; } });
+  useEffect(() => { let jid = ""; try { jid = localStorage.getItem("aihub_genjob") || ""; } catch (e) {}
+    if (jid) api("works/generate/status?id=" + jid).then((r) => { if (r.job.state === "running") pollGen(r.job, undefined, setGen); else { try { localStorage.removeItem("aihub_genjob"); } catch (e) {} if (r.job.state === "done") { toast("Created " + r.job.work.title + " (switched off)"); location.hash = "#/works/" + r.job.work.id; } else toast(r.job.error || "Could not create the workflow"); } }).catch(() => { try { localStorage.removeItem("aihub_genjob"); } catch (e) {} });
+    return () => { for (const j of genJobs.values()) if (j.ui === setGen) j.ui = null; }; }, []);
+  // send() decides at once: a card result (override text) arriving mid-answer is queued and goes out when the turn ends. Returns false when nothing was sent or queued.
+  const send = (override, opts = {}) => {
+    const t0 = String(override !== undefined ? override : text).trim(); if (!t0) return false;
+    if (busyRef.current) { if (override === undefined) return false; pendingRef.current.push(t0); toast("Queued: sent when the answer ends"); return true; }
+    doSend(override, opts); return true;
+  };
+  const doSend = guard(async (override, opts = {}) => {
     let t = (override !== undefined ? override : text).trim();
     if (!t || busyRef.current) return;
     if (engine === "free" && /^\/compact\b/.test(t)) return toast("Free chat has no compaction: switch to Claude Code, or start a new chat.");
     const m = override === undefined && /^\/([\w:.-]+)\s*([\s\S]*)$/.exec(t);
     if (m) { const ui = UI_CMDS.find((c) => c.name === m[1]); if (m[1] === "workflow" || m[1] === "create-work") { if (!m[2]) return toast("Describe the work after /create-work, for example: /create-work pull data from git, build a dashboard, publish it as a space"); return genWork(m[2]); } if (ui && ui.action !== "send" && !m[2]) return runUi(ui.action); const wk = works.find((x) => "work:" + x.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") === m[1]); if (wk) return runWork(wk, m[2]); const pk = slash.packages.find((c) => c.name === m[1]); if (pk) t = pk.prompt.replace(/\$ARGUMENTS/g, m[2]); }
     if (mode === "bypass" && engine !== "free" && !confirm("Bypass checks lets Claude run any tool without asking. Continue?")) return;
-    const atts = override !== undefined ? [] : att; if (override === undefined) { setText(""); setAtt([]); if (ta.current) ta.current.style.height = "auto"; }
-    setHist((h) => [...h, { k: "user", text: t, files: atts.map((a) => "attachments/" + a.name) }]);
-    await follow((on, sig) => stream("chat", { id, text: t, model, effort: opts.effort !== undefined ? opts.effort : effort, mode, engine, attachments: atts.map((a) => ({ name: a.name, data: a.data })) }, on, sig), Date.now());
+    const typed = override === undefined, atts = typed ? att : [], draft = text;       // the draft comes back if the server never starts the turn
+    if (typed) { setText(""); setAtt([]); if (ta.current) ta.current.style.height = "auto"; }
+    stick.current = true; setStuck(true);
+    const row = { k: "user", text: t, files: atts.map((a) => "attachments/" + a.name) };
+    setHist((h) => [...h, row]);
+    await follow((on, sig) => stream("chat", { id, text: t, model, effort: opts.effort !== undefined ? opts.effort : effort, mode, engine, attachments: atts.map((a) => ({ name: a.name, data: a.data })) }, on, sig), Date.now(),
+      { fail: () => { setHist((h) => h.filter((x) => x !== row)); if (typed) { setText((c) => c || draft); setAtt((a) => (a.length ? a : atts)); } } });
   });
   // Follow a turn that runs on the server. Leaving the chat only closes this listener: the answer keeps running there and is saved.
-  const follow = async (open, t0) => {
-    setBusy(true); setPop(null); setSince(t0 || Date.now()); setAct({ k: "think" }); setLive({ text: "", think: "" });
+  const setActK = (a) => { const p = actRef.current; if (p && p.k === a.k && p.name === a.name) return; actRef.current = a; setAct(a); };      // only a change of kind re-renders
+  const follow = async (open, t0, hooks) => {
+    busyRef.current = true; setBusy(true); onBusy && onBusy(id, true); setTimeout(refresh, 1200); setPop(null); setSince(t0 || Date.now()); actRef.current = null; setActK({ k: "think" }); setLive({ text: "", think: "" });
     if (ctl.current) ctl.current.abort();
     const mine = (ctl.current = new AbortController());
-    let lastText = "";
+    let lastText = "", got = false;
+    const buf = { text: "", think: "", raf: 0 };                                        // stream deltas collect here and reach the page once per animation frame
+    const flush = () => { buf.raf = 0; const a = buf.text, b = buf.think; if (!a && !b) return; buf.text = buf.think = ""; setLive((l) => ({ text: l.text + a, think: l.think + b })); };
+    const drop = () => { if (buf.raf) cancelAnimationFrame(buf.raf); buf.raf = 0; buf.text = buf.think = ""; };
     try {
       await open((ev) => {
-        if (ev.k === "delta") { setAct({ k: "write" }); setLive((l) => ({ ...l, text: l.text + ev.text })); }
-        else if (ev.k === "think") { setAct({ k: "think" }); setLive((l) => ({ ...l, think: l.think + ev.text })); }
+        got = true;
+        if (ev.k === "delta") { setActK({ k: "write" }); buf.text += ev.text; if (!buf.raf) buf.raf = requestAnimationFrame(flush); }
+        else if (ev.k === "think") { setActK({ k: "think" }); buf.think += ev.text; if (!buf.raf) buf.raf = requestAnimationFrame(flush); }
         else if (ev.k === "ctx") setCtx(ev.used);
-        else if (ev.k === "msg") { setLive({ text: "", think: "" }); setHist((h) => [...h, ev]); lastText = ev.blocks.filter((b) => b.type === "text").map((b) => b.text).join("\n"); const tl = ev.blocks.filter((b) => b.type === "tool").pop(); if (tl) setAct({ k: "tool", name: tl.name, hint: toolHint(tl) }); }
+        else if (ev.k === "msg") { drop(); setLive({ text: "", think: "" }); setHist((h) => [...h, ev]); lastText = ev.blocks.filter((b) => b.type === "text").map((b) => b.text).join("\n"); const tl = ev.blocks.filter((b) => b.type === "tool").pop(); if (tl) setActK({ k: "tool", name: tl.name, hint: toolHint(tl) }); }
         else if (ev.k === "files") {                                           // a report or page was made: show it on the canvas
-          setHist((h) => [...h, ev]); api("files?id=" + id).then((d) => { setFiles(d.files); setSig(d.sig); });
-          const f = ev.items.find((x) => /\.(html?|svg)$/i.test(x.path)) || ev.items.find((x) => /\.md$/i.test(x.path)); if (f && engineNow.current === "free") { setPrev(f.path); setTab("preview"); setOpen(true); }
+          setHist((h) => [...h, ev]); refreshFiles();
+          const f = ev.items.find((x) => /\.(html?|svg)$/i.test(x.path)) || ev.items.find((x) => /\.md$/i.test(x.path)); if (f && engineNow.current === "free" && !dirtyRef.current) { setPrev(f.path); setTab("preview"); setOpen(true); }
         }
         else if (ev.k === "tool_result" || ev.k === "result" || ev.k === "compact" || ev.k === "note") setHist((h) => [...h, ev]);
         else if (ev.k === "error") { setHist((h) => [...h, ev]); if (ev.auth) setSignin(true); }
         else if (ev.k === "file") {
-          api("files?id=" + id).then((d) => { setFiles(d.files); setSig(d.sig); });
-          const r = relPath(ev.path); if (r && /\.(html?|svg|md)$/i.test(r)) { setPrev(r); setTab("preview"); setOpen(true); }
+          refreshFiles();
+          const r = relPath(ev.path); if (r && /\.(html?|svg|md)$/i.test(r) && !dirtyRef.current) { setPrev(r); setTab("preview"); setOpen(true); }
         }
       }, mine.signal);
-    } catch (e) { if (e.name !== "AbortError") toast(e.message); }
+    } catch (e) { if (e.name !== "AbortError") { toast(e.message); if (!got && hooks && hooks.fail) hooks.fail(); } }
+    drop();
     if (mine.signal.aborted) return;                                       // this page moved on (other chat, or a newer follow)
-    setBusy(false); setAct(null); setLive({ text: "", think: "" }); refresh();
+    busyRef.current = false; setBusy(false); onBusy && onBusy(id, false); actRef.current = null; setAct(null); setLive({ text: "", think: "" }); refresh();
     api("sessions/get?id=" + id).then((d) => setHist(d.history)).catch(() => {});             // same rows as the saved history, so delete-by-position lines up
-    api("files?id=" + id).then((d) => { setFiles(d.files); setSig(d.sig); });
+    refreshFiles();
     const o = lastText.match(/```openui\n([\s\S]*?)```/); if (o) showEl({ lang: "openui", code: o[1] });
+    const q = pendingRef.current.splice(0); if (q.length) setTimeout(() => sendRef.current(q.join("\n\n")), 0);      // results of cards that finished while the answer was still running
   };
-  sendRef.current = send; busyRef.current = busy; engineNow.current = engine;
+  sendRef.current = send; busyRef.current = busy; engineNow.current = engine; prevRef.current = prev;
   const answerNow = guard(async () => {                                   // stop the harness and ask for a short direct answer in the same Claude session
     await post("chat/stop", { id });
     for (let i = 0; i < 60 && busyRef.current; i++) await new Promise((ok) => setTimeout(ok, 250));
+    if (busyRef.current) return toast("Still stopping… try Answer now again in a moment");
     await sendRef.current(DIRECT_PROMPT, { effort: "low" });
   });
   const stop = guard(async () => { await post("chat/stop", { id }); });                // the stream then ends by itself with `done`
-  const pick = (fl) => [...fl].forEach((f) => { const r = new FileReader(); r.onload = () => setAtt((a) => [...a, { name: f.name, data: r.result.split(",")[1], type: f.type, url: r.result }]); r.readAsDataURL(f); });
+  const pick = (fl) => {
+    fl = [...fl]; const have = att.reduce((n, a) => n + (a.size || 0), 0), add = fl.reduce((n, f) => n + f.size, 0);
+    if (have + add > 25 * 1024 * 1024) return toast("Attachments are limited to 25 MB in total (" + Math.round((have + add) / 1048576) + " MB selected)");
+    fl.forEach((f) => { const r = new FileReader(); r.onload = () => setAtt((a) => [...a, { name: f.name, size: f.size, data: r.result.split(",")[1], type: f.type, url: r.result }]); r.readAsDataURL(f); });
+  };
   const onKey = (e) => {
     if (menuItems.length) { if (e.key === "ArrowDown") { e.preventDefault(); setSidx((i) => (i + 1) % menuItems.length); return; } if (e.key === "ArrowUp") { e.preventDefault(); setSidx((i) => (i + menuItems.length - 1) % menuItems.length); return; }
-      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) { e.preventDefault(); pickSlash(menuItems[sidx]); return; } if (e.key === "Escape") { setText(""); return; } }
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) { e.preventDefault(); pickSlash(menuItems[sidx]); return; } if (e.key === "Escape") { e.preventDefault(); setDismissed(text); return; } }
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
   };
   const delMsg = guard(async (i) => {
@@ -420,102 +531,135 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash }) {
     if (hist.slice(i + 1).some((x) => x.k === "user" || x.k === "msg")) { const v = await ask({ title: "Edit and resend?", text: "This message and everything after it are replaced by the new answer. To keep the old version, branch first.", submit: "Resend" }); if (!v) return; }
     await post("sessions/rewind", { id, index: i }); setHist((h) => h.slice(0, i)); setEdit(null); send(t);
   });
-  const acts = (e, i, branch) => html`<div class="mxs"><button class="mx" title="Copy" onClick=${() => copyMsg(e)}>${Ic("copy", 17)}</button>${!busy && e.k === "user" && html`<button class="mx" title="Edit and resend" onClick=${() => setEdit({ i, text: e.text })}>${Ic("edit", 17)}</button>`}${!busy && branch && html`<button class="mx" title="Branch into a new chat" onClick=${() => branchFrom(i)}>${Ic("branch", 17)}</button>`}${!busy && html`<button class="mx del" title="Delete message" onClick=${() => delMsg(i)}>${Ic("trash", 17)}</button>`}</div>`;
+  const acts = (e, i, branch) => html`<div class="mxs"><button class="mx" title="Copy" aria-label="Copy" onClick=${() => copyMsg(e)}>${Ic("copy", 17)}</button>${!busy && e.k === "user" && html`<button class="mx" title="Edit and resend" aria-label="Edit and resend" onClick=${() => setEdit({ i, text: e.text })}>${Ic("edit", 17)}</button>`}${!busy && branch && html`<button class="mx" title="Branch into a new chat" aria-label="Branch into a new chat" onClick=${() => branchFrom(i)}>${Ic("branch", 17)}</button>`}${!busy && html`<button class="mx del" title="Delete message" aria-label="Delete message" onClick=${() => delMsg(i)}>${Ic("trash", 17)}</button>`}</div>`;
   const rename = guard(async () => {
     const v = await ask({ title: "Rename chat", fields: [{ name: "title", label: "Name", value: s.title, required: true, max: 120 }], submit: "Rename" });
     if (!v) return; const r = await post("sessions/update", { id, title: v.title.trim() }); setS(r.session); refresh();
   });
-  const results = Object.fromEntries(hist.filter((e) => e.k === "tool_result").map((e) => [e.id, e]));
-  const lastUser = hist.map((e) => e.k).lastIndexOf("user");
-  const steps = hist.slice(lastUser + 1).filter((e) => e.k === "msg").flatMap((e) => e.blocks.filter((b) => b.type === "tool" && b.name !== "AskUserQuestion").map((b) => ({ name: b.name, hint: toolHint(b), state: results[b.id] ? (results[b.id].error ? "bad" : "ok") : "run" })));
+  const { results, steps } = useMemo(() => {                            // only changes when the history does, not on every streamed token
+    const results = Object.fromEntries(hist.filter((e) => e.k === "tool_result").map((e) => [e.id, e]));
+    const lastUser = hist.map((e) => e.k).lastIndexOf("user");
+    const steps = hist.slice(lastUser + 1).filter((e) => e.k === "msg").flatMap((e) => e.blocks.filter((b) => b.type === "tool" && b.name !== "AskUserQuestion").map((b) => ({ name: b.name, hint: toolHint(b), state: results[b.id] ? (results[b.id].error ? "bad" : "ok") : "run" })));
+    return { results, steps };
+  }, [hist]);
   const u = s ? s.usage : {}, tot = (u.input || 0) + (u.cache_read || 0) + (u.cache_write || 0);
   const refreshMem = guard(async () => {
     if (!confirm("Reload soul and notes into this chat? It starts a fresh Claude session and the next turn rewrites the prompt cache.")) return;
     const extra = await OUI.languagePrompt(); await post("sessions/update", { id, refresh_memory: true, extra }); toast("Memory reloaded"); load();
   });
   const shareRef = useRef(null);                                       // chat blocks share through this chat (blocks.js setBlockSharer)
+  const nodeCat = useRef(null);                                      // runnable nodes of the catalogue (blocks.js NodeCard), run in this chat's folder
+  useEffect(() => { let on = true; setNodeHost({ info: async (t) => { nodeCat.current = nodeCat.current || api("works/nodes").then((d) => d.nodes || []); return (await nodeCat.current).find((n) => n.type === t && n.runnable) || (nodeCat.current = null); },
+    run: (b) => post("nodes/run", { ...b, id }),
+    workInfo: async (wid) => ((await api("works")).works || []).find((w) => w.id === wid) || null,
+    workRun: async (wid, data, text, onStep) => {
+      const r = await post("works/run", { id: wid, text: text || "run from chat", data }); if (!r.run) throw new Error("The workflow did not start (it has no Start node).");
+      for (let i = 0; i < 800; i++) {
+        await new Promise((ok) => setTimeout(ok, 1200)); if (!on) throw new Error("Stopped: the chat was closed.");
+        const d = (await api(`works/run?id=${wid}&run=${r.run}`)).run, nodes = d.nodes || {}, out = { status: d.status, nodes, result: d.result, err: (Object.values(nodes).find((n) => n.error) || {}).error };
+        if (d.status === "done" || d.status === "failed") return out; onStep(out);
+      }
+      return { status: "failed", nodes: {}, err: "Timed out waiting for the workflow." };
+    } }); return () => { on = false; setNodeHost(null); }; }, [id]);
   useEffect(() => { setBlockSharer((content, filename) => shareRef.current && shareRef.current(filename, false, content)); return () => setBlockSharer(null); }, []);
-  if (!s) return html`<div class="empty"><div>${Ic("sparkles", 28)}<div>Loading…</div></div></div>`;
   const src = (p) => `/w/${id}/${sig}/${p.split("/").map(encodeURIComponent).join("/")}`;
-  const pickList = engine === "free" && freeIds && freeIds.length ? (() => { const base = boot.models.models, have = new Set(base.map((m) => m.id)); return [...base, ...freeIds.filter((x) => !have.has(x.id)).map((x) => ({ id: x.id, label: x.id, kind: x.kind, note: x.kind === "image" ? "Image generation model from your API." : x.kind === "tts" ? "Text-to-speech model from your API." : "Available to your API key.", group: "settings", window: win }))]; })() : boot.models.models;
-  const mdl = pickList.find((m) => m.id === model) || pickList[0];
+  const pickList = engine === "free" && freeIds && freeIds.length ? (() => { const base = (fresh || boot.models).models, have = new Set(base.map((m) => m.id)); return [...base, ...freeIds.filter((x) => !have.has(x.id)).map((x) => ({ id: x.id, label: x.id, kind: x.kind, note: x.kind === "image" ? "Image generation model from your API." : x.kind === "tts" ? "Text-to-speech model from your API." : "Available to your API key.", group: "settings", window: win }))]; })() : (fresh || boot.models).models;
+  const mdl = pickList.find((m) => m.id === model) || (model ? { id: model, label: model, group: "picker", kind: "chat", note: "Model of this chat (not in your settings list)." } : pickList[0]);
   const lastCompact = [...hist].reverse().find((e) => e.k === "compact");
-  const canPrev = (p) => /\.(html?|svg|png|jpe?g|gif|webp|pdf|md|txt)$/i.test(p || ""), fver = (files.find((f) => f.path === prev) || {}).mtime || 0;
-  const pickFile = (f) => { setPrev(f.path); setTab(canPrev(f.path) ? "preview" : "edit"); };
+  const canPrev = (p) => /\.(html?|svg|png|jpe?g|gif|webp|pdf|md|txt|docx|xlsx|pptx)$/i.test(p || ""), fver = (files.find((f) => f.path === prev) || {}).mtime || 0;
+  const leaveOk = () => { if (!dirtyRef.current) return true; if (!confirm("Discard unsaved changes to " + baseName(prevRef.current) + "?")) return false; dirtyRef.current = false; return true; };
+  const changeTab = (t) => { if (t !== tab && tab === "edit" && !leaveOk()) return; setTab(t); };
+  const pickFile = (f) => { if (!leaveOk()) return; setPrev(f.path); setTab(canPrev(f.path) ? "preview" : "edit"); };
   const refreshFiles = () => api("files?id=" + id).then((d) => { setFiles(d.files); setSig(d.sig); }).catch(() => {});
   const noFile = html`<div class="empty"><div>${Ic("file", 26)}<div>Pick a file in Files first.</div></div></div>`;
   const previewEl = prev ? (/\.html?$/i.test(prev) ? html`<${Viewer} url=${src(prev)} name=${prev} ver=${fver} sandbox="allow-scripts allow-forms allow-modals allow-popups"/>`
-    : canPrev(prev) ? html`<iframe key=${prev + files.length + fver} sandbox="allow-scripts allow-forms allow-modals allow-popups" src=${src(prev)}></iframe>`
+    : canPrev(prev) ? html`<iframe key=${prev + files.length + fver} sandbox=${/\.pdf$/i.test(prev) ? undefined : "allow-scripts allow-forms allow-modals allow-popups"} src=${src(prev)}></iframe>`
     : html`<div class="empty"><div>${Ic("file", 26)}<div>No preview for this kind of file.<br/>Use Edit to read it.</div></div></div>`)
     : html`<div class="empty"><div>${Ic("eye", 26)}<div>Select a file in Files,<br/>or let Claude write an .html one.</div></div></div>`;
   const share = guard(async (path, bundle, content = null) => { const r = await shareToSpace(post, id, path, { bundle, content, signedIn: boot.context.signed_in }); if (r && r.url) { try { await navigator.clipboard.writeText(r.url); toast("Link copied: " + r.url); } catch (e) {} } if (r && content != null) refreshFiles(); });
   shareRef.current = share;
-  const editEl = prev && html`<${Editor} key=${prev} id=${id} path=${prev} ver=${fver} onSaved=${refreshFiles}/>`, diffEl = prev && html`<${DiffView} key=${prev} id=${id} path=${prev} ver=${fver}/>`;
-  return html`<div class="chatwrap">${signin && html`<${SignIn} close=${() => setSignin(false)}/>`}
-    <div class="chat">
-      ${dlg === "dir" && html`<${WorkDirDialog} s=${s} cur=${dirInfo.dir} busy=${busy} close=${() => setDlg(null)} saved=${(n) => { setDlg(null); setS(n); load(); refresh(); }}/>`}
-      ${dlg === "soul" && html`<${SoulDialog} s=${s} busy=${busy} close=${() => setDlg(null)} saved=${(n) => { setDlg(null); setS(n); load(); }}/>`}
-      <div class="chat-top"><b class="grow ctitle" title="Rename" onClick=${rename}>${s.title}</b><button class="ibtn" title="Rename chat" onClick=${rename}>${Ic("edit", 16)}</button>
-        <button class=${"dirchip" + (s.cwd ? " set" : "")} title=${"Working folder: " + dirInfo.dir + "\nClick to change"} onClick=${() => setDlg("dir")}>${Ic("folder", 14)}<span>${s.cwd ? baseName(s.cwd) : "Private folder"}</span></button>
-        <button class=${"ibtn" + (s.soul != null ? " on" : "")} title=${s.soul != null ? "This chat has its own soul" : "Soul for this chat"} onClick=${() => setDlg("soul")}>${Ic("user", 16)}</button>
-        <button class="ibtn" title="Reload soul and notes (rewrites cache)" onClick=${refreshMem}>${Ic("refresh", 16)}</button>
-        <button class="ibtn cvb" title=${files.length ? `Canvas - ${files.length} file${files.length > 1 ? "s" : ""}` : "Canvas"} onClick=${() => setOpen(!open)} style=${open ? "color:var(--accent2)" : ""}>${Ic("panel", 18)}${files.length > 0 && !open && html`<i class="cnt">${files.length}</i>`}</button></div>
-      <div class="msgs"><div class="col">
-        ${!hist.length && !busy && html`<div class="hello"><div>${Ic("logo", 34, "")}<h1>What shall we work on?</h1><p>Claude Code runs in this chat's own folder with every skill, agent and MCP server aihub installed.<br/>Type <span class="kbd">/</span> for commands.</p></div></div>`}
-        ${hist.map((e, i) => e.k === "user" ? html`<div class="msg user">${edit && edit.i === i ? null : acts(e, i, true)}${edit && edit.i === i ? html`<div class="bub editing"><textarea rows="3" value=${edit.text} autofocus onInput=${(x) => setEdit({ ...edit, text: x.target.value })} onKeyDown=${(x) => { if (x.key === "Escape") setEdit(null); else if (x.key === "Enter" && (x.metaKey || x.ctrlKey)) saveEdit(); }}></textarea>
+  const [proj, setProj] = useState([]), [pub, setPub] = useState(null);                 // aihub packages of the working folder: a Publish button shows only when there are some
+  useEffect(() => { setProj([]); api("project/info?id=" + id).then((d) => setProj(d.packages || [])).catch(() => {}); }, [id, s && s.cwd, busy]);
+  const openCode = guard(async (path) => { await post("files/vscode", { id, path: path || "" }); toast("Opening in VS Code"); });
+  const switchTo = (f) => { if (f.path === prev) return; if (dirtyRef.current && !confirm("Discard unsaved changes to " + baseName(prev) + "?")) return; dirtyRef.current = false; setPrev(f.path); };
+  const editEl = prev && html`<div class="edlay">${rail && html`<div class="edfiles" style=${"width:" + ew + "px"}><${FileTree} files=${files} sel=${prev} src=${src} onPick=${switchTo}/></div><${Grip} cls="ed-grip" value=${() => ew} onChange=${setEw} onDone=${(v) => setPref("edw", String(v))} min=${120} max=${420} sign=${1} reset=${() => { setEw(200); setPref("edw", "200"); }}/>`}<${Editor} key=${prev} id=${id} path=${prev} ver=${fver} onSaved=${refreshFiles} dirtyRef=${dirtyRef}/></div>`, diffEl = prev && html`<${DiffView} key=${prev} id=${id} path=${prev} ver=${fver}/>`;
+  // the message list is rebuilt only when the history, the busy state, the edit box or the folder signature change, not for every streamed token
+  const histEl = useMemo(() => hist.map((e, i) => e.k === "user" ? html`<div class="msg user">${edit && edit.i === i ? null : acts(e, i, true)}${edit && edit.i === i ? html`<div class="bub editing"><textarea rows="3" value=${edit.text} autofocus onInput=${(x) => setEdit({ ...edit, text: x.target.value })} onKeyDown=${(x) => { if (x.key === "Escape") setEdit(null); else if (x.key === "Enter" && (x.metaKey || x.ctrlKey)) saveEdit(); }}></textarea>
             <div class="row" style="justify-content:flex-end;gap:8px;margin-top:6px"><button class="btn" onClick=${() => setEdit(null)}>Cancel</button><button class="btn acc" disabled=${!edit.text.trim()} onClick=${saveEdit}>Resend</button></div></div>` : html`<div class="bub">${e.text}${(e.files || []).map((f) => html`<div class="chip" style="margin-top:6px">${Ic("clip", 12)} ${f.split("/").pop()}</div>`)}</div>`}</div>`
           : e.k === "msg" ? html`<div class="msg bot"><div class="body">${acts(e, i, true)}${e.blocks.map((b) => b.type === "text" ? html`<${Md} text=${b.text} onRender=${showEl} onSend=${(t) => sendRef.current(t)}/>`
               : b.type === "thinking" ? html`<details class="thinkd"><summary>${Ic("sparkles", 13)} <b>Reasoning</b> <span class="mute small">${words(b.text)} words</span></summary><div class="thinkb">${b.text}</div></details>`
               : b.name === "AskUserQuestion" && b.input && b.input.questions ? html`<${AskCard} spec=${b.input} onSend=${(t) => sendRef.current(t)} locked=${busy || hist.slice(i + 1).some((x) => x.k === "user")}/>`
-              : html`<details class="tool"><summary>${Ic("terminal", 14)}<b>${b.name}</b> <span class="mute" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${toolHint(b)}</span>${results[b.id] && results[b.id].error ? html`<span class="tag bad">error</span>` : ""}</summary><pre>${JSON.stringify(b.input, null, 2).slice(0, 3000)}${results[b.id] ? "\n— result —\n" + results[b.id].text : ""}</pre></details>`)}</div></div>`
+              : html`<${ToolRow} b=${b} res=${results[b.id]} hint=${toolHint(b)}/>`)}</div></div>`
           : e.k === "files" ? html`<div class="msg"><div class="fcard"><div class="fc-h">${Ic("folder", 14)}<b>${e.items.some((x) => x.new) ? "Files created" : "Files changed"}</b><span class="mute small">${e.items.length} in this chat's folder</span></div>
               ${e.items.map((f) => { const open = /\.(html?|svg|png|jpe?g|gif|webp|pdf|md|txt)$/i.test(f.path), img = /\.(png|jpe?g|gif|webp|svg)$/i.test(f.path);
                 return html`<div class="fc-r"><span class="fc-i">${img ? html`<img src=${src(f.path)} alt=""/>` : Ic(/\.(pptx?|docx?|xlsx?)$/i.test(f.path) ? "file" : /\.html?$/i.test(f.path) ? "eye" : "file", 16)}</span>
                   <span class="grow fc-n"><b>${f.path.split("/").pop()}</b><span class="mute small">${f.path.includes("/") ? f.path.split("/").slice(0, -1).join("/") + " · " : ""}${num(f.size)}B${f.new ? "" : " · changed"}</span></span>
-                  ${open && html`<button class="btn" onClick=${() => { setPrev(f.path); setTab("preview"); setOpen(true); }}>${Ic("eye", 13)} Open</button>`}
+                  ${open && html`<button class="btn" onClick=${() => { if (!dirtyRef.current || confirm("Discard unsaved changes to " + baseName(prevRef.current) + "?")) { dirtyRef.current = false; setPrev(f.path); setTab("preview"); setOpen(true); } }}>${Ic("eye", 13)} Open</button>`}
                   <button class="btn" title="Share to a Space on the hub" onClick=${() => share(f.path, false)}>${Ic("upload", 13)}</button><a class="btn" href=${src(f.path) + "?download=1"} download title="Download">${Ic("download", 13)}</a></div>`; })}
-              <div class="fc-f"><a onClick=${() => { setTab("files"); setOpen(true); }}>All files ${Ic("right", 12)}</a></div></div></div>`
-          : e.k === "result" ? html`<div class="stats"><span>${(e.ms / 1000).toFixed(1)}s</span><span>in ${num(e.usage.input)}</span><span>out ${num(e.usage.output)}</span><span>cache read ${num(e.usage.cache_read)}</span><span>cache write ${num(e.usage.cache_write)}</span>${e.error && html`<span class="tag bad">failed</span>`}</div>`
+              <div class="fc-f"><button type="button" class="lnk" onClick=${() => { setTab("files"); setOpen(true); }}>All files ${Ic("right", 12)}</button></div></div></div>`
+          : e.k === "result" ? html`<div class="stats"><span>${(e.ms / 1000).toFixed(1)}s</span><span>in ${num(e.usage.input)}</span><span title="Tokens the model wrote for this turn">${num(e.usage.output)} tokens written</span><span>cache read ${num(e.usage.cache_read)}</span><span>cache write ${num(e.usage.cache_write)}</span>${e.error && html`<span class="tag bad">failed</span>`}</div>`
           : e.k === "note" ? html`<div class="note-line">${Ic("info", 14)} ${e.text}</div>`
           : e.k === "compact" ? html`<div class="note-line">${Ic("compact", 14)} Context compacted · ${num(e.pre)} → ${num(e.post)} tokens (${e.trigger})</div>`
-          : e.k === "error" ? html`<div class="msg"><span class="tag bad">${Ic("alert", 12)} error</span> ${linkify(e.text)} ${e.auth && html`<button class="btn" onClick=${() => setSignin(true)}>Sign in</button>`}</div>` : null)}
+          : e.k === "error" ? html`<div class="msg"><span class="tag bad">${Ic("alert", 12)} error</span> ${linkify(e.text)} ${e.auth && html`<button class="btn" onClick=${() => setSignin(true)}>Sign in</button>`}</div>` : null), [hist, busy, edit, sig, boot]);
+  if (!s) return missing ? html`<div class="empty"><div>${Ic("alert", 28)}<h1>Chat not found</h1><p class="mute">${missing}</p><div class="row" style="justify-content:center;gap:8px"><button class="btn acc" onClick=${newChat}>${Ic("plus", 14)} New chat</button><button class="btn" onClick=${load}>${Ic("refresh", 14)} Try again</button></div></div></div>` : html`<div class="empty"><div>${Ic("sparkles", 28)}<div>Loading…</div></div></div>`;
+  return html`<div class="chatwrap">${signin && html`<${SignIn} close=${() => setSignin(false)}/>`}
+    <div class="chat">
+      ${pickF && html`<${FilePicker} ext="" title="Choose a file to mention" start=${dirInfo.dir || ""} onPick=${(p) => { setPickF(false); const d = (dirInfo.dir || "").replace(/\\/g, "/").replace(/\/+$/, ""), q = p.replace(/\\/g, "/"); setText((t) => (t && !/\s$/.test(t) ? t + " " : t) + "@file:" + (d && q.startsWith(d + "/") ? q.slice(d.length + 1) : q) + " "); ta.current && ta.current.focus(); }} close=${() => setPickF(false)}/>`}
+      ${dlg === "dir" && html`<${WorkDirDialog} s=${s} cur=${dirInfo.dir} busy=${busy} close=${() => setDlg(null)} saved=${(n) => { setDlg(null); setS(n); load(); refresh(); }}/>`}
+      ${dlg === "soul" && html`<${SoulDialog} s=${s} busy=${busy} close=${() => setDlg(null)} saved=${(n) => { setDlg(null); setS(n); load(); }}/>`}
+      <div class="chat-top"><button class="ibtn burger" title="Chats and pages" aria-label="Chats and pages" onClick=${onMenu}>${Ic("menu", 18)}</button><b class="grow ctitle" title="Rename" onClick=${rename}>${s.title}</b><button class="ibtn" title="Rename chat" aria-label="Rename chat" onClick=${rename}>${Ic("edit", 16)}</button>
+        <span class="dirwrap">${(() => { const fresh = !hist.length && !busy && !hintOff; return html`<button class=${"dirchip" + (s.cwd ? " set" : "") + (fresh ? " nudge" : "")} title=${"Working folder: " + dirInfo.dir + "\nClick to change"} onClick=${() => { setHintOff(true); setDlg("dir"); }}>${Ic("folder", fresh ? 17 : 14)}<span>${s.cwd ? baseName(s.cwd) : "Private folder"}</span></button>${fresh && !s.cwd && html`<div class="tip-hint" role="tooltip"><b>Choose a project</b><span>Pick your work project folder, or stay in the blank private one.</span><div class="row" style="gap:6px;margin-top:8px"><button class="btn acc" onClick=${() => { setHintOff(true); setDlg("dir"); }}>Choose project</button><button class="btn" onClick=${() => setHintOff(true)}>Blank</button></div></div>`}`; })()}</span>
+        <button class=${"ibtn" + (s.soul != null ? " on" : "")} title=${s.soul != null ? "This chat has its own soul" : "Soul for this chat"} aria-label="Soul for this chat" onClick=${() => setDlg("soul")}>${Ic("user", 16)}</button>
+        <button class="ibtn" title="Reload soul and notes (rewrites cache)" aria-label="Reload soul and notes (rewrites cache)" onClick=${refreshMem}>${Ic("refresh", 16)}</button>
+        ${proj.length > 0 && html`<button class="btn acc" title="Publish this project to the hub (aihub dev publish -i)" onClick=${() => setPub({ name: proj.map((x) => x.name).join(", "), version: proj.length === 1 ? proj[0].version : "", path: dirInfo.dir, project: id, check: { ok: true } })}>${Ic("upload", 14)} Publish</button>`}
+        <button class=${"ibtn" + (term ? " on" : "")} title="Terminal in the working folder" aria-label="Terminal in the working folder" aria-pressed=${term} onClick=${() => setTerm(!term)}>${Ic("terminal", 17)}</button>
+        <button class=${"ibtn cvb" + (!hist.length && !busy && !open && !hintOff ? " nudge" : "")} title=${files.length ? `Canvas - ${files.length} file${files.length > 1 ? "s" : ""}` : "Canvas"} aria-label="Canvas" aria-pressed=${open} onClick=${() => setOpen(!open)} style=${open ? "color:var(--accent2)" : ""}>${Ic("panel", 18)}${files.length > 0 && !open && html`<i class="cnt">${files.length}</i>`}</button></div>
+      <div class="msgs" ref=${msgsRef} onScroll=${onScroll}><div class="col">
+        ${!hist.length && !busy && html`<div class="hello"><div><span class="herologo">${Ic("logo", 44, "")}</span><h1>What shall we work on?</h1><p>Claude Code runs in this chat's own folder with every skill, agent and MCP server aihub installed.<br/>Type <span class="kbd">/</span> for commands.</p></div></div>`}
+        ${histEl}
         ${gen && html`<${GenBar} gen=${gen}/>`}
         ${live.text && html`<div class="msg bot"><div class="body"><${Md} live=${true} text=${live.text} onRender=${showEl}/></div></div>`}
         ${wr.map((r) => html`<${WorkCard} key=${r.key} r=${r} busy=${busy} submit=${(d) => startWork(r.key, r.wk, d, r.text)} cancel=${() => setWr((l) => l.filter((x) => x.key !== r.key))} toChat=${(t) => sendRef.current(t)}/>`)}
         ${busy && html`<${Working} act=${act} since=${since} live=${live} steps=${steps} ctx=${ctx} win=${win} free=${engine === "free"} onStop=${stop} onDirect=${answerNow}/>`}
         <div ref=${end}></div>
-      </div></div>
+      </div>${!stuck && (hist.length > 0 || busy) && html`<div class="jumpw"><button class="jump" onClick=${jump}>${Ic("down", 14)} Jump to latest</button></div>`}</div>
+      ${pub && html`<${PublishSteps} r=${pub} boot=${boot} close=${() => setPub(null)}/>`}
+      ${term && html`<${ChatTerm} key=${id} id=${id} close=${() => setTerm(false)}/>`}
       <div class="composer">
         <div class="box" onDragOver=${(e) => e.preventDefault()} onDrop=${(e) => { e.preventDefault(); pick(e.dataTransfer.files); }}>
           ${(sm || mm) && html`<${SlashMenu} items=${menuItems} idx=${sidx} pick=${pickSlash}/>`}
-          ${att.length ? html`<div>${att.map((a, i) => html`<span class="chip">${a.type.startsWith("image/") ? html`<img src=${a.url} height="16"/>` : Ic("file", 12)} ${a.name} <a onClick=${() => setAtt(att.filter((_, j) => j !== i))}>${Ic("x", 12)}</a></span>`)}</div>` : ""}
+          ${att.length ? html`<div>${att.map((a, i) => html`<span class="chip">${a.type.startsWith("image/") ? html`<img src=${a.url} height="16"/>` : Ic("file", 12)} ${a.name} <button type="button" class="chipx" aria-label=${"Remove " + a.name} onClick=${() => setAtt(att.filter((_, j) => j !== i))}>${Ic("x", 12)}</button></span>`)}</div>` : ""}
           <textarea ref=${ta} rows="1" placeholder=${engine === "free" ? "Ask the model directly…  (no tools, no files)" : "Message Claude…   / for commands"} value=${text} onInput=${(e) => { setText(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 240) + "px"; }}
             onPaste=${(e) => { const f = [...e.clipboardData.files]; if (f.length) { e.preventDefault(); pick(f); } }} onKeyDown=${onKey}></textarea>
           <div class="tools">
-            <label class="ibtn" title="Attach files" style="cursor:pointer">${Ic("clip", 17)}<input type="file" multiple hidden onChange=${(e) => { pick(e.target.files); e.target.value = ""; }}/></label>
+            <button class="ibtn" title="Attach files" aria-label="Attach files" onClick=${() => fileIn.current && fileIn.current.click()}>${Ic("clip", 17)}</button><input type="file" multiple hidden ref=${fileIn} onChange=${(e) => { pick(e.target.files); e.target.value = ""; }}/>
+            <button class="ibtn" title="Choose a file from this project (adds @file:path)" aria-label="Choose a file from this project (adds @file:path)" onClick=${() => setPickF(true)}>${Ic("folder", 17)}</button>
             <${Pop} open=${pop === "engine"} setOpen=${(v) => setPop(v ? "engine" : null)} button=${html`<${Pill} icon=${engine === "free" ? "zap" : "terminal"} label=${engine === "free" ? "Free chat" + ((s.mcp || []).length ? " · " + s.mcp.length + " tool" + (s.mcp.length > 1 ? "s" : "") : "") : "Claude Code"} active=${pop === "engine" || engine === "free"} title="Engine" onClick=${() => { setPop(pop === "engine" ? null : "engine"); if (!mcpAll) api("mcp/free").then((d) => setMcpAll(d.servers)).catch(() => setMcpAll([])); }}/>`}><${EnginePick} mcpAll=${mcpAll} mcpOn=${s.mcp || []} onMcp=${(list) => post("sessions/update", { id, mcp: list }).then((r) => setS(r.session)).catch((e) => toast(e.message))} value=${engine} onChange=${(v) => { setEngine(v); post("sessions/update", { id, engine: v }).catch(() => {}); }} close=${() => setPop(null)}/><//>
             ${engine !== "free" && html`<${Pop} open=${pop === "mode"} setOpen=${(v) => setPop(v ? "mode" : null)} button=${html`<${Pill} icon=${MODE_INFO[mode][0]} label=${MODE_INFO[mode][1]} active=${pop === "mode"} title="Permission mode" onClick=${() => setPop(pop === "mode" ? null : "mode")}/>`}><${ModePick} modes=${boot.modes} value=${mode} onChange=${setMode} close=${() => setPop(null)}/><//>`}
             <${Pop} open=${pop === "effort"} setOpen=${(v) => setPop(v ? "effort" : null)} button=${html`<${Pill} icon="gauge" label=${effort ? effort[0].toUpperCase() + effort.slice(1) : "Effort"} active=${pop === "effort"} title="Thinking effort" onClick=${() => setPop(pop === "effort" ? null : "effort")}/>`}><${EffortPick} value=${effort} onChange=${setEffort}/><//>
             <span class="grow" style="flex:1"></span>
-            <${Pop} open=${pop === "ctx"} setOpen=${(v) => setPop(v ? "ctx" : null)} align="right" button=${html`<button class="ctxbtn" title="Context window" onClick=${() => setPop(pop === "ctx" ? null : "ctx")}><${Ring} pct=${win ? ctx / win : 0}/><span>${ctx ? Math.round((ctx / win) * 100) + "%" : ""}</span></button>`}>
+            <${Pop} open=${pop === "ctx"} setOpen=${(v) => setPop(v ? "ctx" : null)} align="right" button=${html`<button class="ctxbtn" title="Context window" aria-label="Context window" onClick=${() => setPop(pop === "ctx" ? null : "ctx")}><${Ring} pct=${win ? ctx / win : 0}/><span>${ctx ? Math.round((ctx / win) * 100) + "%" : ""}</span></button>`}>
               <${CtxPick} used=${ctx} win=${win} prefs=${prefs} savePrefs=${savePrefs} busy=${busy} compact=${() => { setPop(null); send("/compact"); }} note=${lastCompact && `Last compact: ${num(lastCompact.pre)} → ${num(lastCompact.post)}`}/><//>
-            <${Pop} open=${pop === "model"} setOpen=${(v) => setPop(v ? "model" : null)} align="right" button=${html`<${Pill} icon="cpu" label=${mdl.label.length > 26 ? mdl.label.slice(0, 24) + "…" : mdl.label} active=${pop === "model"} title="Model" onClick=${() => { setPop(pop === "model" ? null : "model"); if (engine === "free" && !freeIds) api("free/models").then((d) => setFreeIds(d.items || (d.models || []).map((id) => ({ id, kind: "chat" })))).catch(() => setFreeIds([])); }}/>`}><${ModelPick} models=${pickList} value=${model} onChange=${setModel} close=${() => setPop(null)}/><//>
-            ${busy ? html`<button class="send stop" title="Stop" onClick=${stop}>${Ic("stop", 16)}</button>` : html`<button class="send" title="Send" onClick=${() => send()} disabled=${!text.trim()}>${Ic("send", 17)}</button>`}
+            <${Pop} open=${pop === "model"} setOpen=${(v) => setPop(v ? "model" : null)} align="right" button=${html`<${Pill} icon="cpu" label=${mdl.label.length > 26 ? mdl.label.slice(0, 24) + "…" : mdl.label} active=${pop === "model"} title="Model" onClick=${() => { setPop(pop === "model" ? null : "model"); api("models").then(setFresh).catch(() => {}); if (engine === "free" && !freeIds) api("free/models").then((d) => setFreeIds(d.items || (d.models || []).map((id) => ({ id, kind: "chat" })))).catch(() => setFreeIds([])); }}/>`}><${ModelPick} models=${pickList} value=${model} onChange=${setModel} close=${() => setPop(null)}/><//>
+            ${busy ? html`<button class="send stop" title="Stop" aria-label="Stop" onClick=${stop}>${Ic("stop", 16)}</button>` : html`<button class="send" title="Send" aria-label="Send" onClick=${() => send()} disabled=${!text.trim()}>${Ic("send", 17)}</button>`}
           </div>
         </div>
         <div class="foot">${u.turns ? `cache hit ${tot ? Math.round(100 * (u.cache_read || 0) / tot) : 0}% · read ${num(u.cache_read)} · written ${num(u.cache_write)} · ${u.turns} turns` + (u.cost ? ` · $${u.cost.toFixed(3)}` : "") : "Same chat, model and tools keep the prompt cache warm."}</div>
       </div>
     </div>
-    <div class=${"canvas" + (open ? " open" : "") + (split && (tab === "edit" || tab === "diff") ? " wide" : "")}>
-      <div class="ctabs"><${Seg} small value=${tab} onChange=${setTab} items=${[{ id: "files", label: "Files", icon: "folder" }, { id: "preview", label: "Preview", icon: "eye" }, { id: "edit", label: "Edit", icon: "edit" }, { id: "diff", label: "Diff", icon: "layers" }, { id: "elements", label: "Elements", icon: "grid" }]}/></div>
+    <div class=${"canvas" + (open ? " open" : "") + (split && (tab === "edit" || tab === "diff") ? " wide" : "")} style=${cw ? "--cw:" + cw + "px" : ""}>
+      ${open && html`<${Grip} cls="cv-grip" value=${() => document.querySelector(".canvas").getBoundingClientRect().width} onChange=${setCw} onDone=${(v) => setPref("canvasw", String(Math.round(v)))} min=${360} max=${() => Math.max(420, innerWidth - 272 - 320)} sign=${-1} reset=${() => { setCw(0); setPref("canvasw", "0"); }}/>`}
+      <div class="ctabs"><${Seg} small value=${tab} onChange=${changeTab} items=${[{ id: "files", label: "Files", icon: "folder" }, { id: "preview", label: "Preview", icon: "eye" }, { id: "edit", label: "Edit", icon: "edit" }, { id: "diff", label: "Diff", icon: "layers" }, { id: "elements", label: "Elements", icon: "grid" }]}/><button class="ibtn cv-x" title="Close the canvas" aria-label="Close the canvas" onClick=${() => setOpen(false)}>${Ic("x", 16)}</button></div>
       ${(tab === "preview" || tab === "edit" || tab === "diff") && html`<div class="fbar"><span class="mono t" title=${prev}>${prev || "No file selected"}</span>${prev && canPrev(prev) && html`<a class="small" href=${src(prev)} target="_blank" rel="noopener">Open ${Ic("link", 12)}</a>`}${prev && !/\.(exe|dll|zip|gz|tar|bin)$/i.test(prev) && html`<button class="btn" title="Publish this file as a Space on the hub" onClick=${() => share(prev, false)}>${Ic("upload", 13)} Share</button>`}${/(^|\/)index\.html?$/i.test(prev || "") && html`<button class="btn" title="Publish the whole folder as a web page Space" onClick=${() => share(prev, true)}>${Ic("folder", 13)} Share bundle</button>`}
-        ${(tab === "edit" || tab === "diff") && html`<button class=${"ibtn" + (split ? " on" : "")} style="width:26px;height:26px" title="Show the preview beside the editor or diff" onClick=${() => setSplit(!split)}>${Ic("panel", 14)}</button>`}</div>`}
+        ${tab === "edit" && html`<button class=${"ibtn" + (rail ? " on" : "")} style="width:26px;height:26px" title="Show the file list beside the editor" aria-label="Show the file list beside the editor" onClick=${() => { setRail(!rail); setPref("edrail", rail ? "0" : "1"); }}>${Ic("folder", 14)}</button>`}
+        ${prev && html`<button class="btn" title="Open this file, in the project folder, in VS Code" onClick=${() => openCode(prev)}>${Ic("code", 13)} VS Code</button>`}
+        ${(tab === "edit" || tab === "diff") && html`<button class=${"ibtn" + (split ? " on" : "")} style="width:26px;height:26px" title="Show the preview beside the editor or diff" aria-label="Show the preview beside the editor or diff" onClick=${() => setSplit(!split)}>${Ic("panel", 14)}</button>`}</div>`}
       <div class="cbody">
-        ${tab === "files" && html`<div class="fdir"><span class="mono t" title=${dirInfo.dir}>${dirInfo.dir}</span><button class="btn" onClick=${() => setDlg("dir")}>${Ic("folder", 13)} Change</button></div>
+        ${tab === "files" && html`<div class="fdir"><span class="mono t" title=${dirInfo.dir}>${dirInfo.dir}</span><button class="btn" title="Open the project folder in VS Code" onClick=${() => openCode("")}>${Ic("code", 13)} VS Code</button><button class="btn" onClick=${() => setDlg("dir")}>${Ic("folder", 13)} Change</button></div>
           ${files.length ? html`<${FileTree} files=${files} sel=${prev} src=${src} onPick=${pickFile}/>` : html`<div class="empty"><div>${Ic("folder", 26)}<div>No files yet.<br/>Ask Claude to build something.</div></div></div>`}`}
         ${tab === "preview" && previewEl}
         ${(tab === "edit" || tab === "diff") && (!prev ? noFile : split && canPrev(prev) ? html`<div class="split"><div class="pane">${previewEl}</div><div class="pane">${tab === "edit" ? editEl : diffEl}</div></div>` : tab === "edit" ? editEl : diffEl)}
-        ${tab === "elements" && (els.length ? els.map((e, i) => html`<${Element} key=${i} e=${e}/>`) : html`<div class="empty"><div>${Ic("layers", 26)}<div>Use Render on an html, svg or openui block<br/>to see it here.</div></div></div>`)}
+        ${tab === "elements" && (els.length ? els.map((e, i) => html`<${Element} key=${e.id} e=${e}/>`) : html`<div class="empty"><div>${Ic("layers", 26)}<div>Use Render on an html, svg or openui block<br/>to see it here.</div></div></div>`)}
       </div>
     </div>
   </div>`;
@@ -533,7 +677,8 @@ function Element({ e }) {
 function SignIn({ close }) {
   const [st, setSt] = useState(null);
   const poll = () => api("auth").then(setSt).catch(() => {});
-  useEffect(() => { guard(async () => { setSt(await post("auth/login")); })(); const t = setInterval(poll, 1000); return () => clearInterval(t); }, []);
+  useEffect(() => { guard(async () => { setSt(await post("auth/login")); })(); }, []);
+  useInterval(poll, 1000);
   const lg = st && st.login;
   return html`<${Modal} close=${close}><h1>Sign in to Claude</h1><p class="sub">Running your <code>apiKeyHelper</code> (${st ? st.program : "…"}). Follow any link it prints; the helper keeps its own token.</p>
     <div class="io" style="min-height:90px;max-height:40vh">${lg ? lg.lines.map((l) => html`<div>${linkify(l)}</div>`) : "Starting…"}</div>
@@ -612,11 +757,17 @@ function SetupDialog({ items, close }) {
 // ---------- services
 function Services() {
   const [list, setList] = useState([]), [log, setLog] = useState(null), [edit, setEdit] = useState(null);
-  const load = guard(async () => setList((await api("services")).services));
-  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, []);
-  const act = (name, action) => guard(async () => { await post("services/action", { name, action }); toast(name + ": " + action); load(); });
+  const bad = useRef({ n: 0, at: 0 });                                 // a failing poll goes quiet and backs off (5 s, 10 s, ... 60 s); only a manual refresh complains
+  const load = async (manual) => {
+    if (manual !== true && Date.now() < bad.current.at) return;
+    try { setList((await api("services")).services); bad.current = { n: 0, at: 0 }; }
+    catch (x) { const n = bad.current.n + 1; bad.current = { n, at: Date.now() + Math.min(60000, 5000 * 2 ** n) }; if (manual === true) toast(x.message); }
+  };
+  useEffect(() => { load(true); }, []);
+  useInterval(load, 5000);
+  const act = (name, action) => guard(async () => { await post("services/action", { name, action }); toast(name + ": " + action); load(true); });
   const logs = guard(async (n) => setLog({ name: n, text: (await api("services/logs?name=" + n)).log }));
-  return html`<div class="page"><h1>Services</h1><p class="sub">Bots and services installed by aihub, run in the background by <code>aihub run</code>.</p>
+  return html`<div class="page"><h1>Services</h1><p class="sub">Bots and services installed by aihub, run in the background by <code>aihub run</code>. <button class="btn" onClick=${() => load(true)}>${Ic("refresh", 14)} Refresh</button></p>
     ${!list.length && html`<div class="card mute">No bots or services installed. Find some under Packages.</div>`}
     ${list.map((s) => { const r = s.runs[0], alive = r && r.alive; return html`<div class="card"><div class="row"><span class="nico" style="width:34px;height:34px;border-radius:10px;background:var(--soft2);display:grid;place-items:center">${Ic("server", 17)}</span><div class="grow"><b>${s.name}</b> <span class="tag">${s.kind}</span> <span class=${"tag " + (alive ? "good" : "")}>${alive ? "running" : (r && r.status) || "stopped"}</span>${s.enabled === false ? html` <span class="tag bad">disabled</span>` : ""}</div>
         ${alive ? html`<button class="btn" onClick=${act(s.name, "restart")}>${Ic("refresh", 14)} Restart</button><button class="btn" onClick=${act(s.name, "stop")}>${Ic("stop", 12)} Stop</button>` : html`<button class="btn acc" onClick=${act(s.name, "start")}>${Ic("play", 13)} Start</button>`}
@@ -676,7 +827,7 @@ function Knowledge() {
   const list = guard(async () => setNotes((await api("knowledge")).notes));
   const open = guard(async (n) => { setBody((await api("knowledge/note?name=" + n)).body); setCur(n); setDirty(false); });
   useEffect(() => { list(); open("soul"); }, []);
-  const save = guard(async () => { const r = await put("knowledge/note", { name: cur, body }); setDirty(false); toast(r.synced ? "Saved and synced" : "Saved locally (hub not reachable)"); list(); });
+  const save = guard(async () => { const r = await put("knowledge/note", { name: cur, body }); setDirty(false); toast(r.synced === false ? "Saved locally (hub not reachable)" : "Saved"); list(); });
   const names = ["soul", ...notes.map((n) => n.name).filter((n) => n !== "soul")];
   return html`<div class="page" style="max-width:1100px"><h1>Knowledge</h1><p class="sub">Soul and notes are your assistant's memory. New chats read them once and freeze them so the prompt cache stays warm; use the refresh button in a chat to pick up changes.</p>
     <div class="row" style="align-items:flex-start"><div style="width:220px"><div class="card" style="padding:6px">${names.map((n) => html`<button class=${"item" + (n === cur ? " on" : "")} onClick=${() => open(n)}>${Ic(n === "soul" ? "sparkles" : "note", 15)}<span class="t">${n}</span></button>`)}</div>
@@ -835,6 +986,7 @@ function Field({ f, v, set, boot, stored, ctx }) {
   return html`<div class="field"><label>${f.label}${f.required ? " *" : ""}</label>
     ${(f.type === "textarea" || (f.type === "text" && !f.secret)) && f.assist && f.assist.length && ctx ? html`<${PromptBox} f=${f} val=${String(val)} set=${set} ctx=${ctx} one=${f.type === "text"}/>`
     : f.type === "folder" ? html`<div class="row" style="gap:6px">${f.assist && f.assist.length && ctx ? html`<div class="grow"><${PromptBox} f=${f} val=${String(val)} set=${set} ctx=${ctx} one=${true}/></div>` : html`<input class="grow" type="text" ...${common}/>`}<button class="btn" type="button" onClick=${async () => { const p = await nativePick({ dirs: true, start: String(val).replace(/^@/, ""), title: "Choose a working folder" }); if (p) set(p); }}>${Ic("folder", 14)} Browse…</button></div>`
+    : f.type === "code" ? html`<textarea class="codebox" rows="16" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" ...${common} onKeyDown=${(e) => { if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.metaKey) { e.preventDefault(); const t = e.target, a = t.selectionStart; set(t.value.slice(0, a) + "    " + t.value.slice(t.selectionEnd)); requestAnimationFrame(() => { t.selectionStart = t.selectionEnd = a + 4; }); } }}></textarea>`
     : f.type === "textarea" ? html`<textarea rows="5" ...${common}></textarea>`
     : f.type === "checkbox" ? html`<${Switch} on=${!!val} onChange=${set} label=${f.label}/>`
     : f.type === "model" ? html`<select value=${val} onChange=${(e) => set(e.target.value)}>${boot.models.models.map((m) => html`<option value=${m.id}>${m.label}${m.real ? " · " + m.real : ""}</option>`)}</select>`
@@ -854,7 +1006,7 @@ function IoStrip({ node, spec, ctx }) {
     <div class="io-row"><span class="io-k">Produces</span><div class="grow"><span class="tag">${OUT_TAG[spec.out] || "text"}</span> <span class="small">${spec.out_note || "text for the next node"}</span></div></div>
     ${spec.needs && html`<div class=${"io-row" + (bad ? " warn" : "")}><span class="io-k">Needs</span><div class="grow small">${bad ? Ic("alert", 12) : Ic("check", 12)} ${spec.needs_note || "a " + spec.needs + " from the node before"}${bad ? html`<div>Nothing before this node gives a path yet. Add a “File / folder (path)” or “Read from git (path)” node, or a Claude task that ends with OUTPUT: /path.</div>` : ""}</div></div>`}</div>`;
 }
-function Inspector({ w, node, spec, cat, run, boot, hook, upd, close, remove }) {
+function Inspector({ w, node, spec, cat, run, boot, hook, trig, upd, close, remove }) {
   const [tab, setTab] = useState("settings"), rn = run && run.nodes && run.nodes[node.id];
   const incoming = w.edges.filter((e) => e.to === node.id), nameOf = (n) => n.label || (cat[n.type] && cat[n.type].title) || n.type;
   const slugs = nodeSlugs(w, cat);
@@ -873,8 +1025,9 @@ function Inspector({ w, node, spec, cat, run, boot, hook, upd, close, remove }) 
   return html`<aside class="insp" key=${node.id}><div class="insp-h"><span class="nico">${Ic(nodeIcon(node.type, spec), 17)}</span><input class="grow" placeholder=${spec ? spec.title : node.type} value=${node.label || ""} onInput=${(e) => set((n) => (n.label = e.target.value))}/><button class="ibtn" onClick=${close}>${Ic("x", 16)}</button></div>
     <div class="insp-t"><${Seg} small value=${tab} onChange=${setTab} items=${[{ id: "settings", label: "Settings" }, { id: "data", label: "Data" }, { id: "about", label: "About" }]}/></div>
     <div class="insp-b">${tab === "settings" ? html`${spec && html`<${IoStrip} node=${node} spec=${spec} ctx=${fctx}/>`}${spec && spec.guide && html`<details class="guide" open=${!Object.keys(node.config).length}><summary>${Ic("book", 14)} How to set this up</summary><div class="guide-b">${linkify(spec.guide)}</div></details>`}${spec ? spec.fields.map((f) => html`<${Field} key=${node.id + f.name} ctx=${fctx} f=${f} v=${node.config[f.name]} stored=${node.config[f.name] === "__stored__"} boot=${boot} set=${(v) => set((n) => (n.config[f.name] = v))}/>`) : html`<p class="tag bad">${Ic("alert", 12)} This node's package is not installed.</p>`}
+        ${trig && trig[node.id] && (() => { const t = trig[node.id]; return html`<div class="field"><label>Trigger process</label><span class=${"tag " + (t.running ? "good" : "bad")}>${t.running ? "Running" : "Stopped" + (t.exit != null ? " (exit " + t.exit + ")" : "")}</span>${t.fails ? html` <span class="mute small">${t.fails} restart${t.fails > 1 ? "s" : ""}</span>` : ""}${t.stderr && t.stderr.length ? html`<pre class="small" style="max-height:160px;overflow:auto;white-space:pre-wrap">${t.stderr.join("\n")}</pre>` : ""}</div>`; })()}
         ${node.type === "start.webhook" && html`<div class="field"><label>Webhook URL (local only)</label><input readonly value=${hook || "Save the work first"} onClick=${(e) => e.target.select()}/><span class="mute small">POST text or {"text":…,"data":{…}} here. The work must be On.</span></div>`}
-        ${incoming.length ? html`<h2>Inputs</h2>${incoming.map((e) => html`<div class="row small" style="margin:4px 0"><span class="grow">${Ic("link", 12)} from ${(w.nodes.find((q) => q.id === e.from) || {}).label || ((w.nodes.find((q) => q.id === e.from) || {}).type)}</span><a style="cursor:pointer" onClick=${() => upd((c) => ((c.edges = c.edges.filter((x) => !(x.from === e.from && x.to === e.to))), c))}>disconnect</a></div>`)}` : ""}
+        ${incoming.length ? html`<h2>Inputs</h2>${incoming.map((e) => html`<div class="row small" style="margin:4px 0"><span class="grow">${Ic("link", 12)} from ${(w.nodes.find((q) => q.id === e.from) || {}).label || ((w.nodes.find((q) => q.id === e.from) || {}).type)}</span><button type="button" class="lnk" onClick=${() => upd((c) => ((c.edges = c.edges.filter((x) => !(x.from === e.from && x.to === e.to))), c))}>disconnect</button></div>`)}` : ""}
         <div style="margin-top:18px"><button class="btn bad" onClick=${remove}>${Ic("trash", 14)} Delete node</button></div>`
       : tab === "data" ? (rn ? html`<dl class="kv"><dt>Status</dt><dd><span class=${"tag " + (rn.status === "ok" ? "good" : rn.status === "error" ? "bad" : "")}>${rn.status}</span> ${rn.note || ""}</dd>${rn.ended && rn.t0 ? html`<dt>Took</dt><dd>${(rn.ended - rn.t0).toFixed(1)}s</dd>` : ""}</dl>
           ${rn.error && html`<h2>Error</h2><div class="io" style="color:var(--bad)">${rn.error}</div>`}${rn.inputs && rn.inputs.length > 1 ? html`<h2>Inputs (${rn.inputs.length})</h2>${rn.inputs.map((x, k) => html`<div class="io-in"><div class="io-h"><span class="tag">${k + 1}</span><b>${x.label}</b><span class="tag">${OUT_TAG[x.kind] || "text"}</span><code class="mute small">{{in.${(fctx.parents.find((p) => p.id === x.from) || {}).slug || k + 1}}}</code></div><div class="io">${x.text}</div></div>`)}`
@@ -885,24 +1038,24 @@ function Inspector({ w, node, spec, cat, run, boot, hook, upd, close, remove }) 
 const Step = ({ n, state, title, children }) => html`<div class=${"step " + state}><span class="sn">${state === "ok" ? Ic("check", 13) : state === "bad" ? Ic("x", 13) : n}</span><div class="sb"><b>${title}</b>${children}</div></div>`;
 function PublishSteps({ r, boot, close }) {
   const [ctx, setCtx] = useState(boot.context), [o, setO] = useState({ indirect: true, bump: false }), [run, setRun] = useState(null), host = useRef(), tm = useRef();
-  const cmd = `aihub dev publish${o.indirect ? " -i" : ""}${o.bump ? " --bump patch" : ""} ${r.path}`;
+  const cmd = `aihub dev publish${o.indirect || r.project ? " -i" : ""}${o.bump ? " --bump patch" : ""} ${r.path}`;
   const recheck = guard(async () => { setCtx((await api("boot")).context); });
   const go = guard(async () => {
     setRun({ state: "run" });
-    try { tm.current = await runInstall(host.current, { publish: r.name, indirect: o.indirect, bump: o.bump }, { post, api }, (code) => setRun({ state: code === 0 ? "ok" : "bad", code })); }
+    try { tm.current = await runInstall(host.current, r.project ? { project: r.project, bump: o.bump } : { publish: r.name, indirect: o.indirect, bump: o.bump }, { post, api }, (code) => setRun({ state: code === 0 ? "ok" : "bad", code })); }
     catch (e) { setRun(null); throw e; }
   });
   useEffect(() => () => tm.current && tm.current.stop && tm.current.stop(), []);
   const copy = (t) => navigator.clipboard.writeText(t).then(() => toast("Copied"));
-  return html`<${Modal} wide=${true} close=${() => run && run.state === "run" ? null : close()}><h1>Publish ${r.name} ${r.version}</h1><p class="sub">Three steps. Secrets were removed from the package.</p>
+  return html`<${Modal} wide=${true} close=${() => run && run.state === "run" ? null : close()}><h1>Publish ${r.name} ${r.version}</h1><p class="sub">${r.project ? "Uploads this project folder straight to the hub (no git needed). Check it holds no secrets first." : "Three steps. Secrets were removed from the package."}</p>
     <div class="steps">
-      <${Step} n="1" state=${r.check && r.check.ok === false ? "bad" : "ok"} title="Package built"><div class="mute small">${r.check && r.check.ok === false ? r.check.text : "aihub dev validate: looks good"} · <code>${r.path}</code></div><//>
+      <${Step} n="1" state=${r.check && r.check.ok === false ? "bad" : "ok"} title=${r.project ? "Project with aihub.toml" : "Package built"}><div class="mute small">${r.check && r.check.ok === false ? r.check.text : "aihub dev validate: looks good"} · <code>${r.path}</code></div><//>
       <${Step} n="2" state=${ctx.signed_in ? "ok" : "todo"} title=${ctx.signed_in ? "Signed in as " + ctx.username : "Sign in to a hub"}>
-        ${ctx.signed_in ? html`<div class="mute small">${ctx.hub}</div>` : html`<div class="mute small">Publishing needs an account that may publish. <a href="#/settings" onClick=${close}>Open Settings > Hub account</a> (or run <code>aihub login</code>), then <a style="cursor:pointer" onClick=${recheck}>check again</a>.</div>`}<//>
+        ${ctx.signed_in ? html`<div class="mute small">${ctx.hub}</div>` : html`<div class="mute small">Publishing needs an account that may publish. <a href="#/settings" onClick=${close}>Open Settings > Hub account</a> (or run <code>aihub login</code>), then <button type="button" class="lnk" onClick=${recheck}>check again</button>.</div>`}<//>
       <${Step} n="3" state=${run && run.state === "ok" ? "ok" : run && run.state === "bad" ? "bad" : "todo"} title="Run the publish command">
         <div class="pubopts"><label class="row" style="gap:7px"><input type="checkbox" checked=${o.indirect} disabled=${!!run} onChange=${(e) => setO({ ...o, indirect: e.target.checked })}/> Upload to the hub <span class="mute small">(-i: no git repository or git account needed)</span></label>
           <label class="row" style="gap:7px"><input type="checkbox" checked=${o.bump} disabled=${!!run} onChange=${(e) => setO({ ...o, bump: e.target.checked })}/> Bump the patch version first</label></div>
-        <div class="cmd"><code>${cmd}</code><button class="ibtn" title="Copy" onClick=${() => copy(cmd)}>${Ic("copy", 14)}</button></div>
+        <div class="cmd"><code>${cmd}</code><button class="ibtn" title="Copy" aria-label="Copy" onClick=${() => copy(cmd)}>${Ic("copy", 14)}</button></div>
         <div class="termbox" ref=${host} style=${run ? "margin-top:10px" : "display:none"}></div>
         ${run && run.state === "ok" && html`<p class="tag good" style="margin-top:10px">${Ic("check", 12)} Published. Anyone with access can now run <code>aihub install ${r.name}</code>.</p>`}
         ${run && run.state === "bad" && html`<p class="tag bad" style="margin-top:10px">${Ic("alert", 12)} The command ended with exit code ${run.code}. Read the terminal above, fix it, and run it again.</p>`}<//>
@@ -956,7 +1109,7 @@ function NodeEditor({ initial, close, saved }) {
         <input style="width:120px" placeholder="name" value=${f.name} onInput=${(e) => setF(i, { name: e.target.value })}/><input class="grow" style="min-width:120px" placeholder="label" value=${f.label || ""} onInput=${(e) => setF(i, { label: e.target.value })}/>
         <select value=${f.type || "text"} onChange=${(e) => setF(i, { type: e.target.value })}>${FIELD_TYPES.map((t) => html`<option>${t}</option>`)}</select>
         <input style="width:140px" placeholder="default" value=${f.default || ""} onInput=${(e) => setF(i, { default: e.target.value })}/>
-        <button class="ibtn" title="Remove field" onClick=${() => set({ fields: n.fields.filter((_, j) => j !== i) })}>${Ic("trash", 14)}</button></div>
+        <button class="ibtn" title="Remove field" aria-label="Remove field" onClick=${() => set({ fields: n.fields.filter((_, j) => j !== i) })}>${Ic("trash", 14)}</button></div>
         ${(f.type === "text" || f.type === "textarea") && html`<div class="row small" style="gap:14px;margin-top:8px;flex-wrap:wrap"><span class="mute">Suggest and highlight:</span>${[["input", "{{input}}"], ["data", "{{data.key}}"], ["file", "@file"], ["skill", "/skill"]].map(([a, l]) => html`<label class="row" style="gap:5px"><input type="checkbox" checked=${(f.assist || []).includes(a)} onChange=${() => togA(i, a)}/>${l}</label>`)}</div>`}</div>`)}
       <button class="btn" onClick=${() => set({ fields: [...n.fields, { name: "field" + (n.fields.length + 1), label: "", type: "text", default: "" }] })}>${Ic("plus", 14)} Add field</button>
       <h2>Program (Python)</h2><textarea class="readme-ed" spellcheck="false" value=${code || ""} onInput=${(e) => setCode(e.target.value)}></textarea>
@@ -990,7 +1143,7 @@ function Nodes({ close, boot, changed }) {
     ${ed && html`<${NodeEditor} initial=${ed.node ? ed : null} close=${() => setEd(null)} saved=${() => { setEd(null); loadMine(); changed(); }}/>`}
     ${share && html`<${ShareForm} node=${true} id=${share.id} info=${share.info} close=${() => setShare(null)} done=${(r) => { setShare(null); setShared(r); }}/>`}
     ${shared && html`<${PublishSteps} r=${shared} boot=${boot} close=${() => setShared(null)}/>`}
-    ${nd && html`<${Nodes} close=${() => setNd(false)} boot=${boot} changed=${loadCat}/>`}<//>`;
+<//>`;
 }
 function Workflows({ close, opened }) {
   const [tab, setTab] = useState("samples"), [samples, setSamples] = useState([]), [mine, setMine] = useState([]), [found, setFound] = useState([]), [q, setQ] = useState(""), [dlg, setDlg] = useState(null);
@@ -1014,15 +1167,17 @@ function Workflows({ close, opened }) {
     ${dlg && html`<${InstallDialog} p=${dlg} close=${() => setDlg(null)} done=${() => { setDlg(null); loadMine(); setTab("installed"); }}/>`}<//>`;
 }
 function Works({ boot, openId }) {
+  const [trig, setTrig] = useState({});
   const [list, setList] = useState([]), [w, setW] = useState(null), [cat, setCat] = useState({}), [sel, setSel] = useState(null), [link, setLink] = useState(null), [mouse, setMouse] = useState(null);
   const [gen, setGen] = useState(""), [genBusy, setGenBusy] = useState(false), [wf, setWf] = useState(false), [nd, setNd] = useState(false), [shared, setShared] = useState(null), [share, setShare] = useState(null), [runs, setRuns] = useState([]), [run, setRun] = useState(null), [hook, setHook] = useState(""), [dirty, setDirty] = useState(false), [pal, setPal] = useState(null), graph = useRef();
   const load = guard(async () => setList((await api("works")).works));
   const loadCat = () => api("works/nodes").then((d) => setCat(Object.fromEntries(d.nodes.map((n) => [n.type, n])))).catch(() => {});
   useEffect(() => { load(); loadCat(); }, []);
-  const open = guard(async (id) => { setW((await api("works/get?id=" + id)).work); setSel(null); setRun(null); setDirty(false); });
+  const open = guard(async (id) => { const d = await api("works/get?id=" + id); setW(d.work); setTrig(d.triggers || {}); setSel(null); setRun(null); setDirty(false); });
   useEffect(() => { if (openId) open(openId); }, [openId]);
   const refreshRuns = useCallback(() => w && w.id && api("works/runs?id=" + w.id).then((d) => setRuns(d.runs)).catch(() => {}), [w && w.id]);
-  useEffect(() => { if (!w || !w.id) return; refreshRuns(); const t = setInterval(() => { refreshRuns(); if (run && ["queued", "running"].includes(run.status)) api(`works/run?id=${w.id}&run=${run.id}`).then((d) => setRun(d.run)).catch(() => {}); }, 2000); return () => clearInterval(t); }, [w && w.id, run && run.id, run && run.status]);
+  useEffect(() => { if (w && w.id) refreshRuns(); }, [w && w.id]);
+  useInterval(() => { refreshRuns(); if (sel && w.enabled) api("works/get?id=" + w.id).then((d) => setTrig(d.triggers || {})).catch(() => {}); if (run && ["queued", "running"].includes(run.status)) api(`works/run?id=${w.id}&run=${run.id}`).then((d) => setRun(d.run)).catch(() => {}); }, w && w.id ? 2000 : null);
   const node = w && sel ? w.nodes.find((n) => n.id === sel) : null, spec = node ? cat[node.type] : null;
   useEffect(() => { setHook(""); if (w && w.id && node && node.type === "start.webhook") api(`works/hook?id=${w.id}&node=${node.id}`).then((d) => setHook(d.url)).catch(() => {}); }, [sel, w && w.id]);
   const upd = (fn) => { setDirty(true); setW((c) => fn({ ...c, nodes: c.nodes.map((n) => ({ ...n, config: { ...n.config } })), edges: [...c.edges] })); };
@@ -1048,7 +1203,7 @@ function Works({ boot, openId }) {
   const track = (e) => { if (!link || !graph.current) return; const r = graph.current.getBoundingClientRect(); setMouse({ x: e.clientX - r.left + graph.current.scrollLeft, y: e.clientY - r.top + graph.current.scrollTop }); };
   const P = (n, out) => ({ x: n.x + (out ? NW : 0), y: n.y + 27 });
   const curve = (a, b) => `M${a.x},${a.y} C${a.x + 80},${a.y} ${b.x - 80},${b.y} ${b.x},${b.y}`;
-  return html`<div class="wk"><div class="wkbar"><button class="ibtn" title="Back" onClick=${() => { if (!dirty || confirm("Discard unsaved changes?")) { setW(null); load(); } }}>${Ic("left", 18)}</button>
+  return html`<div class="wk"><div class="wkbar"><button class="ibtn" title="Back" aria-label="Back" onClick=${() => { if (!dirty || confirm("Discard unsaved changes?")) { setW(null); load(); } }}>${Ic("left", 18)}</button>
       <input class="grow" style="font:600 16px var(--serif);border-color:transparent;background:transparent" value=${w.title} onInput=${(e) => upd((c) => ((c.title = e.target.value), c))}/>
       <label class="row small" style="gap:6px" title="How many runs are kept on disk, and offered to Memory nodes"><span class="mute">History</span><input type="number" min="1" max="500" style="width:64px" value=${w.keep || 40} onInput=${(e) => upd((c) => ((c.keep = Math.max(1, Math.min(500, +e.target.value || 40))), c))}/></label>
       ${w.id && html`<button class="btn" title="Share as an aihub workflow package" onClick=${guard(async () => { const saved = dirty ? await save() : w; setShare({ id: saved.id, info: await api("works/export-info?id=" + saved.id) }); })}>${Ic("upload", 14)} Share</button>`}
@@ -1067,9 +1222,9 @@ function Works({ boot, openId }) {
             <header onPointerDown=${(e) => drag(n, e)}><span class="nico">${Ic(nodeIcon(n.type, sp), 16)}</span><div class="grow" style="min-width:0"><div class="nt">${n.label || (sp ? sp.title : n.type)}</div><div class="ns">${sp ? (sp.kind === "trigger" ? "Start" : sp.group) : "missing package"}</div></div><span class="st"></span>
               <button class="rm" title="Delete" onClick=${() => { upd((c) => ((c.nodes = c.nodes.filter((q) => q.id !== n.id)), (c.edges = c.edges.filter((x) => x.from !== n.id && x.to !== n.id)), c)); setSel(null); }}>${Ic("x", 13)}</button></header>
             <div class="nb">${summary(n) || html`<span class="mute">Not set up</span>`}</div></div>`; })}
-        </div>${link && html`<div class="toast" style="position:sticky;bottom:12px;left:40%;display:inline-block">Click the left dot of the next node <a style="cursor:pointer;color:var(--accent)" onClick=${() => setLink(null)}>cancel</a></div>`}</div>
-      ${node ? html`<${Inspector} w=${w} node=${node} spec=${spec} cat=${cat} run=${run} boot=${boot} hook=${hook} upd=${upd} close=${() => setSel(null)} remove=${() => { upd((c) => ((c.nodes = c.nodes.filter((q) => q.id !== node.id)), (c.edges = c.edges.filter((x) => x.from !== node.id && x.to !== node.id)), c)); setSel(null); }}/>`
-        : html`<aside class="insp"><div class="insp-h"><b class="grow">Runs</b><button class="ibtn" onClick=${refreshRuns}>${Ic("refresh", 15)}</button></div><div class="insp-b">${!runs.length && html`<p class="mute small">No runs yet. Double-click the canvas or press Add node to build the flow.</p>`}
+        </div>${link && html`<div class="toast" style="position:sticky;bottom:12px;left:40%;display:inline-block">Click the left dot of the next node <button type="button" class="lnk" style="color:var(--accent)" onClick=${() => setLink(null)}>cancel</button></div>`}</div>
+      ${node ? html`<${Inspector} w=${w} node=${node} spec=${spec} cat=${cat} run=${run} boot=${boot} hook=${hook} trig=${trig} upd=${upd} close=${() => setSel(null)} remove=${() => { upd((c) => ((c.nodes = c.nodes.filter((q) => q.id !== node.id)), (c.edges = c.edges.filter((x) => x.from !== node.id && x.to !== node.id)), c)); setSel(null); }}/>`
+        : html`<aside class="insp"><div class="insp-h"><b class="grow">Runs</b><button class="ibtn" title="Refresh runs" aria-label="Refresh runs" onClick=${refreshRuns}>${Ic("refresh", 15)}</button></div><div class="insp-b">${!runs.length && html`<p class="mute small">No runs yet. Double-click the canvas or press Add node to build the flow.</p>`}
           ${runs.slice(0, 14).map((r) => html`<div class=${"item" + (run && run.id === r.id ? " on" : "")} onClick=${guard(async () => setRun((await api(`works/run?id=${w.id}&run=${r.id}`)).run))}><span class=${"tag " + (r.status === "done" ? "good" : r.status === "failed" ? "bad" : "")}>${r.status}</span><span class="t small">${r.via} · ${r.text}</span><span class="mute small">${ago(r.started)}</span></div>`)}
           ${run && run.chat && html`<a class="small" href=${"#/chat/" + run.chat}>Open the run's chat and files ${Ic("right", 12)}</a>`}</div></aside>`}</div>
     ${share && html`<${ShareForm} id=${share.id} info=${share.info} close=${() => setShare(null)} done=${(r) => { setShare(null); setShared(r); }}/>`}
@@ -1087,14 +1242,14 @@ function HelperStatus() {
     <button class="btn" onClick=${guard(async () => { const r = await post("auth/check"); setSt(r.status); toast(r.ok ? "Key helper works" : "Sign-in needed"); })}>Check</button><button class="btn acc" onClick=${() => setDlg(true)}>Sign in</button>${dlg && html`<${SignIn} close=${() => setDlg(false)}/>`}</div>`;
 }
 function FilePicker({ start, ext = ".json", title = "Choose a file", onPick, close, dirs = false }) {
-  const [d, setD] = useState(null), [sel, setSel] = useState("");
-  const go = guard(async (p) => { setD(await api("fs/list?ext=" + encodeURIComponent(ext) + (dirs ? "&dirs=1" : "") + "&path=" + encodeURIComponent(p || ""))); setSel(""); });
+  const [d, setD] = useState(null), [sel, setSel] = useState(""), [bad, setBad] = useState("");
+  const go = async (p) => { try { setD(await api("fs/list?ext=" + encodeURIComponent(ext) + (dirs ? "&dirs=1" : "") + "&path=" + encodeURIComponent(p || ""))); setSel(""); setBad(""); } catch (x) { setBad(x.message || "Cannot list this folder"); if (d) toast(x.message); } };
   useEffect(() => { go(start); }, []);
-  if (!d) return html`<${Modal} close=${close}><h1>${title}</h1><div class="shine">Loading…</div><//>`;
+  if (!d) return html`<${Modal} close=${close}><h1>${title}</h1>${bad ? html`<p class="tag bad">${bad}</p><div class="row" style="margin-top:14px"><span class="grow"></span><button class="btn" onClick=${() => go("")}>Try the home folder</button><button class="btn" onClick=${close}>Close</button></div>` : html`<div class="shine">Loading…</div>`}<//>`;
   const under = d.path.toLowerCase().startsWith(d.home.toLowerCase()), parts = d.path.slice(under ? d.home.length : 0).split(/[\\/]/).filter(Boolean); let acc = under ? d.home : "";
   const sep = d.path.includes("\\") ? "\\" : "/", full = (n) => d.path + (d.path.endsWith(sep) ? "" : sep) + n;
   return html`<${Modal} wide=${true} close=${close}><h1>${title}</h1>
-    <div class="crumbs"><a onClick=${() => go(d.home)}>${Ic("folder", 13)} Home</a>${parts.map((p) => { acc = acc ? acc + (acc.endsWith(sep) ? "" : sep) + p : (/^[A-Za-z]:$/.test(p) ? p + sep : sep + p); const here = acc; return html`<span class="mute">/</span><a onClick=${() => go(here)}>${p}</a>`; })}</div>
+    <div class="crumbs"><button type="button" class="lnk" onClick=${() => go(d.home)}>${Ic("folder", 13)} Home</button>${parts.map((p) => { acc = acc ? acc + (acc.endsWith(sep) ? "" : sep) + p : (/^[A-Za-z]:$/.test(p) ? p + sep : sep + p); const here = acc; return html`<span class="mute">/</span><button type="button" class="lnk" onClick=${() => go(here)}>${p}</button>`; })}</div>
     <div class="row small" style="gap:8px;margin:6px 0">${d.places.map((pl) => html`<button class="btn" style="padding:3px 10px" onClick=${() => go(pl.path)}>${pl.name}</button>`)}<span class="mute">${dirs ? "Only folders are shown." : "Only files ending " + ext + " are shown. Contents are never displayed."}</span></div>
     <div class="fpl">${d.parent && html`<div class="fpr" onClick=${() => go(d.parent)}>${Ic("up", 15)}<span class="grow">..</span></div>`}
       ${d.items.map((i) => html`<div class=${"fpr" + (sel === i.name ? " on" : "")} onClick=${() => (i.dir ? go(full(i.name)) : setSel(i.name))} onDblClick=${() => !i.dir && onPick(full(i.name))}>${Ic(i.dir ? "folder" : "file", 15)}<span class="grow">${i.name}</span>${!i.dir && html`<span class="mute small">${num(i.size)}B</span>`}</div>`)}
@@ -1105,7 +1260,8 @@ const WINDOWS = [[200000, "200K tokens"], [500000, "500K tokens"], [1000000, "1M
 function UpdateCard({ prefs, savePrefs }) {
   const [u, setU] = useState(null), [busy, setBusy] = useState(false);
   const load = () => api("update").then((r) => setU(r.update)).catch(() => {});
-  useEffect(() => { load(); const t = setInterval(load, 20000); return () => clearInterval(t); }, []);
+  useEffect(() => { load(); }, []);
+  useInterval(load, 20000);
   const check = async () => { setBusy(true); try { setU((await post("update/check", {})).update); } catch (e) { toast(e.message); } finally { setBusy(false); } };
   return html`<div class="card"><div class="row"><div class="grow"><b>Keep AI Hub UI up to date</b><div class="mute small">Checks for a newer aihub-ui every few hours. “Update and restart” waits until nothing is running (no chat answering, no work, no install), then updates and restarts this service; open pages reconnect.</div>
       ${u && html`<div class="small" style="margin-top:6px">Installed ${u.installed || "?"}${u.latest ? " · newest " + u.latest : ""}${u.newer ? html` · <b>update available</b>` : ""}${u.waiting ? " · waiting: " + u.waiting : ""}${u.error ? html`<span style="color:var(--bad,#c0392b)"> · ${u.error}</span>` : ""}${u.restarting ? " · restarting…" : ""}</div>`}</div>
@@ -1161,25 +1317,30 @@ function Settings({ boot, reload, prefs, savePrefs, focus }) {
 // ---------- shell
 const NAV = [["packages", "package", "Packages"], ["services", "server", "Services"], ["mcp", "plug", "MCP servers"], ["works", "flow", "Works"], ["knowledge", "book", "Knowledge"], ["usage", "chart", "Usage"]];
 function App() {
+  const [sw, setSw] = useState(() => +pref("sidew", "272") || 272);
   const [boot, setBoot] = useState(null), [sess, setSess] = useState({ folders: [], sessions: [] }), [route, setRoute] = useState(location.hash.slice(2) || "chat"), [msg, setMsg] = useState(""), [err, setErr] = useState("");
-  const [q, setQ] = useState(""), [hits, setHits] = useState(null);
+  const [q, setQ] = useState(""), [hits, setHits] = useState(null), [drawer, setDrawer] = useState(false);      // <=860px: the sidebar is a drawer
   const [prefs, setPrefs] = useState({ policy: "off", autocompact: true, compact_pct: 80, window: 1000000 }), [slash, setSlash] = useState({ claude: [], packages: [] });
   setToaster(setMsg);
   const [brand, setBrand] = useState({});
   useEffect(() => { api("brand").then((b) => { setBrand(b || {}); applyBrand(b); }).catch(() => {}); }, []);
   const hubName = brand.name || "AI Hub", Logo = (n) => Ic("logo", n);
   const reloadBoot = () => api("boot").then(setBoot).catch((e) => setErr(e.message));
-  const reloadSess = () => api("sessions").then(setSess).catch(() => {});
+  const [running, setRunning] = useState({});
+  const reloadSess = () => api("sessions").then((d) => { setSess(d); setRunning((r) => { const idle = Object.keys(r).filter((k) => r[k] && d.sessions.some((x) => x.id === k && !x.busy)); if (!idle.length) return r; const n = { ...r }; idle.forEach((k) => delete n[k]); return n; }); }).catch(() => {});                                     // chats this page is streaming right now (shown before the next sessions poll)
+  const markBusy = useCallback((sid, v) => setRunning((r) => (!!r[sid] === v ? r : { ...r, [sid]: v || undefined })), []);
   const alerts = useAlerts(api);
   const savePrefs = guard(async (p) => { const r = await put("prefs", p); setPrefs(r.prefs); return r.prefs; });
-  useEffect(() => { reloadBoot(); reloadSess(); api("prefs").then((d) => setPrefs(d.prefs)).catch(() => {}); api("slash").then(setSlash).catch(() => {}); const h = () => setRoute(location.hash.slice(2) || "chat"); addEventListener("hashchange", h); return () => removeEventListener("hashchange", h); }, []);
+  useEffect(() => { OUI.warm(); reloadBoot(); reloadSess(); api("prefs").then((d) => setPrefs(d.prefs)).catch(() => {}); api("slash").then(setSlash).catch(() => {}); const h = () => setRoute(location.hash.slice(2) || "chat"); addEventListener("hashchange", h); return () => removeEventListener("hashchange", h); }, []);
   useEffect(() => {                                                    // search chats: titles and what was said
     const t = q.trim(); if (t.length < 2) { setHits(null); return; }
     let live = true; const h = setTimeout(() => api("sessions/search?q=" + encodeURIComponent(t)).then((d) => live && setHits(d.results)).catch(() => {}), 220);
     return () => { live = false; clearTimeout(h); };
   }, [q]);
-  useEffect(() => { if (!sess.sessions.some((x) => x.busy)) return; const t = setInterval(reloadSess, 4000); return () => clearInterval(t); }, [sess]);      // chats answering in the background
-  const go = (r) => { location.hash = "#/" + r; };
+  useInterval(reloadSess, sess.sessions.some((x) => x.busy || running[x.id]) ? 4000 : null);      // chats answering in the background
+  const go = (r) => { setDrawer(false); location.hash = "#/" + r; };
+  useEffect(() => { setDrawer(false); }, [route]);
+  useEffect(() => { if (!drawer) return; return escPush(() => setDrawer(false)); }, [drawer]);
   const newChat = guard(async (folder = "") => { const extra = await OUI.languagePrompt(); const r = await post("sessions", { folder: typeof folder === "string" ? folder : "", extra }); await reloadSess(); go("chat/" + r.session.id); });
   if (err) return html`<div class="empty"><div>${Ic("alert", 28)}<h1>AI Hub UI</h1><p>${err}</p><p class="mute">Open the address from <code>~/.aihub/ui/url.txt</code>.</p></div></div>`;
   if (!boot) return html`<div class="empty"><div>${Ic("logo", 30)}<div>Starting…</div></div></div>`;
@@ -1202,20 +1363,20 @@ function App() {
   const newFolder = guard(async () => { const v = await ask({ title: "New project", text: "Projects group chats in the sidebar. Choosing a working folder for a chat makes a project of the same name.", fields: [{ name: "name", label: "Project name", required: true, placeholder: "Project X", max: 60 }], submit: "Create project" }); if (!v) return;
     const n = v.name.trim(); if (sess.folders.includes(n)) return toast("That project already exists"); await post("folders", { folders: [...sess.folders, n] }); reloadSess(); });
   const c = boot.context;
-  return html`<div class="shell"><aside class="side">
+  return html`<div class="shell" style=${"--sw:" + sw + "px"}>${drawer && html`<div class="sdback" onClick=${() => setDrawer(false)}></div>`}<aside class=${"side" + (drawer ? " open" : "")}><${Grip} cls="sd-grip" value=${() => sw} onChange=${setSw} onDone=${(v) => setPref("sidew", String(Math.round(v)))} min=${200} max=${460} sign=${1} reset=${() => { setSw(272); setPref("sidew", "272"); }}/>
       <div class="brand"><span class="logo">${Logo(16)}</span>${hubName}</div>
       <button class="newchat" onClick=${() => newChat()}>${Ic("plus", 16)} New chat</button>
-      <div class="nav">${NAV.map(([k, ic, l]) => html`<a class=${page === k ? "on" : ""} href=${"#/" + k}>${Ic(ic, 17)}${l}</a>`)}</div>
-      <div class="sq">${Ic("search", 14)}<input placeholder="Search chats" value=${q} onInput=${(e) => setQ(e.target.value)} onKeyDown=${(e) => e.key === "Escape" && setQ("")}/>${q && html`<a class="ibtn" style="width:22px;height:22px" title="Clear" onClick=${() => setQ("")}>${Ic("x", 13)}</a>`}</div>
-      <div class="hist">${q.trim().length >= 2 ? html`<h6><span>${hits ? hits.length + " result" + (hits.length === 1 ? "" : "s") : "Searching…"}</span></h6>${(hits || []).map((h) => html`<div class=${"item hit" + (arg === h.id ? " on" : "")} onClick=${() => go("chat/" + h.id)}>${Ic("chat", 15)}<span class="t2"><b>${hilite(h.title, q.trim())}</b>${h.snippet && html`<span class="mute small">${hilite(h.snippet, q.trim())}</span>`}${h.folder && html`<span class="mute small">project ${h.folder}</span>`}</span></div>`)}${hits && !hits.length && html`<p class="mute small" style="padding:8px 10px">No chat matches.</p>`}` : groups.map(([f, items]) => !!(f || items.length) && html`<h6><span title=${(sess.folder_dirs || {})[f] ? "Working folder: " + sess.folder_dirs[f] : ""}>${f || "Chats"}${(sess.folder_dirs || {})[f] ? html` ${Ic("folder", 13)}` : ""}</span>${f && html`<span class="hbtns"><a class="ibtn" style="width:28px;height:28px" title="New chat in this project" onClick=${() => newChat(f)}>${Ic("plus", 17)}</a><a class="ibtn" style="width:28px;height:28px" title="Delete project" onClick=${() => delProject(f)}>${Ic("trash", 17)}</a></span>`}</h6>${items.map((s) => html`<div class=${"item" + (arg === s.id ? " on" : "")} onClick=${() => go("chat/" + s.id)}>${s.busy ? html`<span class="runDot" title="Answering in the background"></span>` : Ic("chat", 15)}<span class="t">${s.title}</span>
-          <span class="x" title="Rename" onClick=${(e) => { e.stopPropagation(); rename(s); }}>${Ic("edit", 18)}</span><span class="x" title="Move to project" onClick=${(e) => { e.stopPropagation(); move(s); }}>${Ic("folder", 18)}</span><span class="x" title="Delete" onClick=${(e) => { e.stopPropagation(); delChat(s); }}>${Ic("trash", 18)}</span></div>`)}`)}
-        <h6><span></span><a style="cursor:pointer;font-weight:500;text-transform:none;letter-spacing:0" onClick=${newFolder}>${Ic("folder", 14)} New project</a></h6></div>
-      <div class="acct item" onClick=${() => go(c.signed_in ? "settings" : "settings/login")}><div class="av">${(c.username || "?")[0].toUpperCase()}</div><div class="grow"><b>${c.signed_in ? c.username : "Sign in"}</b><div class="mute small">${c.hub_configured ? c.hub.replace(/^https?:\/\//, "") : "local only"}</div></div>${Ic("sliders", 16)}</div>
+      <div class="nav" onClick=${() => setDrawer(false)}>${NAV.map(([k, ic, l]) => html`<a class=${page === k ? "on" : ""} href=${"#/" + k}>${Ic(ic, 17)}${l}</a>`)}</div>
+      <div class="sq">${Ic("search", 14)}<input placeholder="Search chats" aria-label="Search chats" value=${q} onInput=${(e) => setQ(e.target.value)} onKeyDown=${(e) => e.key === "Escape" && setQ("")}/>${q && html`<button class="ibtn" style="width:22px;height:22px" title="Clear" aria-label="Clear search" onClick=${() => setQ("")}>${Ic("x", 13)}</button>`}</div>
+      <div class="hist">${q.trim().length >= 2 ? html`<h6><span>${hits ? hits.length + " result" + (hits.length === 1 ? "" : "s") : "Searching…"}</span></h6>${(hits || []).map((h) => html`<div class=${"item hit" + (arg === h.id ? " on" : "")}><button class="rowmain" onClick=${() => go("chat/" + h.id)}>${Ic("chat", 15)}<span class="t2"><b>${hilite(h.title, q.trim())}</b>${h.snippet && html`<span class="mute small">${hilite(h.snippet, q.trim())}</span>`}${h.folder && html`<span class="mute small">project ${h.folder}</span>`}</span></button></div>`)}${hits && !hits.length && html`<p class="mute small" style="padding:8px 10px">No chat matches.</p>`}` : groups.map(([f, items]) => !!(f || items.length) && html`<h6><span title=${(sess.folder_dirs || {})[f] ? "Working folder: " + sess.folder_dirs[f] : ""}>${f || "Chats"}${(sess.folder_dirs || {})[f] ? html` ${Ic("folder", 13)}` : ""}</span>${f && html`<span class="hbtns"><button class="ibtn" style="width:28px;height:28px" title="New chat in this project" aria-label=${"New chat in " + f} onClick=${() => newChat(f)}>${Ic("plus", 17)}</button><button class="ibtn" style="width:28px;height:28px" title="Delete project" aria-label=${"Delete project " + f} onClick=${() => delProject(f)}>${Ic("trash", 17)}</button></span>`}</h6>${items.map((s) => html`<div class=${"item" + (arg === s.id ? " on" : "")}><button class="rowmain" onClick=${() => go("chat/" + s.id)} aria-current=${arg === s.id ? "page" : undefined}>${s.busy || running[s.id] ? html`<span class="runDot" role="img" title="Answering…" aria-label="Answering"></span>` : Ic("chat", 15)}<span class="t">${s.title}</span></button>
+          <button class="x" title="Rename" aria-label=${"Rename " + s.title} onClick=${() => rename(s)}>${Ic("edit", 18)}</button><button class="x" title="Move to project" aria-label=${"Move " + s.title + " to a project"} onClick=${() => move(s)}>${Ic("folder", 18)}</button><button class="x" title="Delete" aria-label=${"Delete " + s.title} onClick=${() => delChat(s)}>${Ic("trash", 18)}</button></div>`)}`)}
+        <h6><span></span><button class="linkbtn" onClick=${newFolder}>${Ic("folder", 14)} New project</button></h6></div>
+      <div class="acct item" role="button" tabindex="0" aria-label="Account and settings" onClick=${() => go(c.signed_in ? "settings" : "settings/login")} onKeyDown=${(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(c.signed_in ? "settings" : "settings/login"); } }}><div class="av">${(c.username || "?")[0].toUpperCase()}</div><div class="grow"><b>${c.signed_in ? c.username : "Sign in"}</b><div class="mute small">${c.hub_configured ? c.hub.replace(/^https?:\/\//, "") : "local only"}</div></div>${Ic("sliders", 16)}</div>
     </aside>
-    <main class="main"><${AlertBar} alerts=${alerts}/>${page === "chat" && arg ? html`<${Chat} key=${arg} id=${arg} boot=${boot} refresh=${reloadSess} newChat=${() => newChat()} prefs=${prefs} savePrefs=${savePrefs} slash=${slash}/>`
+    <main class="main">${!(page === "chat" && arg) && html`<button class="ibtn burger fab" title="Chats and pages" aria-label="Chats and pages" onClick=${() => setDrawer(true)}>${Ic("menu", 18)}</button>`}<${AlertBar} alerts=${alerts}/>${page === "chat" && arg ? html`<${Chat} key=${arg} id=${arg} onBusy=${markBusy} onMenu=${() => setDrawer(true)} boot=${boot} refresh=${reloadSess} newChat=${() => newChat()} prefs=${prefs} savePrefs=${savePrefs} slash=${slash}/>`
       : page === "packages" ? html`<${Packages}/>` : page === "services" ? html`<${Services}/>` : page === "mcp" ? html`<${Mcp}/>`
       : page === "works" ? html`<${Works} boot=${boot} openId=${arg}/>` : page === "knowledge" ? html`<${Knowledge}/>` : page === "usage" ? html`<${UsagePage} api=${api} prefs=${prefs} savePrefs=${savePrefs}/>` : page === "settings" || page === "vault" ? html`<${Settings} boot=${boot} reload=${reloadBoot} prefs=${prefs} savePrefs=${savePrefs} focus=${arg}/>`
-      : html`<div class="hello"><div>${Logo(36)}<h1>${hubName}</h1><p>Chat with Claude Code, manage packages, services, MCP servers and logins.</p><button class="btn acc" onClick=${() => newChat()}>${Ic("plus", 14)} New chat</button></div></div>`}</main>
-    ${msg && html`<div class="toast">${msg}</div>`}<${AskHost}/></div>`;
+      : html`<div class="hello"><div><span class="herologo">${Logo(44)}</span><h1>${hubName}</h1><p>Chat with Claude Code, manage packages, services, MCP servers and logins.</p><button class="btn acc" onClick=${() => newChat()}>${Ic("plus", 14)} New chat</button></div></div>`}</main>
+    ${html`<div class="toast-live" role="status" aria-live="polite">${msg && html`<div class="toast">${msg}</div>`}</div>`}<${AskHost}/></div>`;
 }
 render(html`<${App}/>`, document.getElementById("app"));

@@ -86,7 +86,39 @@ class Cron(unittest.TestCase):
                 W.parse_schedule(bad)
 
 
+    def test_star_steps_names_and_sunday_seven(self):
+        _, s = W.parse_schedule("0 9 */2 * 7")                  # day-of-month `*/2` is still a star: the weekday alone decides on its day...
+        self.assertFalse(s[5])
+        self.assertTrue(s[6])
+        self.assertEqual(s[4], {0})                              # 7 = Sunday = 0
+        _, s = W.parse_schedule("0 9 1 jan-mar mon-fri")
+        self.assertEqual(s[3], {1, 2, 3})
+        self.assertEqual(s[4], {1, 2, 3, 4, 5})
+        _, s = W.parse_schedule("0 9 * * 5-7")
+        self.assertEqual(s[4], {5, 6, 0})
+        _, s = W.parse_schedule("0 9 15 * mon")                  # both restricted: either matches
+        self.assertTrue(W.cron_due(s, datetime.datetime(2026, 10, 26, 9, 0)))     # a Monday, not the 15th
+        self.assertTrue(W.cron_due(s, datetime.datetime(2026, 10, 15, 9, 0)))     # the 15th, a Thursday
+        self.assertFalse(W.cron_due(s, datetime.datetime(2026, 10, 14, 9, 0)))
+
+
 class Flow(Base):
+    def test_concurrent_sync_fires_a_cron_once(self):
+        w = self.save([{"id": "c", "type": "start.cron", "config": {"schedule": "* * * * *"}}, {"id": "t", "type": "flow.template", "config": {"template": "x"}}],
+                      [{"from": "c", "to": "t"}])
+        bar = threading.Barrier(8)
+
+        def go():
+            bar.wait()
+            self.engine.sync()
+        ts = [threading.Thread(target=go) for _ in range(8)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.final(w["id"])
+        self.assertEqual(len(W.list_runs(w["id"])), 1)
+
     def test_template_filter_and_branch_stop(self):
         w = self.save([{"id": "a", "type": "start.manual"}, {"id": "t", "type": "flow.template", "config": {"template": "got {{input}} / {{trigger}}"}},
                        {"id": "f", "type": "flow.filter", "config": {"regex": "^got deploy"}}, {"id": "g", "type": "flow.filter", "config": {"regex": "nomatch"}},
@@ -780,11 +812,23 @@ class Loop(Base):
         self.assertIn("item 1", r["nodes"]["l"]["error"])
         r = self.run_work(*build({"on_error": "continue"}))
         self.assertIn("3 failed", r["nodes"]["l"]["note"])
+        self.assertEqual(r["status"], "done")                     # a continued item failure does not fail the run
         r = self.run_work(*build({"limit": 2}))
         self.assertIn("limit", r["nodes"]["l"]["error"])
         r = self.run_work(*build({"items": " "}))
         self.assertEqual(r["status"], "done")
         self.assertIn("empty", r["nodes"]["l"]["note"])
+
+
+class LoopSharedFlag(Loop):
+    def test_parallel_branch_failure_is_kept_while_a_loop_continues(self):
+        r = self.run_work([{"id": "a", "type": "start.manual", "config": {}},
+                           {"id": "l", "type": "flow.loop", "config": {"items": "a\nb", "split": "lines", "on_error": "continue"}},
+                           {"id": "f", "type": "flow.filter", "config": {"regex": "["}},
+                           {"id": "bad", "type": "flow.filter", "config": {"regex": "["}}],
+                          [{"from": "a", "to": "l"}, {"from": "l", "to": "f"}, {"from": "a", "to": "bad"}])
+        self.assertEqual(r["status"], "failed")
+        self.assertIn("2 failed", r["nodes"]["l"]["note"])
 
 
 class McpControl(unittest.TestCase):

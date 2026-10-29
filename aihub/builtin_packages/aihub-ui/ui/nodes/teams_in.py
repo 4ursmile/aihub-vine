@@ -58,7 +58,13 @@ class H(BaseHTTPRequestHandler):
         if u.path != "/teams" or not hmac.compare_digest(key.encode(), SECRET.encode()):
             return self._reply(403, {"error": "wrong path or secret"})
         try:
-            m = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 262144)) or b"{}")
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        if n < 0:
+            return self._reply(400, {"error": "bad Content-Length"})
+        try:
+            m = json.loads(self.rfile.read(min(n, 262144)) or b"{}")
         except ValueError:
             return self._reply(400, {"error": "body must be JSON"})
         if not isinstance(m, dict):

@@ -12,9 +12,10 @@ from . import aihub as A, chat, freechat, store, term
 
 PKG = "aihub-ui"
 IDLE_FOR = 60
-state = {"checked": 0.0, "installed": "", "latest": "", "error": "", "updated": "", "waiting": "", "restarting": False}
+state = {"checked": 0.0, "installed": "", "latest": "", "error": "", "updated": "", "waiting": "", "restarting": False, "checking": False}
 _lock = threading.Lock()
 _now = threading.Event()
+_checking = threading.Lock()                # one version check at a time
 
 
 def every():
@@ -38,13 +39,22 @@ def busy(engine):
     if engine is not None and getattr(engine, "running", 0):
         return "a work is running"
     with term.lock:
-        if any(t.code is None for t in term.terms.values()):
+        if any(t.code is None and not getattr(t, "shell", False) for t in term.terms.values()):      # chat shells do not count, installs and publishes do
             return "an install is running"
     return ""
 
 
 def check():
     """Ask the CLI for the installed and the newest version. Sets state; -> True when a newer one exists."""
+    with _checking:
+        state["checking"] = True
+        try:
+            return _check()
+        finally:
+            state["checking"] = False
+
+
+def _check():
     try:
         have = next((p.get("version") for p in (A.run(["list"], timeout=60).get("data") or []) if p.get("name") == PKG), "")
         latest = (A.run(["info", PKG], timeout=120).get("data") or {}).get("latest_version") or ""
@@ -105,8 +115,13 @@ def start(engine, restart):
     threading.Thread(target=loop, args=(engine, restart), daemon=True, name="ui-selfupdate").start()
 
 
-def check_now():
-    _now.set()
+def check_now(wait=20.0):
+    """Run a check now (in its own thread, also when auto update is off) and wait for it, at most WAIT seconds. -> True when it finished;
+    False = still running, `status()["checking"]` says so and the page can ask again."""
+    th = threading.Thread(target=check, daemon=True, name="ui-update-check")
+    th.start()
+    th.join(wait)
+    return not th.is_alive()
 
 
 def status():

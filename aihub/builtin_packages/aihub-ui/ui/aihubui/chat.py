@@ -7,6 +7,7 @@ Prompt-cache friendly by construction:
 Claude's own login and settings.json (model, env, hooks, MCP, skills, agents) apply because the real CLI runs."""
 import json
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -84,6 +85,7 @@ class Run:
         self.cond = threading.Condition()
         self.events = []
         self.done = False
+        self.cancel = threading.Event()       # set by stop(): a turn that has not started claude yet must not start it
         self.base = base                      # history lines before this run (a returning page loads those, then replays the run)
         self.since = time.time()
 
@@ -113,11 +115,13 @@ def start(sess, *a, **kw):
     engine, files = kw.pop("engine", "claude"), kw.pop("files", None)           # "free" = the UI's own harness (no Claude Code)
     if engine == "free":
         kw["files"] = files
+    base = store.count(sid)                                         # in memory after the first call; never counted while plock is held
     with plock:
         old = runs.get(sid)
         if old and not old.done:
             return None
-        run = runs[sid] = Run(store.count(sid))
+        run = runs[sid] = Run(base)
+        stopped.discard(sid)
 
     def go():
         try:
@@ -206,11 +210,29 @@ def stop(sid):
         return True
     with plock:
         p = procs.get(sid)
+        r = runs.get(sid)
+    if r and not r.done:                                             # also a turn that is still preparing (before claude exists)
+        r.cancel.set()
+        stopped.add(sid)
     if p and p.poll() is None:
         stopped.add(sid)
         _kill(p)
         return True
-    return False
+    return bool(r and not r.done)
+
+
+def _cancelled(sid):
+    with plock:
+        r = runs.get(sid)
+    return sid in stopped or bool(r and not r.done and r.cancel.is_set())
+
+
+ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+def clean_env(extra):
+    """Only real environment variable names reach the child; secret box entries such as node:<work>:<node>:<field> never do."""
+    return {k: str(v) for k, v in (extra or {}).items() if isinstance(k, str) and ENV_NAME.match(k) and not k.startswith("node:") and v is not None}
 
 
 def busy(sid):
@@ -302,15 +324,31 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
         store.append(sid, ev)
         yield ev
         return
-    stopped.discard(sid)
+    cur = store.get_session(sid)
+    if not cur:                                                     # deleted while queued: no folder, no history
+        yield {"k": "done"}
+        return
+    if "system" not in sess:                                         # a slim row from the list: use the frozen prompt from the files
+        sess = cur
+    if not active(sid):
+        stopped.discard(sid)                                         # (a Run from start() cleared it already; a stop since then must survive)
+    if _cancelled(sid):
+        stopped.discard(sid)
+        yield {"k": "done", "stopped": True}
+        return
     cwd = store.session_dir(sid)
     os.makedirs(cwd, exist_ok=True)
-    start_files = store.tree(sid)
-    before = {f["path"]: (f["mtime"], f["size"]) for f in start_files}               # to list what this turn created or changed
-    try:
-        store.snapshot(sid, start_files)                                             # what Diff compares against
-    except OSError:
-        pass
+    prep = {"before": {}}
+
+    def snap():                                                      # runs while claude boots; the prompt is sent only after it ends
+        files = store.tree(sid)
+        prep["before"] = {f["path"]: (f["mtime"], f["size"]) for f in files}               # to list what this turn created or changed
+        try:
+            store.snapshot(sid, files)                                                     # what Diff compares against
+        except OSError:
+            pass
+    snap_t = threading.Thread(target=snap, daemon=True)
+    snap_t.start()
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
            "--permission-mode", MODES.get(mode, "auto")]
     sp, custom = settings_path()
@@ -340,26 +378,37 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
         cmd += ["--disallowedTools", "AskUserQuestion"]
     env = dict(os.environ)
     env.update(store.prefs_env())
-    env.update(extra_env or {})
+    env.update(clean_env(extra_env))
     env["AIHUB_UI_SESSION"] = sid
+    if _cancelled(sid):
+        snap_t.join()
+        stopped.discard(sid)
+        yield {"k": "done", "stopped": True}
+        return
     try:
         p = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True, encoding="utf-8", errors="replace", start_new_session=True)
     except OSError as e:
+        snap_t.join()
         ev = {"k": "error", "text": "cannot start claude: %s (install Claude Code and sign in with `claude`)" % e}
         store.append(sid, ev)
         yield ev
         return
     with plock:
         procs[sid] = p
+    if _cancelled(sid):                                              # Stop arrived while claude was starting
+        _kill(p)
     errbuf = []
     threading.Thread(target=lambda: errbuf.extend(p.stderr.readlines()[-20:]), daemon=True).start()
+    snap_t.join()                                                    # the snapshot must hold the files as they were before claude sees the prompt
+    before = prep["before"]
     try:
         p.stdin.write(text)
         p.stdin.close()
     except (OSError, ValueError):
         pass
-    store.update_session(sid, started=True, model=model, effort=effort, mode=mode)
+    store.update_session(sid, started=True, model=model, effort=effort, mode=mode)       # (no write when nothing changed)
+    ctx = None                                                       # context size: kept here, written once when the turn ends
     got_result = False
     t0 = time.time()
     try:
@@ -383,14 +432,14 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
                 c = m.get("compact_metadata") or {}
                 ev = {"k": "compact", "pre": c.get("pre_tokens", 0), "post": c.get("post_tokens", 0), "trigger": c.get("trigger", "auto")}
                 store.append(sid, ev)
-                store.update_session(sid, ctx=ev["post"])
+                ctx = ev["post"]
                 yield ev
                 yield {"k": "ctx", "used": ev["post"]}
             elif t == "assistant":
                 u = _usage((m.get("message") or {}).get("usage"))
                 used = u["input"] + u["cache_read"] + u["cache_write"]
                 if used:
-                    store.update_session(sid, ctx=used)
+                    ctx = used
                     yield {"k": "ctx", "used": used}
                 blocks = _blocks((m.get("message") or {}).get("content"))
                 if blocks:
@@ -440,6 +489,8 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
     finally:
         with plock:
             procs.pop(sid, None)
+        if ctx is not None:
+            store.update_session(sid, ctx=ctx)                       # one write per turn (a crash loses only this number)
     if not got_result and sid in stopped:
         stopped.discard(sid)                                         # the user pressed Stop: not an error
     elif not got_result:

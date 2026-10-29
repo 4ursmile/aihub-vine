@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from aihubui import aihub as A, auth, chat, freechat, hubusage, mcpclient, selfupdate, sources, spacebundle, store, term, usagereport, works as W    # noqa: E402
+from aihubui import aihub as A, auth, chat, freechat, hubusage, mcpclient, officeview, selfupdate, sources, spacebundle, store, term, usagereport, works as W    # noqa: E402
 from aihubui.secretbox import Box, write_private                  # noqa: E402
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -38,8 +38,8 @@ SIGN_KEY = secrets.token_bytes(32)
 BOX = None
 ENGINE = None
 ADDR = {"host": "127.0.0.1", "port": 0}
-CSP = ("default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-       "img-src 'self' data: blob: https://tile.openstreetmap.org https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; connect-src 'self'; frame-src 'self'; "
+CSP = ("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; "          # every library is vendored: no CDN for the UI itself
+       "img-src 'self' data: blob: https://tile.openstreetmap.org; font-src 'self'; connect-src 'self'; frame-src 'self'; "
        "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 PREVIEW_CSP = ("sandbox allow-scripts allow-forms allow-modals allow-popups; default-src 'self' 'unsafe-inline' data: blob:; "
                "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
@@ -58,9 +58,10 @@ def sig(sid):
 
 
 class Err(Exception):
-    def __init__(self, msg, code=400):
+    def __init__(self, msg, code=400, **extra):
         super().__init__(msg)
         self.code = code
+        self.extra = extra                              # more fields for the JSON answer (e.g. mtime of a file that changed)
 
 
 def need(body, key, kind=str):
@@ -86,10 +87,20 @@ class H(BaseHTTPRequestHandler):
         pass
 
     # ---- plumbing
+    _unread = False                                      # a request body is still on the socket: the reply must close the connection (keep-alive would read it as the next request)
+
     def _send(self, code, body=b"", ctype="application/json", extra=None):
+        self._head(code, ctype, len(body), extra)
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _head(self, code, ctype, length, extra=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", str(length))
+        if self._unread:
+            self.close_connection = True
+            self.send_header("Connection", "close")
         if not (extra and "Cache-Control" in extra):
             self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -98,8 +109,6 @@ class H(BaseHTTPRequestHandler):
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
 
     def _json(self, obj, code=200):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
@@ -121,11 +130,20 @@ class H(BaseHTTPRequestHandler):
     def _authed(self):
         return hmac.compare_digest(self._cookie(), TOKEN)
 
+    def _length(self):
+        v = (self.headers.get("Content-Length") or "").strip()
+        if not v:
+            return 0
+        if not v.isdigit():
+            raise Err("bad Content-Length")
+        return int(v)
+
     def _body(self):
-        n = int(self.headers.get("Content-Length") or 0)
+        n = self._length()
         if n > MAX_BODY:
             raise Err("too large", 413)
         raw = self.rfile.read(n) if n else b""
+        self._unread = False
         if not raw:
             return {}
         try:
@@ -151,7 +169,9 @@ class H(BaseHTTPRequestHandler):
     def _route(self, method):
         u = urlsplit(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        self._unread = True
         try:
+            self._unread = self._length() > 0
             if not self._host_ok():
                 return self._send(403, b"bad host or origin", "text/plain")
             if u.path.startswith("/w/"):
@@ -173,7 +193,7 @@ class H(BaseHTTPRequestHandler):
                 return self._static(u.path)
             self._send(405, b"", "text/plain")
         except Err as e:
-            self._json({"error": str(e)}, e.code)
+            self._json(dict(e.extra, error=str(e)), e.code)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:                                                   # never leak a traceback to the page
@@ -223,18 +243,64 @@ class H(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(p)[0] or "text/plain"
         if ctype.startswith("text/") and "charset" not in ctype:
             ctype += "; charset=utf-8"
+        if p.lower().endswith(officeview.EXT) and "download=1" not in self.path:         # Word / Excel / PowerPoint -> a page the canvas can show
+            try:
+                page = officeview.render(p)
+            except (ValueError, OSError) as e:
+                page = officeview.error_page(str(e))
+            return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8", {"Content-Security-Policy": PREVIEW_CSP, "Content-Disposition": "inline"})
+        disp = "inline" if self.path.find("download=1") < 0 else "attachment"
+        if ctype == "application/pdf":                                                   # Chrome's PDF viewer does not run inside a sandbox
+            return self._send_file(p, ctype, {"Content-Security-Policy": "frame-ancestors 'self'", "Content-Disposition": disp})
+        if not (ctype.startswith("text/html") and "view=" in self.path):
+            return self._send_file(p, ctype, {"Content-Security-Policy": PREVIEW_CSP, "Content-Disposition": disp})
         with open(p, "rb") as f:
             data = f.read()
-        if ctype.startswith("text/html") and "view=" in self.path:                  # slideshow / document runtime for the canvas
-            try:
-                with open(os.path.join(STATIC, "deckrt.js"), encoding="utf-8") as rt:
-                    tag = b"<script>" + rt.read().replace("</script", "<\\/script").encode("utf-8") + b"</script>"
-                i = data.lower().rfind(b"</body>")
-                data = data[:i] + tag + data[i:] if i >= 0 else data + tag
-            except OSError:
-                pass
-        self._send(200, data, ctype, {"Content-Security-Policy": PREVIEW_CSP,
-                                      "Content-Disposition": "inline" if self.path.find("download=1") < 0 else "attachment"})
+        try:                                                                          # slideshow / document runtime for the canvas
+            with open(os.path.join(STATIC, "deckrt.js"), encoding="utf-8") as rt:
+                tag = b"<script>" + rt.read().replace("</script", "<\\/script").encode("utf-8") + b"</script>"
+            i = data.lower().rfind(b"</body>")
+            data = data[:i] + tag + data[i:] if i >= 0 else data + tag
+        except OSError:
+            pass
+        self._send(200, data, ctype, {"Content-Security-Policy": PREVIEW_CSP, "Content-Disposition": disp})
+
+    def _send_file(self, p, ctype, extra):
+        """A file streamed from disk (never read whole into memory): Content-Length from stat, one `Range: bytes=a-b` (206) for media, HEAD sends no body."""
+        try:
+            size = os.stat(p).st_size
+        except OSError:
+            return self._send(404, b"not found", "text/plain")
+        start, end, code, head = 0, size - 1, 200, dict(extra, **{"Accept-Ranges": "bytes"})
+        m = re.fullmatch(r"bytes=(\d*)-(\d*)", (self.headers.get("Range") or "").strip())      # a list of ranges or junk is ignored: the whole file
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start, end = int(m.group(1)), min(int(m.group(2)) if m.group(2) else size - 1, size - 1)
+            else:
+                start, end = max(0, size - int(m.group(2))), size - 1
+            if start >= size or start > end:
+                return self._send(416, b"", ctype, dict(head, **{"Content-Range": "bytes */%d" % size}))
+            code = 206
+            head["Content-Range"] = "bytes %d-%d/%d" % (start, end, size)
+        length = end - start + 1 if size else 0
+        self._head(code, ctype, length, head)
+        if self.command == "HEAD" or not length:
+            return
+        try:
+            with open(p, "rb") as f:
+                f.seek(start)
+                left = length
+                while left > 0:
+                    chunk = f.read(min(left, 1 << 16))
+                    if not chunk:
+                        self.close_connection = True                      # the file shrank: the promised length cannot be met
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+        except OSError as e:
+            if isinstance(e, (BrokenPipeError, ConnectionResetError)):
+                raise
+            self.close_connection = True
 
     def _hook(self, path):
         """Webhook trigger: POST /hook/<work>/<node>/<token>, body = text or JSON {text, data}. 127.0.0.1 only (Host check above), no cookie."""
@@ -245,10 +311,11 @@ class H(BaseHTTPRequestHandler):
         node = next((n for n in (w or {}).get("nodes", []) if n["id"] == parts[3] and n.get("type") == "start.webhook"), None)
         if not w or not node or not w.get("enabled"):
             return self._send(404, b"no such enabled webhook", "text/plain")
-        n = int(self.headers.get("Content-Length") or 0)
+        n = self._length()
         if n > 256 * 1024:
             return self._send(413, b"too large", "text/plain")
         raw = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+        self._unread = False
         try:
             d = json.loads(raw)
             ev = {"text": str(d.get("text", "")), "data": d.get("data") if isinstance(d.get("data"), dict) else {}} if isinstance(d, dict) else {"text": raw}
@@ -281,6 +348,10 @@ def boot(h, q, b):
             "claude": A.claude_settings(), "port": ADDR["port"], "cli": A.command()[-1]}
 
 
+def models_now(h, q, b):
+    return A.models()
+
+
 GZIP_EXT = {".js", ".mjs", ".css", ".html", ".json", ".svg"}
 _STATIC_CACHE = {}                                  # (path, etag) -> bytes as sent (gzipped when the client accepts it)
 STATIC_TYPES = {".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
@@ -292,6 +363,8 @@ PALETTES = ("blue", "indigo", "purple", "pink", "red", "orange", "claude", "gree
 def brand(h, q, b):
     """Name, accent palette and logo of the signed-in hub (its public /meta), cached 5 minutes. Nothing here is secret; no
     login is sent. An unreachable hub just gives the defaults."""
+    if BRAND["hub"] and time.time() - BRAND["at"] < 300:            # cache first: no CLI process for a repeat call (login/logout reset it)
+        return BRAND["doc"]
     hub = (_ctx(cli(lambda: A.run(["list"]))).get("hub") or "").rstrip("/")
     if not hub:
         return {}
@@ -348,9 +421,39 @@ def install(h, q, b):
     return {"changes": doc.get("changes"), "messages": doc.get("messages"), "data": doc.get("data"), "setup": need_setup}
 
 
+def _term_error(e):
+    """A message for a terminal that could not start (limit reached, program or folder missing, no pty)."""
+    if isinstance(e, OSError):
+        return "cannot start the terminal: %s" % (e.strerror or e)
+    return str(e)
+
+
 def term_start(h, q, b):
     """A command in a real terminal so a question can be answered in the page. Only two fixed kinds, this is not a shell:
     `aihub install <names>` and `aihub dev publish <package folder made by Share>`."""
+    if b.get("shell"):
+        # A shell in a chat's working folder ("direct work"). The UI is 127.0.0.1 only behind the per-start key, Host/Origin check and X-AIHub-UI header.
+        cwd = store.session_dir(need(b, "session"))
+        os.makedirs(cwd, exist_ok=True)
+        sh = os.environ.get("COMSPEC", "cmd.exe") if os.name == "nt" else (os.environ.get("SHELL") or "/bin/sh")
+        try:
+            t = term.start([sh] + ([] if os.name == "nt" else ["-l"]), dict(os.environ, AIHUB_NO_UPDATE="1"), cwd=cwd, shell=True)
+        except (RuntimeError, OSError) as e:
+            raise Err(_term_error(e))
+        return {"id": t.id, "services": [], "cwd": cwd}
+    if b.get("project"):                                  # the chat's own project folder (it has an aihub.toml): publish straight to the hub
+        sid = str(b["project"])
+        if not store.get_session(sid):
+            raise Err("no such chat", 404)
+        d = store.session_dir(sid)
+        if not project_packages(d):
+            raise Err("this folder has no aihub.toml")
+        args = ["dev", "publish"] + (["--bump", "patch"] if b.get("bump") else []) + ["-i", d]
+        try:
+            t = term.start(A.command() + args, dict(os.environ, AIHUB_NO_UPDATE="1"), cwd=d)
+        except (RuntimeError, OSError) as e:
+            raise Err(_term_error(e))
+        return {"id": t.id, "services": []}
     if b.get("publish"):
         try:
             name = A.safe_name(b["publish"])
@@ -374,9 +477,52 @@ def term_start(h, q, b):
             args.append("-i")
     try:
         t = term.start(A.command() + args, dict(os.environ, AIHUB_NO_UPDATE="1"))
-    except RuntimeError as e:
-        raise Err(str(e))
+    except (RuntimeError, OSError) as e:
+        raise Err(_term_error(e))
     return {"id": t.id, "services": [s["name"] for s in A.services() if s["name"] in names and s["env"]]}
+
+
+def project_packages(root):
+    """aihub packages of a project folder: its own aihub.toml and, for a monorepo, those one folder down. -> [{name, version, type, path}] (path relative, '' = the folder)."""
+    def read(d):
+        try:
+            with open(os.path.join(d, "aihub.toml"), encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return None
+        info, table = {}, ""
+        for ln in lines:
+            t = ln.strip()
+            if t.startswith("["):
+                table = t.strip("[] ")
+            elif table == "package":
+                m = re.match(r'^(name|version|type)\s*=\s*"([^"]*)"', t)
+                if m:
+                    info[m.group(1)] = m.group(2)
+        return {"name": info.get("name", os.path.basename(d)), "version": info.get("version", ""), "type": info.get("type", "")}
+    out = []
+    own = read(root)
+    if own:
+        out.append(dict(own, path=""))
+    try:
+        for n in sorted(os.listdir(root))[:200]:
+            if n.startswith(".") or n in ("node_modules", "attachments"):
+                continue
+            if os.path.isdir(os.path.join(root, n)):
+                sub = read(os.path.join(root, n))
+                if sub:
+                    out.append(dict(sub, path=n))
+    except OSError:
+        pass
+    return out[:40]
+
+
+def project_info(h, q, b):
+    """The chat folder's aihub packages (empty = no manifest, so no Publish button)."""
+    sid = q.get("id") or ""
+    if not store.get_session(sid):
+        raise Err("no such chat", 404)
+    return {"dir": store.session_dir(sid), "packages": project_packages(store.session_dir(sid))}
 
 
 def open_url(url):
@@ -486,6 +632,9 @@ def term_read(h, q, b):
     except ValueError:
         after = 0
     data, pos, code = t.read(after, 15.0)
+    if code is not None and not t.shell and not getattr(t, "inv", False):
+        t.inv = True                                       # an install / publish ended: installed packages, services and nodes may have changed
+        A.invalidate()
     return {"data": base64.b64encode(data).decode(), "pos": pos, "code": code}
 
 
@@ -499,6 +648,7 @@ def term_write(h, q, b):
         t.write(str(b["data"]).encode("utf-8"))
     if b.get("kill"):
         t.kill()
+        A.invalidate()
     return {"ok": True}
 
 
@@ -555,7 +705,9 @@ def service_env(h, q, b):
         if allowed[k]["secret"] and v == "":
             continue                                   # blank secret field = keep what is stored
         values[k] = v
-    pkg = next(p for p in cli(lambda: A.run(["list"])).get("data") or [] if p["name"] == n)
+    pkg = next((p for p in cli(lambda: A.run(["list"])).get("data") or [] if p["name"] == n), None)
+    if not pkg:
+        raise Err("not an installed service or bot", 404)
     A.write_env(A.env_path(pkg), values)
     return {"saved": sorted(values)}
 
@@ -613,10 +765,12 @@ def login(h, q, b):
     if "\n" in user + pw:
         raise Err("no line breaks")
     doc = cli(lambda: A.run(["login", user, "--password-stdin"], stdin=pw + "\n"))
+    BRAND["at"] = 0
     return {"context": _ctx(doc)}
 
 
 def logout(h, q, b):
+    BRAND["at"] = 0
     return {"context": _ctx(cli(lambda: A.run(["logout"])))}
 
 
@@ -647,16 +801,19 @@ def note_get(h, q, b):
 
 
 def note_put(h, q, b):
-    p = _note_path(need(b, "name"))
+    name = need(b, "name")
+    p = _note_path(name)
     os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
-        f.write(str(b.get("body", "")))
-    pushed = True
+    write_private(p, str(b.get("body", "")).encode("utf-8"))        # atomic: a crash cannot leave half a note
+    threading.Thread(target=_note_push, args=(name,), daemon=True, name="note-push").start()      # the reply does not wait for the hub
+    return {"saved": True, "synced": None}                           # None = being synced in the background; the local note is kept either way
+
+
+def _note_push(name):
     try:
-        A.run(["knowledge", "push", b["name"]], timeout=60)
+        A.run(["knowledge", "push", name], timeout=60)
     except A.CliError:
-        pushed = False                                  # not signed in / hub down: the local note is kept
-    return {"saved": True, "synced": pushed}
+        pass                                             # not signed in / hub down: the local note is kept
 
 
 def note_delete(h, q, b):
@@ -845,18 +1002,72 @@ def _chat_of(q, b):
     return s
 
 
+def _vscode_cmd():
+    """argv prefix that launches VS Code: the `code` shell command, else the app bundle / install folder."""
+    exe = shutil.which("code")
+    if exe:
+        return [exe]
+    if sys.platform == "darwin" and os.path.isdir("/Applications/Visual Studio Code.app"):
+        return ["open", "-a", "Visual Studio Code", "--args"]
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA")
+        for c in (local and os.path.join(local, "Programs", "Microsoft VS Code", "Code.exe"), os.path.join(os.environ.get("ProgramFiles", ""), "Microsoft VS Code", "Code.exe")):
+            if c and os.path.isfile(c):
+                return [c]
+    return None
+
+
+def open_vscode(h, q, b):
+    """Open the chat's working folder (and optionally one file in it) in VS Code. Local machine only, like the rest of the UI."""
+    s = _chat_of(q, b)
+    root = store.session_dir(s["id"])
+    args = [root]
+    rel = str(b.get("path") or "")
+    if rel:
+        full = store.safe_join(root, rel)
+        if not full or not os.path.isfile(full):
+            raise Err("no such file in this chat", 404)
+        args += ["-g", full]
+    cmd = _vscode_cmd()
+    if not cmd:
+        raise Err("VS Code was not found: install it, and on macOS/Linux run 'Shell Command: Install code command in PATH'")
+    try:
+        subprocess.Popen(cmd + args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        raise Err("cannot start VS Code: " + str(e))
+    return {"ok": True, "dir": root}
+
+
 def file_get(h, q, b):
     s = _chat_of(q, b)
     r = store.read_text(s["id"], q.get("path"))
     if r is None:
         raise Err("no such file", 404)
+    if "mtime" not in r:                                  # binary / big files too: the page compares it before it saves
+        p = store._file(s["id"], q.get("path"))[0]
+        try:
+            r = dict(r, mtime=os.stat(p).st_mtime)
+        except (OSError, TypeError):
+            pass
     return r
 
 
 def file_put(h, q, b):
     s = _chat_of(q, b)
+    path = need(b, "path")
+    seen = b.get("mtime")
+    if seen is not None:                                  # the page saves what it read at MTIME: refuse when the file changed since (a turn, another editor)
+        if isinstance(seen, bool) or not isinstance(seen, (int, float)):
+            raise Err("bad mtime")
+        p = store._file(s["id"], path)[0]
+        try:
+            now = os.stat(p).st_mtime if p else None
+        except OSError:
+            now = None
+        if now is not None and abs(now - float(seen)) > 0.001:
+            raise Err("changed", 409, mtime=now)
     try:
-        return store.write_text(s["id"], need(b, "path"), b.get("text", ""))
+        return store.write_text(s["id"], path, b.get("text", ""))
     except ValueError as e:
         raise Err(str(e))
 
@@ -909,9 +1120,8 @@ def update_status(h, q, b):
 
 
 def update_check(h, q, b):
-    selfupdate.check_now()
-    time.sleep(0.3)
-    return {"update": selfupdate.status()}
+    done = selfupdate.check_now(20.0)                  # waits for the answer; not done in time = running, ask /update again
+    return {"update": selfupdate.status(), "running": not done}
 
 
 def mcp_test(h, q, b):
@@ -929,6 +1139,8 @@ def chat_stop(h, q, b):
 
 MENTION_CHAT = re.compile(r"@chat:([0-9a-f]{8})(?::(\d{1,3}))?\b")
 MENTION_TOOL = re.compile(r"@tool:([A-Za-z0-9][\w.:-]{0,79})")
+MENTION_WORK = re.compile(r"@work:([0-9a-f]{8})\b")
+MENTION_NODE = re.compile(r"@node:([A-Za-z0-9][\w.:/-]{0,79})")
 MENTION_DEFAULT, MENTION_CHARS = 40, 40000
 
 
@@ -949,13 +1161,31 @@ def mentions(s, text):
     tools = list(dict.fromkeys(MENTION_TOOL.findall(text)))[:6]
     if tools:
         out.append("[The user points you to these tools for this request: %s. Use them (skill, command or MCP server of that name) where they fit.]" % ", ".join(tools))
-    more = sources.resolve(text, store.session_dir(s["id"]))
+    cat = None
+    for nt in list(dict.fromkeys(m.rstrip(".,;:)") for m in MENTION_NODE.findall(text)))[:3]:
+        cat = cat or W.catalogue()
+        spec = cat.get(nt)
+        if W.runnable(spec):
+            out.append(W.node_brief(spec))
+    for wid in list(dict.fromkeys(MENTION_WORK.findall(text)))[:3]:
+        w = store.get_work(wid)
+        if w:
+            out.append(store.work_brief(w))
+    more = sources.resolve(text, store.session_dir(s["id"])) + sources.file_mentions(text, store.session_dir(s["id"]))
     return (("\n\n" + "\n\n".join(out)) if out else "") + more, tools
 
 
 def works_sources(h, q, b):
     """@ menu entries for Spaces and Knowledge notes; `q` = what is typed after @."""
-    return {"items": sources.suggest(q.get("q") or "")}
+    items = sources.suggest(q.get("q") or "")
+    if q.get("nodes"):                                                    # the chat menu also offers nodes it can run (@node:<type>)
+        words = (q.get("q") or "").strip().lower()
+        words = words[5:] if words.startswith("node:") else words
+        items += [{"name": "node:" + t, "description": "Node · %s%s" % (sp["title"], " - " + sp["desc"][:80] if sp.get("desc") else ""), "source": "node", "key": (sp["title"] + " " + sp["group"] + " " + t).lower()}
+                  for t, sp in W.catalogue().items() if W.runnable(sp) and (not words or words in (sp["title"] + " " + t).lower())][:20]
+        items += [{"name": "work:" + w["id"], "description": "Workflow · %s%s" % (w["title"], " - " + w["description"][:80] if w.get("description") else ""), "source": "work", "key": (w["title"] or "").lower()}
+                  for w in store.works() if not words or words.replace("work:", "") in (w["title"] or "").lower()][:20]
+    return {"items": items}
 
 
 def chat_send(h, q, b):
@@ -963,6 +1193,8 @@ def chat_send(h, q, b):
     s = store.get_session(need(b, "id"))
     if not s:
         raise Err("no such chat", 404)
+    if chat.active(s["id"]):                                                      # first: nothing is written or counted for a send that is refused
+        raise Err("this chat is still answering", 409)
     text = need(b, "text")
     mode = b.get("mode") if b.get("mode") in chat.MODES else "auto"
     effort = b.get("effort") if b.get("effort") in chat.EFFORT else ""
@@ -971,7 +1203,12 @@ def chat_send(h, q, b):
         raise Err("bad model")
     names = []
     wd = store.session_dir(s["id"])
-    for a in (b.get("attachments") or [])[:12]:
+    atts = b.get("attachments") or []
+    if not isinstance(atts, list):
+        raise Err("bad attachments")
+    for a in atts[:12]:
+        if not isinstance(a, dict):
+            raise Err("bad attachment")
         try:
             raw = base64.b64decode(a.get("data", ""), validate=True)
         except Exception:
@@ -1047,6 +1284,8 @@ def usage_get(h, q, b):
     """Usage page + price alerts. `days` = the "last N days" window (also the budget window); `fresh=1` skips the 45 s cache."""
     try:
         return usagereport.report(q.get("days") or 7, force=q.get("fresh") == "1")
+    except ValueError as e:
+        raise Err(str(e))
     except A.CliError as e:
         raise Err(str(e), 502)
 
@@ -1219,7 +1458,8 @@ def work_get(h, q, b):
     w = store.get_work(q.get("id"))
     if not w:
         raise Err("no such work", 404)
-    return {"work": w}
+    st = getattr(ENGINE, "status", None) if ENGINE else None
+    return {"work": w, "triggers": st(w.get("id")) if st else {}}
 
 
 def work_save(h, q, b):
@@ -1270,6 +1510,80 @@ def work_generate(h, q, b):
     return {"work": w}
 
 
+GEN_JOBS = {}                                       # id -> job dict of this process; a "running" file with no entry here was cut off by a restart
+GEN_LOCK = threading.Lock()
+
+
+def _gen_file(jid):
+    return os.path.join(store.ui_dir("genjobs"), jid + ".json")
+
+
+def _gen_save(job):
+    write_private(_gen_file(job["id"]), json.dumps(job).encode("utf-8"))
+
+
+def _gen_prune(now=None):
+    """Forget finished jobs older than a day (memory and genjobs/*.json). A running one is never touched."""
+    cut = (now or time.time()) - 86400
+    with GEN_LOCK:
+        for jid in [k for k, j in GEN_JOBS.items() if j.get("state") != "running" and j.get("since", 0) / 1000 < cut]:
+            GEN_JOBS.pop(jid, None)
+    d = store.ui_dir("genjobs")
+    try:
+        for n in os.listdir(d):
+            p = os.path.join(d, n)
+            if n.endswith(".json") and os.path.getmtime(p) < cut and n[:-5] not in GEN_JOBS:
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        running = json.load(f).get("state") == "running"
+                except (OSError, ValueError):
+                    running = False
+                if not running or os.path.getmtime(p) < cut - 86400:      # a "running" file this old was cut off by a restart long ago
+                    os.remove(p)
+    except OSError:
+        pass
+
+
+def work_generate_start(h, q, b):
+    """Same as works/generate but in the background: the page polls works/generate/status, so a reload, a chat switch or a restart no longer loses it."""
+    prompt, model = need(b, "prompt"), str(b.get("model") or "")
+    _gen_prune()
+    job = {"id": secrets.token_hex(8), "state": "running", "prompt": prompt[:200], "since": int(time.time() * 1000)}
+    with GEN_LOCK:
+        GEN_JOBS[job["id"]] = job
+    _gen_save(job)
+
+    def run():
+        try:
+            w = W.generate(prompt, model, BOX)
+            ENGINE.sync()
+            job.update(state="done", work={"id": w["id"], "title": w.get("title", "")})
+        except Exception as e:
+            job.update(state="failed", error=str(e) or "could not create the workflow")
+        try:
+            _gen_save(job)
+        except Exception:
+            pass
+    threading.Thread(target=run, daemon=True).start()
+    return {"job": job}
+
+
+def work_generate_status(h, q, b):
+    jid = q.get("id", "")
+    if not re.fullmatch(r"[0-9a-f]{16}", jid):
+        raise Err("bad id")
+    job = GEN_JOBS.get(jid)
+    if job is None:
+        try:
+            with open(_gen_file(jid), encoding="utf-8") as f:
+                job = json.load(f)
+        except (OSError, ValueError):
+            raise Err("no such job", 404)
+        if job.get("state") == "running":
+            job.update(state="failed", error="The UI was restarted while the workflow was being designed. Send the request again.")
+    return {"job": job}
+
+
 def work_make(h, q, b):
     """Save a work that an answer proposed in a ```workflow block (unknown nodes refused, secrets emptied, switched OFF)."""
     try:
@@ -1281,6 +1595,23 @@ def work_make(h, q, b):
 
 def work_nodes(h, q, b):
     return {"nodes": [W.public(s) for s in W.catalogue(force=True).values()]}
+
+
+def node_run(h, q, b):
+    """Run ONE node from a chat card: {type, config, input, id (chat)} -> {text, data, log}. Secrets arrive in config for this run only."""
+    spec = W.catalogue().get(str(b.get("type") or ""))
+    if not W.runnable(spec):
+        raise Err("this node cannot run on its own", 400)
+    sid = str(b.get("id") or "")
+    wd = store.session_dir(sid) if sid and store.get_session(sid) else os.path.expanduser("~")
+    text = str(b.get("input") or "")[:50000]
+    hubusage.use("node:" + spec["type"], package=spec.get("package") or "aihub-ui", session=sid)
+    try:
+        return W.run_single(spec, b.get("config"), text, wd)
+    except ValueError as e:
+        raise Err(str(e), 400)
+    except RuntimeError as e:
+        raise Err("%s failed: %s" % (spec["title"], e), 422)
 
 
 def work_run(h, q, b):
@@ -1323,7 +1654,7 @@ def _slug(t):
     return __import__("re").sub(r"[^a-z0-9]+", "-", (t or "work").lower()).strip("-")[:40] or "work"
 
 
-RISKS = {"io.read_file": "reads files on this computer", "io.request": "makes web requests", "git.read": "reads git repositories with your Vault logins",
+RISKS = {"io.read_file": "reads files on this computer", "io.request": "makes web requests", "code.python": "runs Python code written in the workflow on the installer's machine", "git.read": "reads git repositories with your Vault logins",
          "start.webhook": "listens for local webhook calls", "start.teams": "listens for messages from outside (tunnel + secret)", "send.teams": "posts to Teams"}
 
 
@@ -1733,7 +2064,7 @@ def works_mentions(h, q, b):
 
 
 ROUTES = {
-    ("GET", "boot"): boot, ("GET", "brand"): brand, ("GET", "packages"): packages, ("GET", "search"): search, ("GET", "info"): info,
+    ("GET", "boot"): boot, ("GET", "models"): models_now, ("GET", "brand"): brand, ("GET", "packages"): packages, ("GET", "search"): search, ("GET", "info"): info,
     ("POST", "install"): install, ("POST", "term/start"): term_start, ("GET", "term/read"): term_read, ("GET", "fs/list"): fs_list, ("POST", "fs/pick"): fs_pick, ("POST", "term/write"): term_write, ("POST", "uninstall"): _simple("uninstall", flags=("--force",)), ("POST", "update"): update_all,
     ("POST", "enable"): _simple("enable", flags=("--yes",)), ("POST", "disable"): _simple("disable"),
     ("GET", "services"): services, ("POST", "services/action"): service_action, ("GET", "services/logs"): service_logs,
@@ -1745,10 +2076,10 @@ ROUTES = {
     ("POST", "knowledge/delete"): note_delete, ("POST", "knowledge/pull"): knowledge_pull,
     ("GET", "sessions"): sessions, ("POST", "sessions"): session_new, ("GET", "sessions/get"): session_get,
     ("POST", "sessions/update"): session_update, ("POST", "sessions/delete"): session_delete, ("POST", "sessions/delmsg"): session_delmsg, ("POST", "folders"): folders,
-    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("GET", "files/diff"): file_diff, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("POST", "sessions/rewind"): session_rewind,
+    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("GET", "files/diff"): file_diff, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("POST", "sessions/rewind"): session_rewind,
     ("GET", "themes"): themes_list, ("POST", "themes/save"): theme_save, ("POST", "themes/delete"): theme_delete, ("GET", "usage"): usage_get, ("POST", "spaces/publish"): space_publish, ("GET", "spaces"): spaces_mine, ("GET", "prefs"): prefs_get, ("PUT", "prefs"): prefs_put, ("GET", "slash"): slash,
     ("GET", "works"): works, ("GET", "works/get"): work_get, ("POST", "works/save"): work_save, ("POST", "works/delete"): work_delete,
-    ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import,
+    ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("POST", "nodes/run"): node_run, ("GET", "project/info"): project_info, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/generate/start"): work_generate_start, ("GET", "works/generate/status"): work_generate_status, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import,
     ("GET", "works/run"): work_run_get, ("GET", "nodes/local"): nodes_local, ("GET", "nodes/starter"): nodes_starter, ("POST", "nodes/save"): nodes_save, ("POST", "nodes/delete"): nodes_delete,
     ("GET", "nodes/export-info"): nodes_export_info, ("POST", "nodes/export"): nodes_export, ("GET", "nodes/packages"): nodes_packages, ("POST", "works/layout"): works_layout, ("GET", "works/mentions"): works_mentions, ("GET", "works/sources"): works_sources, ("GET", "works/hook"): work_hook,
     ("GET", "auth"): auth_status, ("POST", "auth/check"): auth_check, ("POST", "auth/login"): auth_login,

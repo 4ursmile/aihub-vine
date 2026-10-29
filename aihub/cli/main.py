@@ -559,6 +559,11 @@ def cmd_sync(a):
 
 
 def cmd_update(a):
+    with registry.quiet():          # hub first, never ask for a git login
+        return _update(a)
+
+
+def _update(a):
     pk = [(n, r) for n, r in installer.state()["packages"].items() if (not a.name or n == a.name) and installer.enabled(r)]
     if not pk:
         ui.note("No matching installed packages.")

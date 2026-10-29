@@ -2,6 +2,21 @@
 import { html, useState, useEffect, useRef, useLayoutEffect } from "./vendor/preact-htm.js";
 import { Ic } from "./icons.js";
 
+// ---------- Esc stack: only the top-most layer (modal, popover, zoom, drawer) reacts to Esc
+const layers = [];
+export const escPush = (fn) => { const o = { fn }; layers.push(o); return () => { const i = layers.indexOf(o); if (i >= 0) layers.splice(i, 1); }; };
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && layers.length && !e.defaultPrevented) layers[layers.length - 1].fn(e); });
+// setInterval that sleeps while the tab is hidden and fires once when it comes back; `ms` null = off. The callback is read fresh on every tick.
+export function useInterval(fn, ms) {
+  const f = useRef(); f.current = fn;
+  useEffect(() => {
+    if (ms == null) return;
+    const tick = () => { if (!document.hidden) f.current(); }, t = setInterval(tick, ms);
+    document.addEventListener("visibilitychange", tick);
+    return () => { clearInterval(t); document.removeEventListener("visibilitychange", tick); };
+  }, [ms]);
+}
+
 let toastSet = null;
 export const setToaster = (f) => { toastSet = f; };
 export const toast = (t) => { if (toastSet) { toastSet(t); clearTimeout(toast.t); toast.t = setTimeout(() => toastSet(""), 3500); } };
@@ -19,18 +34,31 @@ export function Pop({ open, setOpen, button, children, up = true, align = "left"
   useEffect(() => {
     if (!open) return;
     const d = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
-    const k = (e) => { if (e.key === "Escape") setOpen(false); };
-    document.addEventListener("pointerdown", d); document.addEventListener("keydown", k);
-    return () => { document.removeEventListener("pointerdown", d); document.removeEventListener("keydown", k); };
+    const off = escPush(() => setOpen(false));
+    document.addEventListener("pointerdown", d);
+    return () => { document.removeEventListener("pointerdown", d); off(); };
   }, [open]);
   return html`<div class="pw" ref=${ref}>${button}${open && html`<div class=${"pop " + (up ? "up " : "down ") + align} style=${width ? `width:${width}px` : ""}>${children}</div>`}</div>`;
 }
 
 export const Switch = ({ on, onChange, label }) => html`<button class=${"sw" + (on ? " on" : "")} role="switch" aria-checked=${on} aria-label=${label} onClick=${() => onChange(!on)}><i></i></button>`;
 
+const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
 export function Modal({ children, close, wide }) {
-  useEffect(() => { const k = (e) => e.key === "Escape" && close && close(); document.addEventListener("keydown", k); return () => document.removeEventListener("keydown", k); }, []);
-  return html`<div class="modal" onPointerDown=${(e) => e.target === e.currentTarget && close && close()}><div class=${"sheet" + (wide ? " wide" : "")}>${children}</div></div>`;
+  const cr = useRef(), box = useRef(); cr.current = close;                 // `close` is read through a ref: the Esc handler lives for the whole life of the dialog
+  useEffect(() => {
+    const prev = document.activeElement, off = escPush(() => cr.current && cr.current());
+    const b = box.current; if (b && !b.contains(document.activeElement)) { const f = b.querySelector("input,select,textarea") || b.querySelector(FOCUSABLE); if (f) f.focus(); else { b.tabIndex = -1; b.focus(); } }
+    return () => { off(); if (prev && prev.focus && document.contains(prev)) try { prev.focus(); } catch (e) { /* gone */ } };
+  }, []);
+  const trap = (e) => {
+    if (e.key !== "Tab" || !box.current) return;
+    const l = [...box.current.querySelectorAll(FOCUSABLE)].filter((x) => x.offsetParent !== null);
+    if (!l.length) { e.preventDefault(); return; }
+    const a = document.activeElement;
+    if (e.shiftKey && (a === l[0] || !box.current.contains(a))) { e.preventDefault(); l[l.length - 1].focus(); } else if (!e.shiftKey && (a === l[l.length - 1] || !box.current.contains(a))) { e.preventDefault(); l[0].focus(); }
+  };
+  return html`<div class="modal" onPointerDown=${(e) => e.target === e.currentTarget && cr.current && cr.current()} onKeyDown=${trap}><div class=${"sheet" + (wide ? " wide" : "")} role="dialog" aria-modal="true" ref=${box}>${children}</div></div>`;
 }
 
 // ---------- small form dialogs (replace prompt()/confirm()): ask({title, text, fields, submit, danger}) -> values or null

@@ -105,6 +105,9 @@ def is_auth_error(err):
     return any(w in gitx.strip_hints(str(err)).lower() for w in _AUTH_WORDS)       # our own hint lines never count
 
 
+NO_PROMPT = False       # unattended work (package updates): never ask for a git login, fail so the caller can use the hub
+
+
 def with_access(url, fn):
     """Run fn() (a git operation on `url`) for any remote, whatever its host: the index, a package repo, another team's repo.
     The helper is registered for that host first (idempotent, other hosts untouched). If fn fails for lack of credentials and a
@@ -114,7 +117,7 @@ def with_access(url, fn):
     try:
         return fn()
     except gitx.GitError as e:
-        if not (is_auth_error(e) and ui.INTERACTIVE and (url or "").startswith("http")):
+        if not (is_auth_error(e) and ui.INTERACTIVE and not NO_PROMPT and (url or "").startswith("http")):
             raise
         ensure_git_access(url)
         return fn()

@@ -1,23 +1,23 @@
-// Diagrams drawn from CODE in an answer, by libraries loaded lazily from jsDelivr (pinned): ```mermaid (flowchart, sequence, mindmap, ER, gantt,
+// Diagrams drawn from CODE in an answer, by libraries loaded lazily from static/vendor/lazy (vendored, no CDN): ```mermaid (flowchart, sequence, mindmap, ER, gantt,
 // class, state, timeline, pie, git graph...), ```dot / ```graphviz (Graphviz), ```echarts (any ECharts option as JSON: graph, tree, treemap, sankey,
 // radar, heatmap, scatter...), ```map (Leaflet: markers, lines, GeoJSON on OpenStreetMap tiles). A library is fetched only when a block needs it.
 import { html, useState, useEffect, useRef } from "./vendor/preact-htm.js";
 import DOMPurify from "./vendor/purify.js";
 import { Ic } from "./icons.js";
 
-const CDN = "https://cdn.jsdelivr.net/npm/";
+const LAZY = new URL("./vendor/lazy/", import.meta.url).href;      // vendored copies (ui/tools/vendor_libs.py); no CDN
 export const DIAGRAMS = { mermaid: "Diagram", dot: "Graph", graphviz: "Graph", echarts: "Chart", map: "Map" };
 
 const dark = () => matchMedia("(prefers-color-scheme: dark)").matches;
 const libs = {};
 const once = (key, make) => libs[key] || (libs[key] = make().catch((e) => { delete libs[key]; throw e; }));
 const script = (src) => new Promise((ok, no) => { const s = document.createElement("script"); s.src = src; s.onload = ok; s.onerror = () => no(new Error("could not load " + src)); document.head.append(s); });
-const sheet = (href) => { const l = document.createElement("link"); l.rel = "stylesheet"; l.href = href; document.head.append(l); };
+const css = (local) => { const l = document.createElement("link"); l.rel = "stylesheet"; l.href = LAZY + local; document.head.append(l); };
 
-const loadMermaid = () => once("mermaid", async () => (await import(CDN + "mermaid@11.4.1/dist/mermaid.esm.min.mjs")).default);
-const loadViz = () => once("viz", async () => (await import(CDN + "@viz-js/viz@3.11.0/+esm")).instance());
-const loadEcharts = () => once("echarts", async () => { await script(CDN + "echarts@5.5.1/dist/echarts.min.js"); return window.echarts; });
-const loadLeaflet = () => once("leaflet", async () => { sheet(CDN + "leaflet@1.9.4/dist/leaflet.css"); await script(CDN + "leaflet@1.9.4/dist/leaflet.js"); return window.L; });
+const loadMermaid = () => once("mermaid", async () => (await import(LAZY + "mermaid.mjs")).default);
+const loadViz = () => once("viz", async () => (await import(LAZY + "viz.mjs")).instance());
+const loadEcharts = () => once("echarts", async () => { await script(LAZY + "echarts.min.js"); return window.echarts; });
+const loadLeaflet = () => once("leaflet", async () => { css("leaflet/leaflet.css"); await script(LAZY + "leaflet/leaflet.js"); return window.L; });
 
 let queue = Promise.resolve(), seq = 0;                         // mermaid renders one at a time (it keeps global state)
 const inLine = (fn) => { const r = queue.then(fn); queue = r.catch(() => {}); return r; };

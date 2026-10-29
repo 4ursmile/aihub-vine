@@ -1,5 +1,6 @@
 """Everything that touches aihub or Claude Code state. The CLI is the only writer of packages, logins and runs: this module calls
 `aihub --json ...` (arguments as a list, never a shell; secrets on stdin) and reads Claude's settings without ever returning a secret."""
+import copy
 import json
 import os
 import re
@@ -36,8 +37,65 @@ def command():
     return [sys.executable, "-m", "aihub.cli"]
 
 
+# ---- short-lived cache for the two read-only listings every page polls (a CLI process costs ~0.4 s)
+TTL = {("list",): 5.0, ("run", "list"): 2.0}
+_cache = {}                                            # key -> (time, doc); callers get a deep copy
+_cl = threading.Lock()
+_flight = {}                                           # key -> lock (single flight: N callers at once = one process)
+_epoch = [0]                                           # bumped by invalidate(): an answer that started before it is not stored
+CHANGES = {"install", "uninstall", "enable", "disable", "update", "upgrade", "login", "logout", "sync", "setup", "register", "vault", "config", "restore"}
+RUN_READ = {"list", "logs", "status", "show", "ps"}
+
+
+def invalidate():
+    """Forget the cached listings (after anything that installs, removes, enables, signs in/out, starts/stops a run) and the Works node catalogue."""
+    with _cl:
+        _epoch[0] += 1
+        _cache.clear()
+    m = sys.modules.get((__package__ or "aihubui") + ".works")
+    reset = getattr(m, "catalogue_reset", None)
+    if reset:
+        try:
+            reset()
+        except Exception:
+            pass
+
+
+def _changes(args):
+    a = list(args)
+    return bool(a) and (a[0] in CHANGES or (a[0] == "run" and len(a) > 1 and a[1] not in RUN_READ))
+
+
 def run(args, stdin=None, timeout=600):
-    """-> the JSON document of `aihub --json ARGS`. Raises CliError (message = the CLI's own error) when ok is false."""
+    """-> the JSON document of `aihub --json ARGS`. Raises CliError (message = the CLI's own error) when ok is false.
+    `list` (5 s) and `run list` (2 s) are cached and single flight; commands that change state drop the cache when they end."""
+    key = tuple(args)
+    ttl = TTL.get(key)
+    if not ttl or stdin is not None:
+        try:
+            return _run(args, stdin, timeout)
+        finally:
+            if _changes(args):
+                invalidate()
+    with _cl:
+        hit = _cache.get(key)
+        if hit and time.time() - hit[0] < ttl:
+            return copy.deepcopy(hit[1])
+        gate = _flight.setdefault(key, threading.Lock())
+    with gate:
+        with _cl:
+            hit = _cache.get(key)
+            if hit and time.time() - hit[0] < ttl:
+                return copy.deepcopy(hit[1])
+            epoch = _epoch[0]
+        doc = _run(args, stdin, timeout)
+        with _cl:
+            if epoch == _epoch[0]:
+                _cache[key] = (time.time(), copy.deepcopy(doc))
+        return doc
+
+
+def _run(args, stdin=None, timeout=600):
     try:
         p = subprocess.run(command() + ["--json"] + list(args), input=stdin, capture_output=True, text=True, timeout=timeout,
                            env=dict(os.environ, AIHUB_JSON="1", AIHUB_NO_UPDATE="1"))
@@ -164,10 +222,43 @@ def services():
 
 # ---- Claude Code settings (read for models, hooks, MCP; secrets masked)
 
+def _jsonc(text):
+    """json.loads that also accepts what Claude Code tolerates in settings.json: // and /* */ comments and trailing commas."""
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    out, i, n, q = [], 0, len(text), False
+    while i < n:
+        c = text[i]
+        if q:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                i += 1
+                out.append(text[i])
+            elif c == '"':
+                q = False
+        elif c == '"':
+            q = True
+            out.append(c)
+        elif text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        else:
+            out.append(c)
+        i += 1
+    return json.loads(re.sub(r",(\s*[}\]])", r"\1", "".join(out)))
+
+
 def _json(path):
     try:
         with open(path, encoding="utf-8-sig") as f:
-            return json.load(f)
+            return _jsonc(f.read())
     except (OSError, ValueError):
         return {}
 
@@ -198,6 +289,13 @@ def mask_env(env):
     return {k: ("set" if SECRET_KEY.search(k) and v else v) for k, v in (env or {}).items()}
 
 
+def _opt_list(opts):
+    """modelPicker.options as a list: a list, or a {model: label-or-option} mapping."""
+    if isinstance(opts, dict):
+        return [dict(v, model=k) if isinstance(v, dict) else {"model": k, "label": str(v)} for k, v in opts.items()]
+    return list(opts) if isinstance(opts, list) else []
+
+
 def merged_settings():
     """The settings files in order (later wins), like Claude Code: `env` merged key by key, picker options and availableModels joined."""
     out = {}
@@ -208,9 +306,10 @@ def merged_settings():
         for k, v in d.items():
             if k == "env" and isinstance(v, dict):
                 out["env"] = dict(out.get("env") or {}, **v)
-            elif k == "modelPicker" and isinstance(v, dict):
+            elif k == "modelPicker" and isinstance(v, (dict, list)):
                 prev = out.get("modelPicker") or {}
-                out["modelPicker"] = {**prev, **v, "options": list(prev.get("options") or []) + list(v.get("options") or [])}
+                mine = v if isinstance(v, dict) else {"options": v}
+                out["modelPicker"] = {**prev, **mine, "options": list(prev.get("options") or []) + _opt_list(mine.get("options"))}
             elif k == "availableModels" and isinstance(v, list):
                 out[k] = list(out.get(k) or []) + v
             else:
@@ -265,12 +364,11 @@ def models():
     picker, kinds = {}, {}
     if _pref("model_picker", True):
         mp = s.get("modelPicker")
-        opts = mp.get("options") if isinstance(mp, dict) else mp
-        for o in (opts if isinstance(opts, list) else [])[:200]:
+        for o in _opt_list(mp.get("options") if isinstance(mp, dict) else mp)[:200]:
             if isinstance(o, str):
                 o = {"model": o}
-            mid = next((o[k] for k in ("model", "id", "value") if isinstance(o, dict) and isinstance(o.get(k), str)), None)
-            if mid and re.match(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]@-]{0,150}$", mid):
+            mid = next((o[k].strip() for k in ("model", "id", "value", "modelId", "model_id", "name") if isinstance(o, dict) and isinstance(o.get(k), str) and o[k].strip()), None)
+            if mid and re.match(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]@+=,-]{0,150}$", mid):
                 picker[mid] = str(o.get("label") or o.get("name") or mid)[:80]
                 kinds[mid] = model_kind(o, mid)
                 add(mid, picker[mid])

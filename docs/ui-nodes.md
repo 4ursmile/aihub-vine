@@ -202,6 +202,29 @@ Both Teams nodes carry a `guide` that the node inspector shows above the setting
 
 URL, header, body, path and ref fields of these nodes are templated (`{{input}}`, `{{trigger}}`, `{{data.key}}`).
 
+## Python function node (`code.python`)
+
+Write one function in the node's code box. Its argument and its return must be typed as a pydantic `BaseModel` or a `dict` / `Dict[...]` / `TypedDict`; the node refuses anything else with a message that says what to annotate.
+
+```python
+from pydantic import BaseModel
+
+class In(BaseModel):
+    text: str
+    times: int = 2
+
+class Out(BaseModel):
+    result: str
+
+def main(args: In) -> Out:
+    return Out(result=args.text * args.times)
+```
+
+- Entry point: `main`, else `run`, else the last function defined. One argument at most.
+- Input is parsed for you: `data` of the nodes before, then the input text when it is a JSON object (also inside a ```json fence; a plain text input fills a field called `input` or `text`), then the optional **Arguments** JSON field (`{{input}}` / `{{data.x}}` are filled in). A model drops keys it has no field for (unless `extra = "allow"`).
+- Output: the return becomes JSON text; every top-level key is `{{data.key}}` for later nodes. `print()` goes to the run log.
+- Runs with the UI's Python (`nodes/python_fn.py`, own process, timeout field, default 60 s, max 3600). pydantic is only needed when the code imports it; a missing module is reported with the pip command. Shared workflows list "runs Python code ..." under Safety.
+
 ## Description, sharing metadata and the demo
 
 Every work has a short **description** (the line under the title bar; shown in lists and used as the package description). **Share** opens a form: package name, version, description, authors (default: your hub user name, else the OS user), license, tags, the operating systems it works on, node packages and commands it needs (detected from the nodes, editable) and a generated README you can edit. It writes `~/.aihub/ui/export/<name>/` (`aihub.toml`, `works/*.work.json`, `README.md`), runs `aihub dev validate` on it and shows the publish command. Risky nodes (files, web requests, git, Claude with checks bypassed, node packages) are listed as chips in the form and again when someone adds the workflow, which always arrives switched off.
@@ -216,7 +239,7 @@ Package type `workflow`: no code, just `works/*.work.json` (the work without its
 
 ## Installs that ask questions
 
-The install dialog opens a terminal by default (xterm.js from jsDelivr). It runs `aihub install NAME` in a pseudo-terminal, so an install script that asks something on stdin can be answered in the page; it is not a shell and cannot run anything else. Output is kept in memory, the dialog continues to the package settings form when the install ends. Windows has no pty: untick *Open a terminal* there.
+The install dialog opens a terminal by default (xterm.js, vendored in `static/vendor/lazy/`). It runs `aihub install NAME` in a pseudo-terminal, so an install script that asks something on stdin can be answered in the page; it is not a shell and cannot run anything else. Output is kept in memory, the dialog continues to the package settings form when the install ends. Windows has no pty: untick *Open a terminal* there.
 
 ## Inputs and outputs of a work (running it from a chat)
 
@@ -232,7 +255,7 @@ Claude writes one `.html` file; the canvas (Files > click the file) recognises i
 | Slides | `<meta name="aihub-kind" content="slides">` or `<section class="slide">` blocks (1280x720 px each) | one slide at a time, scaled to fit; arrows, `g` = all slides, full screen; `aside.notes` are hidden | PowerPoint `.pptx` (editable: headings, text, lists, tables, pictures, notes, placed where they are), PDF (print, one slide per page), HTML |
 | Document | `<meta name="aihub-kind" content="doc">` or `<article class="doc">` | a page | Word `.docx`, PDF (A4), Markdown, HTML |
 
-How it works: the file is opened with `?view=deck` / `?view=doc`; the server injects `static/deckrt.js` into the HTML (only then) and the page and the viewer talk by `postMessage` (the preview iframe stays sandboxed, no network). Export asks the page to *extract* its blocks (text with runs, lists, tables, pictures, computed colours/fonts, position on the slide) and builds the file in the browser with PptxGenJS / docx from jsDelivr (loaded when you press Export). The built-in skill package `aihub-slides` and the chat's system prompt teach Claude the format. `SKILL.md` has the rules (variables on `:root`, no scripts, one idea per slide).
+How it works: the file is opened with `?view=deck` / `?view=doc`; the server injects `static/deckrt.js` into the HTML (only then) and the page and the viewer talk by `postMessage` (the preview iframe stays sandboxed, no network). Export asks the page to *extract* its blocks (text with runs, lists, tables, pictures, computed colours/fonts, position on the slide) and builds the file in the browser with PptxGenJS / docx (vendored, loaded when you press Export). The built-in skill package `aihub-slides` and the chat's system prompt teach Claude the format. `SKILL.md` has the rules (variables on `:root`, no scripts, one idea per slide).
 
 **Themes** (Settings > Themes): name, six colours (background, text, muted, accent, dark accent, panels) and two fonts, plus notes for Claude. *Import from a PowerPoint* reads `ppt/theme/theme1.xml` in the browser (JSZip): colour scheme and major/minor fonts become the theme. Stored in `~/.aihub/ui/themes/<id>.json`. Mention one in a chat with `@theme:<id>` (typing `@` lists them): the server appends a `[Theme "Name" ... --bg:#...]` block to that message for Claude only; the visible message and the cached system prompt do not change.
 
@@ -340,3 +363,9 @@ The model also gets the tool `aihub_mcp` (`status`, `retry`, `enable`, `disable`
 ## Updating aihub-ui by itself
 
 A thread (`aihubui/selfupdate.py`) asks the hub for the newest `aihub-ui` every `UI_UPDATE_MINUTES` (default 60). Settings > Updates (pref `auto_update`): **Update and restart** (default), **Only tell me**, **Off**; *Check now* forces a check. With a newer version it waits until nothing runs for 60 s (no chat answering, no free chat, no work run, no install terminal), runs `aihub update aihub-ui`, then restarts: a clean exit when started by `aihub run` (the supervisor restarts the service, same address and key) or an in-place exec otherwise. A failed update is reported on the card and tried again later; the running copy is not touched until the update succeeded. `GET /api/update`, `POST /api/update/check`.
+
+## Running a node from a chat
+
+Type `@node:<type>` in a chat (the `@` menu lists every action node that has a program). The assistant is told the node's fields: it fills them from your message, asks for only the missing required ones with a form, and then answers with a ```node block. The card shows the values (editable), secret fields as password boxes (used for that run only, never sent to the model), and a **Run** button; the output appears in the card and the result goes back to the chat by itself, so the assistant can continue. `@work:<id>` works the same for a workflow: the assistant asks for missing Start inputs, then a card runs it and returns the result. Trigger, Claude and flow nodes are not runnable on their own.
+
+Cards run by themselves once every required value is filled (only when they appear live, never when an old chat is reopened). A chat whose working folder holds an `aihub.toml` (or sub folders that do) shows a **Publish** button that uploads it straight to the hub (`aihub dev publish -i`) in a terminal dialog.

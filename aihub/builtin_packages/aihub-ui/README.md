@@ -29,4 +29,4 @@ The chat's system prompt (soul, note index, OpenUI rules) is built once and froz
 
 **Claude sign-in**: if `settings.json` has an `apiKeyHelper` that needs an OAuth sign-in, chats and Claude nodes check it first and offer Sign in. The key it prints is never stored or shown.
 
-Libraries load from jsDelivr at pinned versions, so the page needs internet for them.
+Every library ships in `ui/static/vendor/` (the lazy ones in `vendor/lazy/`, built by `python ui/tools/vendor_libs.py`), so the page works offline and loads nothing from a CDN. Map tiles still come from OpenStreetMap. HTML pages Claude writes in a chat may still use jsDelivr.

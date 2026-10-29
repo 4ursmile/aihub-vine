@@ -404,7 +404,8 @@ def _install_newer(name, force=False):
     latest = registry.resolve(name)["version"]
     if rec and not force and V.compare(latest, rec["version"]) <= 0:
         return None
-    installer.install(name, "", True, None)
+    with registry.quiet():
+        installer.install(name, "", True, None)
     return latest
 
 

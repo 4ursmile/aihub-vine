@@ -903,3 +903,23 @@ body.sp-wide main{transition:padding .35s cubic-bezier(.22,.8,.2,1)}
 .sp-fl{opacity:1!important}
 ::view-transition-group(*),::view-transition-old(*),::view-transition-new(*){animation:none!important}
 .sp-stage{view-transition-name:none}body.sp-wide main{transition:none}.sp-modes button,.sp-ib{transition:none}
+
+/* ---------- space share lists */
+.sp-share .sp-tools{display:flex;flex-direction:column;gap:10px}.sp-share .sp-pick{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px;max-height:300px;overflow:auto}
+.sp-share .sp-prow{display:flex;flex-direction:row;align-items:center;gap:12px;padding:8px 10px;border-radius:10px;font-size:14px;color:var(--fg);cursor:default;min-height:48px}
+.sp-share label.sp-prow{cursor:pointer}.sp-share .sp-prow:hover{background:var(--fill,rgba(127,127,127,.1))}.sp-share .sp-prow.on{background:color-mix(in srgb,var(--blue) 14%,transparent)}
+.sp-share .sp-prow input[type=checkbox]{width:18px;height:18px;flex:none;margin:0;accent-color:var(--blue)}
+.sp-av{flex:none;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-size:13px;font-weight:600;color:#fff;background:hsl(var(--h) 55% 42%)}.sp-av.group{border-radius:9px}
+.sp-pn{flex:1;min-width:0;display:flex;flex-direction:column}.sp-pn b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sp-pn small{color:var(--fg-3);font-size:12px}
+.sp-share .sp-bar{display:flex;gap:10px;align-items:center;justify-content:flex-end}.sp-share .field.sm{min-width:110px}
+@media(max-width:600px){.sp-share .sp-prow{flex-wrap:wrap}}
+
+/* ---------- dialog (native <dialog>, used by Space sharing): a float, so it may blur like .pop/.toast; fallbacks join the glass block rules */
+.dlg{border:1px solid var(--glass-line);padding:0;border-radius:var(--r);background:var(--glass-strong);color:var(--fg);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);box-shadow:var(--rim),0 24px 70px rgba(0,0,0,.28);width:min(560px,calc(100vw - 32px));max-height:min(720px,calc(100vh - 48px));overflow:hidden;flex-direction:column;margin:auto;overscroll-behavior:contain}
+.dlg[open]{display:flex;animation:dlg-in .28s var(--ease)}@keyframes dlg-in{from{opacity:0;transform:translateY(10px) scale(.98)}}.dlg::backdrop{background:rgba(0,0,0,.32)}
+.dlg-h{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 22px 12px}.dlg-h h3{font-size:21px;font-weight:600;letter-spacing:-.025em;margin:0}
+.dlg-b{padding:4px 22px 22px;overflow:auto;display:flex;flex-direction:column;gap:12px}.dlg .sp-pick{max-height:240px;background:var(--surface);border-radius:var(--r-sm)}
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){.dlg{background:var(--glass-solid)}}
+@media(prefers-reduced-transparency:reduce),(prefers-contrast:more){.dlg{backdrop-filter:none;-webkit-backdrop-filter:none;background:var(--glass-solid)}}
+@media(prefers-reduced-motion:reduce){.dlg[open]{animation:none}}
+@media(max-width:600px){.dlg{width:calc(100vw - 16px);max-height:calc(100vh - 24px)}}

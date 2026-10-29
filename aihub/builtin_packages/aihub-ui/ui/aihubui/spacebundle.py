@@ -42,6 +42,14 @@ class _Ctx:
     def __init__(self, root):
         self.root = os.path.realpath(root)
         self.used, self.skipped, self.size = [], [], 0
+        self.counted, self.uris = set(), {}
+
+    def uri(self, p):
+        """data: URI of a file, built once however often the page refers to it."""
+        u = self.uris.get(p)
+        if u is None:
+            u = self.uris[p] = _data_uri(p)
+        return u
 
     def local(self, ref, base):
         """-> absolute path of a local file a page refers to, or None (remote, outside the root, missing, too big)."""
@@ -55,10 +63,12 @@ class _Ctx:
         if ".git" in os.path.relpath(full, self.root).split(os.sep):
             return None
         n = os.path.getsize(full)
-        if n > FILE_MAX or self.size + n > TOTAL_MAX:
-            self.skipped.append(os.path.relpath(full, self.root).replace(os.sep, "/"))
-            return None
-        self.size += n
+        if full not in self.counted:                       # each file counts once toward the total, however often it is used
+            if n > FILE_MAX or self.size + n > TOTAL_MAX:
+                self.skipped.append(os.path.relpath(full, self.root).replace(os.sep, "/"))
+                return None
+            self.counted.add(full)
+            self.size += n
         r = os.path.relpath(full, self.root).replace(os.sep, "/")
         if r not in self.used:
             self.used.append(r)
@@ -84,7 +94,7 @@ def _data_uri(p):
 def _css(text, base, ctx):
     def one(m):
         p = ctx.local(m.group(2), base)
-        return "url(%s)" % _data_uri(p) if p else m.group(0)
+        return "url(%s)" % ctx.uri(p) if p else m.group(0)
     return _URL.sub(one, text)
 
 
@@ -114,13 +124,13 @@ def bundle(path, root):
         if rel == "stylesheet":
             return "<style>%s</style>" % _css(_read(p).decode("utf-8", "replace"), os.path.dirname(p), ctx).replace("</style", "<\\/style")
         if "icon" in rel or rel in ("preload", "image_src"):
-            return tag.replace(href.group(0), 'href="%s"' % _data_uri(p))
+            return tag.replace(href.group(0), 'href="%s"' % ctx.uri(p))
         return tag
     html = _LINK.sub(link, html)
 
     def attr(m):
         p = ctx.local(m.group(3), base)
-        return '%s"%s"' % (m.group(1), _data_uri(p)) if p else m.group(0)
+        return '%s"%s"' % (m.group(1), ctx.uri(p)) if p else m.group(0)
     html = _ATTR.sub(attr, html)
     html = re.sub(r"(<style\b[^>]*>)(.*?)(</style>)", lambda m: m.group(1) + _css(m.group(2), base, ctx) + m.group(3), html, flags=re.I | re.S)
     html = re.sub(r"(\bstyle\s*=\s*\")([^\"]*url\([^\"]*)(\")", lambda m: m.group(1) + _css(m.group(2), base, ctx).replace('"', "'") + m.group(3), html, flags=re.I)

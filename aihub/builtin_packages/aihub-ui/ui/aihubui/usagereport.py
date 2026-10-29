@@ -74,22 +74,43 @@ def evaluate(by_day, rules, now=None):
     return states, alerts
 
 
+_flight = {}                                        # key -> lock: one `aihub usage` per window at a time, the others wait and share its answer
+_CACHE_MAX = 16
+
+
 def report(days=7, force=False):
+    """-> the Usage page document. ValueError for a `days` that is not a number. Concurrent calls for the same window share one CLI run."""
+    try:
+        days = max(1, min(365, int(days or 7)))
+    except (TypeError, ValueError):
+        raise ValueError("days must be a whole number")
     pr = store.prefs()
     rules = pr.get("alerts") or []
-    days = max(1, min(365, int(days or 7)))
     key = (days, repr(rules))
-    with _lock:
+
+    def fresh():
         hit = _cache.get(key)
-        if hit and not force and time.time() - hit[0] < TTL:
-            return hit[1]
-    doc = A.run(["usage", "--days", str(days)], timeout=240)
-    per = {p["key"]: p for p in (doc.get("data") or []) if isinstance(p, dict)}
-    slim = {k: {"period": p.get("period"), "total": p.get("total"), "by_day": p.get("by_day") or [], "by_tool": p.get("by_tool") or [],
-                "by_model": p.get("by_model") or []} for k, p in per.items()}
-    states, alerts = evaluate((per.get("all") or {}).get("by_day") or [], rules)
-    out = {"days": days, "periods": slim, "rules": states, "alerts": alerts, "sync": hubusage.sync_state()}
+        return hit[1] if hit and time.time() - hit[0] < TTL else None
     with _lock:
-        _cache.clear()
-        _cache[key] = (time.time(), out)
-    return out
+        if not force and fresh() is not None:
+            return fresh()
+        gate = _flight.setdefault(key, threading.Lock())
+    with gate:
+        with _lock:
+            got = fresh()
+        if got is not None and not force:                       # the call we waited for just filled it
+            return got
+        doc = A.run(["usage", "--days", str(days)], timeout=240)
+        per = {p["key"]: p for p in (doc.get("data") or []) if isinstance(p, dict)}
+        slim = {k: {"period": p.get("period"), "total": p.get("total"), "by_day": p.get("by_day") or [], "by_tool": p.get("by_tool") or [],
+                    "by_model": p.get("by_model") or []} for k, p in per.items()}
+        states, alerts = evaluate((per.get("all") or {}).get("by_day") or [], rules)
+        out = {"days": days, "periods": slim, "rules": states, "alerts": alerts, "sync": hubusage.sync_state()}
+        with _lock:
+            _cache[key] = (time.time(), out)
+            while len(_cache) > _CACHE_MAX:
+                _cache.pop(min(_cache, key=lambda k: _cache[k][0]))
+            if len(_flight) > 64:                                  # rules change the key: forget locks of windows no longer cached
+                for k in [k for k in _flight if k not in _cache and k != key and not _flight[k].locked()]:
+                    _flight.pop(k, None)
+        return out

@@ -191,7 +191,7 @@ function Slides({ items }) {
   const paused = hold || off || hid || items.length < 2, sheen = useSheen();
   return html`<section ref=${box} class="ft rv" data-paused=${paused ? "1" : null} role="region" aria-roledescription="carousel" aria-label="Featured packages" tabindex="0" onKeyDown=${key} onPointerMove=${sheen}
       onPointerEnter=${() => setHold(true)} onPointerLeave=${() => setHold(false)} onFocusIn=${() => setHold(true)} onFocusOut=${(e) => !e.currentTarget.contains(e.relatedTarget) && setHold(false)}>
-    <div class="ft-track" ref=${track} onPointerDown=${() => (aim.current = -1)} onWheel=${() => (aim.current = -1)} onTouchStart=${() => (aim.current = -1)}>${items.map((p, i) => html`<article key=${p.name} class=${"ft-slide sheen" + (i === at ? " on" : "")} data-i=${i} style=${"--tc:" + (TINT[p.type] || "var(--blue)")} aria-roledescription="slide" aria-label=${(i + 1) + " of " + items.length + ": " + p.name} inert=${i !== at}>
+    <div class="ft-track" ref=${track} onPointerDown=${() => (aim.current = -1)} onWheel=${() => (aim.current = -1)} onTouchStart=${() => (aim.current = -1)}>${items.map((p, i) => html`<article key=${p.name} class=${"ft-slide sheen" + (i === at ? " on" : "")} data-i=${i} aria-roledescription="slide" aria-label=${(i + 1) + " of " + items.length + ": " + p.name} inert=${i !== at} style=${"--tc:" + (TINT[p.type] || "var(--blue)") + ";cursor:pointer"} onClick=${(e) => { if (!e.target.closest("a,button,input,.ft-cmd")) location.hash = "#/package/" + p.name; }}>
       <div class="ft-copy"><div class="row ft-eye"><span class=${"badge " + (TYPE[p.type] || "")}>${p.type}</span>${p.category && html`<span class="mut3 xs">${p.category}</span>`}</div>
         <h3><a href=${"#/package/" + p.name}>${p.name}</a></h3><p>${p.description || "No description"}</p>
         <div class="meta"><span>v${p.latest_version || "–"}</span><span>↓ ${fmt(p.downloads)}</span><${Stars} r=${p.rating && p.rating.avg} />${p.updated && html`<span>updated ${ago(p.updated)}</span>`}</div>
@@ -1654,8 +1654,15 @@ function FrameView({ s }) {
   if (!u.d) return u.e ? html`<${Err} e=${u.e} />` : html`<div class="skel" style="height:60vh"></div>`;
   return html`<iframe class="sp-frame" title=${s.title} src=${u.d.url} allow="fullscreen" allowfullscreen sandbox=${s.kind === "pdf" ? null : "allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-downloads allow-modals"}></iframe>`;
 }
-function SpaceShare({ s }) {
-  const [tick, setTick] = useState(0), [pick, setPick] = useState({}), [flt, setFlt] = useState(""), [acc, setAcc] = useState("view"), [busy, setBusy] = useState(false);
+function Av({ n, t }) { return html`<span class=${"sp-av " + t} style=${"--h:" + hue(n)} aria-hidden="true">${t === "group" ? "#" : (n[0] || "?").toUpperCase()}</span>`; }
+function Dlg({ title, onClose, cls = "", children }) {
+  const r = useRef();
+  useEffect(() => { const d = r.current; if (d && !d.open) d.showModal(); return () => { if (d && d.open) d.close(); }; }, []);   // native modal: top layer, so the page's transformed ancestors cannot trap it
+  return html`<dialog class=${"dlg " + cls} ref=${r} aria-label=${title} onCancel=${(e) => { e.preventDefault(); onClose(); }} onClick=${(e) => { if (e.target === r.current) onClose(); }}>
+    <div class="dlg-h"><h3>${title}</h3><button type="button" class="btn sec sm" onClick=${onClose} aria-label="Close">Close</button></div><div class="dlg-b">${children}</div></dialog>`;
+}
+function SpaceShare({ s, onClose }) {
+  const [tick, setTick] = useState(0), [pick, setPick] = useState({}), [flt, setFlt] = useState(""), [type, setType] = useState(""), [acc, setAcc] = useState("view"), [busy, setBusy] = useState(false);
   const a = useLoad(() => api("/spaces/" + s.ref + "/access"), [s.ref, tick]);
   const all = useLoad(() => api("/groups/lookup?limit=500"), [s.ref]);
   const have = new Set(((a.d && a.d.access) || []).map((x) => x.type + ":" + x.name)), q = flt.trim().toLowerCase();
@@ -1663,8 +1670,6 @@ function SpaceShare({ s }) {
     .filter((c) => c.name !== s.owner && !have.has(c.type + ":" + c.name) && (!q || c.label.toLowerCase().includes(q)));
   const key = (c) => c.type + ":" + c.name, chosen = Object.keys(pick).filter((k) => pick[k]);
   const toggle = (c) => setPick({ ...pick, [key(c)]: !pick[key(c)] });
-  const allOn = cand.length > 0 && cand.every((c) => pick[key(c)]);
-  const sel = () => { const n = { ...pick }; cand.forEach((c) => { n[key(c)] = !allOn; }); setPick(n); };
   const share = async () => { setBusy(true);
     try { const items = chosen.map((k) => { const [type, ...r] = k.split(":"); return { type, name: r.join(":") }; });
       try { await api("/spaces/" + s.ref + "/access", { method: "PUT", body: { items, access: acc } }); }
@@ -1673,14 +1678,19 @@ function SpaceShare({ s }) {
       toast("Shared with " + items.length); setPick({}); setTick(tick + 1); }
     catch (er) { toast(er.message, 1); } setBusy(false); };
   const rm = async (x) => { try { await api("/spaces/" + s.ref + "/access/" + x.type + "/" + encodeURIComponent(x.name), { method: "DELETE" }); setTick(tick + 1); } catch (er) { toast(er.message, 1); } };
-  return html`<div class="sp-panel"><h3>Who can open it</h3><p class="sp-hint">${s.visibility === "public" ? "Public: anyone with the link. Sharing below only matters if you make it private." : "Private: you, plus these people and groups."}</p>
-    <div class="row"><input class="field" style="max-width:240px" placeholder="Filter people and groups" value=${flt} onInput=${(e) => setFlt(e.target.value)} />
-      <button class="btn sec sm" type="button" onClick=${sel} disabled=${!cand.length}>${allOn ? "Clear" : "Select all"}</button></div>
-    <ul class="sp-acl" style="max-height:260px;overflow:auto">${all.d ? cand.map((c) => html`<li key=${key(c)}><label style="display:flex;gap:8px;align-items:center;flex:1;cursor:pointer"><input type="checkbox" checked=${!!pick[key(c)]} onChange=${() => toggle(c)} /><b>${c.label}</b><span class="badge">${c.type}</span></label></li>`) : html`<li>Loading…</li>`}${all.d && !cand.length && html`<li class="sp-hint">Nobody left to pick.</li>`}</ul>
-    <div class="row"><select class="field sm" value=${acc} onChange=${(e) => setAcc(e.target.value)}><option value="view">can view</option><option value="edit">can edit</option></select>
+  const setLevel = async (x, access) => { try { await api("/spaces/" + s.ref + "/access", { method: "PUT", body: { type: x.type, name: x.name, access } }); setTick(tick + 1); } catch (er) { toast(er.message, 1); } };
+  const shown = type ? cand.filter((c) => c.type === type) : cand, mine = (a.d && a.d.access) || [];
+  return html`<${Dlg} title="Who can open it" cls="sp-share" onClose=${onClose}><p class="sp-hint">${s.visibility === "public" ? "Public: anyone with the link. Sharing below only matters if you make it private." : "Private: you, plus these people and groups."}</p>
+    <div class="sp-tools"><input class="field" type="search" placeholder="Filter people and groups" value=${flt} onInput=${(e) => setFlt(e.target.value)} />
+      <div class="sp-chips">${[["", "All"], ["user", "People"], ["group", "Groups"]].map(([k, l]) => html`<button type="button" key=${k} class=${"chip" + (type === k ? " on" : "")} onClick=${() => setType(k)}>${l}</button>`)}
+        <button class="chip" type="button" onClick=${() => { const n = { ...pick }; shown.forEach((c) => { n[key(c)] = !shown.every((x) => pick[key(x)]); }); setPick(n); }} disabled=${!shown.length}>${shown.length && shown.every((c) => pick[key(c)]) ? "Clear" : "Select all"}</button></div></div>
+    <ul class="sp-pick">${all.d ? shown.map((c) => html`<li key=${key(c)}><label class=${"sp-prow" + (pick[key(c)] ? " on" : "")}><input type="checkbox" checked=${!!pick[key(c)]} onChange=${() => toggle(c)} /><${Av} n=${c.name} t=${c.type} /><span class="sp-pn"><b>${c.label}</b></span><span class="badge">${c.type === "group" ? "group" : "person"}</span></label></li>`) : html`<li class="sp-hint">Loading…</li>`}${all.d && !shown.length && html`<li class="sp-hint">Nobody left to pick.</li>`}</ul>
+    <div class="sp-bar"><select class="field sm" value=${acc} onChange=${(e) => setAcc(e.target.value)} aria-label="Access level"><option value="view">can view</option><option value="edit">can edit</option></select>
       <button class="btn sm" onClick=${share} disabled=${!chosen.length || busy}>${busy ? "Sharing…" : chosen.length ? "Share with " + chosen.length : "Share"}</button></div>
-    <h3 style="margin-top:16px">Already shared</h3>
-    <ul class="sp-acl">${((a.d && a.d.access) || []).map((x) => html`<li key=${x.type + x.name}><b>${x.name}</b><span class="badge">${x.type}</span><span class="badge ${x.access === "edit" ? "orange" : "blue"}">${x.access}</span><button class="btn sec sm" onClick=${() => rm(x)}>Remove</button></li>`)}</ul></div>`;
+    <h3 style="margin-top:12px">Already shared <span class="mute">${mine.length || ""}</span></h3>
+    <ul class="sp-pick">${mine.map((x) => html`<li key=${x.type + x.name}><div class="sp-prow"><${Av} n=${x.name} t=${x.type} /><span class="sp-pn"><b>${x.name}</b><small>${x.type === "group" ? "group" : "person"}</small></span>
+      <select class="field sm" value=${x.access} onChange=${(e) => setLevel(x, e.target.value)} aria-label=${"Access for " + x.name}><option value="view">can view</option><option value="edit">can edit</option></select>
+      <button class="btn sec sm" onClick=${() => rm(x)} aria-label=${"Remove " + x.name}>Remove</button></div></li>`)}${a.d && !mine.length && html`<li class="sp-hint">Not shared with anyone yet.</li>`}</ul><//>`;
 }
 function SpaceSettings({ s, onSaved }) {
   const st = s.settings || {}, [f, setF] = useState({ title: s.title, description: s.description, tags: s.tags.join(", "), view: st.view || "fit", transition: st.transition || "auto", autoplay: st.autoplay || 0, loop: !!st.loop, visibility: s.visibility });
@@ -1743,7 +1753,7 @@ function SpacePage({ sref: rf }) {
       ${s.can_manage && html`<${Ib} d=${SI.share} label="Share" on=${panel === "share"} onClick=${() => setPanel(panel === "share" ? null : "share")} />`}
       ${s.can_manage && (ask ? html`<span class="sp-ask">Delete <b>${s.ref}</b> for everyone?<button class="btn sec sm" onClick=${() => setAsk(false)}>Cancel</button><button class="btn danger sm" onClick=${del}>Delete</button></span>` : html`<${Ib} d=${SI.trash} label="Delete" cls="warn" onClick=${() => setAsk(true)} />`)}</div>
     ${panel === "set" && s.can_edit && html`<${SpaceSettings} s=${s} onSaved=${(x) => { setLocal(x); setTick(tick + 1); setPanel(null); }} />`}
-    ${panel === "share" && s.can_manage && html`<${SpaceShare} s=${s} />`}
+    ${panel === "share" && s.can_manage && html`<${SpaceShare} s=${s} onClose=${() => setPanel(null)} />`}
     <div class=${"sp-stage sp-k-" + s.kind + " sp-s-" + eff} ref=${stage}>${eff === "full" && html`<div class="sp-fl"><button class="btn sec sm" onClick=${() => pick(pre || "fit")}>Exit full screen</button></div>`}${body}</div></div>`;
 }
 function NavMenu({ label, lead, items }) {

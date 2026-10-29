@@ -6,13 +6,13 @@ helper saves itself. Claude Code runs it on its own; this module adds what a hea
   * login()  runs the helper in the background with a long timeout and collects stderr lines, so a device-code or sign-in URL it prints
              reaches the page. The helper stores its own token (that is what it is for); we only remember "valid until" in memory.
   * ready()  preflight for a chat turn or a work node: fresh within the helper's TTL, else check(). A failure carries needs_login."""
-import json
 import os
+import signal
 import subprocess
 import threading
 import time
 
-from .aihub import settings_files
+from .aihub import _jsonc, settings_files
 
 DEFAULT_TTL = 300
 _lock = threading.Lock()
@@ -23,8 +23,8 @@ def _settings():
     out = {}
     for fn in settings_files():                                         # local overrides, as Claude Code merges them
         try:
-            with open(fn, encoding="utf-8") as f:
-                d = json.load(f)
+            with open(fn, encoding="utf-8-sig") as f:
+                d = _jsonc(f.read())
             if isinstance(d, dict):
                 out.update({k: v for k, v in d.items() if k != "env"})
                 out.setdefault("env", {}).update(d.get("env") or {})
@@ -45,6 +45,36 @@ def ttl():
         return DEFAULT_TTL
 
 
+def kill(p):
+    """Kill the helper's whole process group (it runs through a shell that starts the real command); a plain p.kill() left the child holding the pipes."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True, timeout=10)
+        else:
+            os.killpg(p.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        try:
+            p.kill()
+        except OSError:
+            pass
+
+
+def run_helper(cmd, timeout):
+    """-> (returncode, stdout, stderr). Raises subprocess.TimeoutExpired after killing the whole group."""
+    p = subprocess.Popen(cmd, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         cwd=os.path.expanduser("~"), start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill(p)
+        try:
+            p.communicate(timeout=5)
+        except Exception:
+            pass
+        raise
+    return p.returncode, out, err
+
+
 def _clean(text, key):
     text = (text or "")[-4000:]
     return text.replace(key, "***") if key else text
@@ -56,12 +86,14 @@ def check(timeout=45):
     if not cmd:
         return {"ok": True, "error": "", "needs_login": False}
     try:
-        p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, cwd=os.path.expanduser("~"))
+        rc, out, err = run_helper(cmd, timeout)
     except subprocess.TimeoutExpired:
         return _fail("the key helper took longer than %ds (it probably waits for a sign-in)" % timeout)
-    key = p.stdout.strip()
-    if p.returncode != 0 or not key:
-        return _fail(_clean(p.stderr, key).strip() or "the key helper printed no key (exit %d)" % p.returncode)
+    except OSError as e:
+        return _fail("could not run the key helper: %s" % e)
+    key = out.strip()
+    if rc != 0 or not key:
+        return _fail(_clean(err, key).strip() or "the key helper printed no key (exit %d)" % rc)
     with _lock:
         state["valid_until"] = time.time() + ttl()
         state["last_error"] = ""
@@ -105,7 +137,7 @@ def login(timeout=300):
         try:
             p = subprocess.Popen(cmd, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                  cwd=os.path.expanduser("~"), start_new_session=True)
-            timer = threading.Timer(timeout, p.kill)
+            timer = threading.Timer(timeout, kill, (p,))
             timer.start()
             out = []
             threading.Thread(target=lambda: out.append(p.stdout.read()), daemon=True).start()

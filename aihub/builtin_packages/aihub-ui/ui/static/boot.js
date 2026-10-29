@@ -1,0 +1,2 @@
+// Shows why the page stayed blank (a classic script, so it runs even when a module fails; inline scripts are blocked by the CSP).
+addEventListener("error",function(e){var a=document.getElementById("app");if(a&&!a.firstChild&&e&&e.message)a.innerHTML="<pre style='padding:24px;font:13px monospace;white-space:pre-wrap'>AI Hub UI could not start: "+e.message.replace(/</g,"&lt;")+"\nTry a hard refresh (Ctrl/Cmd+Shift+R) or restart: aihub run aihub-ui</pre>"});

@@ -44,6 +44,86 @@ class PrefetchTest(unittest.TestCase):
         self.assertIsNotNone(out["x"][1])
 
 
+class GitLoginFallbackTest(unittest.TestCase):
+    """No valid git login -> the package comes through the hub, unless --from repo."""
+
+    def setUp(self):
+        from aihub.cli import paths
+        self.pkg = {"name": "x", "version": "1", "repo": {"url": "https://git.example/r.git", "branch": "main", "subdir": ""}}
+        self.denied = gitx.GitError("fatal: Authentication failed for 'https://git.example/r.git'")
+        self.hub = mock.patch.object(paths, "hub_configured", lambda: True)
+        self.hub.start()
+        self.addCleanup(self.hub.stop)
+        self.addCleanup(setattr, registry, "REPO_ONLY", registry.REPO_ONLY)
+
+    def test_checkout_uses_hub_when_login_refused(self):
+        registry.REPO_ONLY = False
+        with mock.patch.object(registry, "_get_repo", side_effect=self.denied), \
+                mock.patch.object(registry, "_from_hub", return_value="rev1") as hub:
+            self.assertEqual(registry.checkout(self.pkg, tempfile.mkdtemp()), "rev1")
+        hub.assert_called_once()
+
+    def test_prefetch_uses_hub_for_whole_repo(self):
+        registry.REPO_ONLY = False
+        with mock.patch.object(gitx, "current", lambda *a, **k: None), \
+                mock.patch.object(gitx, "fetch", side_effect=self.denied), \
+                mock.patch.object(registry, "_from_hub", return_value="rev1") as hub:
+            out = registry.prefetch([self.pkg], tempfile.mkdtemp())
+        self.assertIsNone(out["x"][1])
+        hub.assert_called_once()
+
+    def test_repo_only_keeps_the_git_error(self):
+        registry.REPO_ONLY = True
+        with mock.patch.object(registry, "_get_repo", side_effect=self.denied), \
+                mock.patch.object(registry, "_from_hub") as hub:
+            with self.assertRaises(Exception):
+                registry.checkout(self.pkg, tempfile.mkdtemp())
+        hub.assert_not_called()
+
+    def test_other_git_errors_do_not_fall_back(self):
+        registry.REPO_ONLY = False
+        with mock.patch.object(registry, "_get_repo", side_effect=gitx.GitError("fatal: couldn't find remote ref main")), \
+                mock.patch.object(registry, "_from_hub") as hub:
+            with self.assertRaises(Exception):
+                registry.checkout(self.pkg, tempfile.mkdtemp())
+        hub.assert_not_called()
+
+
+class QuietUpdateTest(unittest.TestCase):
+    """Updates: hub first, no login prompt, git only when the hub fails."""
+
+    def setUp(self):
+        from aihub.cli import paths
+        self.pkg = {"name": "x", "version": "2", "repo": {"url": "https://git.example/r.git", "branch": "main", "subdir": ""}}
+        p = mock.patch.object(paths, "hub_configured", lambda: True)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_hub_is_tried_before_git(self):
+        with registry.quiet(), mock.patch.object(registry, "_from_hub", return_value="r") as hub, \
+                mock.patch.object(registry, "_checkout_git") as git_:
+            self.assertEqual(registry.checkout(self.pkg, tempfile.mkdtemp()), "r")
+        hub.assert_called_once()
+        git_.assert_not_called()
+        self.assertFalse(registry.QUIET)
+
+    def test_git_when_hub_fails(self):
+        from aihub.cli import api
+        with registry.quiet(), mock.patch.object(registry, "_from_hub", side_effect=api.ApiError("down")), \
+                mock.patch.object(registry, "_checkout_git", return_value="g"):
+            self.assertEqual(registry.checkout(self.pkg, tempfile.mkdtemp()), "g")
+
+    def test_no_prompt_while_quiet(self):
+        from aihub.cli import remote_config, ui
+        asked = []
+        err = gitx.GitError("fatal: Authentication failed")
+        with mock.patch.object(ui, "INTERACTIVE", True), mock.patch.object(remote_config, "ensure_helper"), \
+                mock.patch.object(remote_config, "ensure_git_access", lambda u: asked.append(u)), registry.quiet():
+            with self.assertRaises(gitx.GitError):
+                remote_config.with_access("https://git.example/r.git", lambda: (_ for _ in ()).throw(err))
+        self.assertEqual(asked, [])
+
+
 class InstallManyTest(unittest.TestCase):
     def test_one_plan_and_bad_name_skipped(self):
         from aihub.cli import installer

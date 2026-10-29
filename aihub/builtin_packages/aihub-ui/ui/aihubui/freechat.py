@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 
 from . import auth, hubusage, mcpclient, store
-from .aihub import HOME, settings_files
+from .aihub import HOME, _jsonc, settings_files
 
 DEFAULT_MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}
 BUDGET = {"low": 2000, "medium": 5000, "high": 10000, "xhigh": 20000, "max": 32000}      # thinking tokens per effort level
@@ -67,8 +67,8 @@ def _env():
     out = {k: v for k, v in os.environ.items() if _mine(k)}
     for fn in settings_files():
         try:
-            with open(fn, encoding="utf-8") as f:
-                d = json.load(f)
+            with open(fn, encoding="utf-8-sig") as f:
+                d = _jsonc(f.read())
             out.update({k: str(v) for k, v in (d.get("env") or {}).items() if _mine(k)})
             if isinstance(d.get("model"), str):
                 out.setdefault("_model", d["model"])
@@ -77,24 +77,51 @@ def _env():
     return out
 
 
+KEY_TTL = 300
+_keys = {}                                  # helper command -> (key, valid until): the apiKeyHelper is not run again for every message
+_keys_lock = threading.Lock()
+
+
+def drop_key():
+    """Forget the cached apiKeyHelper key (after a 401)."""
+    with _keys_lock:
+        _keys.clear()
+
+
+def _helper_key(cmd):
+    with _keys_lock:
+        c = _keys.get(cmd)
+    if c and time.time() < c[1]:
+        return c[0]
+    try:
+        rc, out, _ = auth.run_helper(cmd, 45)
+    except subprocess.TimeoutExpired:
+        raise ValueError("the apiKeyHelper took too long (it probably waits for a sign-in; see Settings)")
+    key = out.strip()
+    if rc != 0 or not key:
+        raise ValueError("the apiKeyHelper printed no key (exit %d). Sign in under Settings." % rc)
+    with _keys_lock:
+        _keys[cmd] = (key, time.time() + KEY_TTL)
+    return key
+
+
+def uses_helper(env):
+    return not (env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN")) and bool(auth.helper())
+
+
 def credentials(extra_env=None):
     """-> (base_url, headers, env). Raises ValueError with a message for the page when there is no usable key."""
     env = _env()
     env.update({k: v for k, v in (extra_env or {}).items() if _mine(k)})
     base = (env.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com").rstrip("/")
     head = {"anthropic-version": VERSION, "content-type": "application/json", "accept": "text/event-stream"}
+    cmd = auth.helper()
     if env.get("ANTHROPIC_API_KEY"):
         head["x-api-key"] = env["ANTHROPIC_API_KEY"]
     elif env.get("ANTHROPIC_AUTH_TOKEN"):
         head["authorization"] = "Bearer " + env["ANTHROPIC_AUTH_TOKEN"]
-    elif auth.helper():
-        try:
-            p = subprocess.run(auth.helper(), shell=True, capture_output=True, text=True, timeout=45, stdin=subprocess.DEVNULL, cwd=os.path.expanduser("~"))
-        except subprocess.TimeoutExpired:
-            raise ValueError("the apiKeyHelper took too long (it probably waits for a sign-in; see Settings)")
-        key = p.stdout.strip()
-        if p.returncode != 0 or not key:
-            raise ValueError("the apiKeyHelper printed no key (exit %d). Sign in under Settings." % p.returncode)
+    elif cmd:
+        key = _helper_key(cmd)
         head["x-api-key" if key.startswith("sk-ant-") else "authorization"] = key if key.startswith("sk-ant-") else "Bearer " + key
     else:
         raise ValueError("Free chat needs an API key. Add ANTHROPIC_API_KEY under Settings > Encrypted secrets (or in the env block of your Claude settings.json). "
@@ -105,6 +132,17 @@ def credentials(extra_env=None):
 def tls_context(env):
     """Like Claude Code: NODE_TLS_REJECT_UNAUTHORIZED=0 (an explicit choice in the user's settings) skips verification; NODE_EXTRA_CA_CERTS /
     SSL_CERT_FILE / AIHUB_CA_BUNDLE add a CA file; on macOS the system bundle is added because some Python builds ship without roots."""
+    k = tuple(env.get(x) for x in KEYS)
+    c = _ctx.get(k)
+    if c is None:
+        c = _ctx[k] = _make_ctx(env)
+    return c
+
+
+_ctx = {}
+
+
+def _make_ctx(env):
     if str(env.get("NODE_TLS_REJECT_UNAUTHORIZED")) == "0":
         return ssl._create_unverified_context()
     ctx = ssl.create_default_context()
@@ -128,8 +166,21 @@ def resolve_model(model, env):
     return m if m not in DEFAULT_MODELS else DEFAULT_MODELS[m]
 
 
-def messages_from(rows):
-    """Chat history rows -> API messages: user text and assistant text only (tool calls and results of the other engine are left out), roles alternating."""
+LEFT_OUT = "[Earlier messages of this conversation were left out to fit the context window.]"
+
+
+def _budget():
+    """Characters of history to send: 60% of the `window` pref (tokens x 4 chars), at most ~600k tokens."""
+    try:
+        w = int(store.prefs().get("window") or 0)
+    except (TypeError, ValueError, OSError):
+        w = 0
+    return int(min(w * 0.6 if w else 600_000, 600_000) * 4)
+
+
+def messages_from(rows, budget=None):
+    """Chat history rows -> API messages: user text and assistant text only (tool calls and results of the other engine are left out), roles alternating.
+    The oldest messages are dropped when the history is over `budget` characters (default from the window pref); the first message stays a user one."""
     out = []
 
     def add(role, text):
@@ -146,7 +197,16 @@ def messages_from(rows):
             add("user", e.get("text"))
         elif k == "msg":
             add("assistant", "\n\n".join(b.get("text", "") for b in e.get("blocks") or [] if isinstance(b, dict) and b.get("type") == "text"))
-    if out and out[0]["role"] != "user":
+    size = lambda m: len(m["content"][0]["text"])
+    cap, total, cut = (_budget() if budget is None else budget), sum(size(m) for m in out), 0
+    while len(out) > 1 and (total > cap or out[0]["role"] != "user"):
+        total -= size(out.pop(0))
+        cut += 1
+    if cut:
+        if out[0]["role"] != "user":
+            out.insert(0, {"role": "user", "content": [{"type": "text", "text": ""}]})
+        out[0]["content"][0]["text"] = LEFT_OUT + "\n\n" + out[0]["content"][0]["text"] if out[0]["content"][0]["text"] else LEFT_OUT
+    elif out and out[0]["role"] != "user":
         out.insert(0, {"role": "user", "content": [{"type": "text", "text": "(earlier conversation)"}]})
     return out
 
@@ -302,7 +362,7 @@ def _round(base, head, body, env, state, secrets):
                     break
                 if kind == "content_block_start":
                     cb = d.get("content_block") or {}
-                    cur = {"type": cb.get("type"), "text": "", "thinking": "", "signature": "", "id": cb.get("id"), "name": cb.get("name"), "json": ""}
+                    cur = {"type": cb.get("type"), "text": "", "thinking": "", "signature": "", "data": cb.get("data") or "", "id": cb.get("id"), "name": cb.get("name"), "json": ""}
                     blocks.append(cur)
                 elif kind == "content_block_delta" and cur is not None:
                     dl = d.get("delta") or {}
@@ -367,26 +427,29 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
     """Generator of UI events for one message in free chat. Same events and history as chat.turn. With MCP servers switched on for the chat
     (session field `mcp`) it runs the usual tool loop: the model asks for a tool, we call the MCP server, the result goes back, until it answers."""
     sid = sess["id"]
-    try:
-        base, head, env = credentials(extra_env)
-    except ValueError as e:
-        ev = {"k": "error", "text": str(e)}
-        store.append(sid, ev)
-        yield ev
-        yield {"k": "done"}
-        return
-    secrets = [head.get("x-api-key"), (head.get("authorization") or "")[7:]]
     state = {"cancel": threading.Event(), "resp": None}
     with lock:
-        live[sid] = state
+        live[sid] = state                                               # first thing: Stop works while credentials and MCP servers are still starting
     t0 = time.time()
     box = None
     try:
+        try:
+            base, head, env = credentials(extra_env)
+        except ValueError as e:
+            ev = {"k": "error", "text": str(e)}
+            store.append(sid, ev)
+            yield ev
+            yield {"k": "done"}
+            return
+        secrets = [head.get("x-api-key"), (head.get("authorization") or "")[7:]]
+        if state["cancel"].is_set():
+            yield {"k": "done"}
+            return
         if sess.get("mcp"):
             st = store.mcp_state()
             mine = {k: set(v) for k, v in (sess.get("mcp_off") or {}).items() if isinstance(v, list)}
             tools_off = {k: set(st["tools_off"].get(k, ())) | mine.get(k, set()) for k in set(st["tools_off"]) | set(mine)}
-            box = mcpclient.Toolbox([str(n) for n in sess["mcp"]][:20], off=st["off"], tools_off=tools_off, persist=lambda *a: _persist_mcp(sid, *a))
+            box = mcpclient.Toolbox([str(n) for n in sess["mcp"]][:20], off=st["off"], tools_off=tools_off, persist=lambda *a: _persist_mcp(sid, *a), cancel=state["cancel"])
             for n in box.notes:
                 ev = {"k": "note", "text": n}
                 store.append(sid, ev)
@@ -410,9 +473,9 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
             body["max_tokens"] = MAX_OUT + budget
         store.update_session(sid, engine="free")
         total = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
-        all_text, err, retried = [], "", False
+        all_text, err, retried, reauthed = [], "", False, False
         limit, rnd, finished = (MAX_ROUNDS if body.get("tools") else 1), 0, False
-        while rnd < limit:
+        while rnd < limit and not state["cancel"].is_set():
             res = None
             if box and box.specs:
                 body["tools"] = box.specs                               # aihub_mcp may have started, stopped or hidden something since the last round
@@ -428,6 +491,17 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
                         yield {"k": "ctx", "used": used}
                 else:
                     res = val
+            if res["err"] and res["code"] == 401 and not reauthed and uses_helper(env):
+                reauthed = True                                          # the cached helper key went stale: ask the helper again, once
+                drop_key()
+                try:
+                    _, h2, _ = credentials(extra_env)
+                    head.clear()
+                    head.update(h2)
+                    secrets[:] = [h2.get("x-api-key"), (h2.get("authorization") or "")[7:]]
+                    continue
+                except ValueError:
+                    pass
             if res["err"] and res["code"] in (400, 403, 404) and "model" in res["err"].lower() and not retried:
                 retried = True                                           # the default model id is not one this key has: look for one that is
                 try:
@@ -453,9 +527,12 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
                 err = res["err"]
             ui_blocks, api_blocks, calls = [], [], []
             for b in res["blocks"]:
-                if b["type"] == "thinking" and b["thinking"]:
-                    ui_blocks.append({"type": "thinking", "text": b["thinking"]})
+                if b["type"] == "thinking" and (b["thinking"] or b["signature"]):
+                    if b["thinking"]:
+                        ui_blocks.append({"type": "thinking", "text": b["thinking"]})
                     api_blocks.append({"type": "thinking", "thinking": b["thinking"], "signature": b["signature"]})
+                elif b["type"] == "redacted_thinking" and b["data"]:
+                    api_blocks.append({"type": "redacted_thinking", "data": b["data"]})
                 elif b["type"] == "text" and b["text"]:
                     ui_blocks.append({"type": "text", "text": b["text"]})
                     api_blocks.append({"type": "text", "text": b["text"]})

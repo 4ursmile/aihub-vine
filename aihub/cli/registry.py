@@ -351,6 +351,29 @@ INDIRECT = False        # `aihub install -i` / `--from archive`: the hub fetches
 REPO_ONLY = False       # `aihub install --from repo`: git only; a package that has no repository (an archive on the hub) is an error
 
 
+QUIET = False           # updates (`aihub update`, policy refresh): hub first, git only if the hub fails, and never ask for a git login
+
+
+def quiet():
+    """Context manager: package updates run unattended: through the hub when one is configured, no git credential prompt."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def cm():
+        global QUIET
+        old, QUIET = QUIET, True
+        old_prompt, remote_config.NO_PROMPT = remote_config.NO_PROMPT, True
+        try:
+            yield
+        finally:
+            QUIET, remote_config.NO_PROMPT = old, old_prompt
+    return cm()
+
+
+def _hub_first():
+    return QUIET and not REPO_ONLY and paths.hub_configured()
+
+
 def on_hub(repo):
     """The package lives on the hub itself (`aihub dev publish -i`): there is no git repository, the hub sends the archive."""
     return str((repo or {}).get("url") or "").startswith("hub://")
@@ -387,16 +410,43 @@ def _from_hub(r, dest):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _git_login_failed(e):
+    """The git route failed because a login is missing or was refused (never a missing commit or a network problem)."""
+    msg = gitx.strip_hints(str(e))
+    return gitx.fetch_failure(msg) == "auth" or remote_config.is_auth_error(msg)
+
+
+def _hub_instead(r, dest, e):
+    """No usable git login: take the package through the hub (what `-i` does). Not with `--from repo`, and not without a hub."""
+    if REPO_ONLY or not paths.hub_configured():
+        raise e
+    ui.info("%s: no valid git login, downloading through the hub instead" % r["name"])
+    try:
+        return _from_hub(r, dest)
+    except (OSError, ValueError, tarfile.TarError, api.ApiError) as he:
+        raise api.ApiError("%s; the hub fallback failed too (%s)" % (e, he))
+
+
 def checkout(r, dest):
     """Materialise a resolved package into dest (its subdir of the repo at the requested ref/branch)."""
     if REPO_ONLY and on_hub(r.get("repo")):
         raise api.ApiError("%s %s is an archive package: it was published to the hub and has no git repository. Install it without --from repo" % (r["name"], r["version"]))
-    if INDIRECT or on_hub(r.get("repo")):
+    if _hub_first() and not (INDIRECT or on_hub(r.get("repo"))):
+        try:
+            return _from_hub(r, dest)
+        except (OSError, ValueError, tarfile.TarError, api.ApiError):
+            pass                                  # the hub could not serve it: git, as before (still without asking)
+    elif INDIRECT or on_hub(r.get("repo")):
         try:
             return _from_hub(r, dest)
         except (OSError, ValueError, tarfile.TarError) as e:       # the hub is the way now; git is legacy and `-i` never falls back to it
             raise api.ApiError("hub transfer failed for %s (%s); retry%s" % (r["name"], e, "" if on_hub(r.get("repo")) else ", or install without -i to use git"))
-    return _checkout_git(r, dest)
+    try:
+        return _checkout_git(r, dest)
+    except api.ApiError as e:
+        if not _git_login_failed(e):
+            raise
+        return _hub_instead(r, dest, e)
 
 
 def _get_repo(r, repo, src):
@@ -467,10 +517,13 @@ def prefetch(pkgs, base, workers=None):
     from concurrent.futures import ThreadPoolExecutor
     out, locks, lk = {}, {}, threading.Lock()
 
-    def one(r, src=None):
+    def one(r, src=None, hub=False):
         dest = os.path.join(base, r["name"])
         try:
-            r["rev"] = _checkout_git(r, dest, src) if src is not None else checkout(r, dest)
+            if hub:
+                r["rev"] = _hub_instead(r, dest, api.ApiError("%s: git login missing or refused" % r["name"]))
+            else:
+                r["rev"] = _checkout_git(r, dest, src) if src is not None else checkout(r, dest)
             out[r["name"]] = (dest, None)
         except Exception as e:             # reported when that package's turn comes; the others carry on
             out[r["name"]] = (None, e)
@@ -492,13 +545,17 @@ def prefetch(pkgs, base, workers=None):
                     for r in rs:                       # the commit is not in this repo (the package moved): each one looks in the other places
                         one(r)
                     return
+                if _git_login_failed(e) and not REPO_ONLY and paths.hub_configured():
+                    for r in rs:                       # no valid login for this git host: every package of the repo comes through the hub
+                        one(r, hub=True)
+                    return
                 for r in rs:
                     out[r["name"]] = (None, api.ApiError("%s: %s" % (r["name"], e)) if not isinstance(e, api.ApiError) else e)
                 return
             for r in rs:
                 one(r, src)
 
-    via_hub = [r for r in pkgs if INDIRECT or on_hub(r.get("repo"))]    # plain parallel downloads; the rest share one clone per git repo
+    via_hub = [r for r in pkgs if INDIRECT or on_hub(r.get("repo")) or _hub_first()]    # plain parallel downloads; the rest share one clone per git repo
     groups = {}
     for r in pkgs:
         if r not in via_hub:

@@ -3,17 +3,22 @@
 Servers come from: installed aihub packages that declare `[[mcp_servers]]` (and are enabled), the UI's own list (MCP servers page) and the user-level
 servers in ~/.claude.json. Free chat starts only the ones the user ticked for that chat, for one answer, and stops them afterwards.
 Protocol: newline-delimited JSON-RPC 2.0 on the child's stdin/stdout (`initialize`, `notifications/initialized`, `tools/list`, `tools/call`)."""
+import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import threading
+import time
 
 from . import aihub as A, store
 
 PROTOCOL = "2025-06-18"
 START_TIMEOUT = 25
 CALL_TIMEOUT = 90
+IDLE_TTL = 600                                                           # a pooled server nobody used for this long is stopped
+SOURCES_TTL = 30
 NAME = re.compile(r"[^A-Za-z0-9_-]")
 
 
@@ -51,8 +56,22 @@ def _toml(path):
     return out
 
 
-def sources():
-    """name -> {command, args, env, origin} of every stdio MCP server free chat could use. URL (http/sse) servers are not supported here."""
+_src = {"at": 0.0, "val": {}}
+_src_lock = threading.Lock()
+
+
+def sources(fresh=False):
+    """name -> {command, args, env, origin} of every stdio MCP server free chat could use (cached SOURCES_TTL s: it runs `aihub list`). URL (http/sse) servers are not supported here."""
+    with _src_lock:
+        if not fresh and _src["val"] and time.time() - _src["at"] < SOURCES_TTL:
+            return {k: dict(v) for k, v in _src["val"].items()}
+    out = _sources()
+    with _src_lock:
+        _src.update(at=time.time(), val=out)
+    return {k: dict(v) for k, v in out.items()}
+
+
+def _sources():
     out = {}
     try:
         pk = A.run(["list"]).get("data") or []
@@ -81,7 +100,7 @@ def sources():
 def public():
     st = store.mcp_state()
     return [{"name": n, "origin": s["origin"], "command": s["command"], "off": n in st["off"], "default": n in st["default_on"], "tools_off": st["tools_off"].get(n, [])}
-            for n, s in sorted(sources().items())]
+            for n, s in sorted(sources(fresh=True).items())]
 
 
 class Server:
@@ -93,6 +112,8 @@ class Server:
         self.lock = threading.Lock()
         self.err = []
         self.tools = []
+        self.dead = False
+        self.last = time.time()
 
     def start(self):
         env = dict(os.environ)
@@ -103,7 +124,7 @@ class Server:
         except OSError as e:
             raise RuntimeError("cannot start %s: %s" % (self.spec["command"], e.strerror or e))
         threading.Thread(target=self._read, daemon=True).start()
-        threading.Thread(target=lambda: [self.err.append(x.decode("utf-8", "replace")) or self.err.__delitem__(slice(0, -20)) for x in self.p.stderr], daemon=True).start()
+        threading.Thread(target=self._drain, args=(self.p,), daemon=True).start()
         self.request("initialize", {"protocolVersion": PROTOCOL, "capabilities": {}, "clientInfo": {"name": "aihub-ui", "version": "1"}}, START_TIMEOUT)
         self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         cursor = None
@@ -114,6 +135,17 @@ class Server:
             if not cursor:
                 break
 
+    def _drain(self, p):
+        try:
+            for x in p.stderr:
+                self.err.append(x.decode("utf-8", "replace"))
+                del self.err[:-20]
+        except (OSError, ValueError):
+            pass
+
+    def alive(self):
+        return not self.dead and self.p is not None and self.p.poll() is None
+
     def _send(self, msg):
         try:
             self.p.stdin.write((json.dumps(msg) + "\n").encode("utf-8"))
@@ -122,47 +154,163 @@ class Server:
             pass
 
     def _read(self):
-        for raw in self.p.stdout:
-            try:
-                m = json.loads(raw)
-            except ValueError:
-                continue
-            if not isinstance(m, dict):
-                continue
-            if "method" in m and "id" in m:                                     # a request from the server
-                self._send({"jsonrpc": "2.0", "id": m["id"], **({"result": {}} if m["method"] == "ping" else {"error": {"code": -32601, "message": "not supported by this client"}})})
-            elif "id" in m and m["id"] in self.wait:
-                ev, box = self.wait[m["id"]]
-                box.append(m)
-                ev.set()
-        for ev, box in list(self.wait.values()):                                 # the server ended: wake everyone
+        try:
+            for raw in self.p.stdout:
+                try:
+                    m = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(m, dict):
+                    continue
+                if "method" in m and "id" in m:                                     # a request from the server
+                    self._send({"jsonrpc": "2.0", "id": m["id"], **({"result": {}} if m["method"] == "ping" else {"error": {"code": -32601, "message": "not supported by this client"}})})
+                elif "id" in m:
+                    with self.lock:
+                        w = self.wait.get(m["id"])
+                    if w:
+                        w[1].append(m)
+                        w[0].set()
+        except (OSError, ValueError):
+            pass
+        with self.lock:                                                         # the server ended: later requests fail at once, current ones wake now
+            self.dead = True
+            waiting = list(self.wait.values())
+        for ev, box in waiting:
             if not box:
                 box.append({"error": {"message": "the MCP server ended: " + " ".join(self.err)[-300:]}})
             ev.set()
 
-    def request(self, method, params, timeout):
+    def request(self, method, params, timeout, cancel=None):
+        """cancel: an Event (Stop); the wait ends within 0.25 s of it being set."""
+        ev, box = threading.Event(), []
         with self.lock:
+            if self.dead or (self.p is not None and self.p.poll() is not None):
+                self.dead = True
+                raise RuntimeError("the MCP server %s is not running: %s" % (self.name, " ".join(self.err)[-300:] or "it ended"))
             self.id += 1
             rid = self.id
-        ev, box = threading.Event(), []
-        self.wait[rid] = (ev, box)
+            self.wait[rid] = (ev, box)
+        self.last = time.time()
         self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
-        if not ev.wait(timeout):
+        end, done = time.time() + timeout, False
+        while not done:
+            left = end - time.time()
+            if left <= 0:
+                break
+            done = ev.wait(min(0.25, left))
+            if not done and cancel is not None and cancel.is_set():
+                with self.lock:
+                    self.wait.pop(rid, None)
+                raise RuntimeError("stopped")
+        with self.lock:
             self.wait.pop(rid, None)
+        if not done:
             raise RuntimeError("%s did not answer %s within %ds" % (self.name, method, timeout))
-        self.wait.pop(rid, None)
+        self.last = time.time()
         m = box[0]
         if "error" in m:
             raise RuntimeError(str((m["error"] or {}).get("message") or m["error"])[:300])
         return m.get("result") or {}
 
     def close(self):
-        if self.p and self.p.poll() is None:
-            try:
-                self.p.stdin.close()
-                self.p.terminate()
-            except OSError:
-                pass
+        """Stop the server and everything it started: SIGTERM to its process group, 3 s grace, then SIGKILL (Windows: taskkill /T /F)."""
+        self.dead = True
+        p = self.p
+        if not p:
+            return
+        try:
+            p.stdin.close()
+        except (OSError, ValueError):
+            pass
+        if os.name == "nt":
+            if p.poll() is None:
+                try:
+                    subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True, timeout=10)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            return
+        try:
+            os.killpg(p.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            p.wait(3)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(p.pid, signal.SIGKILL)                                    # the leader may be gone while children live on
+        except OSError:
+            pass
+        try:
+            p.wait(2)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+# ---- pool: one running server per (name, spec), shared by every free-chat message until idle for IDLE_TTL
+
+_pool, _plocks = {}, {}
+_pool_lock = threading.Lock()
+_reaper = {"t": None}
+
+
+def _key(name, spec):
+    return (name, hashlib.sha1(json.dumps(spec, sort_keys=True, default=str).encode("utf-8")).hexdigest())
+
+
+def _sweep(now=None):
+    now = now or time.time()
+    with _pool_lock:
+        gone = [(k, s) for k, s in _pool.items() if not s.alive() or now - s.last > IDLE_TTL]
+        for k, _ in gone:
+            _pool.pop(k, None)
+    for _, s in gone:
+        threading.Thread(target=s.close, daemon=True).start()
+
+
+def _reap():
+    while True:
+        time.sleep(30)
+        _sweep()
+
+
+def acquire(name, spec, force=False):
+    """A started Server for (name, spec): the pooled one when it still runs, else a new one (a dead one is replaced). Raises RuntimeError when it cannot start."""
+    k = _key(name, spec)
+    with _pool_lock:
+        lk = _plocks.setdefault(k, threading.Lock())
+        if _reaper["t"] is None:
+            _reaper["t"] = threading.Thread(target=_reap, daemon=True)
+            _reaper["t"].start()
+    _sweep()
+    with lk:
+        with _pool_lock:
+            s = _pool.get(k)
+        if s and s.alive() and not force:
+            s.last = time.time()
+            return s
+        if s:
+            with _pool_lock:
+                _pool.pop(k, None)
+            s.close()
+        s = Server(name, spec)
+        try:
+            s.start()
+        except Exception:
+            s.close()
+            raise
+        with _pool_lock:
+            _pool[k] = s
+        return s
+
+
+def shutdown():
+    """Stop every pooled server (tests, process exit)."""
+    with _pool_lock:
+        old = list(_pool.values())
+        _pool.clear()
+    for s in old:
+        s.close()
 
 
 META = "aihub_mcp"
@@ -179,12 +327,14 @@ class Toolbox:
     Besides them the model gets `aihub_mcp` (status / retry / enable / disable) so a user can say "retry the github server" or "turn off the delete tool" in the chat.
     OFF = servers never used in free chat (MCP settings); TOOLS_OFF = {server: [tool]} hidden from the model; PERSIST(kind, server, tool, on) saves a change for this chat."""
 
-    def __init__(self, names, off=(), tools_off=None, persist=None):
+    def __init__(self, names, off=(), tools_off=None, persist=None, cancel=None):
         self.names = list(dict.fromkeys(names))
         self.had = bool(self.names)                                  # something was switched on: aihub_mcp stays, even when every server is off
         self.off = set(off)
         self.tools_off = {k: set(v) for k, v in (tools_off or {}).items()}
         self.persist = persist
+        self.cancel = cancel
+        self.closed = False
         self.src = sources()
         self.servers, self.errors, self.map, self.specs, self.notes = {}, {}, {}, [], []
         ts = []
@@ -192,12 +342,24 @@ class Toolbox:
             why = self._blocked(n)
             if why:
                 self.errors[n] = why
+            elif self._stopped():
+                self.errors[n] = "stopped"
             else:
                 ts.append(threading.Thread(target=self._start, args=(n,), daemon=True))
-        [t.start() for t in ts]
-        [t.join(START_TIMEOUT + 5) for t in ts]
+                ts[-1].start()
+        deadline = time.time() + START_TIMEOUT + 5                    # one shared deadline, not one per server
+        for t in ts:
+            while t.is_alive() and time.time() < deadline and not self._stopped():
+                t.join(min(0.2, max(0.0, deadline - time.time())))
+        self.closed = self.closed or self._stopped() or any(t.is_alive() for t in ts)
+        for n in self.names:
+            if n not in self.servers and n not in self.errors:
+                self.errors[n] = "stopped" if self._stopped() else "did not start in time"
         self.rebuild()
         self.notes = ["MCP server %s: %s (ask me to retry it, or open the MCP page)" % (n, e) for n, e in self.errors.items()]
+
+    def _stopped(self):
+        return self.cancel is not None and self.cancel.is_set()
 
     def _blocked(self, n):
         if n in self.off:
@@ -206,18 +368,17 @@ class Toolbox:
             return "not installed or enabled any more"
         return ""
 
-    def _start(self, n):
-        old = self.servers.pop(n, None)
-        if old:
-            old.close()
-        s = Server(n, self.src[n])
+    def _start(self, n, force=False):
+        self.servers.pop(n, None)                                    # pooled: not stopped here, the pool reaps it when idle (or replaces it on force)
         try:
-            s.start()
-            self.servers[n] = s
-            self.errors.pop(n, None)
+            s = acquire(n, self.src[n], force=force)
         except Exception as e:
-            s.close()
             self.errors[n] = str(e)[:240]
+            return
+        if self.closed:                                              # the toolbox was closed while this was starting: do not hand the server to nobody
+            return
+        self.servers[n] = s
+        self.errors.pop(n, None)
 
     def rebuild(self):
         self.map, specs = {}, []
@@ -260,36 +421,38 @@ class Toolbox:
             if known and tool not in known:
                 return "%s has no tool %s (tools: %s)" % (srv, tool, ", ".join(known)), True
             (self.tools_off.setdefault(srv, set()).discard if act == "enable" else self.tools_off.setdefault(srv, set()).add)(tool)
-            self._save("tool", srv, tool, act == "enable")
+            warn = self._save("tool", srv, tool, act == "enable")
             self.rebuild()
-            return "%s tool %s of %s for this chat" % ("enabled" if act == "enable" else "disabled", tool, srv), False
+            return "%s tool %s of %s for this chat%s" % ("enabled" if act == "enable" else "disabled", tool, srv, warn), False
         if act == "disable":
             if srv in self.names:
                 self.names.remove(srv)
-            old = self.servers.pop(srv, None)
-            old and old.close()
+            self.servers.pop(srv, None)
             self.errors.pop(srv, None)
-            self._save("server", srv, "", False)
+            warn = self._save("server", srv, "", False)
             self.rebuild()
-            return "server %s is off for this chat" % srv, False
+            return "server %s is off for this chat%s" % (srv, warn), False
         why = self._blocked(srv)
         if why:
             return "cannot start %s: %s" % (srv, why), True
+        warn = ""
         if srv not in self.names:
             self.names.append(srv)
-            self._save("server", srv, "", True)
-        self._start(srv)
+            warn = self._save("server", srv, "", True)
+        self._start(srv, force=True)
         self.rebuild()
         if srv in self.servers:
-            return "%s is running with %d tool(s)" % (srv, len(self.servers[srv].tools)), False
+            return "%s is running with %d tool(s)%s" % (srv, len(self.servers[srv].tools), warn), False
         return "%s still fails: %s" % (srv, self.errors.get(srv, "unknown error")), True
 
     def _save(self, kind, srv, tool, on):
+        """-> "" or a warning to add to the tool result when the change could not be kept for later messages."""
         if self.persist:
             try:
                 self.persist(kind, srv, tool, on)
-            except Exception:
-                pass
+            except Exception as e:
+                return " (warning: this change applies now but could not be saved for the chat: %s)" % str(e)[:150]
+        return ""
 
     def call(self, api, args):
         """-> (text, is_error). Tool output is returned as data for the model; images and other content are named, not passed."""
@@ -299,7 +462,7 @@ class Toolbox:
         if not s:
             return "unknown tool " + api, True
         try:
-            r = s.request("tools/call", {"name": name, "arguments": args if isinstance(args, dict) else {}}, CALL_TIMEOUT)
+            r = s.request("tools/call", {"name": name, "arguments": args if isinstance(args, dict) else {}}, CALL_TIMEOUT, self.cancel)
         except RuntimeError as e:
             return "%s (if the server died, call aihub_mcp with action retry and server %s)" % (e, s.name), True
         parts = []
@@ -313,13 +476,14 @@ class Toolbox:
         return "\n".join(parts)[:20000], bool(r.get("isError"))
 
     def close(self):
-        for s in list(self.servers.values()):
-            s.close()
+        """Release the servers: they stay in the pool for the next message and are stopped when idle (IDLE_TTL)."""
+        self.closed = True
+        self.servers = {}
 
 
 def probe(name):
     """Start one server, list its tools, stop it. -> {"ok", "error", "tools": [{name, description}]} (the MCP page's Test button)."""
-    spec = sources().get(name)
+    spec = sources(fresh=True).get(name)
     if not spec:
         return {"ok": False, "error": "not installed or enabled", "tools": []}
     s = Server(name, spec)

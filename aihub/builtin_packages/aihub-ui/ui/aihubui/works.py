@@ -12,6 +12,7 @@
   or a PACKAGE NODE: `<package>/nodes/<id>.node.json` + a program, see docs/ui-nodes.md.
 * Secrets typed into a package node's `secret` fields are encrypted (secretbox) and handed to the program on stdin only.
 * Runs are recorded under ~/.aihub/ui/runs/<work>/<run>.json (last 40 kept)."""
+import collections
 import concurrent.futures as cf
 import datetime
 import hashlib
@@ -35,7 +36,7 @@ WORKERS = 4                              # nodes of one run that may run at the 
 OUT_KINDS = ("text", "path", "json", "url")
 NODE_ID = re.compile(r"^[a-z][a-z0-9_.-]{0,40}$")
 KINDS = ("trigger", "action")
-FIELD_TYPES = ("text", "textarea", "number", "checkbox", "select", "password", "model", "effort", "mode", "folder")
+FIELD_TYPES = ("text", "textarea", "number", "checkbox", "select", "password", "model", "effort", "mode", "folder", "code")
 FILTER = {"name": "filter", "label": "Only start when the text matches (regex)", "type": "text", "default": "", "help": "Checked first; empty = every event starts a run."}
 
 TEAMS_OUT_GUIDE = """Send a message to Teams (no app registration, no admin consent):
@@ -71,6 +72,27 @@ GIT_PULL_GUIDE = """Pulls a git repository first and passes on WHERE the files a
 3. The output is the full path (one per line when you list several sub paths). {{input}} in the next node is that path; Claude (it may read the folder) opens the parquet, csv, images ... itself with its own tools.
 4. Next: a Claude task that analyses the data and writes a dashboard, then Publish to Space."""
 
+PYFN_SAMPLE = """from pydantic import BaseModel
+
+
+class In(BaseModel):
+    text: str
+    times: int = 2
+
+
+class Out(BaseModel):
+    result: str
+    length: int
+
+
+def main(args: In) -> Out:
+    result = args.text * args.times
+    return Out(result=result, length=len(result))
+"""
+PYFN_GUIDE = ("Write one function (`main`, else `run`, else the last one) with ONE argument and a return, both typed as a pydantic BaseModel or a dict / TypedDict. "
+              "The argument is filled for you: {{data.x}} keys of the nodes before, the input text when it is a JSON object (a plain text input fills a field named `input` or `text`), then the Arguments field. "
+              "The return becomes this node's output (JSON); each key is {{data.key}} later. print() goes to the run log. "
+              "Runs on your machine with the UI's Python (pydantic must be installed for it: python -m pip install pydantic). Dict-only code needs nothing.")
 SPACE_GUIDE = """Publishes a file or folder to the hub as a Space (document, slides, report, PDF, sheet, dashboard, HTML page).
 - File or folder: the path to publish. Empty = the path the previous node ended with (a Claude task should end its answer with `OUTPUT: /full/path`). A folder must have index.html.
 - Space name: lower-case slug. The same name again publishes a new revision of that space; empty = named after the file.
@@ -126,6 +148,11 @@ BUILTIN = {
                               {"name": "title", "label": "Title (optional)", "type": "text", "default": ""},
                               {"name": "text", "label": "Message", "type": "textarea", "default": "{{input}}", "required": True},
                               {"name": "payload", "label": "Payload", "type": "select", "options": ["card", "text"], "default": "card", "help": "card = Adaptive Card (the Teams template). text = {\"text\": ...} for your own flow."}]},
+    "code.python": {"title": "Python function", "kind": "action", "group": "Code", "desc": "Runs a Python function you write. Type its argument and its return as a pydantic model or a dict: the input is parsed into the argument and the return becomes JSON for the next nodes.",
+                    "run": ["{python}", "{pkg}/nodes/python_fn.py"], "timeout": 300, "timeout_key": "timeout", "templated": ["args"], "guide": PYFN_GUIDE,
+                    "fields": [{"name": "code", "label": "Python code", "type": "code", "required": True, "default": PYFN_SAMPLE},
+                               {"name": "args", "label": "Arguments (optional JSON object)", "type": "text", "default": "", "help": "Overrides the parsed input, e.g. {\"n\": {{data.count}}}. {{input}} and {{data.x}} are filled in."},
+                               {"name": "timeout", "label": "Timeout (seconds)", "type": "number", "default": 60}]},
     "io.read_file": {"title": "Read file", "kind": "action", "group": "Data", "desc": "Reads a local text file (or lists a folder) and passes the text on. Key, secret and .env files are refused.",
                      "run": ["{python}", "{pkg}/nodes/read_file.py"], "timeout": 60, "templated": ["path"],
                      "fields": [{"name": "path", "label": "File or folder", "type": "text", "required": True, "default": "", "help": "~ works; a relative path starts in the run's working folder. {{data.x}} is filled in."},
@@ -220,6 +247,7 @@ BUILTIN_IO = {
     "flow.output": ("text", "the run's answer", "", ""),
     "flow.memory": ("text", "remembered context + the input", "", ""),
     "io.read_file": ("text", "the file's text", "", ""),
+    "code.python": ("json", "the function's return value as JSON; each key is {{data.key}}", "", ""),
     "io.request": ("json", "the answer text; {{data.status}}", "", ""),
     "git.read": ("text", "the file text or folder listing", "", ""),
     "git.pull": ("path", "the folder or file path, not its content", "", ""),
@@ -293,15 +321,33 @@ def _valid_spec(pkg, path, raw):
         return None
 
 
+CAT_TTL = 60
+_cat_lock = threading.Lock()
+
+
+def catalogue_reset():
+    """Forget the cached catalogue (the server calls this after an install / uninstall)."""
+    _cat.update(t=0.0, v={})
+
+
 def catalogue(force=False):
-    """-> {type: spec}. Builtin nodes plus every `nodes/*.node.json` of an installed, enabled package. Cached 10 s."""
-    if not force and time.time() - _cat["t"] < 10 and _cat["v"]:
+    """-> {type: spec}. Builtin nodes plus every `nodes/*.node.json` of an installed, enabled package. Cached 60 s, one rebuild at a time;
+    a catalogue built while the CLI failed is returned but not cached."""
+    if not force and time.time() - _cat["t"] < CAT_TTL and _cat["v"]:
         return _cat["v"]
+    with _cat_lock:
+        if not force and time.time() - _cat["t"] < CAT_TTL and _cat["v"]:
+            return _cat["v"]
+        return _build_catalogue()
+
+
+def _build_catalogue():
+    ok = True
     out = {k: dict(v, type=k, builtin=True, **({"dir": UI_DIR} if v.get("run") else {})) for k, v in BUILTIN.items()}
     try:
         pkgs = A.run(["list"]).get("data") or []
     except A.CliError:
-        pkgs = []
+        pkgs, ok = [], False
     for p in pkgs:
         d = os.path.join(p.get("path") or "", "nodes")
         if p.get("enabled", True) is False or not os.path.isdir(d):
@@ -343,12 +389,13 @@ def catalogue(force=False):
     for s in out.values():
         if s["kind"] == "trigger" and not any(f["name"] == "filter" for f in s["fields"]):
             s["fields"] = s["fields"] + [FILTER]
-    _cat.update(t=time.time(), v=out)
+    if ok:
+        _cat.update(t=time.time(), v=out)
     return out
 
 
 def public(spec):
-    return {k: v for k, v in spec.items() if k not in ("run", "dir", "venv")}
+    return dict({k: v for k, v in spec.items() if k not in ("run", "dir", "venv")}, runnable=runnable(spec))
 
 
 UI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -356,8 +403,14 @@ UI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ---------- cron / interval
 
-def _field(txt, lo, hi):
+NAMES = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+         "sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
+
+
+def _field(txt, lo, hi, names=False):
     out = set()
+    if names:
+        txt = re.sub(r"[A-Za-z]{3}", lambda m: str(NAMES[m.group(0).lower()]) if m.group(0).lower() in NAMES else m.group(0), txt)
     for part in txt.split(","):
         step = 1
         if "/" in part:
@@ -388,8 +441,9 @@ def parse_schedule(text):
     f = t.split()
     if len(f) != 5:
         raise ValueError("schedule: 5 cron fields (m h dom mon dow) or an interval like 5m")
-    sets = [_field(f[0], 0, 59), _field(f[1], 0, 23), _field(f[2], 1, 31), _field(f[3], 1, 12), _field(f[4].replace("7", "0") if f[4] == "7" else f[4], 0, 6)]
-    return "cron", sets + [f[2] != "*", f[4] != "*"]
+    mon = _field(f[3], 1, 12, True)
+    sets = [_field(f[0], 0, 59), _field(f[1], 0, 23), _field(f[2], 1, 31), mon, {d % 7 for d in _field(f[4], 0, 7, True)}]
+    return "cron", sets + [not f[2].startswith("*"), not f[4].startswith("*")]
 
 
 def cron_due(sets, dt):
@@ -406,13 +460,20 @@ def _skey(wid, nid, field):
     return "node:%s:%s:%s" % (wid, nid, field)
 
 
+SECRETISH = re.compile(r"secret|token|password|passwd|key|auth|webhook", re.I)
+
+
 def strip_secrets(work, box):
     """Move typed secret values of package nodes into the encrypted box; the work file keeps a marker. Returns the cleaned work."""
     cat = catalogue()
     for n in work["nodes"]:
         spec = cat.get(n.get("type"))
         cfg = n.setdefault("config", {})
-        if not spec:
+        if not spec:                                                   # catalogue unavailable / package removed: never keep a secret-looking value in plain text
+            for k, v in list(cfg.items()):
+                if SECRETISH.search(k) and isinstance(v, str) and v and v != MARK:
+                    box.put(_skey(work["id"], n["id"], k), v)
+                    cfg[k] = MARK
             continue
         for f in spec["fields"]:
             if f.get("secret"):
@@ -503,16 +564,37 @@ def keep_of(wid):
         return KEEP_RUNS
 
 
-def _save_run(run):
+def _save_run(run, trim=True):
     d = runs_dir(run["work"])
     os.makedirs(d, exist_ok=True)
     write_private(os.path.join(d, run["id"] + ".json"), json.dumps(run, ensure_ascii=False).encode("utf-8"))
+    if trim:
+        _trim_runs(d, keep_of(run["work"]))
+
+
+def _trim_runs(d, keep):
+    """Drop the oldest run files beyond KEEP, and the chats those runs created (work chats only)."""
     files = sorted(f for f in os.listdir(d) if f.endswith(".json"))
-    for f in files[:-keep_of(run["work"])]:
+    for f in files[:-keep] if keep else []:
+        chats = []
+        try:
+            with open(os.path.join(d, f), encoding="utf-8") as fh:
+                r = json.load(fh)
+            if r.get("status") in ("queued", "running"):
+                continue
+            chats = r.get("chats") or ([r["chat"]] if r.get("chat") else [])
+        except (OSError, ValueError, AttributeError):
+            pass
         try:
             os.remove(os.path.join(d, f))
         except OSError:
-            pass
+            continue
+        for sid in chats:
+            try:
+                if isinstance(sid, str) and (store.get_session(sid) or {}).get("work"):
+                    store.delete_session(sid)
+            except Exception:
+                pass
 
 
 def list_runs(wid):
@@ -568,7 +650,13 @@ def memory_text(cfg, work_id, run_id=""):
         wid = work_id if src == "work" else str(cfg.get("work") or "")
         if not store.ID.match(wid):
             return ""
-        runs = [r for r in (get_run(wid, x["id"]) for x in list_runs(wid)) if r and r["id"] != run_id and r.get("status") in ("done", "failed")][:n]
+        runs, d = [], runs_dir(wid)
+        for f in sorted(os.listdir(d), reverse=True):
+            if len(runs) >= n:
+                break
+            r = get_run(wid, f[:-5]) if f.endswith(".json") else None
+            if r and r["id"] != run_id and r.get("status") in ("done", "failed"):
+                runs.append(r)
         for r in reversed(runs):
             outs = [v for v in r.get("nodes", {}).values() if v.get("status") == "ok" and v.get("output")]
             last = max(outs, key=lambda v: v.get("ended") or 0)["output"] if outs else ""
@@ -617,14 +705,24 @@ def pointer_dirs(cdata, inputs):
     return out
 
 
+def _first_files(root, n):
+    out = []
+    for r, ds, fs in os.walk(root):
+        ds[:] = sorted(x for x in ds if x not in (".git", "node_modules"))
+        out.extend(os.path.join(r, f) for f in sorted(fs))
+        if len(out) >= n:
+            break
+    return out[:n]
+
+
 def pointer_text(cdata, inputs, limit=30000):
     """Opt-in for Free chat: the text of small files behind the pointers (a folder: its first files), capped."""
     out, left = [], limit
     for p in _pointers(cdata, inputs):
-        files = [p] if os.path.isfile(p) else sorted(os.path.join(r, f) for r, ds, fs in os.walk(p) if ".git" not in r.split(os.sep) for f in fs)[:20]
+        files = [p] if os.path.isfile(p) else _first_files(p, 20)
         for f in files:
             try:
-                if os.path.getsize(f) > left:
+                if sources._blocked(f) or os.path.getsize(f) > left:
                     continue
                 with open(f, encoding="utf-8") as fh:
                     t = fh.read(left)
@@ -635,16 +733,44 @@ def pointer_text(cdata, inputs, limit=30000):
     return "".join(out)
 
 
+def _kill_tree(p):
+    """Kill a child and everything it started (its own process group; Windows: taskkill /T)."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True, timeout=10)
+        else:
+            os.killpg(p.pid, 9)
+    except (OSError, subprocess.SubprocessError):
+        try:
+            p.kill()
+        except OSError:
+            pass
+
+
 def run_package_node(spec, cfg, inputs, ctx, wd):
     argv = _argv(spec)
+    limit = spec["timeout"]
+    if spec.get("timeout_key"):                                     # a node that lets the person set its own limit
+        try:
+            limit = min(max(int(cfg.get(spec["timeout_key"]) or limit), 1), 3600)
+        except (TypeError, ValueError):
+            pass
     payload = json.dumps({"config": cfg, "input": "\n\n".join(text_of(i) for i in inputs), "inputs": inputs, "run": ctx, "workdir": wd}, ensure_ascii=False)
     try:
-        p = subprocess.run(argv, input=payload, capture_output=True, text=True, timeout=spec["timeout"], cwd=spec["dir"],
-                           env=dict(os.environ, AIHUB_NODE=spec["type"], AIHUB_NODE_WORKDIR=wd))
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("timed out after %ds" % spec["timeout"])
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=spec["dir"], start_new_session=True,
+                                env=dict(os.environ, AIHUB_NODE=spec["type"], AIHUB_NODE_WORKDIR=wd))
     except OSError as e:
         raise RuntimeError("cannot start: %s" % e)
+    try:
+        so, se = proc.communicate(payload, timeout=limit)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            proc.communicate(timeout=5)
+        except Exception:
+            pass
+        raise RuntimeError("timed out after %ds" % limit)
+    p = subprocess.CompletedProcess(argv, proc.returncode, so or "", se or "")
     last = next((ln for ln in reversed(p.stdout.strip().splitlines()) if ln.strip().startswith("{")), "")
     try:
         res = json.loads(last) if last else {}
@@ -657,6 +783,74 @@ def run_package_node(spec, cfg, inputs, ctx, wd):
     if "data" in res:
         ev["data"] = res["data"]
     return ev, (res.get("log") or "")
+
+
+# ---------- a node run on its own, from a chat (`@node:<type>` + a ```node block)
+
+def runnable(spec):
+    """A node a chat can run alone: an action with a program (not Claude / flow nodes, which need a work around them)."""
+    return bool(spec) and spec.get("kind") == "action" and bool(spec.get("run")) and not spec.get("hidden")
+
+
+def node_brief(spec):
+    """Prompt text for a mentioned node: what it does, its fields, and the protocol (ask for what is missing, else a ```node block)."""
+    lines = []
+    for f in spec["fields"]:
+        extra = [f["type"]] + (["required"] if f.get("required") else []) + (["options: " + ", ".join(f["options"])] if f.get("options") else []) + (["default: %s" % f["default"]] if f.get("default") not in ("", None) else [])
+        if f.get("secret"):
+            lines.append("- %s (%s): SECRET. Never ask for it and never write it; the card shows a password box to the user." % (f["name"], f["label"]))
+        else:
+            lines.append("- %s (%s; %s)%s" % (f["name"], f["label"], ", ".join(extra), (": " + f["help"]) if f.get("help") else ""))
+    need = [f for f in spec["fields"] if f.get("required") and not f.get("secret")]
+    return ("[The user wants the node \"%s\" (@node:%s) run from this chat. %s%s\nFields:\n%s\n"
+            "How to run it: work out each field from the user's message and this conversation. If a required field (%s) is still unknown, ask for ONLY the missing ones with a ```form block "
+            "(fields named exactly like the node's, same types/options) and stop; do not guess values. Once every required field is known, answer with ONE ```node block and nothing that depends on its result: "
+            "{\"type\":\"%s\",\"config\":{\"field\":\"value\"},\"input\":\"optional text for {{input}}\"} (config holds non-secret fields only, values as the field types expect). "
+            "The page shows a card where the user checks the values and presses Run; the result comes back as the next message. Do not run the program yourself.]"
+            % (spec["title"], spec["type"], spec.get("desc") or "", ("\nGuide: " + spec["guide"]) if spec.get("guide") else "", "\n".join(lines) or "(no fields)",
+               ", ".join(f["name"] for f in need) or "none", spec["type"]))
+
+
+def clean_node_config(spec, cfg):
+    """Keep only the node's own fields, coerce types, enforce required. Raises ValueError with what is missing or wrong."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    out, missing = {}, []
+    for f in spec["fields"]:
+        v = cfg.get(f["name"], f.get("default", ""))
+        t = f["type"]
+        if t == "checkbox":
+            v = bool(v)
+        elif t == "number":
+            if str(v).strip() == "":
+                v = ""
+            else:
+                try:
+                    n = float(v)
+                except (TypeError, ValueError):
+                    raise ValueError("%s must be a number" % f["label"])
+                v = int(n) if n == int(n) else n
+        else:
+            v = str(v if v is not None else "")[:50000]
+            if t == "select" and f.get("options") and v and v not in f["options"]:
+                raise ValueError("%s: pick one of %s" % (f["label"], ", ".join(f["options"])))
+        if f.get("required") and t != "checkbox" and str(v).strip() == "":
+            missing.append(f["label"])
+        out[f["name"]] = v
+    if missing:
+        raise ValueError("missing: " + ", ".join(missing))
+    return out
+
+
+def run_single(spec, cfg, text, wd):
+    """Run one node alone. -> {"text", "data", "log"}. Templated fields see {{input}}; secrets come in `cfg` for this run only."""
+    cfg = clean_node_config(spec, cfg)
+    ev = {"text": text}
+    ctx = {"input": text, "data": {}, "in": {}}
+    tpl = spec.get("templated") or ()
+    if tpl:
+        cfg = {k: (render(v, ctx) if k in tpl and isinstance(v, str) else v) for k, v in cfg.items()}
+    out, log = run_package_node(spec, cfg, [ev] if text else [], {"id": "chat", "work": "", "node": spec["type"]}, wd)
+    return {"text": text_of(out)[:20000], "data": out.get("data") if isinstance(out, dict) else None, "log": (log or "")[-1500:]}
 
 
 LOOP, ENDLOOP = "flow.loop", "flow.endloop"
@@ -731,8 +925,30 @@ class Engine:
         self.fired = {}
         self.procs = {}                       # (work, node) -> {"p": Popen, "sig": str}
         self.lock = threading.Lock()
+        self.sync_lock = threading.RLock()     # sync() runs from the scheduler and from HTTP handlers
+        self.wake = threading.Event()
         self.stop = threading.Event()
+        self._interrupted()
         threading.Thread(target=self._loop, daemon=True, name="works-scheduler").start()
+
+    def _interrupted(self):
+        """Runs left queued / running by a previous process will never finish: say so."""
+        try:
+            base = store.ui_dir("runs")
+            for wid in os.listdir(base):
+                d = os.path.join(base, wid)
+                for f in os.listdir(d) if os.path.isdir(d) else ():
+                    fp = os.path.join(d, f)
+                    try:
+                        with open(fp, encoding="utf-8") as fh:
+                            r = json.load(fh)
+                        if r.get("status") in ("queued", "running"):
+                            r.update(status="interrupted", ended=time.time(), error=r.get("error") or "the UI stopped while this run was waiting or running")
+                            write_private(fp, json.dumps(r, ensure_ascii=False).encode("utf-8"))
+                    except (OSError, ValueError, AttributeError):
+                        pass
+        except OSError:
+            pass
 
     # -- starting runs
     def fire(self, work, node, event, via):
@@ -741,7 +957,7 @@ class Engine:
             return None
         run = {"id": time.strftime("%Y%m%d%H%M%S-") + uuid.uuid4().hex[:6], "work": work["id"], "status": "queued", "started": time.time(), "ended": None,
                "via": via, "trigger": node["id"], "text": text_of(event)[:300], "nodes": {}, "chat": None, "result": None}
-        _save_run(run)
+        _save_run(run, trim=False)
         with self.lock:
             q = self.queues.get(work["id"])
             if not q:
@@ -757,9 +973,12 @@ class Engine:
     def _worker(self, wid, q):
         while not self.stop.is_set():
             try:
-                run, event = q.get(timeout=5)
+                item = q.get(timeout=5)
             except queue.Empty:
                 continue
+            if item is None:                                                 # its work was deleted
+                return
+            run, event = item
             with self.lock:
                 self.running += 1
             try:
@@ -779,7 +998,7 @@ class Engine:
         order, ins = topo(work)
         nodes = {n["id"]: n for n in work["nodes"]}
         run["status"] = "running"
-        _save_run(run)
+        _save_run(run, trim=False)
         outs = {run["trigger"]: event}
         ctx_base = {"trigger": text_of(event), "data": event.get("data", {}) if isinstance(event, dict) else {}}
         sess, sess_free, failed = None, None, False
@@ -792,9 +1011,30 @@ class Engine:
         ctx_of = {}                                                         # node id -> the template context of its current step
         collected = {}                                                      # End loop id -> {"texts", "results", "failed"} of its loop
 
-        def save():
+        gate = {"t": 0.0, "dirty": False, "timer": None}
+
+        def save(final=False):
+            """Write the run file at most once a second while it runs (a timer catches the last change); the final save also trims old runs."""
             with lock:
-                _save_run(run)
+                now = time.time()
+                if final or now - gate["t"] >= 1:
+                    if gate["timer"]:
+                        gate["timer"].cancel()
+                        gate["timer"] = None
+                    gate.update(t=now, dirty=False)
+                    _save_run(run, trim=final)
+                    return
+                gate["dirty"] = True
+                if not gate["timer"]:
+                    def late():
+                        with lock:
+                            gate["timer"] = None
+                            if gate["dirty"]:
+                                gate.update(t=time.time(), dirty=False)
+                                _save_run(run, trim=False)
+                    gate["timer"] = threading.Timer(max(0.05, 1 - (now - gate["t"])), late)
+                    gate["timer"].daemon = True
+                    gate["timer"].start()
 
         def upd(rec, **kw):
             with lock:
@@ -802,7 +1042,6 @@ class Engine:
 
         def do_loop(lid, cfg, cdata, rec, outs):
             """Run the loop's body once per item, one pass after the other. -> the loop node's own output (a summary)."""
-            nonlocal failed
             body = [b for b in order if b in bodies.get(lid, ())]
             if any(nodes[b].get("type") == LOOP for b in body):
                 raise RuntimeError("a loop inside a loop is not supported: end the first one with End loop")
@@ -832,16 +1071,15 @@ class Engine:
                 if cfg.get("fresh_chat", True):
                     fresh()
                 with lock:
-                    before = failed
-                    failed = False
+                    old = {b: run["nodes"].get(b) for b in body}
                 last = None
                 for b in body:
-                    step(b, it_outs)
+                    step(b, it_outs, True)
                     if it_outs.get(b) is not None:
                         last = b
                 with lock:
-                    this_bad, failed = failed, before
-                    recs = [run["nodes"].get(b) or {} for b in body]
+                    recs = [r for b in body if (r := run["nodes"].get(b)) is not None and r is not old[b]]      # records written by THIS pass
+                    this_bad = any(r.get("status") == "error" for r in recs)
                     err = next((r.get("error") for r in recs if r.get("status") == "error"), "")
                 res = text_of(it_outs[last]) if last else ""
                 short = text.replace("\n", " ")[:60]
@@ -854,8 +1092,6 @@ class Engine:
                 upd(rec, note="%d/%d done%s" % (k, len(items), ", %d failed" % bad if bad else ""), log="\n".join(lines)[-1500:])
                 save()
                 if this_bad and cfg.get("on_error") != "continue":
-                    with lock:
-                        failed = True
                     raise RuntimeError("item %d (%s) failed: %s" % (k, short, str(err)[:200]))
                 if gap and k < len(items) and self.stop.wait(gap):
                     break
@@ -864,7 +1100,7 @@ class Engine:
             upd(rec, note="%d item(s), %d failed" % (len(items), bad) if items else "the list is empty: nothing to repeat")
             return {"text": "%d item(s) repeated, %d failed" % (len(items), bad), "data": dict(cdata, count=len(items), failed=bad)}
 
-        def step(nid, outs=outs):
+        def step(nid, outs=outs, inloop=False):
             nonlocal sess, sess_free, failed
             n = nodes[nid]
             spec = cat.get(n.get("type"))
@@ -881,7 +1117,7 @@ class Engine:
             if not spec:
                 with lock:
                     run["nodes"][nid] = {"status": "error", "error": "unknown node type %s (package removed?)" % n.get("type")}
-                    failed = True
+                    failed = failed or not inloop
                 return
             if spec["kind"] == "trigger":
                 return
@@ -947,6 +1183,7 @@ class Engine:
                             mine.append("claude")
                         if sess is None or cfg.get("fresh") or not solo:
                             s = store.update_session(store.create_session("Work: %s" % work["title"], "", chat.build_system(chat.freechat.WORK_RULES), cwd=folder)["id"], work=True)
+                            run.setdefault("chats", []).append(s["id"])
                             sess = s if sess is None and not folder else sess
                             cur = s
                         else:
@@ -986,6 +1223,7 @@ class Engine:
                         if sess_free is None or cfg.get("fresh") or not solo:
                             made = store.update_session(store.create_session("Work: %s" % work["title"], "", chat.build_system())["id"], engine="free", work=True,
                                                         mcp=[x.strip() for x in str(cfg.get("mcp") or "").split(",") if x.strip()][:20])
+                            run.setdefault("chats", []).append(made["id"])
                             sess_free = made if sess_free is None else sess_free
                         else:
                             made = sess_free
@@ -1015,7 +1253,7 @@ class Engine:
                         v = cdata.get(k)
                         if not str(cfg.get(k) or "").strip() and v not in (None, "", [], {}):
                             cfg[k] = "\n".join(str(x) for x in v) if isinstance(v, list) else v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
-                    out, log = run_package_node(spec, cfg, inputs, {"id": run["id"], "work": work["id"], "node": nid}, store.work_dir(run["chat"]) if run["chat"] else os.path.expanduser("~"))
+                    out, log = run_package_node(spec, cfg, inputs, {"id": run["id"], "work": work["id"], "node": nid}, store.session_dir(run["chat"]) if run["chat"] else os.path.expanduser("~"))
                     if log:
                         upd(rec, log=log[-1500:])
                     if isinstance(out, dict) and out.get("skip"):
@@ -1026,7 +1264,7 @@ class Engine:
             except Exception as e:
                 with lock:
                     rec.update(status="error", ended=time.time(), error=str(e)[:600])
-                    failed = True
+                    failed = failed or not inloop
             with lock:
                 for k in mine:
                     busy[k] = False
@@ -1067,22 +1305,43 @@ class Engine:
                          detail={"title": work.get("title", ""), "status": run["status"], "trigger": str((nodes.get(run["trigger"]) or {}).get("type") or "")})
         except Exception:
             pass
-        _save_run(run)
+        save(True)
 
     # -- scheduler + trigger processes
     def _loop(self):
-        while not self.stop.wait(15):
+        while not self.stop.is_set():
+            self.wake.wait(15)
+            self.wake.clear()
+            if self.stop.is_set():
+                return
             try:
                 self.sync()
             except Exception:
                 pass
 
+    def kick(self):
+        """Ask the scheduler thread to run sync() now (instead of calling it from a request handler)."""
+        self.wake.set()
+
     def sync(self):
-        """Fire due cron triggers; start / stop package trigger processes to match the enabled works."""
+        """Fire due cron triggers; start / stop package trigger processes to match the enabled works. Safe to call from any thread."""
+        with self.sync_lock:
+            self._sync()
+
+    def _sync(self):
         now = datetime.datetime.now()
-        wanted = {}
-        cat = catalogue()
-        for meta in store.works():
+        wanted, cat = {}, None
+        metas = store.works()
+        ids = {m["id"] for m in metas}
+        with self.lock:                                                     # a deleted work: its queue thread ends, its timers are forgotten
+            for wid in [w for w in self.queues if w not in ids]:
+                try:
+                    self.queues.pop(wid).put_nowait(None)
+                except queue.Full:
+                    pass
+        for k in [k for k in self.fired if k[0] not in ids]:
+            self.fired.pop(k, None)
+        for meta in metas:
             w = store.get_work(meta["id"])
             if not w or not w.get("enabled"):
                 continue
@@ -1090,8 +1349,10 @@ class Engine:
                 t = n.get("type")
                 if t == "start.cron":
                     self._cron(w, n, now)
-                elif t in cat and cat[t].get("run") and cat[t]["kind"] == "trigger":
-                    wanted[(w["id"], n["id"])] = (w, n, cat[t])
+                elif isinstance(t, str) and t.startswith("pkg:"):          # only a package trigger needs the catalogue (it runs the CLI)
+                    cat = cat if cat is not None else catalogue()
+                    if t in cat and cat[t].get("run") and cat[t]["kind"] == "trigger":
+                        wanted[(w["id"], n["id"])] = (w, n, cat[t])
         for key in list(self.procs):
             if key not in wanted:
                 self._kill(key)
@@ -1103,7 +1364,17 @@ class Engine:
                 self._kill(key)
                 cur = None
             if not cur or (cur["p"].poll() is not None and time.time() >= cur["retry"]):
-                self._spawn(key, w, n, spec, cfg, sig, cur["fails"] + 1 if cur else 0)
+                fails = 0 if not cur else 0 if time.time() - cur["t0"] > 300 else cur["fails"] + 1       # lived 5 min: not a crash loop
+                self._spawn(key, w, n, spec, cfg, sig, fails)
+
+    def status(self, wid):
+        """{node id: {running, exit, fails, stderr}} of a work's trigger processes (the last 20 stderr lines), for the page."""
+        out = {}
+        for (w, nid), cur in list(self.procs.items()):
+            if w == wid:
+                rc = cur["p"].poll()
+                out[nid] = {"running": rc is None, "exit": rc, "fails": cur["fails"], "stderr": list(cur["err"])}
+        return out
 
     def _cron(self, w, n, now):
         cfg = n.get("config") or {}
@@ -1125,16 +1396,28 @@ class Engine:
 
     def _spawn(self, key, w, n, spec, cfg, sig, fails):
         argv = _argv(spec)
+        err = collections.deque(maxlen=20)
+        retry = time.time() + min(900, 30 * 2 ** fails)
         try:
-            p = subprocess.Popen(argv, cwd=spec["dir"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
+            p = subprocess.Popen(argv, cwd=spec["dir"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
                                  env=dict(os.environ, AIHUB_NODE=spec["type"]), start_new_session=True)
             p.stdin.write(json.dumps({"config": cfg, "run": {"work": w["id"], "node": n["id"]}}) + "\n")
             p.stdin.flush()
-        except OSError:
-            self.procs[key] = {"p": type("Dead", (), {"poll": lambda s: 1})(), "sig": sig, "fails": fails, "retry": time.time() + min(900, 30 * 2 ** fails)}
+        except OSError as e:
+            err.append("cannot start: %s" % e)
+            self.procs[key] = {"p": type("Dead", (), {"poll": lambda s: 1})(), "sig": sig, "fails": fails, "retry": retry, "t0": time.time(), "err": err}
             return
-        self.procs[key] = {"p": p, "sig": sig, "fails": fails, "retry": time.time() + min(900, 30 * 2 ** fails)}
+        self.procs[key] = {"p": p, "sig": sig, "fails": fails, "retry": retry, "t0": time.time(), "err": err}
+        threading.Thread(target=self._drain, args=(p, err), daemon=True).start()
         threading.Thread(target=self._read, args=(w["id"], n["id"], p), daemon=True).start()
+
+    @staticmethod
+    def _drain(p, err):
+        try:
+            for ln in p.stderr:
+                err.append(ln.rstrip()[:300])
+        except (OSError, ValueError):
+            pass
 
     def _read(self, wid, nid, p):
         """Each stdout line {"event": {"text": ..., "data": ...}} starts a run (after the trigger's filter)."""
@@ -1151,10 +1434,14 @@ class Engine:
     def _kill(self, key):
         cur = self.procs.pop(key, None)
         if cur and cur["p"].poll() is None:
-            try:
-                os.killpg(cur["p"].pid, 15)
-            except (OSError, AttributeError):
-                cur["p"].terminate()
+            _kill_tree(cur["p"]) if os.name == "nt" else self._term(cur["p"])
+
+    @staticmethod
+    def _term(p):
+        try:
+            os.killpg(p.pid, 15)
+        except (OSError, AttributeError):
+            p.terminate()
 
     def shutdown(self):
         self.stop.set()

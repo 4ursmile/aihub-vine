@@ -1,10 +1,11 @@
-// Export of a presented deck / document: PowerPoint (PptxGenJS), Word (docx), Markdown, PDF (browser print). Libraries come from jsDelivr on demand.
+// Export of a presented deck / document: PowerPoint (PptxGenJS), Word (docx), Markdown, PDF (browser print). Libraries load on demand from static/vendor/lazy (vendored, no CDN).
 const libs = {};
-const lib = (url, ok) => libs[url] || (libs[url] = new Promise((res, rej) => {
+const LAZY = new URL("./vendor/lazy/", import.meta.url).href;
+const lib = (file, ok) => libs[file] || (libs[file] = new Promise((res, rej) => {
   if (ok()) return res();
-  const s = document.createElement("script"); s.src = url; s.onload = res; s.onerror = () => { delete libs[url]; rej(new Error("Could not load " + url.split("/")[4])); }; document.head.appendChild(s);
+  const s = document.createElement("script"); s.src = LAZY + file; s.onload = res; s.onerror = () => { s.remove(); delete libs[file]; rej(new Error("Could not load " + file)); }; document.head.appendChild(s);
 }));
-export const loadJSZip = () => lib("https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js", () => window.JSZip).then(() => window.JSZip);
+export const loadJSZip = () => lib("jszip.min.js", () => window.JSZip).then(() => window.JSZip);
 
 export const safeName = (t) => (String(t || "export").replace(/[^\w.\- ]+/g, "").trim().replace(/\s+/g, "-").slice(0, 60) || "export");
 function save(blob, name) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000); }
@@ -18,7 +19,7 @@ const svgUrl = (svg) => "data:image/svg+xml;base64," + btoa(unescape(encodeURICo
 
 // ---------- PowerPoint
 export async function toPptx(d, name) {
-  await lib("https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js", () => window.PptxGenJS);
+  await lib("pptxgen.bundle.js", () => window.PptxGenJS);
   const p = new window.PptxGenJS(); p.layout = "LAYOUT_WIDE"; p.title = d.title || name;
   const k = 13.333 / 1280, inch = (v) => Math.max(0, Math.round(v * k * 1000) / 1000);
   const runsOf = (b, fg) => (b.runs && b.runs.length ? b.runs : [{ text: b.text }]).map((r) => ({ text: r.text, options: { bold: r.bold || b.look?.bold, italic: r.italic || b.look?.italic, color: b.look?.color || fg, underline: r.underline ? { style: "sng" } : undefined,
@@ -43,7 +44,7 @@ export async function toPptx(d, name) {
 
 // ---------- Word
 export async function toDocx(d, name) {
-  await lib("https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js", () => window.docx);
+  await lib("docx.umd.js", () => window.docx);
   const X = window.docx, H = [null, X.HeadingLevel.HEADING_1, X.HeadingLevel.HEADING_2, X.HeadingLevel.HEADING_3, X.HeadingLevel.HEADING_4, X.HeadingLevel.HEADING_5, X.HeadingLevel.HEADING_6];
   const tr = (r) => { const o = { text: r.text, bold: r.bold || undefined, italics: r.italic || undefined, font: r.code ? "Consolas" : undefined };
     return r.href ? new X.ExternalHyperlink({ link: r.href, children: [new X.TextRun({ ...o, style: "Hyperlink" })] }) : new X.TextRun(o); };

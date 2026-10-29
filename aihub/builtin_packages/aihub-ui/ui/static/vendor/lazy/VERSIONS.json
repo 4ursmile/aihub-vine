@@ -1,0 +1,141 @@
+{
+ "files": {
+  "addon-fit.mjs": {
+   "from": {
+    "@xterm/addon-fit": "0.10.0"
+   },
+   "sha256": "c7483d28522ddc177bebc0b990c7d2d36b401ec528be2976e9277a213df91a2a",
+   "size": 2021
+  },
+  "docx.umd.js": {
+   "from": {
+    "docx": "8.5.0"
+   },
+   "sha256": "02d568d203c0180af37609bcf5ff6c0919d220f933a88ca896eba0556a08faad",
+   "size": 742858
+  },
+  "echarts.min.js": {
+   "from": {
+    "echarts": "5.5.1"
+   },
+   "sha256": "e84270bd0cd5bdf60fefc26d00c2a391cb2e81f4d26a7a9ee16185a54773a3cf",
+   "size": 1030855
+  },
+  "jszip.min.js": {
+   "from": {
+    "jszip": "3.10.1"
+   },
+   "sha256": "acc7e41455a80765b5fd9c7ee1b8078a6d160bbbca455aeae854de65c947d59e",
+   "size": 97630
+  },
+  "leaflet/images/layers-2x.png": {
+   "from": {
+    "leaflet": "1.9.4"
+   },
+   "sha256": "066daca850d8ffbef007af00b06eac0015728dee279c51f3cb6c716df7c42edf",
+   "size": 1259
+  },
+  "leaflet/images/layers.png": {
+   "from": {
+    "leaflet": "1.9.4"
+   },
+   "sha256": "1dbbe9d028e292f36fcba8f8b3a28d5e8932754fc2215b9ac69e4cdecf5107c6",
+   "size": 696
+  },
+  "leaflet/images/marker-icon-2x.png": {
+   "from": {
+    "leaflet": "1.9.4"
+   },
+   "sha256": "00179c4c1ee830d3a108412ae0d294f55776cfeb085c60129a39aa6fc4ae2528",
+   "size": 2464
+  },
+  "leaflet/images/marker-icon.png": {
+   "from": {
+    "leaflet": "1.9.4"
+   },
+   "sha256": "574c3a5cca85f4114085b6841596d62f00d7c892c7b03f28cbfa301deb1dc437",
+   "size": 1466
+  },
+  "leaflet/images/marker-shadow.png": {
+   "from": {
+    "leaflet": "1.9.4"
+   },
+   "sha256": "264f5c640339f042dd729062cfc04c17f8ea0f29882b538e3848ed8f10edb4da",
+   "size": 618
+  },
+  "leaflet/leaflet.css": {
+   "from": {
+    "leaflet": "1.9.4"
+   },
+   "sha256": "a7837102824184820dfa198d1ebcd109ff6d0ff9a2672a074b9a1b4d147d04c6",
+   "size": 14806
+  },
+  "leaflet/leaflet.js": {
+   "from": {
+    "leaflet": "1.9.4"
+   },
+   "sha256": "db49d009c841f5ca34a888c96511ae936fd9f5533e90d8b2c4d57596f4e5641a",
+   "size": 147552
+  },
+  "mermaid.mjs": {
+   "from": {
+    "mermaid": "11.4.1"
+   },
+   "sha256": "66269540edcafeb333af48ff56b96c0f8b56990e68debf5a52eafeb85a6775c2",
+   "size": 2613212
+  },
+  "openui.mjs": {
+   "from": {
+    "@openuidev/react-lang": "1.0.2",
+    "@openuidev/react-ui": "0.18.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+   },
+   "sha256": "c13ddb47afa5f7b61373d4a6500886e9a7821646b8f0510ac73fc581e76735c4",
+   "size": 3283445
+  },
+  "openui/components.css": {
+   "from": {
+    "@openuidev/react-ui": "0.18.1"
+   },
+   "sha256": "47bf5e5068650930020145fb26ae905ed12146541113cb9d4335e1e4e44c948a",
+   "size": 363218
+  },
+  "openui/openui-defaults.css": {
+   "from": {
+    "@openuidev/react-ui": "0.18.1"
+   },
+   "sha256": "d9db636411482aee8e96ae6b11b2116e5a34f5b42c25036bcb878fb358d65c30",
+   "size": 33353
+  },
+  "pptxgen.bundle.js": {
+   "from": {
+    "pptxgenjs": "3.12.0"
+   },
+   "sha256": "cd078ca9e91c6f9e061ee0a3c310d6ff157c3a71b1dea7f40fd53818017266ff",
+   "size": 477529
+  },
+  "viz.mjs": {
+   "from": {
+    "@viz-js/viz": "3.11.0"
+   },
+   "sha256": "8f20008f70980e52ca61dbafc4480b51ed8528364bf6171db2317a97a064855b",
+   "size": 1389879
+  },
+  "xterm.css": {
+   "from": {
+    "@xterm/xterm": "5.5.0"
+   },
+   "sha256": "ba8e6985669488981ccf40c0cefe3aba80722cb6c92de7ad628b0bd717faf2b6",
+   "size": 5559
+  },
+  "xterm.mjs": {
+   "from": {
+    "@xterm/xterm": "5.5.0"
+   },
+   "sha256": "685dd68cfd6e94f9d445d05603bddab203132c5511325b0da1aa330ae6222fe6",
+   "size": 288259
+  }
+ },
+ "tool": "ui/tools/vendor_libs.py"
+}

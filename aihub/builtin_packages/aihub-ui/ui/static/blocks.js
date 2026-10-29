@@ -2,12 +2,14 @@
 import { html, render, useState, useEffect, useRef } from "./vendor/preact-htm.js";
 import { marked } from "./vendor/marked.js";
 import DOMPurify from "./vendor/purify.js";
-import hljs from "./vendor/highlight.js";
 import { Ic } from "./icons.js";
-import { toast } from "./ui.js";
+import { toast, escPush } from "./ui.js";
 import { Diagram, DIAGRAMS } from "./diagram.js";
 
 marked.setOptions({ gfm: true, breaks: false });
+// highlight.js (~100 KB) loads on the first code block; blocks drawn before it arrives are highlighted when it does
+let hlLib = null, hlLoad = null;
+const withHl = (fn) => { if (hlLib) return fn(hlLib); (hlLoad ||= import("./vendor/highlight.js").then((m) => (hlLib = m.default)).catch(() => null)).then((h) => h && fn(h)); };
 const SHELL = new Set(["sh", "bash", "zsh", "shell", "console", "terminal", "fish", "powershell", "ps1", "cmd"]);
 const PALETTE = ["#d97757", "#6a9bcc", "#788c5d", "#c4a05a", "#9b87b8", "#5f8f8a", "#b0645a"];
 
@@ -32,9 +34,9 @@ const nudge = () => requestAnimationFrame(() => window.dispatchEvent(new Event("
 function zoom(box) {
   if (box.closest(".bk-zoom")) { box.closest(".bk-zoom")._close(); return; }
   const ph = document.createComment("zoomed"), ov = el("div", "bk-zoom"); box.replaceWith(ph); ov.append(box); document.body.append(ov);
-  const key = (e) => { if (e.key === "Escape") close(); };
-  const close = () => { document.removeEventListener("keydown", key); if (ph.parentNode) ph.replaceWith(box); else box.remove(); ov.remove(); nudge(); };
-  ov._close = close; ov.onclick = (e) => { if (e.target === ov) close(); }; document.addEventListener("keydown", key); nudge();
+  const off = escPush(() => close());
+  const close = () => { off(); if (ph.parentNode) ph.replaceWith(box); else box.remove(); ov.remove(); nudge(); };
+  ov._close = close; ov.onclick = (e) => { if (e.target === ov) close(); }; nudge();
 }
 const PAGE_CSS = ":root{--surface:#fff;--line:#e4e2dc;--mute:#6b6a65}body{margin:0;padding:24px;font:14px system-ui,sans-serif;background:#fff;color:#1f1e1c}svg,img{max-width:100%;height:auto}.ct{font:11px system-ui;fill:#6b6a65}.cg{stroke:#e4e2dc}";
 const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -73,7 +75,7 @@ function codeBlock(pre, code, lang, onRender) {          // replaces PRE by the 
   acts.push(copyBtn(() => code.textContent));
   if (lang === "html" || lang === "svg") { const s = shareBtn(() => ({ content: lang === "svg" ? pageOf("Graphic", code.textContent) : code.textContent, filename: (lang === "svg" ? "graphic" : "page") + ".html" })); if (s) acts.push(s); }
   acts.push(zoomBtn(box));
-  if (lang && hljs.getLanguage(lang)) try { hljs.highlightElement(code); } catch (e) { /* plain */ }
+  if (lang) withHl((h) => { if (h.getLanguage(lang)) try { h.highlightElement(code); } catch (e) { /* plain */ } });
   if (code.textContent.length > 1200) box.classList.add("long");                    // a report or page: keep the chat short, scroll inside
   pre.replaceWith(box); box.append(head("code", lang || "code", ...acts), pre);
 }
@@ -95,7 +97,7 @@ const unclosed = (t) => ((t || "").match(/^\s*```/gm) || []).length % 2 === 1;
 export function Md({ text, live, onRender, onSend }) {
   // Incremental: the answer is split into top-level blocks; a block whose source did not change keeps its DOM node, so tables,
   // charts and cards that are already written never flash while the rest streams. Only the block being written is rebuilt.
-  const ref = useRef(), pend = useRef(text), raf = useRef(0), blocks = useRef([]), prevLive = useRef(live);
+  const ref = useRef(), pend = useRef(text), raf = useRef(0), blocks = useRef([]), prevLive = useRef(live), lexc = useRef(null), tm = useRef(0), lastP = useRef(0);
   const build = (tok, links, isLast, t) => {
     const holder = el("div", "mdb"); holder.style.display = "contents"; const mounted = []; let rich = false;
     const part = [tok]; part.links = links;
@@ -115,9 +117,19 @@ export function Md({ text, live, onRender, onSend }) {
         if (!spec || !Array.isArray(spec.nodes)) return;
         rich = true; const d = el("div", "bk rich"); pre.replaceWith(d); mounted.push(d); render(html`<${WorkCard} spec=${spec} locked=${live}/>`, d); return;
       }
-      if (DIAGRAMS[lang]) {                                                   // mermaid / dot / echarts / map: drawn from code by a CDN library
+      if (DIAGRAMS[lang]) {                                                   // mermaid / dot / echarts / map: drawn from code by a vendored library
         rich = true; const d = el("div", "bk rich"), m = el("div"); d.append(m); pre.replaceWith(d); mounted.push(m); render(html`<${Diagram} lang=${lang} code=${code.textContent}/>`, m);
         if (!live) richBar(d, lang === "map" ? "Map" : "Diagram", lang !== "map"); return;
+      }
+      if (lang === "node") {                                                  // @node:<type> run from the chat: a card with the filled fields and a Run button
+        let spec; try { spec = JSON.parse(code.textContent); } catch (e) { return; }
+        if (!spec || typeof spec.type !== "string") return;
+        rich = true; const d = el("div", "bk rich"); pre.replaceWith(d); mounted.push(d); render(html`<${NodeCard} spec=${spec} onSend=${onSend} locked=${live}/>`, d); return;
+      }
+      if (lang === "work") {                                                  // @work:<id>: a card with the inputs and a Run button; the result goes back to the chat by itself
+        let spec; try { spec = JSON.parse(code.textContent); } catch (e) { return; }
+        if (!spec || typeof spec.id !== "string") return;
+        rich = true; const d = el("div", "bk rich"); pre.replaceWith(d); mounted.push(d); render(html`<${WorkRunCard} spec=${spec} onSend=${onSend} locked=${live}/>`, d); return;
       }
       if (lang === "chart" || lang === "form" || lang === "ask") {
         let spec; try { spec = JSON.parse(code.textContent); } catch (e) { return; }
@@ -137,9 +149,19 @@ export function Md({ text, live, onRender, onSend }) {
     return { node: holder, mounted, rich };
   };
   const drop = (b) => { b.mounted.forEach((d) => render(null, d)); b.node.remove(); };
+  // While streaming, only the tail is lexed: the blocks before the last two are final, so their tokens are kept and lexing restarts at their end.
+  const lex = (t) => {
+    if (!live || t.length < 4000 || /[\r\t]/.test(t)) { lexc.current = null; return marked.lexer(t); }
+    const c = lexc.current; let pre = [], upto = 0, links = {};
+    if (c && t.startsWith(c.head)) { pre = c.toks; upto = c.upto; links = c.links; }
+    const tail = marked.lexer(t.slice(upto)), all = [...pre, ...tail]; all.links = { ...links, ...tail.links };
+    const keep = all.slice(0, Math.max(0, all.length - 2)), n = keep.reduce((a, k) => a + k.raw.length, 0);
+    lexc.current = { toks: keep, upto: n, head: t.slice(0, n), links: all.links };
+    return all;
+  };
   const paint = () => {
-    raf.current = 0; const root = ref.current; if (!root) return; const t = pend.current || "";
-    const all = marked.lexer(t), toks = all.filter((k) => k.type !== "space"), list = blocks.current;
+    raf.current = 0; lastP.current = performance.now(); const root = ref.current; if (!root) return; const t = pend.current || "";
+    const all = lex(t), toks = all.filter((k) => k.type !== "space"), list = blocks.current;
     const liveChanged = prevLive.current !== live; prevLive.current = live;
     root.querySelectorAll(".caret").forEach((c) => c.remove());
     toks.forEach((tok, i) => {
@@ -153,8 +175,12 @@ export function Md({ text, live, onRender, onSend }) {
     if (live) { const last = root.lastElementChild && root.lastElementChild.lastElementChild; const c = el("span", "caret");
       (last && !last.classList.contains("bk") ? last : root.lastElementChild || root).append(c); }
   };
-  useEffect(() => { pend.current = text; if (!raf.current) raf.current = requestAnimationFrame(paint); }, [text, live]);
-  useEffect(() => () => { cancelAnimationFrame(raf.current); blocks.current.forEach((b) => b.mounted.forEach((d) => render(null, d))); }, []);
+  useEffect(() => {
+    pend.current = text; if (raf.current || tm.current) return;
+    const wait = live && text.length > 20000 ? Math.max(0, 100 - (performance.now() - lastP.current)) : 0;           // a big live answer paints about 10 times a second
+    if (wait) tm.current = setTimeout(() => { tm.current = 0; raf.current = requestAnimationFrame(paint); }, wait); else raf.current = requestAnimationFrame(paint);
+  }, [text, live]);
+  useEffect(() => () => { cancelAnimationFrame(raf.current); clearTimeout(tm.current); blocks.current.forEach((b) => b.mounted.forEach((d) => render(null, d))); }, []);
   return html`<div class="md" ref=${ref}></div>`;
 }
 
@@ -195,7 +221,7 @@ export function FormBlock({ spec, onSend, disabled }) {
   const fields = (spec.fields || []).slice(0, 20).filter((f) => f && /^[\w.-]{1,40}$/.test(f.name || ""));
   const [v, setV] = useState(() => Object.fromEntries(fields.map((f) => [f.name, f.default ?? (f.type === "checkbox" ? false : "")]))), [done, setDone] = useState(false);
   const ok = fields.every((f) => !f.required || (f.type === "checkbox" ? true : String(v[f.name] ?? "").trim() !== ""));
-  const submit = (e) => { e.preventDefault(); if (!ok || done || !onSend) return; setDone(true); onSend("Form " + (spec.title ? "“" + spec.title + "” " : "") + "response:\n```json\n" + JSON.stringify(v, null, 2) + "\n```"); };
+  const submit = (e) => { e.preventDefault(); if (!ok || done || !onSend) return; if (onSend("Form " + (spec.title ? "“" + spec.title + "” " : "") + "response:\n```json\n" + JSON.stringify(v, null, 2) + "\n```") !== false) setDone(true); };
   return html`<form class="fb" onSubmit=${submit}><div class="bk-head"><span class="bk-title">${Ic("form", 14)}<span>${spec.title || "Form"}</span></span>${done && html`<span class="tag good">${Ic("check", 12)} sent</span>`}</div>
     ${spec.description && html`<p class="mute small fb-d">${spec.description}</p>`}
     <div class="fb-grid">${fields.map((f) => { const set = (x) => setV((c) => ({ ...c, [f.name]: x })); const dis = done || disabled;
@@ -217,7 +243,7 @@ export function AskCard({ spec, onSend, locked }) {
   const ready = final.every((a) => a.length), dis = sent || locked || !onSend;
   const advance = (i) => { if (!q_multi(i) && i < qs.length - 1) setTimeout(() => setStep((s) => Math.max(s, i + 1)), 160); };
   const q_multi = (i) => qs[i].multiSelect;
-  const go = () => { if (!ready || dis) return; setSent(true); onSend(answersText(qs, final)); };
+  const go = () => { if (!ready || dis) return; if (onSend(answersText(qs, final)) !== false) setSent(true); };
   return html`<div class=${"ask" + (sent ? " sent" : "")}><div class="bk-head"><span class="bk-title">${Ic("chat", 14)}<span>${qs.length > 1 ? "A few questions" : "A question"}</span></span>${sent && html`<span class="tag good">${Ic("check", 12)} answered</span>`}</div>
     ${qs.map((q, qi) => html`<section class=${"aq" + (qi > step && !sent ? " later" : "")} style=${`--i:${qi}`}>
       <div class="aq-h">${q.header && html`<span class="chip2">${String(q.header).slice(0, 24)}</span>`}<b>${q.question}</b>${q.multiSelect && html`<span class="mute small">pick any</span>`}</div>
@@ -239,4 +265,85 @@ export function WorkCard({ spec, locked }) {
   return html`<div class="ask"><div class="bk-head"><span class="bk-title">${Ic("flow", 14)}<span>Workflow: ${spec.title || "Untitled"}</span></span>${state === "done" && html`<span class="tag good">${Ic("check", 12)} created</span>`}</div>
     <p class="small" style="margin:6px 0">${spec.description || ""}</p><p class="mute small">${spec.nodes.length} nodes: ${types.join(", ")}</p>
     <button class="btn acc" disabled=${locked || state === "busy" || state === "done"} onClick=${go}>${Ic("plus", 14)} Create in Works</button></div>`;
+}
+
+
+// ---------- node: the answer filled a node's fields (asking the user for the missing ones first); Run executes it alone, the result can go back to the chat
+let nodeHost = null;
+// A card runs by itself once its required values are all there, but only when it was seen streaming live: reopening an old chat never re-runs anything.
+const seenLive = new Set(), autoRan = new Set();
+function useAutoRun(key, locked, ready, runRef) {
+  useEffect(() => {
+    if (locked) { seenLive.add(key); return; }
+    if (ready && seenLive.has(key) && !autoRan.has(key) && runRef.current) { autoRan.add(key); runRef.current(); }
+  }, [locked, ready]);
+}
+export const setNodeHost = (h) => { nodeHost = h; };
+const nodeResultText = (title, res) => "Result of the node “" + title + "”:\n```\n" + (res.text || "(no text)") + "\n```" + (res.data ? "\nData:\n```json\n" + JSON.stringify(res.data, null, 2).slice(0, 8000) + "\n```" : "");
+export function NodeCard({ spec, onSend, locked }) {
+  const [info, setInfo] = useState(undefined), [v, setV] = useState(() => ({ ...(spec.config && typeof spec.config === "object" ? spec.config : {}) })), [input, setInput] = useState(String(spec.input || ""));
+  const [st, setSt] = useState(""), [res, setRes] = useState(null), [err, setErr] = useState(""), runRef = useRef(null), key = "node:" + JSON.stringify(spec);
+  const reqOk = !!info && (info.fields || []).every((f) => !f.required || f.type === "checkbox" || String(v[f.name] !== undefined ? v[f.name] : f.default ?? "").trim() !== "");
+  useAutoRun(key, locked, reqOk, runRef);
+  useEffect(() => { let on = true; (nodeHost ? nodeHost.info(spec.type) : Promise.resolve(null)).then((i) => on && setInfo(i || null)).catch(() => on && setInfo(null)); return () => { on = false; }; }, [spec.type]);
+  if (info === undefined) return html`<div class="ask"><div class="bk-head"><span class="bk-title">${Ic("flow", 14)}<span>Node: ${spec.type}</span></span></div></div>`;
+  if (!info) return html`<div class="ask"><div class="bk-head"><span class="bk-title">${Ic("flow", 14)}<span>Node: ${spec.type}</span></span></div><p class="mute small">This node is not installed or cannot run on its own.</p></div>`;
+  const fields = info.fields || [], val = (f) => (v[f.name] !== undefined ? v[f.name] : f.type === "checkbox" ? !!f.default : f.default ?? "");
+  const missing = fields.filter((f) => f.required && f.type !== "checkbox" && String(val(f) ?? "").trim() === "");
+  const dis = st === "busy" || locked, set = (f, x) => setV((c) => ({ ...c, [f.name]: x }));
+  const run = async () => {
+    if (missing.length || dis) return; setSt("busy"); setErr(""); setRes(null);
+    try { const r = await nodeHost.run({ type: spec.type, config: Object.fromEntries(fields.map((f) => [f.name, val(f)])), input }); setRes(r); setSt("done"); if (onSend) onSend(nodeResultText(info.title, r)); }
+    catch (e) { setErr(e.message || String(e)); setSt("error"); }
+  };
+  runRef.current = () => { run(); };
+  return html`<div class="fb"><div class="bk-head"><span class="bk-title">${Ic("flow", 14)}<span>Node: ${info.title}</span></span>
+      ${st === "done" && html`<span class="tag good">${Ic("check", 12)} done</span>`}${st === "error" && html`<span class="tag bad">failed</span>`}</div>
+    ${info.desc && html`<p class="mute small fb-d">${info.desc}</p>`}
+    <div class="fb-grid">${fields.map((f) => html`<label class=${"fb-f" + (f.type === "textarea" || f.type === "code" ? " wide" : "")}><span>${f.label || f.name}${f.required ? " *" : ""}${f.secret ? " (secret, used for this run only)" : ""}</span>
+      ${f.type === "textarea" || f.type === "code" ? html`<textarea rows="3" value=${val(f)} disabled=${dis} onInput=${(e) => set(f, e.target.value)}></textarea>`
+      : f.type === "select" ? html`<select value=${val(f)} disabled=${dis} onChange=${(e) => set(f, e.target.value)}><option value="">Choose…</option>${(f.options || []).map((o) => html`<option>${String(o)}</option>`)}</select>`
+      : f.type === "checkbox" ? html`<input type="checkbox" checked=${!!val(f)} disabled=${dis} onChange=${(e) => set(f, e.target.checked)}/>`
+      : html`<input type=${f.secret ? "password" : f.type === "number" ? "number" : "text"} autocomplete="off" value=${f.secret && v[f.name] === undefined ? "" : val(f)} disabled=${dis} onInput=${(e) => set(f, e.target.value)}/>`}</label>`)}
+      ${(info.templated || []).length > 0 && html`<label class="fb-f wide"><span>Input text (for {{input}})</span><textarea rows="2" value=${input} disabled=${dis} onInput=${(e) => setInput(e.target.value)}></textarea></label>`}</div>
+    ${err && html`<p class="small" style="color:var(--bad,#c0392b);margin:6px 0">${err}</p>`}
+    ${res && html`<pre class="small" style="max-height:240px;overflow:auto;margin:8px 0;white-space:pre-wrap">${res.text || "(no text output)"}${res.data ? "\n\n" + JSON.stringify(res.data, null, 2).slice(0, 4000) : ""}</pre>`}
+    <div class="fb-foot"><span class="mute small grow">${missing.length ? "Fill in: " + missing.map((f) => f.label || f.name).join(", ") : "Runs by itself when the values are filled; the result returns to the chat."}</span>
+      <button class="btn pri" disabled=${dis || missing.length > 0} onClick=${run}>${st === "busy" ? "Running…" : st === "done" ? "Run again" : "Run"}</button></div></div>`;
+}
+
+// ---------- work: a mentioned workflow. Inputs are checked here; Run starts it on the server, the card follows it and hands the result to the chat
+export function WorkRunCard({ spec, onSend, locked }) {
+  const [info, setInfo] = useState(undefined), [v, setV] = useState(() => ({ ...(spec.data && typeof spec.data === "object" ? spec.data : {}) })), [st, setSt] = useState(""), [run, setRun] = useState(null), [err, setErr] = useState(""), runRef = useRef(null), key = "work:" + JSON.stringify(spec);
+  const reqOk = !!info && (info.inputs || []).every((f) => !f.required || f.type === "checkbox" || String(v[f.name] !== undefined ? v[f.name] : f.default ?? "").trim() !== "");
+  useAutoRun(key, locked, reqOk, runRef);
+  useEffect(() => { let on = true; (nodeHost ? nodeHost.workInfo(spec.id) : Promise.resolve(null)).then((i) => on && setInfo(i || null)).catch(() => on && setInfo(null)); return () => { on = false; }; }, [spec.id]);
+  const head = (t, tag) => html`<div class="bk-head"><span class="bk-title">${Ic("flow", 14)}<span>Workflow: ${t}</span></span>${tag}</div>`;
+  if (info === undefined) return html`<div class="ask">${head(spec.id)}</div>`;
+  if (!info) return html`<div class="ask">${head(spec.id)}<p class="mute small">This workflow no longer exists.</p></div>`;
+  const ins = info.inputs || [], val = (f) => (v[f.name] !== undefined ? v[f.name] : f.default ?? (f.type === "checkbox" ? false : ""));
+  const bad = ins.find((f) => f.required && f.type !== "checkbox" && String(val(f) ?? "").trim() === "");
+  const dis = st === "busy" || locked, set = (f, x) => setV((c) => ({ ...c, [f.name]: x }));
+  const go = async () => {
+    if (bad || dis) return; setSt("busy"); setErr(""); setRun(null);
+    try {
+      const r = await nodeHost.workRun(info.id, Object.fromEntries(ins.map((f) => [f.name, val(f)])), String(spec.text || ""), setRun);
+      setRun(r); setSt(r.status === "done" ? "done" : "error"); if (r.status !== "done") setErr(r.err || "The workflow failed.");
+      if (onSend) onSend(r.status === "done" ? "Result of the workflow “" + info.title + "”:\n\n" + ((r.result && r.result.text) || "(it finished without text output)") : "The workflow “" + info.title + "” failed: " + (r.err || "unknown error"));
+    } catch (e) { setErr(e.message || String(e)); setSt("error"); }
+  };
+  runRef.current = () => { go(); };
+  const steps = Object.entries((run && run.nodes) || {});
+  return html`<div class="fb">${head(info.title, st === "done" ? html`<span class="tag good">${Ic("check", 12)} done</span>` : st === "error" ? html`<span class="tag bad">failed</span>` : null)}
+    ${info.description && html`<p class="mute small fb-d">${info.description}</p>`}
+    ${ins.length > 0 && html`<div class="fb-grid">${ins.map((f) => html`<label class=${"fb-f" + (f.type === "textarea" ? " wide" : "")}><span>${f.label}${f.required ? " *" : ""}</span>
+      ${f.type === "textarea" ? html`<textarea rows="3" value=${val(f)} disabled=${dis} onInput=${(e) => set(f, e.target.value)}></textarea>`
+      : f.type === "select" ? html`<select value=${val(f)} disabled=${dis} onChange=${(e) => set(f, e.target.value)}>${(f.options || []).map((o) => html`<option>${o}</option>`)}</select>`
+      : f.type === "checkbox" ? html`<input type="checkbox" checked=${!!val(f)} disabled=${dis} onChange=${(e) => set(f, e.target.checked)}/>`
+      : html`<input type=${f.type === "number" ? "number" : "text"} value=${val(f)} disabled=${dis} onInput=${(e) => set(f, e.target.value)}/>`}</label>`)}</div>`}
+    ${steps.length > 0 && html`<p class="mute small">${steps.filter(([, n]) => n.status === "ok").length} of ${steps.length} steps done${st === "busy" ? "…" : ""}</p>`}
+    ${err && html`<p class="small" style="color:var(--bad,#c0392b);margin:6px 0">${err}</p>`}
+    ${run && run.result && html`<div class="wres"><${Md} text=${run.result.text}/></div>`}
+    <div class="fb-foot"><span class="mute small grow">${bad ? "Fill in: " + bad.label : "Runs by itself when the inputs are filled; the result returns to the chat."}</span>
+      <button class="btn pri" disabled=${dis || !!bad} onClick=${go}>${st === "busy" ? "Running…" : st === "done" ? "Run again" : "Run"}</button></div></div>`;
 }

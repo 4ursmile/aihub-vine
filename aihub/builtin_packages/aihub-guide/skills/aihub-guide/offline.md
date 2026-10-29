@@ -76,7 +76,7 @@ aihub install <name>              # resolve from the index, clone at the version
 aihub install <name> --yes        # skip confirmations
 aihub install <name> --from archive|repo   # archive = from the hub (like -i), repo = from git; a package published with `dev publish -i` is an archive (no repo)
 aihub download <name>[@ver] [-o DIR] [--archive|--folder]   # save NAME-VER.tar.gz (archive packages, parallel resumable chunks, sha256 checked) or the unpacked folder (git packages)
-aihub install <name> -i           # --indirect: get it through the hub instead of git (needs install_indirect; no git fallback, fails with a message). Git LFS files come down too (needs git-lfs where git runs); the CLI says if it was cached
+aihub install <name> -i           # --indirect: get it through the hub instead of git (needs install_indirect; no git fallback, fails with a message). Without -i, a missing/refused git login falls back to the hub by itself (not with --from repo). Git LFS files come down too (needs git-lfs where git runs); the CLI says if it was cached
 aihub install a b "c>=1.0"        # several packages at once; one failing never stops the rest
 aihub install -r requirements.txt # pip-style file: one name[<spec>] per line, # comments, nested -r
 aihub install <name> --tool claude --tool opencode   # only these tools

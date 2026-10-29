@@ -8,6 +8,8 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import deque
+from itertools import islice
 
 from .aihub import HOME
 from .secretbox import write_private
@@ -102,6 +104,55 @@ def _stamp(path):
         return None
 
 
+SIDE = ("system", "extra", "seed")          # big per-chat texts: kept out of sessions.json, in a file each
+
+
+def _side_path(sid, k):
+    if k == "system":
+        return os.path.join(ui_dir("system"), sid + ".md")       # the file chat.turn passes to claude as-is
+    return os.path.join(ui_dir("side"), "%s.%s.txt" % (sid, k))
+
+
+def _side_get(sid, k):
+    try:
+        with open(_side_path(sid, k), encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _side_put(sid, k, v):
+    p = _side_path(sid, k)
+    v = "" if v is None else str(v)
+    if v:
+        if _side_get(sid, k) != v:
+            write_private(p, v.encode("utf-8"))
+    else:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def _full(s):
+    """Copy of a slim session row with system / extra / seed read back from their files."""
+    s = dict(s)
+    for k in SIDE:
+        s[k] = _side_get(s["id"], k)
+    return s
+
+
+def _migrate(d):
+    """Old sessions.json kept system / extra / seed inside every row (94% of the file): move them to files. -> True when it changed."""
+    fat = [s for s in d["sessions"].values() if isinstance(s, dict) and any(k in s for k in SIDE)]
+    for s in fat:
+        for k in SIDE:
+            v = s.pop(k, None)
+            if v and not _side_get(s["id"], k):
+                _side_put(s["id"], k, v)
+    return bool(fat)
+
+
 def _index(shared=False):
     """sessions.json. SHARED=True: the parsed copy kept until the file changes (read only: do not modify it); else a private parse to edit and save."""
     path = ui_dir("sessions.json")
@@ -109,6 +160,11 @@ def _index(shared=False):
     if shared and st is not None and _icache["stamp"] == st:
         return _icache["data"]
     d = _read(path, {"sessions": {}, "folders": []})
+    if st is not None and isinstance(d.get("sessions"), dict):
+        with _lock:
+            if _migrate(d):
+                _save_index(d)
+                st = _stamp(path)
     if shared:
         _icache["stamp"], _icache["data"] = st, d
     return d
@@ -120,18 +176,23 @@ def _save_index(d):
     _icache["stamp"] = None
 
 
-def sessions():
+def sessions(full=False):
+    """Folders + chats for the list (newest first). Rows are SLIM (no system / extra / seed); FULL=True loads those too."""
     with _lock:
         d = _index(True)
-        return {"folders": d["folders"], "folder_dirs": d.get("folder_dirs") or {}, "sessions": sorted(d["sessions"].values(), key=lambda s: -s.get("updated", 0))}
+        rows = sorted(d["sessions"].values(), key=lambda s: -s.get("updated", 0))
+        return {"folders": d["folders"], "folder_dirs": d.get("folder_dirs") or {}, "sessions": [_full(s) for s in rows] if full else rows}
 
 
-def get_session(sid):
+def get_session(sid, full=True):
+    """One chat. FULL=False skips the side files (system / extra / seed): cheaper for callers that only need cwd, engine, ..."""
     if not ID.match(str(sid)):
         return None
     with _lock:
         s = _index(True)["sessions"].get(sid)
-        return dict(s) if s else None
+        if not s:
+            return None
+        return _full(s) if full else dict(s)
 
 
 def create_session(title="", folder="", system="", cwd="", extra=""):
@@ -140,23 +201,31 @@ def create_session(title="", folder="", system="", cwd="", extra=""):
         os.makedirs(work_dir(sid), exist_ok=True)
     now = time.time()
     s = {"id": sid, "title": title or "New chat", "folder": folder, "created": now, "updated": now, "claude": str(uuid.uuid4()),
-         "started": False, "system": system, "extra": extra, "cwd": cwd, "soul": None, "engine": "claude", "mcp": [], "model": "", "effort": "", "mode": "auto", "usage": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "cost": 0.0, "turns": 0}}
+         "started": False, "cwd": cwd, "soul": None, "engine": "claude", "mcp": [], "model": "", "effort": "", "mode": "auto", "usage": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "cost": 0.0, "turns": 0}}
+    for k, v in (("system", system), ("extra", extra)):
+        _side_put(sid, k, v)
     with _lock:
         d = _index()
         d["sessions"][sid] = s
         _save_index(d)
-    return s
+    return dict(s, system=system or "", extra=extra or "", seed="")
 
 
 def update_session(sid, **kw):
+    """Change fields of a chat -> the full row (system / extra / seed included), None when it does not exist. Nothing is written when
+    nothing changed."""
     with _lock:
         d = _index()
         s = d["sessions"].get(sid)
         if not s:
             return None
-        s.update(kw)
-        _save_index(d)
-        return s
+        for k in SIDE:
+            if k in kw:
+                _side_put(sid, k, kw.pop(k))
+        if any(k not in s or s[k] != v for k, v in kw.items()):
+            s.update(kw)
+            _save_index(d)
+        return _full(s)
 
 
 def add_usage(sid, u):
@@ -187,7 +256,9 @@ def delete_session(sid):
         d = _index()
         d["sessions"].pop(sid, None)
         _save_index(d)
-    for p in (os.path.join(ui_dir("history"), sid + ".jsonl"),):
+    _counts.pop(sid, None)
+    _scache.pop(sid, None)
+    for p in [os.path.join(ui_dir("history"), sid + ".jsonl")] + [_side_path(sid, k) for k in SIDE]:
         try:
             os.remove(p)
         except OSError:
@@ -207,6 +278,9 @@ def set_folders(names):
         _save_index(d)
 
 
+_counts = {}                      # sid -> lines in the history file (kept in memory; set once, then bumped by append)
+
+
 def append(sid, ev):
     if not ID.match(str(sid)):
         return
@@ -214,36 +288,37 @@ def append(sid, ev):
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with _lock, open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        if sid in _counts:
+            _counts[sid] += 1
 
 
 def history(sid, upto=None):
-    """Stored events of a chat (last MAX_HISTORY). UPTO = only the first N lines: a running turn replays its own events to a page that comes back."""
+    """Stored events of a chat (last MAX_HISTORY). UPTO = only the first N lines: a running turn replays its own events to a page that comes back.
+    Only the tail lines are parsed."""
     if not ID.match(str(sid)):
         return []
-    out = []
     try:
         with open(os.path.join(ui_dir("history"), sid + ".jsonl"), encoding="utf-8") as f:
-            for n, ln in enumerate(f):
-                if upto is not None and n >= upto:
-                    break
-                try:
-                    out.append(json.loads(ln))
-                except ValueError:
-                    pass
+            lines = deque(islice(f, upto) if upto is not None else f, maxlen=MAX_HISTORY)
     except OSError:
-        pass
-    return out[-MAX_HISTORY:]
+        return []
+    return parse_rows(lines)
 
 
 def count(sid):
-    """Lines in the history file (what `history(upto=)` counts)."""
+    """Lines in the history file (what `history(upto=)` counts). Counted from the file once per chat, then kept in memory."""
     if not ID.match(str(sid)):
         return 0
-    try:
-        with open(os.path.join(ui_dir("history"), sid + ".jsonl"), encoding="utf-8") as f:
-            return sum(1 for _ in f)
-    except OSError:
-        return 0
+    with _lock:
+        n = _counts.get(sid)
+        if n is None:
+            try:
+                with open(os.path.join(ui_dir("history"), sid + ".jsonl"), encoding="utf-8") as f:
+                    n = sum(1 for _ in f)
+            except OSError:
+                n = 0
+            _counts[sid] = n
+        return n
 
 
 def transcript(rows, limit=60000):
@@ -285,6 +360,7 @@ def write_rows(sid, rows):
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with _lock:
         write_private(p, ("\n".join(rows) + ("\n" if rows else "")).encode("utf-8"))
+        _counts[sid] = len(rows)
 
 
 def parse_rows(rows):
@@ -314,6 +390,7 @@ def delete_event(sid, index):
             return None
         del rows[index]
         write_private(p, ("\n".join(rows) + ("\n" if rows else "")).encode("utf-8"))
+        _counts[sid] = len(rows)
         return len(rows)
 
 
@@ -397,41 +474,80 @@ def write_text(sid, rel, text):
     data = str(text).encode("utf-8")
     if len(data) > 2_000_000:
         raise ValueError("file too large to edit here (2 MB)")
-    tmp = p + ".aihub-tmp"
-    with open(tmp, "wb") as f:
-        f.write(data)
+    tmp = "%s.aihub-%s.tmp" % (p, secrets.token_hex(4))              # unique: two saves at once cannot share a temp file
     try:
-        os.chmod(tmp, os.stat(p).st_mode & 0o777)
-    except OSError:
-        pass
-    os.replace(tmp, p)
+        with open(tmp, "wb") as f:
+            f.write(data)
+        try:
+            os.chmod(tmp, os.stat(p).st_mode & 0o777)
+        except OSError:
+            pass
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
     return {"size": len(data), "mtime": os.path.getmtime(p)}
 
 
 def snapshot(sid, files):
-    """Copy the small text files of the folder as they are NOW (before a turn), so Diff can show what the turn changed. One snapshot per chat."""
+    """Copy the small text files of the folder as they are NOW (before a turn), so Diff can show what the turn changed. One snapshot per chat.
+    Incremental: a file whose copy has the same size and mtime is left alone, copies of files that are gone are deleted."""
     root, dst = session_dir(sid), os.path.join(ui_dir("snap"), sid)
-    shutil.rmtree(dst, ignore_errors=True)
+    base = os.path.join(dst, "files")
+    keep = set()
     n = total = 0
     for f in files:
         if n >= SNAP_FILES or total >= SNAP_TOTAL:
             break
         if f["size"] > SNAP_FILE_MAX:
             continue
-        src = os.path.join(root, f["path"])
+        rel = f["path"]
+        out = os.path.join(base, rel)
         try:
-            with open(src, "rb") as fh:
+            st = os.stat(os.path.join(root, rel))
+            ot = os.stat(out)
+            same = ot.st_size == st.st_size and ot.st_mtime_ns == st.st_mtime_ns
+        except OSError:
+            same = False
+        if same:
+            keep.add(os.path.normcase(out))
+            n += 1
+            total += ot.st_size
+            continue
+        try:
+            with open(os.path.join(root, rel), "rb") as fh:
                 b = fh.read(SNAP_FILE_MAX + 1)
+            mt = os.stat(os.path.join(root, rel)).st_mtime_ns
         except OSError:
             continue
-        if _looks_binary(b):
+        if _looks_binary(b) or len(b) > SNAP_FILE_MAX:
             continue
-        out = os.path.join(dst, "files", f["path"])
         os.makedirs(os.path.dirname(out), exist_ok=True)
         with open(out, "wb") as fh:
             fh.write(b)
+        try:
+            os.utime(out, ns=(mt, mt))
+        except OSError:
+            pass
+        keep.add(os.path.normcase(out))
         n += 1
         total += len(b)
+    for d, dirs, fs in os.walk(base, topdown=False):
+        for x in fs:
+            p = os.path.join(d, x)
+            if os.path.normcase(p) not in keep:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+        if d != base:
+            try:
+                os.rmdir(d)
+            except OSError:
+                pass
     os.makedirs(dst, exist_ok=True)
 
 
@@ -464,36 +580,69 @@ def git_text(sid, rel):
 
 # ---- search across chats (title + what was said)
 
-def search(q, limit=40):
-    q = str(q or "").strip().lower()
-    if len(q) < 2:
+SEARCH_FILE_BYTES = 2_000_000       # only the last bytes of a long history are searched
+SEARCH_SECONDS = 1.5
+_scache = {}                        # sid -> ((mtime_ns, size), [texts])
+
+
+class Hits(list):
+    """Search result; `.partial` is True when the time budget ran out before every chat was looked at."""
+    partial = False
+
+
+def _texts(sid):
+    """Searchable texts (what the user said, what the assistant wrote) of a chat, cached until its history file changes."""
+    p = os.path.join(ui_dir("history"), sid + ".jsonl")
+    st = _stamp(p)
+    if st is None:
+        _scache.pop(sid, None)
         return []
+    c = _scache.get(sid)
+    if c and c[0] == st:
+        return c[1]
     out = []
-    for s in sessions()["sessions"]:
-        hit, snippet = q in s.get("title", "").lower(), ""
+    try:
+        with open(p, "rb") as f:
+            if st[1] > SEARCH_FILE_BYTES:
+                f.seek(st[1] - SEARCH_FILE_BYTES)
+                f.readline()                                    # the first line is cut: skip it
+            raw = f.read()
+    except OSError:
+        return []
+    for ln in raw.decode("utf-8", "replace").splitlines():
         try:
-            with open(os.path.join(ui_dir("history"), s["id"] + ".jsonl"), encoding="utf-8") as f:
-                for ln in f:
-                    if q not in ln.lower():
-                        continue
-                    try:
-                        e = json.loads(ln)
-                    except ValueError:
-                        continue
-                    if e.get("k") == "user":
-                        txt = str(e.get("text", ""))
-                    elif e.get("k") == "msg":
-                        txt = "\n".join(b.get("text", "") for b in e.get("blocks") or [] if isinstance(b, dict) and b.get("type") == "text")
-                    else:
-                        continue
-                    i = txt.lower().find(q)
-                    if i >= 0:
-                        a = max(0, i - 40)
-                        snippet = (("…" if a else "") + " ".join(txt[a:i + len(q) + 80].split()))[:160]
-                        hit = True
-                        break
-        except OSError:
-            pass
+            e = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(e, dict):
+            continue
+        if e.get("k") == "user":
+            out.append(str(e.get("text", "")))
+        elif e.get("k") == "msg":
+            out.append("\n".join(b.get("text", "") for b in e.get("blocks") or [] if isinstance(b, dict) and b.get("type") == "text"))
+    _scache[sid] = (st, out)
+    return out
+
+
+def search(q, limit=40):
+    """Chats whose title or text contains Q -> Hits (a list; `.partial` when the 1.5 s budget ended early)."""
+    q = str(q or "").strip().lower()
+    out = Hits()
+    if len(q) < 2:
+        return out
+    t0 = time.time()
+    for s in sessions()["sessions"]:
+        if time.time() - t0 > SEARCH_SECONDS:
+            out.partial = True
+            break
+        hit, snippet = q in s.get("title", "").lower(), ""
+        for txt in _texts(s["id"]):
+            i = txt.lower().find(q)
+            if i >= 0:
+                a = max(0, i - 40)
+                snippet = (("…" if a else "") + " ".join(txt[a:i + len(q) + 80].split()))[:160]
+                hit = True
+                break
         if hit:
             out.append({"id": s["id"], "title": s.get("title", ""), "folder": s.get("folder", ""), "updated": s.get("updated", 0), "snippet": snippet})
             if len(out) >= limit:
@@ -541,6 +690,18 @@ def parse_inputs(text):
 def work_inputs(w):
     n = next((n for n in (w or {}).get("nodes", []) if n.get("type") == "start.manual"), None)
     return parse_inputs(((n or {}).get("config") or {}).get("inputs"))
+
+
+def work_brief(w):
+    """Prompt text for a mentioned workflow: its inputs and the protocol (ask for the missing ones with a form, else ONE ```work block)."""
+    ins = work_inputs(w)
+    lines = ["- %s (%s; %s%s%s)" % (f["name"], f["label"], f["type"], ", required" if f["required"] else "", (", options: " + ", ".join(f["options"])) if f.get("options") else "") for f in ins]
+    need = [f["name"] for f in ins if f["required"]]
+    return ("[The user wants the workflow \"%s\" (@work:%s) run from this chat. %s\nInputs:\n%s\n"
+            "How to run it: work out each input from the user's message and this conversation. If a required input (%s) is still unknown, ask for ONLY the missing ones with a ```form block "
+            "(fields named exactly like the inputs) and stop; do not guess. Once they are known, answer with ONE ```work block and nothing that depends on its result: "
+            "{\"id\":\"%s\",\"data\":{\"input\":\"value\"},\"text\":\"optional text for the start\"}. The page shows a card where the user presses Run; the result comes back as the next message. Do not run it yourself.]"
+            % (w.get("title") or "Workflow", w["id"], w.get("description") or "", "\n".join(lines) or "(none)", ", ".join(need) or "none", w["id"]))
 
 
 def works():
@@ -672,13 +833,13 @@ def save_prefs(new):
     if "claude_settings" in new:
         c = str(new["claude_settings"] or "").strip()
         if c:
-            from .aihub import user_path
+            from .aihub import user_path, _jsonc
             full = user_path(c)
             if not full.lower().endswith(".json") or not os.path.isfile(full):
                 raise ValueError("that is not an existing .json file: %s" % full)
             try:
                 with open(full, encoding="utf-8-sig") as f:
-                    if not isinstance(json.loads(f.read(2_000_000)), dict):
+                    if not isinstance(_jsonc(f.read(2_000_000)), dict):
                         raise ValueError("it must hold a JSON object")
             except (OSError, ValueError) as e:
                 raise ValueError("cannot use %s: %s" % (full, e))
