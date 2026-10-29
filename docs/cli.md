@@ -71,6 +71,7 @@ aihub install package-name --yes
 aihub install pkg-a pkg-b "pkg-c>=1.0"
 aihub install -r requirements.txt
 aihub install package-name --from archive|repo   # where the package comes from: archive = download it from the hub (same as -i), repo = clone its git repository. Default: a package published to the hub is an archive, any other comes from git. --from repo on an archive package fails (it has no repository); -i with --from repo is refused
+aihub install package-name -u        # --upgrade: install only if a newer allowed version exists (up to date = skipped, not installed = installed)
 aihub install package-name -i        # --indirect: the hub fetches from git and sends it (needs the install_indirect permission; no git fallback: a hub failure is an error). Without `-i`, a missing or refused git login falls back to the hub automatically (not with `--from repo`). Git LFS files are downloaded in both modes (needs git-lfs on the machine that runs git: the hub for -i, else you); the CLI says whether it used a cache or fetched
 aihub install package-name --tool claude --tool opencode
 aihub list

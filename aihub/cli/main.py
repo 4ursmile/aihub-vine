@@ -220,6 +220,10 @@ def cmd_install(a):
     specs = list(dict.fromkeys(specs))               # same line twice installs once
     registry.INDIRECT, registry.REPO_ONLY = _source_mode(a)
     ui.out()
+    if getattr(a, "upgrade", False):
+        specs = _only_newer(specs)
+        if not specs:
+            return
     if len(specs) == 1:
         n, sp = _spec(specs[0])
         installer.install(n, sp, a.yes, a.tool)
@@ -230,6 +234,24 @@ def cmd_install(a):
         ui.bad("%s: %s" % (n, e))
     if failed:
         raise ValueError("%d of %d package(s) not installed: %s" % (len(failed), len(specs), ", ".join(n for n, _ in failed)))
+
+
+def _only_newer(specs):
+    """`install -u`: drop installed packages that already have the latest version the constraint allows (not installed = keep)."""
+    st = installer.state()["packages"]
+    keep = []
+    for s in specs:
+        n, sp = _spec(s)
+        r = st.get(naming.normalize(n)) or st.get(n)
+        if not r:
+            keep.append(s)
+            continue
+        latest = registry.resolve(n, sp)["version"]
+        if V.compare(latest, r["version"]) > 0:
+            keep.append(s)
+        else:
+            ui.info("%s is up to date (%s)" % (n, r["version"]))
+    return keep
 
 
 def _source_mode(a):
@@ -1583,6 +1605,7 @@ def build_parser():
         arg("-r", "--requirement", action="append", metavar="FILE", help="Install every package listed in FILE (pip style: one per line, # comments, nested -r); repeatable."),
         arg("-y", "--yes", action="store_true", help="Skip install-script and tool-registration prompts; use detected tools unless --tool is given."),
         arg("--tool", action="append", metavar="TOOL", help="Register components with this tool; repeat to select multiple (claude, codex, or opencode)."),
+        arg("-u", "--upgrade", action="store_true", help="Upgrade to the latest allowed version: packages already installed at that version are skipped, newer ones are installed, missing ones are installed."),
         arg("-i", "--indirect", action="store_true", help="Get the package through the hub instead of straight from git (needs the install_indirect permission). The hub does all git work with its own login, so no git credentials are needed on this machine; it never falls back to git."),
         arg("--from", dest="source", choices=["archive", "repo"], metavar="archive|repo", help="Where to get the package: 'archive' = download it from the hub (same as -i), 'repo' = clone it from its git repository. Default: a package published to the hub is an archive, any other comes from git. An archive package has no repository, so --from repo fails for it."))
     add("enable", cmd_enable, "Switch a disabled package back on.",
