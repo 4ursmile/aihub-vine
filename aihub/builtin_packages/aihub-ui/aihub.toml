@@ -1,6 +1,6 @@
 [package]
 name = "aihub-ui"
-version = "1.21.3"
+version = "1.21.7"
 type = "service"
 description = "Local chat and control UI for AI Hub: chat with Claude Code, manage packages, services, MCP servers, logins, knowledge and works. Localhost only."
 tags = ["aihub", "ui", "chat", "local"]

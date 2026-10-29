@@ -9,6 +9,7 @@ Safety model (it can install software and run an agent as you, so it is locked d
   * secrets are never returned: settings.json / .env / vault values read "set"; secrets the UI keeps itself are encrypted (secretbox)"""
 import base64
 import hashlib
+import gzip
 import hmac
 import json
 import mimetypes
@@ -89,7 +90,8 @@ class H(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        if not (extra and "Cache-Control" in extra):
+            self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
@@ -189,11 +191,27 @@ class H(BaseHTTPRequestHandler):
         p = store.safe_join(STATIC, unquote(name))
         if not p or not os.path.isfile(p):
             return self._send(404, b"not found", "text/plain")
-        with open(p, "rb") as f:
-            data = f.read()
         ext = os.path.splitext(p)[1].lower()           # fixed: the OS table (Windows registry) may call .js text/plain, and browsers refuse such a module
         ctype = STATIC_TYPES.get(ext) or mimetypes.guess_type(p)[0] or "application/octet-stream"
-        self._send(200, data, ctype, {"Content-Security-Policy": CSP})
+        st = os.stat(p)
+        gz = ext in GZIP_EXT and "gzip" in (self.headers.get("Accept-Encoding") or "") and st.st_size > 1024
+        tag = '"%x-%x%s"' % (st.st_mtime_ns, st.st_size, "-g" if gz else "")
+        head = {"Content-Security-Policy": CSP, "Cache-Control": "no-cache", "ETag": tag, "Vary": "Accept-Encoding"}   # revalidate: edits show without a restart, an unchanged file costs a 304
+        if self.headers.get("If-None-Match") == tag:
+            return self._send(304, b"", ctype, head)
+        key = (p, tag)
+        data = _STATIC_CACHE.get(key)
+        if data is None:
+            with open(p, "rb") as f:
+                data = f.read()
+            if gz:
+                data = gzip.compress(data, 6, mtime=0)
+            if len(_STATIC_CACHE) > 64:
+                _STATIC_CACHE.clear()
+            _STATIC_CACHE[key] = data
+        if gz:
+            head["Content-Encoding"] = "gzip"
+        self._send(200, data, ctype, head)
 
     def _workfile(self, path):
         parts = path.split("/", 4)                        # '', 'w', sid, sig, rest
@@ -263,6 +281,8 @@ def boot(h, q, b):
             "claude": A.claude_settings(), "port": ADDR["port"], "cli": A.command()[-1]}
 
 
+GZIP_EXT = {".js", ".mjs", ".css", ".html", ".json", ".svg"}
+_STATIC_CACHE = {}                                  # (path, etag) -> bytes as sent (gzipped when the client accepts it)
 STATIC_TYPES = {".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
                 ".html": "text/html; charset=utf-8", ".json": "application/json", ".svg": "image/svg+xml", ".wasm": "application/wasm"}
 BRAND = {"at": 0, "hub": None, "doc": {}}

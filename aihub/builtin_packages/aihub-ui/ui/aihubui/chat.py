@@ -186,6 +186,21 @@ def follow(sid):
 stopped = set()
 
 
+def _kill(p):
+    """End the child and what it started: its process group (POSIX) or the whole tree (Windows, where there is no killpg)."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=10)
+        else:
+            os.killpg(p.pid, signal.SIGTERM)
+    except Exception:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+
 def stop(sid):
     if freechat.cancel(sid):
         return True
@@ -193,10 +208,7 @@ def stop(sid):
         p = procs.get(sid)
     if p and p.poll() is None:
         stopped.add(sid)
-        try:
-            os.killpg(p.pid, signal.SIGTERM)
-        except (OSError, AttributeError):
-            p.terminate()
+        _kill(p)
         return True
     return False
 
@@ -237,14 +249,28 @@ def _result_text(c):
     return "\n".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text") if isinstance(c, list) else ""
 
 
+_cj = {"stamp": None, "data": {}}
+
+
+def _claude_json():
+    """~/.claude.json (can be MBs) parsed again only when the file changed."""
+    p = os.path.join(os.path.expanduser("~"), ".claude.json")
+    st = os.stat(p)
+    stamp = (st.st_mtime_ns, st.st_size)
+    if _cj["stamp"] != stamp:
+        with open(p, encoding="utf-8") as f:
+            _cj["data"] = json.load(f)
+        _cj["stamp"] = stamp
+    return _cj["data"]
+
+
 def mcp_config():
     """Path of an --mcp-config file for `claude -p`, or None. The chat runs in its own folder, so servers Claude Code keeps per
     PROJECT (~/.claude.json `projects.<dir>.mcpServers`, the default scope of `claude mcp add`) would never load here: they are
     merged in (user scope and the UI list win), so what works in a terminal also works in the chat."""
     merged = {}
     try:
-        with open(os.path.join(os.path.expanduser("~"), ".claude.json"), encoding="utf-8") as f:
-            d = json.load(f)
+        d = _claude_json()
         for proj in (d.get("projects") or {}).values():
             for n, v in ((proj or {}).get("mcpServers") or {}).items():
                 if isinstance(v, dict):
@@ -331,7 +357,7 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
     try:
         p.stdin.write(text)
         p.stdin.close()
-    except OSError:
+    except (OSError, ValueError):
         pass
     store.update_session(sid, started=True, model=model, effort=effort, mode=mode)
     got_result = False
@@ -341,6 +367,8 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
             try:
                 m = json.loads(ln)
             except ValueError:
+                continue
+            if not isinstance(m, dict):                              # "null" or a bare number on stdout (a killed child): not an event
                 continue
             t = m.get("type")
             if t == "stream_event":
@@ -392,7 +420,20 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
                       "text": m.get("result") if m.get("is_error") else ""}
                 store.append(sid, ev)
                 yield ev
-        p.wait(timeout=10)
+                if ev["error"] or m.get("subtype", "success") != "success":
+                    why = (m.get("result") or "").strip() or "".join(errbuf).strip() or "claude stopped: %s" % m.get("subtype", "error")
+                    err = {"k": "error", "text": why[-1200:]}      # the API's own message, not only a "failed" tag after the thinking
+                    store.append(sid, err)
+                    yield err
+            elif t == "system" and m.get("subtype") == "api_retry":
+                ev = {"k": "note", "text": "API error%s, retrying (%s/%s): %s" % (
+                    " " + str(m["error_status"]) if m.get("error_status") else "", m.get("attempt", "?"), m.get("max_retries", "?"), m.get("error") or "")}
+                store.append(sid, ev)
+                yield ev
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            _kill(p)
     except GeneratorExit:                                            # whoever drives turn() went away: stop the child
         stop(sid)
         raise

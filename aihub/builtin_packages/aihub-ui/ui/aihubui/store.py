@@ -84,24 +84,45 @@ def _read(path, default):
         return default
 
 
-def _write(path, data):
+def _write(path, data, compact=False):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    write_private(path, json.dumps(data, indent=1).encode("utf-8"))
+    write_private(path, (json.dumps(data, separators=(",", ":")) if compact else json.dumps(data, indent=1)).encode("utf-8"))
 
 
 # ---- chats
 
-def _index():
-    return _read(ui_dir("sessions.json"), {"sessions": {}, "folders": []})
+_icache = {"stamp": None, "data": None}
+
+
+def _stamp(path):
+    try:
+        st = os.stat(path)
+        return st.st_mtime_ns, st.st_size
+    except OSError:
+        return None
+
+
+def _index(shared=False):
+    """sessions.json. SHARED=True: the parsed copy kept until the file changes (read only: do not modify it); else a private parse to edit and save."""
+    path = ui_dir("sessions.json")
+    st = _stamp(path)
+    if shared and st is not None and _icache["stamp"] == st:
+        return _icache["data"]
+    d = _read(path, {"sessions": {}, "folders": []})
+    if shared:
+        _icache["stamp"], _icache["data"] = st, d
+    return d
 
 
 def _save_index(d):
-    _write(os.path.join(ui_dir(), "sessions.json"), d)
+    p = os.path.join(ui_dir(), "sessions.json")
+    _write(p, d, compact=True)
+    _icache["stamp"] = None
 
 
 def sessions():
     with _lock:
-        d = _index()
+        d = _index(True)
         return {"folders": d["folders"], "folder_dirs": d.get("folder_dirs") or {}, "sessions": sorted(d["sessions"].values(), key=lambda s: -s.get("updated", 0))}
 
 
@@ -109,7 +130,8 @@ def get_session(sid):
     if not ID.match(str(sid)):
         return None
     with _lock:
-        return _index()["sessions"].get(sid)
+        s = _index(True)["sessions"].get(sid)
+        return dict(s) if s else None
 
 
 def create_session(title="", folder="", system="", cwd="", extra=""):

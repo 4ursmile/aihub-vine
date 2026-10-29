@@ -528,12 +528,32 @@ class UsageAndSpaces(unittest.TestCase):
             self.assertEqual(t.call_count, 1)
         self.hu._timer = None
 
-    def test_use_event_goes_through_aihub_hook_use(self):
-        with mock.patch.object(self.hu.subprocess, "run") as run:
-            self.hu.use("chat", session="s1", detail={"engine": "free"}).join(5)
-        args, kw = run.call_args
-        self.assertEqual(args[0][-4:], ["hook", "--use", "--source", "aihub-ui"])
-        self.assertEqual(json.loads(kw["input"]), {"package": "aihub-ui", "component": "chat", "session": "s1", "detail": {"engine": "free"}})
+    def test_use_events_are_spooled_directly_and_flushed_once(self):
+        home = self.hu.A.HOME()
+        os.makedirs(home, exist_ok=True)
+        cfg = os.path.join(home, "config.json")
+        keep = open(cfg).read() if os.path.exists(cfg) else None
+        open(cfg, "w").write(json.dumps({"client_id": "c1"}))
+        spool = os.path.join(home, "queue", "events.jsonl")
+        before = open(spool).read().count("\n") if os.path.exists(spool) else 0
+        try:
+            with mock.patch.object(self.hu, "kick") as k:
+                self.hu.use("chat", session="s1", detail={"engine": "free"})
+                self.hu.use("mcp:x", package="pkg", session="s1", detail={"tool": "t"})
+                self.assertEqual(k.call_count, 2)
+            rows = [json.loads(x) for x in open(spool).read().splitlines()[before:]]
+            self.assertEqual([(r["kind"], r["package"], r["component"], r["client_id"]) for r in rows],
+                             [("use", "aihub-ui", "chat", "c1"), ("use", "pkg", "mcp:x", "c1")])
+            self.assertEqual(len({r["id"] for r in rows}), 2)
+            with mock.patch.object(self.hu.subprocess, "run") as run:
+                self.hu._pending = True
+                self.hu._run()
+            self.assertEqual([c[0][0][-1] for c in run.call_args_list], ["flush", "usage-sync"])
+        finally:
+            if keep is None:
+                os.remove(cfg)
+            else:
+                open(cfg, "w").write(keep)
 
     def test_cli_hook_use_records_one_use_event(self):
         from aihub.cli import hooks

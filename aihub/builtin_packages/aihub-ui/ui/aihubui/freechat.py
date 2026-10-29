@@ -206,10 +206,12 @@ def cancel(sid):
     if not c:
         return False
     c["cancel"].set()
-    try:
-        c["resp"] and c["resp"].close()                                  # unblocks the reader
-    except Exception:
-        pass
+    resp = c.get("resp")
+    if resp is not None:
+        try:
+            resp.close()                                                 # unblocks the reader
+        except Exception:
+            pass
     return True
 
 
@@ -325,7 +327,7 @@ def _round(base, head, body, env, state, secrets):
                 elif kind == "error":
                     err = "API: " + str((d.get("error") or {}).get("message") or d)[:400]
                     break
-    except (OSError, ValueError) as e:                                   # a closed socket after Stop lands here too
+    except Exception as e:                                               # Stop closes the response under the reader: that raises OSError, ValueError or AttributeError ('NoneType' has no attribute ...)
         if not state["cancel"].is_set():
             err = "connection lost: %s" % e
     finally:
@@ -488,6 +490,8 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
             msgs.append({"role": "assistant", "content": api_blocks})
             msgs.append({"role": "user", "content": results})
             rnd += 1
+        if finished and not err and not all_text and not state["cancel"].is_set():
+            err = "The model returned no answer, only thinking (stop reason: %s)%s" % (res["stop"] or "unknown", "; raise the output limit or lower the effort" if res["stop"] == "max_tokens" else "")
         if not finished and not state["cancel"].is_set() and not err:
             err = "stopped after %d tool rounds without a final answer" % MAX_ROUNDS
         made = _save_reports(sid, "\n\n".join(all_text)) if all_text and not err else []

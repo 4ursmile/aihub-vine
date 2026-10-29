@@ -3,19 +3,22 @@
 Claude Code turns are already in Claude's own session logs, which `aihub usage-sync` totals per day and uploads. Free chat talks to the
 API directly, so nothing is logged for it: `note()` appends one line (numbers and the model name only) to ~/.aihub/ui/usage.jsonl, which
 the CLI reads as the tool `aihub-ui`. Then `kick()` starts ONE `aihub usage-sync` after a short quiet window (a burst of turns, or a work
-with many AI nodes, becomes a single upload). `use()` counts a chat send / finished work run as a `use` event of a package (the hub's
-use numbers) through `aihub hook --use`, so it rides the CLI's telemetry spool. Nothing here may raise or block a turn."""
+with many AI nodes, becomes a single upload). `use()` counts a chat send / finished work run / free-chat MCP call as a `use` event of a package (the hub's
+use numbers): it appends to the CLI's telemetry spool and the same quiet window runs one `aihub flush`. Nothing here may raise or block a turn."""
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
+import uuid
 
 from . import aihub as A
 
 WINDOW = 6.0                       # seconds of quiet before the upload starts
 _lock = threading.Lock()
 _timer = None
+_pending = False                    # use events were spooled since the last flush
 
 
 def log_path():
@@ -37,19 +40,48 @@ def note(sid, engine, model, u):
     kick()
 
 
-def use(component, package="aihub-ui", session="", detail=None):
-    """One `use` event for the hub's counts (component: chat, work:<id>). Fire and forget, in a thread."""
-    ev = {"package": package or "aihub-ui", "component": component, "session": str(session or ""), "detail": detail or {}}
-    t = threading.Thread(target=_use, args=(json.dumps(ev),), daemon=True)
-    t.start()
-    return t
-
-
-def _use(line):
+def _json(name):
     try:
-        subprocess.run(A.command() + ["hook", "--use", "--source", "aihub-ui"], input=line, text=True, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=30, env=dict(os.environ, AIHUB_NO_UPDATE="1"))
-    except (OSError, subprocess.SubprocessError):
+        with open(os.path.join(A.HOME(), name), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def use(component, package="aihub-ui", session="", detail=None):
+    """One `use` event for the hub's counts (component: chat, work:<id>, mcp:<server>). The line goes straight into the CLI's telemetry
+    spool (one O_APPEND write, no process, any CLI version reads it: `aihub hook --use` is missing from older installs, which made every
+    count vanish silently). The next `kick()` window then runs ONE `aihub flush` for all of them. Never raises."""
+    global _pending
+    try:
+        cid = _json("config.json").get("client_id")
+        if not cid:
+            return                                                  # the CLI has not named this machine yet (first hook run does)
+        user = os.environ.get("USER") or os.environ.get("USERNAME") or os.environ.get("LOGNAME") or ""
+        try:
+            import socket
+            host = socket.gethostname()
+        except OSError:
+            host = ""
+        ev = {"id": uuid.uuid4().hex, "ts": time.time(), "kind": "use", "package": str(package or "aihub-ui")[:128],
+              "component": str(component)[:128], "session": str(session or "")[:128], "client_id": cid, "source": "aihub-ui",
+              "detail": {str(k)[:40]: (v if isinstance(v, (int, float, bool)) else str(v)[:200]) for k, v in (detail or {}).items()},
+              "local_user": user, "host": host, "os": sys.platform, "user": _json("credentials.json").get("username") or "", "cwd": ""}
+        line = (json.dumps(ev, separators=(",", ":")) + "\n").encode("utf-8", "replace")
+        q = os.path.join(A.HOME(), "queue")
+        os.makedirs(q, exist_ok=True)
+        spool = os.path.join(q, "events.jsonl")
+        if os.path.exists(spool) and os.path.getsize(spool) > 5 * 1024 * 1024:
+            return                                                  # same cap as the CLI's own spool
+        fd = os.open(spool, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, line)
+        finally:
+            os.close(fd)
+        _pending = True
+        kick()
+    except Exception:
         pass
 
 
@@ -64,9 +96,17 @@ def kick():
 
 
 def _run():
-    global _timer
+    global _timer, _pending
     with _lock:
         _timer = None
+        flush, _pending = _pending, False
+    env = dict(os.environ, AIHUB_NO_UPDATE="1")
+    if flush:                                                       # all use events of the window leave in ONE batch
+        try:
+            subprocess.run(A.command() + ["flush"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=120, env=env)
+        except (OSError, subprocess.SubprocessError):
+            pass
     try:
         subprocess.run(A.command() + ["usage-sync"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        timeout=120, env=dict(os.environ, AIHUB_NO_UPDATE="1"))

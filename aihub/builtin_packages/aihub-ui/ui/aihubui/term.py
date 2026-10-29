@@ -15,7 +15,7 @@ try:
     import struct
     import termios
     HAVE_PTY = True
-except ImportError:                                  # Windows: the install runs without a terminal
+except ImportError:                                  # Windows: Term falls back to pipes with its own line editing
     HAVE_PTY = False
 
 MAX = 400_000
@@ -31,14 +31,38 @@ class Term:
         self.code = None
         self.cv = threading.Condition()
         self.t0 = time.time()
-        m, s = pty.openpty()
-        self.fd = m
-        self.set_size(24, 100)
-        self.p = subprocess.Popen(argv, stdin=s, stdout=s, stderr=s, env=dict(env, TERM="xterm-256color"), start_new_session=True, close_fds=True)
-        os.close(s)
+        self.pipe = False
+        self._open(argv, env)
         threading.Thread(target=self._pump, daemon=True).start()
 
+    def _open(self, argv, env):
+        if HAVE_PTY:
+            try:
+                m, s = pty.openpty()
+            except OSError:                          # no free pty: fall through to plain pipes
+                m = None
+            if m is not None:
+                self.fd = m
+                self.set_size(24, 100)
+                try:
+                    self.p = subprocess.Popen(argv, stdin=s, stdout=s, stderr=s, env=dict(env, TERM="xterm-256color"), start_new_session=True, close_fds=True)
+                finally:
+                    os.close(s)
+                return
+        # No pseudo-terminal (Windows): the child gets pipes, this class does the line editing and the echo a terminal would do.
+        self.pipe, self.line = True, bytearray()
+        kw = {}
+        if os.name == "nt":
+            kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            kw["start_new_session"] = True
+        self.p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0,
+                                  env=dict(env, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8", TERM="xterm-256color"), **kw)
+        self.fd = self.p.stdout.fileno()
+
     def set_size(self, rows, cols):
+        if self.pipe:
+            return
         try:
             fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", max(2, min(rows, 300)), max(10, min(cols, 400)), 0, 0))
         except OSError:
@@ -52,6 +76,8 @@ class Term:
                 d = b""
             if not d:
                 break
+            if self.pipe:
+                d = d.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")        # a terminal page needs CR LF
             with self.cv:
                 self.buf += d
                 if len(self.buf) > MAX:
@@ -64,9 +90,17 @@ class Term:
             self.code = code
             self.cv.notify_all()
         try:
-            os.close(self.fd)
+            if self.pipe:
+                self.p.stdout.close()
+            else:
+                os.close(self.fd)
         except OSError:
             pass
+
+    def _echo(self, d):
+        with self.cv:
+            self.buf += d
+            self.cv.notify_all()
 
     def read(self, after, wait=20.0):
         """-> (bytes from absolute position AFTER, new position, exit code or None). Waits up to WAIT seconds for news."""
@@ -85,23 +119,55 @@ class Term:
             return bytes(self.buf[start - self.base:]), top, self.code
 
     def write(self, data):
-        if self.code is None:
-            try:
-                os.write(self.fd, data[:8192])
-            except OSError:
-                pass
+        if self.code is not None:
+            return
+        if self.pipe:
+            self._write_pipe(data[:8192])
+            return
+        try:
+            os.write(self.fd, data[:8192])
+        except OSError:
+            pass
+
+    def _write_pipe(self, data):
+        """Typed keys -> a line editor: echo what is typed, send the line on Enter, Backspace edits, Ctrl-C stops."""
+        for ch in data.decode("utf-8", "replace"):
+            if ch == "\x03":
+                self._echo(b"^C\r\n")
+                self.kill()
+                return
+            if ch in "\r\n":
+                line, self.line = bytes(self.line), bytearray()
+                self._echo(b"\r\n")
+                try:
+                    self.p.stdin.write(line + b"\n")
+                    self.p.stdin.flush()
+                except (OSError, ValueError):
+                    return
+            elif ch in "\x7f\b":
+                if self.line:
+                    self.line = bytearray(bytes(self.line).decode("utf-8", "ignore")[:-1].encode("utf-8"))
+                    self._echo(b"\b \b")
+            elif ch >= " ":
+                self.line += ch.encode("utf-8")
+                self._echo(ch.encode("utf-8"))
 
     def kill(self):
         if self.p.poll() is None:
             try:
-                os.killpg(self.p.pid, signal.SIGTERM)
-            except OSError:
-                self.p.terminate()
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.p.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=10)
+                else:
+                    os.killpg(self.p.pid, signal.SIGTERM)
+            except Exception:
+                try:
+                    self.p.terminate()
+                except Exception:
+                    pass
 
 
 def start(argv, env=None):
-    if not HAVE_PTY:
-        raise RuntimeError("no terminal on this system")
     with lock:
         for k in [k for k, t in terms.items() if t.code is not None and time.time() - t.t0 > 3600]:
             terms.pop(k, None)
