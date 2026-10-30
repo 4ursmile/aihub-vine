@@ -134,11 +134,11 @@ function EffortPick({ value, onChange, close }) {
 }
 // keyboard for every composer panel: focus the search box or the current option on open; ↑ ↓ Home End move over
 // options, MCP cards, switches and fields; 1-9 pick an option / toggle a card; Enter/Space choose (native click)
-const NAV = ".opt, .mcp-card, .sw, .mq, .mcp-q input, input[type=range], .ctxp .btn";
+const OPT_NAV = ".opt, .mcp-card, .sw, .mq, .mcp-q input, input[type=range], .ctxp .btn";
 const isText = (el) => el && el.tagName === "INPUT" && el.type !== "range";
 function useOptKeys(ready = true) {
   const el = useRef();
-  const items = () => el.current ? [...el.current.querySelectorAll(NAV)].filter((x) => !x.disabled && !(x.classList.contains("sw") && x.closest(".mcp-card"))) : [];
+  const items = () => el.current ? [...el.current.querySelectorAll(OPT_NAV)].filter((x) => !x.disabled && !(x.classList.contains("sw") && x.closest(".mcp-card"))) : [];
   useEffect(() => { const b = el.current && (el.current.querySelector(".mq") || el.current.querySelector(".opt.on") || items()[0]); b && b.focus(); }, [!!ready]);
   const onKeyDown = (e) => {
     if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
