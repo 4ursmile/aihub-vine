@@ -260,6 +260,10 @@ def _source_mode(a):
     ind = bool(getattr(a, "indirect", False))
     if ind and src == "repo":
         raise ValueError("-i (through the hub) and --from repo (git only) contradict each other")
+    if src == "repo" and not gitx.available():
+        raise ValueError("--from repo needs git: " + gitx.NO_GIT)
+    if not ind and src != "archive" and registry.no_git_uses_hub():
+        return True, False
     return ind or src == "archive", src == "repo"
 
 
@@ -782,13 +786,16 @@ def cmd_usage(a):
     rep = usage.report(tools, a.days, model=a.model, recs=recs)
     p = usage.pick(rep, a.days)                           # the window --days selects (all time when 0)
     if a.session or a.sessions or a.tips:
+        usage_rates = {}
         ss = usage.sessions_of(p["recs"], meta)
         if a.find:
             ss = usage.find_sessions(ss, a.find)
         if a.json:
-            body = {"tips": usage.tips(ss)} if a.tips else {"sessions": [{k: v for k, v in s.items() if k not in ("reqs", "notes", "text")} for s in usage.sort_sessions(ss, a.sort)]}
-            if a.session:
-                body = {"sessions": [dict(s, notes=usage.notes_of(s)) for s in usage.find_sessions(ss, a.session)]}
+            body = {"tips": usage.tips(ss)} if a.tips else {"sessions": [dict({k: v for k, v in s.items() if k not in ("reqs", "notes", "text")}, flags=usage.flags_of(s))
+                                                                            for s in usage.sort_sessions(ss, a.sort)]}
+            if a.session:       # additive: flags (counts), series (time, context, output, cost, flags per request), tips for this session alone
+                body = {"sessions": [dict(s, notes=usage.notes_of(s), flags=usage.flags_of(s), series=usage.series_of(s, usage_rates), tips=usage.tips([s]))
+                                     for s in usage.find_sessions(ss, a.session)]}
             print(json.dumps(body, default=lambda o: sorted(o)))
             return 0
         if a.tips:
@@ -1714,6 +1721,8 @@ def build_parser():
         arg("--schedule", metavar="WHEN", help="Run on a schedule: seconds, 30s/5m/2h/1d, or a cron expression ('0 8 * * 1-5'). With set: '' removes it."),
         arg("--restart", choices=["no", "on-failure", "always"], help="Restart policy when the bot ends (default: the package's [bot]/[service] restart, else on-failure (service: always); no with --schedule or --fg)."),
         arg("--no-hub", action="store_true", help="Do not report this run to the hub."),
+        arg("--venv", metavar="PATH", help="Run with this virtualenv (its python, VIRTUAL_ENV, its bin first on PATH). Remembered for the package, also for restarts; 'default' clears it. Without it: .venv/venv in the bot or package folder, the package's own venv, then aihub's python."),
+        arg("--python", metavar="PATH", help="Run with this python interpreter (remembered like --venv)."),
         arg("-f", "--follow", action="store_true", help="logs: keep printing new output (Ctrl-C stops)."),
         arg("-n", "--lines", type=int, default=40, metavar="N", help="logs: lines to show (default 40)."),
         arg("--all", action="store_true", help="stop: every running run."),

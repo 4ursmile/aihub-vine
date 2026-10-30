@@ -140,6 +140,149 @@ class SavedNodes(Base):
         self.assertEqual((by["m"].get("preset"), by["k"].get("preset")), ("company-mail", None))
 
 
+class AuthCapture(BaseHTTPRequestHandler):
+    got = []
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        AuthCapture.got.append(self.headers.get("Authorization"))
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+
+class Credentials(Base):
+    def make(self, kind="http", name="Company API", fields=None):
+        return W.save_credential({"kind": kind, "name": name, "fields": fields or {"authorization": "Bearer SET-TOKEN"}}, self.box)
+
+    def test_secret_values_live_only_in_the_box_and_never_in_replies_or_work_files(self):
+        import server
+        server.BOX = self.box
+        c = self.make()
+        self.assertEqual(c["fields"]["authorization"], W.MARK)
+        self.assertNotIn("SET-TOKEN", open(W._creds_file()).read())
+        self.assertEqual(self.box.get_all()[W._ckey(c["id"], "authorization")], "Bearer SET-TOKEN")
+        self.assertNotIn("SET-TOKEN", json.dumps(server.credentials_list(None, {}, {})))
+        r = server.credentials_save(None, {}, {"credential": {"id": c["id"], "kind": "http", "name": "Company API", "fields": {"authorization": W.MARK, "headers": "X-A: 1"}}})
+        self.assertEqual(self.box.get_all()[W._ckey(c["id"], "authorization")], "Bearer SET-TOKEN")      # MARK keeps the stored value
+        self.assertNotIn("SET-TOKEN", json.dumps(r))
+        w = self.save([{"id": "s", "type": "start.manual"}, {"id": "r", "type": "io.request", "credential": c["id"], "config": {"url": "http://x"}}], [{"from": "s", "to": "r"}])
+        self.assertEqual(w["nodes"][1]["credential"], c["id"])
+        self.assertNotIn("SET-TOKEN", json.dumps(store.get_work(w["id"])))
+        with self.assertRaises(ValueError):
+            W.save_credential({"id": c["id"], "kind": "smtp", "name": "x"}, self.box)                  # the kind cannot change
+        self.assertTrue(W.delete_credential(c["id"], self.box))
+        self.assertNotIn(W._ckey(c["id"], "authorization"), self.box.get_all())
+
+    def test_precedence_is_node_over_set_over_saved_node_and_a_set_is_shared(self):
+        c = self.make("smtp", "Mail", {"host": "smtp.set.com", "username": "set@x.com", "password": "set-pw", "security": "ssl"})
+        pre = W.save_preset({"type": "send.smtp", "name": "P", "config": {"host": "smtp.preset.com", "port": 25, "username": "pre@x.com"}}, self.box)
+        spec = W.catalogue()["send.smtp"]
+        a = {"id": "a", "type": "send.smtp", "credential": c["id"], "preset": pre["id"], "config": {"host": "smtp.node.com", "to": "t@y.com"}}
+        b = {"id": "b", "type": "send.smtp", "credential": c["id"], "config": {"to": "u@y.com", "password": ""}}
+        w = self.save([{"id": "s", "type": "start.manual"}, a, b], [{"from": "s", "to": "a"}, {"from": "s", "to": "b"}])
+        ca = W.with_secrets(w["id"], w["nodes"][1], spec, self.box)
+        cb = W.with_secrets(w["id"], w["nodes"][2], spec, self.box)
+        self.assertEqual((ca["host"], ca["username"], ca["password"], ca["port"]), ("smtp.node.com", "set@x.com", "set-pw", 25))   # node > set > saved node
+        self.assertEqual((cb["host"], cb["password"], cb["to"]), ("smtp.set.com", "set-pw", "u@y.com"))                        # both nodes use the one set
+        W.save_credential({"id": c["id"], "kind": "smtp", "name": "Mail", "fields": {"host": "smtp.new.com", "password": W.MARK}}, self.box)
+        self.assertEqual(W.with_secrets(w["id"], w["nodes"][2], spec, self.box)["host"], "smtp.new.com")                       # one edit reaches both
+        self.assertEqual(W.credentials_view()[0]["used_in"][0]["nodes"], ["send.smtp", "send.smtp"])
+
+    def test_package_kind_and_the_teams_nodes_share_one_set(self):
+        cat = W.catalogue(force=True)
+        self.assertEqual(W.kinds()["teams"]["package"], "aihub-nodes-teams")
+        c = self.make("teams", "Teams", {"tenant_id": "t1", "webhook_url": "https://hook/1", "hook_secret": "0123456789abcdef"})
+        self.assertNotIn("https://hook/1", open(W._creds_file()).read())
+        out = W.with_secrets("w", {"id": "n", "type": "pkg:aihub-nodes-teams/teams-send", "credential": c["id"], "config": {}}, cat["pkg:aihub-nodes-teams/teams-send"], self.box)
+        legacy = W.with_secrets("w", {"id": "m", "type": "send.teams", "credential": c["id"], "config": {}}, cat["send.teams"], self.box)
+        start = W.with_secrets("w", {"id": "t", "type": "start.teams", "credential": c["id"], "config": {}}, cat["start.teams"], self.box)
+        self.assertEqual((out["webhook_url"], legacy["webhook_url"], start["secret"]), ("https://hook/1", "https://hook/1", "0123456789abcdef"))
+
+    def test_a_run_sends_the_set_and_the_node_override_wins(self):
+        srv = HTTPServer(("127.0.0.1", 0), AuthCapture)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        AuthCapture.got.clear()
+        c = self.make()
+        url = "http://127.0.0.1:%d/" % srv.server_address[1]
+        w = self.save([{"id": "s", "type": "start.manual"},
+                       {"id": "a", "type": "io.request", "credential": c["id"], "config": {"method": "POST", "url": url, "body": "{}"}},
+                       {"id": "b", "type": "io.request", "credential": c["id"], "config": {"method": "POST", "url": url, "body": "{}", "authorization": "Bearer MINE"}}],
+                      [{"from": "s", "to": "a"}, {"from": "a", "to": "b"}])
+        self.engine.fire(w, w["nodes"][0], {"text": "go"}, "manual")
+        runs = self.final(w["id"])
+        self.assertEqual(runs[0]["status"], "done", runs[0])
+        self.assertEqual(AuthCapture.got, ["Bearer SET-TOKEN", "Bearer MINE"])
+        self.assertNotIn("SET-TOKEN", json.dumps(runs))                                              # not in the run record either
+
+    def test_git_login_override_reaches_git_through_env_and_never_argv(self):
+        sys.path.insert(0, os.path.join(UI, "nodes"))
+        import _fsread as F
+        args, env = F.git_login({"username": "bob", "token": "tok-SECRET"}, "git.example.com")
+        self.assertNotIn("tok-SECRET", " ".join(args))
+        self.assertEqual((env["AIHUB_NODE_GIT_USER"], env["AIHUB_NODE_GIT_TOKEN"]), ("bob", "tok-SECRET"))
+        self.assertIn("credential.https://git.example.com.helper=", args)
+        self.assertEqual(F.git_login({"token": ""}, "git.example.com"), ([], {}))
+        with self.assertRaises(ValueError):
+            F.git_login({"token": "t"}, "evil.com/x#")
+        # the real node program with a fake git that records what it was given
+        import subprocess
+        bindir = tempfile.mkdtemp()
+        rec = os.path.join(bindir, "rec.txt")
+        fake = os.path.join(bindir, "git")
+        with open(fake, "w") as f:
+            f.write('#!/bin/sh\necho "ARGS $*" >> "%s"\necho "TOKEN=$AIHUB_NODE_GIT_TOKEN USER=$AIHUB_NODE_GIT_USER" >> "%s"\necho "fatal: Authentication failed tok-SECRET" >&2\nexit 1\n' % (rec, rec))
+        os.chmod(fake, 0o755)
+        c = self.make("git", "Git", {"username": "bob", "token": "tok-SECRET"})
+        spec = W.catalogue()["git.read"]
+        cfg = W.with_secrets("w", {"id": "g", "type": "git.read", "credential": c["id"], "config": {"url": "https://git.example.com/o/r.git"}}, spec, self.box)
+        self.assertEqual((cfg["username"], cfg["token"]), ("bob", "tok-SECRET"))
+        for prog in ("git_read.py", "git_pull.py"):
+            open(rec, "w").close()
+            p = subprocess.run([sys.executable, os.path.join(UI, "nodes", prog)], input=json.dumps({"config": cfg}), capture_output=True, text=True,
+                               env=dict(os.environ, PATH=bindir + os.pathsep + os.environ["PATH"], AIHUB_HOME=self.tmp))
+            seen = open(rec).read()
+            self.assertIn("TOKEN=tok-SECRET USER=bob", seen)
+            self.assertNotIn("tok-SECRET", seen.split("TOKEN=")[0])                                 # not in argv
+            self.assertNotIn("tok-SECRET", p.stdout)                                                 # scrubbed from the error shown
+            self.assertFalse(json.loads(p.stdout)["ok"])
+
+    def test_export_keeps_the_kind_not_the_values_and_a_missing_set_fails_clearly(self):
+        import server
+        server.BOX = self.box
+        c = self.make("teams", "Teams", {"webhook_url": "https://hook/9"})
+        w = self.save([{"id": "s", "type": "start.manual"}, {"id": "t", "type": "send.teams", "credential": c["id"], "config": {"text": "hi"}}], [{"from": "s", "to": "t"}])
+        server.A.run = lambda args, **k: {"data": [], "messages": []}
+        out = server.work_export(None, {}, {"id": w["id"], "name": "wf-teams", "version": "1.0.0"})
+        files = [os.path.join(dp, f) for dp, _, fs in os.walk(out["path"]) for f in fs]
+        text = "".join(open(f).read() for f in files if f.endswith((".json", ".md", ".toml")))
+        self.assertNotIn("https://hook/9", text)
+        node = next(n for f in files if f.endswith(".work.json") for n in json.load(open(f))["nodes"] if n["id"] == "t")
+        self.assertEqual((node.get("credential"), node["credential_kind"], node["credential_name"]), (None, "teams", "Teams"))
+        self.assertIn("teams", " ".join(server._risks(store.clean_work({"nodes": [node]}))))
+        # importing: no set -> reported; one set of the kind -> linked
+        imp = store.clean_work({"title": "i", "nodes": [{"id": "s", "type": "start.manual"}, dict(node)], "edges": [{"from": "s", "to": "t"}]})
+        W.delete_credential(c["id"], self.box)
+        self.assertEqual(server._needs_credentials(server._bind_credentials(imp))[0]["kind"], "teams")
+        w2 = store.save_work(imp)
+        rid = self.engine.fire(w2, w2["nodes"][0], {"text": "go"}, "manual")
+        self.final(w2["id"])
+        r = W.get_run(w2["id"], rid)
+        self.assertEqual(r["status"], "failed")
+        self.assertIn("needs a 'teams' credential set", r["nodes"]["t"]["error"])
+        c2 = self.make("teams", "Mine", {"webhook_url": "https://hook/2"})
+        self.assertEqual(server._bind_credentials(store.clean_work(imp))["nodes"][1]["credential"], c2["id"])
+        # a node whose set was deleted fails with the reason
+        w3 = self.save([{"id": "s", "type": "start.manual"}, {"id": "t", "type": "send.teams", "credential": "ghost", "config": {"text": "hi"}}], [{"from": "s", "to": "t"}])
+        rid = self.engine.fire(w3, w3["nodes"][0], {"text": "go"}, "manual")
+        self.final(w3["id"])
+        self.assertIn("was deleted", W.get_run(w3["id"], rid)["nodes"]["t"]["error"])
+
+
 class Cron(unittest.TestCase):
     def test_schedules(self):
         k, s = W.parse_schedule("30 8 * * 1-5")
@@ -357,7 +500,7 @@ class Generate(Base):
     def test_prompt_documents_data_flow_and_the_example_is_valid(self):
         self.assertIn("{{in.", W.GEN_RULES)
         self.assertIn("OUTPUT:", W.GEN_RULES)
-        self.assertIn("out: path", W._gen_catalogue())
+        self.assertIn("text:path", W._gen_catalogue())
         w = W.checked_work(json.loads(json.dumps(W.GEN_EXAMPLE)))
         self.assertEqual(len(w["nodes"]), 4)
         self.assertEqual(w["nodes"][0]["config"]["inputs"], "repo|Repository URL|text||*")

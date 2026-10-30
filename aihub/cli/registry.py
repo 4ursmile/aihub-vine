@@ -370,6 +370,26 @@ def quiet():
     return cm()
 
 
+_TOLD = False
+
+
+def no_git_uses_hub():
+    """The ONE check for "no git program on this machine, but a hub is configured, and --from repo was not asked": every install path
+    (install, download, update, sync, setup profiles, builtin and policy installs) then goes through the hub up front, as with -i.
+    Says so once per process."""
+    global _TOLD
+    if REPO_ONLY or gitx.available() or not paths.hub_configured():
+        return False
+    if not _TOLD:
+        _TOLD = True
+        ui.info("git is not installed: packages come through the hub (as with -i)")
+    return True
+
+
+def via_hub():
+    return INDIRECT or no_git_uses_hub()
+
+
 def _hub_first():
     return QUIET and not REPO_ONLY and paths.hub_configured()
 
@@ -411,16 +431,16 @@ def _from_hub(r, dest):
 
 
 def _git_login_failed(e):
-    """The git route failed because a login is missing or was refused (never a missing commit or a network problem)."""
+    """The git route failed because a login is missing or was refused, or git is not installed at all (never a missing commit or a network problem)."""
     msg = gitx.strip_hints(str(e))
-    return gitx.fetch_failure(msg) == "auth" or remote_config.is_auth_error(msg)
+    return gitx.NO_GIT in msg or gitx.fetch_failure(msg) == "auth" or remote_config.is_auth_error(msg)
 
 
 def _hub_instead(r, dest, e):
     """No usable git login: take the package through the hub (what `-i` does). Not with `--from repo`, and not without a hub."""
     if REPO_ONLY or not paths.hub_configured():
         raise e
-    ui.info("%s: no valid git login, downloading through the hub instead" % r["name"])
+    ui.info("%s: %s, downloading through the hub instead" % (r["name"], "git is not installed" if gitx.NO_GIT in str(e) else "no valid git login"))
     try:
         return _from_hub(r, dest)
     except (OSError, ValueError, tarfile.TarError, api.ApiError) as he:
@@ -431,12 +451,12 @@ def checkout(r, dest):
     """Materialise a resolved package into dest (its subdir of the repo at the requested ref/branch)."""
     if REPO_ONLY and on_hub(r.get("repo")):
         raise api.ApiError("%s %s is an archive package: it was published to the hub and has no git repository. Install it without --from repo" % (r["name"], r["version"]))
-    if _hub_first() and not (INDIRECT or on_hub(r.get("repo"))):
+    if _hub_first() and not (via_hub() or on_hub(r.get("repo"))):
         try:
             return _from_hub(r, dest)
         except (OSError, ValueError, tarfile.TarError, api.ApiError):
             pass                                  # the hub could not serve it: git, as before (still without asking)
-    elif INDIRECT or on_hub(r.get("repo")):
+    elif via_hub() or on_hub(r.get("repo")):
         try:
             return _from_hub(r, dest)
         except (OSError, ValueError, tarfile.TarError) as e:       # the hub is the way now; git is legacy and `-i` never falls back to it
@@ -555,13 +575,14 @@ def prefetch(pkgs, base, workers=None):
             for r in rs:
                 one(r, src)
 
-    via_hub = [r for r in pkgs if INDIRECT or on_hub(r.get("repo")) or _hub_first()]    # plain parallel downloads; the rest share one clone per git repo
+    hub_all = via_hub()
+    hub_pkgs = [r for r in pkgs if hub_all or on_hub(r.get("repo")) or _hub_first()]    # plain parallel downloads; the rest share one clone per git repo
     groups = {}
     for r in pkgs:
-        if r not in via_hub:
+        if r not in hub_pkgs:
             repo = r["repo"]
             groups.setdefault((repo["url"], repo.get("branch") or "main", repo.get("ref")), []).append(r)
-    jobs = [lambda r=r: one(r) for r in via_hub] + [lambda rs=rs: group(rs) for rs in groups.values()]
+    jobs = [lambda r=r: one(r) for r in hub_pkgs] + [lambda rs=rs: group(rs) for rs in groups.values()]
     with ThreadPoolExecutor(max_workers=max(1, min(workers or WORKERS, len(jobs)))) as ex:
         list(ex.map(lambda j: j(), jobs))
     return out

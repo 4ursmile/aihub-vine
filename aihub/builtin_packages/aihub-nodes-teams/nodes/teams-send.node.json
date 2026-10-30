@@ -4,10 +4,47 @@
   "kind": "action",
   "group": "Teams",
   "description": "Posts a message to a Teams channel through its Workflows / incoming webhook URL.",
-  "run": ["{python}", "nodes/teams_send.py"],
+  "run": [
+    "{python}",
+    "nodes/teams_send.py"
+  ],
   "timeout": 30,
+  "inputs": [
+    {
+      "name": "input",
+      "type": "text",
+      "desc": "the message text when 'Message' is {{input}}",
+      "required": false
+    }
+  ],
+  "outputs": [
+    {
+      "name": "text",
+      "type": "text",
+      "desc": "what was posted",
+      "example": "posted"
+    }
+  ],
   "fields": [
-    {"name": "webhook_url", "label": "Webhook URL", "type": "password", "required": true, "help": "Stored encrypted; never shown again."},
-    {"name": "text", "label": "Message", "type": "textarea", "default": "{{input}}", "help": "{{input}} is the text from the previous node."}
-  ]
+    {
+      "name": "webhook_url",
+      "label": "Webhook URL",
+      "type": "password",
+      "required": false,
+      "help": "Stored encrypted; never shown again."
+    },
+    {
+      "name": "text",
+      "label": "Message",
+      "type": "textarea",
+      "default": "{{input}}",
+      "help": "{{input}} is the text from the previous node."
+    }
+  ],
+  "credential": {
+    "kind": "teams",
+    "map": {
+      "webhook_url": "webhook_url"
+    }
+  }
 }

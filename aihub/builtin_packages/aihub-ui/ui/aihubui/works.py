@@ -21,6 +21,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -46,6 +47,41 @@ TEAMS_OUT_GUIDE = """Send a message to Teams (no app registration, no admin cons
 4. Paste it into "Workflow URL" here. It is encrypted on this machine and never shown again.
 5. Payload "card" matches that template. Choose "text" only if your own flow reads {"text": ...}.
 Test: put Start: manual > Send to Teams, set Message, press Run."""
+
+SLACK_GUIDE = """Send a message to Slack with an Incoming Webhook:
+1. Open https://api.slack.com/apps > Create New App > From scratch, pick the workspace.
+2. Incoming Webhooks > turn it on > Add New Webhook to Workspace > choose the channel.
+3. Copy the Webhook URL (https://hooks.slack.com/services/...). Treat it like a password: it is stored encrypted here.
+Test: Start: manual > Send to Slack, set Message, press Run."""
+
+DISCORD_GUIDE = """Send a message to Discord with a channel webhook:
+1. In Discord: channel settings (gear) > Integrations > Webhooks > New Webhook > Copy Webhook URL.
+2. Paste it into "Webhook URL". It is stored encrypted here. @everyone / @here in the text never ping anyone.
+Plain messages are cut at 2000 characters; with a Title the text goes into an embed (4096).
+Test: Start: manual > Send to Discord, set Message, press Run."""
+
+WEBHOOK_GUIDE = """Send data to any URL (Zapier, n8n, Make, your own service):
+1. Paste the https URL. If the receiver wants a key, put it in "Authorization value" (stored encrypted).
+2. Body: JSON is sent as it is, anything else is wrapped as {"text": ...}. Format "text" sends it raw.
+The answer of the receiver is passed on. For other methods or reading data use the HTTP request node.
+Test: Start: manual > Send to webhook, set the URL and body, press Run."""
+
+SLACK_IN_GUIDE = """Start a work from a Slack message or slash command. Slack cannot call your laptop, so point a tunnel at this node's port.
+1. Pick a Local port (8792) and turn the work on; the node listens on 127.0.0.1:PORT. Start a tunnel for that port (cloudflared / ngrok), note its https address.
+2. https://api.slack.com/apps > your app > Basic Information > copy the Signing Secret into this node (stored encrypted). Requests without a valid signature are refused.
+3. Event Subscriptions: Request URL = https://<tunnel>/slack/events (Slack confirms it at once, so the work must be on). Subscribe to bot events message.channels / message.groups / message.im / app_mention. Invite the bot to the channel.
+4. Optional slash command: Request URL = https://<tunnel>/slack/command; the text after the command starts the run.
+Reply with Send to Slack (or the thread via Data channel, thread_ts). Bot messages are ignored unless you tick Include bots."""
+
+TELEGRAM_IN_GUIDE = """Start a work from a Telegram message. No tunnel or open port: the node asks Telegram for new messages (long polling).
+1. In Telegram talk to @BotFather: /newbot, copy the bot token. Stored encrypted here.
+2. Write to your bot (or add it to a group; in groups turn off privacy with /setprivacy to read every message).
+3. Turn the work on. Messages sent while it was off are skipped. Only one program may poll a bot at a time.
+Use Chat IDs to accept only your own chat (send a message, the run's data shows chat_id). Reply with Send to Telegram: its Chat ID is filled from the message."""
+
+TELEGRAM_OUT_GUIDE = """Send a message to Telegram with a bot (@BotFather: /newbot, copy the token).
+Chat ID: your user id, a group id (negative), or @channelname. After a Start: Telegram node it is filled from the message.
+Test: Start: manual > Send to Telegram, set Chat ID and Message, press Run."""
 
 TEAMS_IN_GUIDE = """Start a work from a Teams message. Teams cannot call your laptop, so a Power Automate flow forwards messages to a tunnel that points at this node's port.
 1. Pick a Local port (8791) and type a long random Shared secret. Turn the work on: the node now listens on 127.0.0.1:PORT.
@@ -148,6 +184,47 @@ BUILTIN = {
                                {"name": "from_regex", "label": "Only from senders matching (regex)", "type": "text", "default": ""},
                                {"name": "chat", "label": "Only in this chat or channel (exact name)", "type": "text", "default": ""},
                                {"name": "strip_html", "label": "Turn Teams HTML into plain text", "type": "checkbox", "default": True}]},
+    "start.slack": {"title": "Start: Slack message", "kind": "trigger", "group": "Chat", "desc": "Starts when Slack posts a message, mention or slash command to this node's own listener (127.0.0.1, Slack signature required).",
+                    "run": ["{python}", "{pkg}/nodes/slack_in.py"], "timeout": 60, "guide": SLACK_IN_GUIDE,
+                    "fields": [{"name": "port", "label": "Local port", "type": "number", "default": 8792, "required": True, "help": "Expose only this port through your tunnel."},
+                               {"name": "signing_secret", "label": "Signing secret", "type": "password", "required": True, "help": "Slack app > Basic Information. Stored encrypted."},
+                               {"name": "channel", "label": "Only these channel IDs (space or comma separated)", "type": "text", "default": ""},
+                               {"name": "from_regex", "label": "Only from user IDs matching (regex)", "type": "text", "default": ""},
+                               {"name": "include_bots", "label": "Include bot messages", "type": "checkbox", "default": False}]},
+    "start.telegram": {"title": "Start: Telegram message", "kind": "trigger", "group": "Chat", "desc": "Starts when your Telegram bot receives a message. Polls Telegram: no tunnel, no open port.",
+                       "run": ["{python}", "{pkg}/nodes/telegram_in.py"], "timeout": 60, "guide": TELEGRAM_IN_GUIDE,
+                       "fields": [{"name": "bot_token", "label": "Bot token", "type": "password", "required": True, "help": "From @BotFather. Stored encrypted."},
+                                  {"name": "chat_ids", "label": "Only these chat IDs (space or comma separated)", "type": "text", "default": ""},
+                                  {"name": "from_regex", "label": "Only from names matching (regex)", "type": "text", "default": ""},
+                                  {"name": "include_bots", "label": "Include messages from bots", "type": "checkbox", "default": False}]},
+    "send.telegram": {"title": "Send to Telegram", "kind": "action", "group": "Chat", "desc": "Sends a message through a Telegram bot.",
+                      "run": ["{python}", "{pkg}/nodes/telegram_send.py"], "timeout": 60, "templated": ["chat_id", "reply_to"], "takes": ["chat_id"], "guide": TELEGRAM_OUT_GUIDE,
+                      "fields": [{"name": "bot_token", "label": "Bot token", "type": "password", "required": True, "help": "From @BotFather. Stored encrypted."},
+                                 {"name": "chat_id", "label": "Chat ID", "type": "text", "default": "{{data.chat_id}}", "required": True, "help": "Filled from a Start: Telegram node; or a user id, group id, @channel."},
+                                 {"name": "text", "label": "Message", "type": "textarea", "default": "{{input}}", "required": True},
+                                 {"name": "format", "label": "Format", "type": "select", "options": ["plain", "HTML", "MarkdownV2"], "default": "plain"},
+                                 {"name": "reply_to", "label": "Reply to message ID (optional)", "type": "text", "default": "{{data.message_id}}"}]},
+    "send.slack": {"title": "Send to Slack", "kind": "action", "group": "Chat", "desc": "Posts a message to a Slack channel through an Incoming Webhook URL.",
+                   "run": ["{python}", "{pkg}/nodes/slack_send.py"], "timeout": 60, "guide": SLACK_GUIDE,
+                   "fields": [{"name": "webhook_url", "label": "Webhook URL", "type": "password", "required": True, "help": "https://hooks.slack.com/services/... Stored encrypted."},
+                              {"name": "title", "label": "Title (optional)", "type": "text", "default": ""},
+                              {"name": "text", "label": "Message", "type": "textarea", "default": "{{input}}", "required": True},
+                              {"name": "username", "label": "Sender name (optional)", "type": "text", "default": ""},
+                              {"name": "icon_emoji", "label": "Icon, e.g. :robot_face: (optional)", "type": "text", "default": ""}]},
+    "send.discord": {"title": "Send to Discord", "kind": "action", "group": "Chat", "desc": "Posts a message to a Discord channel through a webhook URL.",
+                     "run": ["{python}", "{pkg}/nodes/discord_send.py"], "timeout": 60, "guide": DISCORD_GUIDE,
+                     "fields": [{"name": "webhook_url", "label": "Webhook URL", "type": "password", "required": True, "help": "https://discord.com/api/webhooks/... Stored encrypted."},
+                                {"name": "title", "label": "Title (optional, makes it an embed)", "type": "text", "default": ""},
+                                {"name": "text", "label": "Message", "type": "textarea", "default": "{{input}}", "required": True},
+                                {"name": "username", "label": "Sender name (optional)", "type": "text", "default": ""}]},
+    "send.webhook": {"title": "Send to webhook", "kind": "action", "group": "Chat", "desc": "POSTs JSON (or text) to any https URL: Zapier, n8n, Make, your own service. Data: status.",
+                     "run": ["{python}", "{pkg}/nodes/webhook_send.py"], "timeout": 60, "templated": ["url"], "guide": WEBHOOK_GUIDE,
+                     "fields": [{"name": "url", "label": "URL", "type": "text", "required": True, "help": "https only; may use {{data.x}}"},
+                                {"name": "method", "label": "Method", "type": "select", "options": ["POST", "PUT", "PATCH"], "default": "POST"},
+                                {"name": "body", "label": "Body", "type": "textarea", "default": "{{input}}"},
+                                {"name": "format", "label": "Format", "type": "select", "options": ["json", "text"], "default": "json"},
+                                {"name": "headers", "label": "Headers (Name: value per line)", "type": "textarea", "default": ""},
+                                {"name": "secret", "label": "Authorization value (optional)", "type": "password", "default": "", "help": "e.g. Bearer abc123. Stored encrypted."}]},
     "send.teams": {"title": "Send to Teams", "kind": "action", "group": "Teams", "desc": "Posts a message to a channel or chat through a Teams Workflows webhook URL.",
                    "run": ["{python}", "{pkg}/nodes/teams_out.py"], "timeout": 60,
                    "guide": TEAMS_OUT_GUIDE,
@@ -261,34 +338,112 @@ BUILTIN = {
 
 _cat = {"t": 0.0, "v": {}}
 ASSIST = ("input", "data", "file", "skill")                   # what a field may suggest + highlight: {{input}}/{{trigger}}, {{data.key}}, @file, /skill
-BUILTIN_OUTPUTS = {"send.smtp": ["to", "subject", "attachments", "action", "path"], "git.pull": ["path"], "io.path": ["path"], "space.publish": ["url"]}
+for _t in ("git.read", "git.pull"):                                   # a login for this call only: wins over the Vault / credential helper (https only, never argv or disk)
+    BUILTIN[_t]["fields"] = BUILTIN[_t]["fields"] + [
+        {"name": "username", "label": "Login username (overrides the Vault)", "type": "text", "default": "", "help": "Empty = x-access-token. Only used together with a token."},
+        {"name": "token", "label": "Access token (overrides the Vault)", "type": "password", "help": "Stored encrypted. Empty = the Vault / credential helper answers as usual."}]
+# which credential kind each builtin node takes, and which node field gets which set field ({set field: node field})
+BUILTIN_CRED = {"send.smtp": ("smtp", {}), "io.request": ("http", {}), "git.read": ("git", {"username": "username", "token": "token"}), "git.pull": ("git", {"username": "username", "token": "token"}),
+                "send.teams": ("teams", {"webhook_url": "webhook_url"}), "start.teams": ("teams", {"hook_secret": "secret"}),
+                "send.slack": ("slack", {"webhook_url": "webhook_url"}), "send.discord": ("discord", {"webhook_url": "webhook_url"}),
+                "start.slack": ("slack", {"signing_secret": "signing_secret"}), "start.telegram": ("telegram", {"bot_token": "bot_token"}), "send.telegram": ("telegram", {"bot_token": "bot_token"})}
+for _t, (_k, _m) in BUILTIN_CRED.items():
+    BUILTIN[_t]["credential"] = {"kind": _k, "map": _m}
+
 CLAUDE_OUT = "the reply text. To hand a file or folder on, make Claude end the reply with `OUTPUT: /full/path`"
-# what a node hands on (`out`: text|path|json|url, `out_note`) and what it needs from the nodes before it (`needs`, `needs_note`); shown in the editor
-BUILTIN_IO = {
-    "start.manual": ("text", "the text you type; your inputs are {{data.name}}", "", ""),
-    "start.cron": ("text", "the text you set", "", ""),
-    "start.webhook": ("text", "the POSTed text (data too, if sent)", "", ""),
-    "start.teams": ("text", "the message text", "", ""),
-    "ai.claude": ("text", CLAUDE_OUT, "", ""),
-    "ai.free": ("text", "the reply text", "", ""),
-    "flow.filter": ("text", "the same input, or nothing (the branch stops)", "", ""),
-    "flow.note": ("text", "the same input", "", ""),
-    "flow.template": ("text", "the template filled in", "", ""),
-    "flow.output": ("text", "the run's answer", "", ""),
-    "flow.memory": ("text", "remembered context + the input", "", ""),
-    "io.read_file": ("text", "the file's text", "", ""),
-    "code.python": ("json", "the function's return value as JSON; each key is {{data.key}}", "", ""),
-    "io.request": ("json", "the answer text; {{data.status}}", "", ""),
-    "git.read": ("text", "the file text or folder listing", "", ""),
-    "git.pull": ("path", "the folder or file path, not its content", "", ""),
-    "io.path": ("path", "the path(s), not the content", "", ""),
-    "space.publish": ("url", "the space reference and link", "path", "a file or folder path: a path node before it, or a Claude task that ends with OUTPUT: /full/path"),
-    "send.email": ("text", "what was sent", "", ""),
-    "send.smtp": ("text", "what was sent or saved; {{data.path}} for an eml draft", "", ""),
-    "flow.loop": ("text", "the current item, once per pass", "", ""),
-    "flow.endloop": ("text", "the results of all passes", "", ""),
-    "send.teams": ("text", "what was sent", "", ""),
+
+
+# ONE explicit input/output schema per node. inputs: [{name, type text|path|json|url, desc, required}]  (name `input` = the text of the parent node(s), {{input}};
+# any other name = a standard data key taken from the node before, {{data.name}}, or a settings field of that name)
+# outputs: [{name, type, desc, example}]  (name `text` = what is handed on as {{input}}; any other name = {{data.name}} for the nodes after).
+def _i(name, type="text", desc="", required=False):
+    return {"name": name, "type": type, "desc": desc, "required": required}
+
+
+def _o(name, type="text", desc="", example=""):
+    return {"name": name, "type": type, "desc": desc, "example": example}
+
+
+_IN_TEXT = _i("input", "text", "the text of the node before (optional)")
+_MAIL_KEYS = [_i(k, "text", "taken from the node before when the field is empty") for k in ("to", "subject", "body")]
+BUILTIN_SCHEMA = {
+    "start.manual": ([], [_o("text", "text", "the text you type for the run", "manual run"), _o("<input name>", "text", "each input you declare is {{data.name}}", "")]),
+    "start.cron": ([], [_o("text", "text", "the text you set", "nightly check")]),
+    "start.webhook": ([], [_o("text", "text", "the POSTed text", "deploy done"), _o("<key>", "json", "keys of the POSTed `data` object", "")]),
+    "start.teams": ([], [_o("text", "text", "the message text", "deploy now"), _o("from", "text", "sender", "alice"), _o("chat", "text", "channel or chat name", "Ops")]),
+    "ai.claude": ([_IN_TEXT, _i("path", "path", "folders/files named by a pointer node are opened by Claude")], [_o("text", "text", CLAUDE_OUT, "Done. OUTPUT: /Users/me/report/index.html")]),
+    "ai.free": ([_IN_TEXT], [_o("text", "text", "the reply text", "A short summary...")]),
+    "flow.filter": ([_i("input", "text", "the text tested against the regex", True)], [_o("text", "text", "the same input, or nothing (the branch stops)", "")]),
+    "flow.note": ([_IN_TEXT], [_o("text", "text", "the same input", "")]),
+    "flow.template": ([_IN_TEXT], [_o("text", "text", "the template filled in", "Hello ada")]),
+    "flow.output": ([_IN_TEXT], [_o("text", "text", "the run's answer", "Report ready")]),
+    "flow.memory": ([_IN_TEXT], [_o("text", "text", "remembered context + the input", "Remembered context: ...")]),
+    "io.read_file": ([_i("path", "path", "a file (or folder) path; relative = the run folder (set in the node)", False)], [_o("text", "text", "the file's text", "col1,col2\n1,2"), _o("json", "json", "the parsed JSON when 'Parse' is JSON", "")]),
+    "code.python": ([_IN_TEXT], [_o("text", "json", "the function's return value as JSON", '{"total": 3}'), _o("<key>", "text", "each key of a returned object is {{data.key}}", "")]),
+    "io.request": ([_i("url", "url", "set in the node, may use {{data.x}}", False)], [_o("text", "json", "the answer text", '{"items": []}'), _o("status", "text", "HTTP status code", "200")]),
+    "git.read": ([_i("url", "url", "repository URL", True)], [_o("text", "text", "the file text or folder listing", "# README ...")]),
+    "git.pull": ([_i("url", "url", "repository URL", True)], [_o("text", "path", "the folder or file path, not its content", "/Users/me/.aihub/ui/git/repo"), _o("path", "path", "the same path as {{data.path}}", "/Users/me/.aihub/ui/git/repo")]),
+    "io.path": ([_IN_TEXT], [_o("text", "path", "the path(s), not the content", "/Users/me/data"), _o("path", "path", "the same path as {{data.path}}", "/Users/me/data")]),
+    "space.publish": ([_i("path", "path", "a file or folder (folder: index.html at its top): a path node before it, or a Claude task that ends with OUTPUT: /full/path", True)],
+                      [_o("text", "url", "the space reference and link", "Published space me@dash http://hub/#/s/me@dash"), _o("url", "url", "the link as {{data.url}}", "http://hub/#/s/me@dash")]),
+    "send.email": (_MAIL_KEYS, [_o("text", "text", "what was sent", "Sent to a@x.com")]),
+    "send.smtp": (_MAIL_KEYS + [_i("attachments", "path", "one path per line, from the node before")],
+                  [_o("text", "text", "what was sent or saved", "Sent to a@x.com"), _o("to", "text", "recipients", "a@x.com"), _o("subject", "text", "", "Report"), _o("attachments", "path", "", ""),
+                   _o("action", "text", "send | draft | eml", "send"), _o("path", "path", "the .eml file for an eml draft", "")]),
+    "send.teams": ([_IN_TEXT], [_o("text", "text", "what was posted", "posted")]),
+    "start.slack": ([], [_o("text", "text", "the message text", "deploy now"), _o("from", "text", "Slack user ID", "U024BE7LH"), _o("channel", "text", "channel ID", "C024BE91L"),
+                         _o("thread_ts", "text", "thread to reply in", "1700000000.0001"), _o("ts", "text", "message time", ""), _o("command", "text", "slash command, if any", "/ask"), _o("response_url", "text", "slash command reply URL", "")]),
+    "start.telegram": ([], [_o("text", "text", "the message text", "hello"), _o("from", "text", "sender name", "alice"), _o("chat_id", "text", "chat to reply to", "123456"),
+                            _o("chat", "text", "chat name", "Ops"), _o("message_id", "text", "message id", "42")]),
+    "send.telegram": ([_IN_TEXT, _i("chat_id", "text", "set in the node, or from Start: Telegram", False)], [_o("text", "text", "what was sent", "sent"), _o("message_id", "text", "id of the sent message", "43")]),
+    "send.slack": ([_IN_TEXT], [_o("text", "text", "what was posted", "posted")]),
+    "send.discord": ([_IN_TEXT], [_o("text", "text", "what was posted", "posted")]),
+    "send.webhook": ([_IN_TEXT], [_o("text", "text", "the receiver's answer", '{"ok": true}'), _o("status", "text", "HTTP status code", "200")]),
+    "flow.loop": ([_i("input", "text", "the list: lines, comma separated, or a JSON list", True)],
+                  [_o("text", "text", "the current item, once per pass", "a@x.com"), _o("item", "text", "the item as {{data.item}}", "a@x.com"), _o("index", "text", "1-based position", "1"), _o("total", "text", "how many items", "5")]),
+    "flow.endloop": ([_i("input", "text", "the results of all passes", False)], [_o("text", "text", "the results of all passes, joined", "ok\nok"), _o("count", "text", "how many passes worked", "5"), _o("failed", "text", "how many failed", "0")]),
 }
+
+
+def _io_item(raw, out):
+    """One schema entry from a dict (or just a name). None when unusable. Never raises."""
+    if isinstance(raw, str):
+        raw = {"name": raw}
+    if not isinstance(raw, dict):
+        return None
+    nm = str(raw.get("name", ""))
+    if not re.match(r"^(?:[A-Za-z_][A-Za-z0-9_]{0,39}|<[A-Za-z0-9 _-]{1,30}>)$", nm):
+        return None
+    it = {"name": nm, "type": raw.get("type") if raw.get("type") in OUT_KINDS else "text", "desc": str(raw.get("desc") or raw.get("description") or "")[:200]}
+    if out:
+        it["example"] = str(raw.get("example") or "")[:120]
+    else:
+        it["required"] = bool(raw.get("required"))
+    return it
+
+
+def norm_io(raw):
+    """-> (inputs, outputs) of a node.json: the new `inputs`/`outputs` objects, or the old keys as a fallback
+    (`out`/`out_note` = the `text` output, `outputs` as names = data keys, `needs`/`needs_note` = a required input)."""
+    raw = raw if isinstance(raw, dict) else {}
+    outs = [x for x in (_io_item(o, True) for o in (raw.get("outputs") if isinstance(raw.get("outputs"), list) else [])[:30]) if x]
+    ins = [x for x in (_io_item(i, False) for i in (raw.get("inputs") if isinstance(raw.get("inputs"), list) else [])[:30]) if x]
+    if not any(o["name"] == "text" for o in outs):
+        outs.insert(0, {"name": "text", "type": raw.get("out") if raw.get("out") in OUT_KINDS else "text", "desc": str(raw.get("out_note", ""))[:160], "example": ""})
+    if not ins:
+        if raw.get("needs") in OUT_KINDS:
+            ins = [{"name": "path" if raw.get("needs") == "path" else "input", "type": raw["needs"], "desc": str(raw.get("needs_note", ""))[:160], "required": True}]
+        elif raw.get("kind") != "trigger":
+            ins = [dict(_IN_TEXT)]
+    return ins, outs
+
+
+def legacy_of(ins, outs):
+    """The old flat keys the editor and repair still read, derived from the schema."""
+    text = next((o for o in outs if o["name"] == "text"), None) or {"type": "text", "desc": ""}
+    need = next((i for i in ins if i.get("required") and i["type"] == "path"), None)
+    return {"out": text["type"], "out_note": text["desc"], "needs": need["type"] if need else "", "needs_note": need["desc"] if need else "",
+            "outputs": [o["name"] for o in outs if o["name"] != "text" and not o["name"].startswith("<")][:20]}
 
 
 def local_dir(*a):
@@ -324,6 +479,21 @@ def _argv(spec):
     return [python_of(spec) if x == "{python}" else x.replace("{pkg}", spec["dir"]) for x in spec["run"]]
 
 
+def _spec_cred(raw, fields):
+    """A node declares the credential kind it takes: `credential: {kind, map: {set field: node field}}`."""
+    cr = raw.get("credential")
+    if not isinstance(cr, dict) or not KIND_ID.match(str(cr.get("kind", ""))):
+        return {}
+    names = {f["name"] for f in fields}
+    mp = cr.get("map") if isinstance(cr.get("map"), dict) else {}
+    return {"credential": {"kind": cr["kind"], "map": {str(k): str(v) for k, v in mp.items() if str(v) in names and FIELD_NAME.match(str(k))}}}
+
+
+def _spec_io(raw):
+    ins, outs = norm_io(raw)
+    return dict(legacy_of(ins, outs), io={"inputs": ins, "outputs": outs})
+
+
 def _valid_spec(pkg, path, raw):
     try:
         nid, kind = raw["id"], raw["kind"]
@@ -342,10 +512,9 @@ def _valid_spec(pkg, path, raw):
         spec = {"type": "pkg:%s/%s" % (pkg["name"], nid), "title": str(raw.get("title", nid))[:60], "kind": kind, "group": str(raw.get("group") or pkg["name"])[:30],
                 "desc": str(raw.get("description", ""))[:400], "fields": fields, "package": pkg["name"], "run": run, "dir": pkg["path"],
                 "timeout": min(max(int(raw.get("timeout", 120)), 5), 3600), "guide": str(raw.get("guide", ""))[:4000],
-                "out": raw.get("out") if raw.get("out") in OUT_KINDS else "text", "out_note": str(raw.get("out_note", ""))[:160],
-                "needs": raw.get("needs") if raw.get("needs") in OUT_KINDS else "", "needs_note": str(raw.get("needs_note", ""))[:160],
-                "outputs": [str(o)[:40] for o in raw.get("outputs", []) if isinstance(o, str) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", o)][:20] if isinstance(raw.get("outputs"), list) else [],
+                **_spec_io(raw),
                 "takes": [f["name"] for f in fields if f["name"] in _names(raw.get("takes")) and not f["secret"]][:20],
+                **_spec_cred(raw, fields),
                 "venv": str(pkg.get("venv") or ""), "templated": [x for x in raw.get("templated", []) if isinstance(x, str)][:20] if isinstance(raw.get("templated"), list) else []}
         return spec
     except (KeyError, TypeError, ValueError):
@@ -379,11 +548,20 @@ def _build_catalogue():
         pkgs = A.run(["list"]).get("data") or []
     except A.CliError:
         pkgs, ok = [], False
+    found = {}
     for p in pkgs:
         d = os.path.join(p.get("path") or "", "nodes")
         if p.get("enabled", True) is False or not os.path.isdir(d):
             continue
         for f in sorted(os.listdir(d)):
+            if f.endswith(".cred.json"):                                 # a credential kind the package defines (fields, labels, secrets, hint)
+                try:
+                    with open(os.path.join(d, f), encoding="utf-8") as fh:
+                        kd = _valid_kind(p["name"], json.load(fh))
+                except (OSError, ValueError):
+                    kd = None
+                if kd:
+                    found[kd["kind"]] = kd
             if f.endswith(".node.json"):
                 try:
                     with open(os.path.join(d, f), encoding="utf-8") as fh:
@@ -409,10 +587,11 @@ def _build_catalogue():
     except OSError:
         pass
     for t, s in out.items():
-        if t in BUILTIN_OUTPUTS:
-            s["outputs"] = BUILTIN_OUTPUTS[t]
-        if t in BUILTIN_IO:
-            s["out"], s["out_note"], s["needs"], s["needs_note"] = BUILTIN_IO[t]
+        if t in BUILTIN_SCHEMA:
+            ins, outs = BUILTIN_SCHEMA[t]
+            s.update(legacy_of(ins, outs), io={"inputs": ins, "outputs": outs})
+        elif "io" not in s:
+            s.update(_spec_io(s))
     for s in out.values():
         s["fields"] = [dict(f, secret=bool(f.get("secret")) or f.get("type") == "password") for f in s["fields"]]
     for t, s in out.items():
@@ -420,6 +599,7 @@ def _build_catalogue():
     for s in out.values():
         if s["kind"] == "trigger" and not any(f["name"] == "filter" for f in s["fields"]):
             s["fields"] = s["fields"] + [FILTER]
+    _cat["kinds"] = found
     if ok:
         _cat.update(t=time.time(), v=out)
     return out
@@ -527,12 +707,17 @@ def with_secrets(work_id, node, spec, box):
             allv = allv if allv is not None else box.get_all()
             cfg[f["name"]] = allv.get(_skey(work_id, node["id"], f["name"]), "")
     p = preset(node.get("preset"))
+    base = None
     if p and p["type"] == node.get("type"):
         base = dict(p["config"])
         for f in spec["fields"]:
             if f.get("secret") and base.get(f["name"]) == MARK:
                 allv = allv if allv is not None else box.get_all()
                 base[f["name"]] = allv.get(_pkey(p["id"], f["name"]), "")
+    cv = cred_values(node, spec, box)                                      # order: node override > credential set > saved node > defaults
+    if cv:
+        base = dict(base or {}, **cv)
+    if base is not None:
         base.update({k: v for k, v in cfg.items() if v not in (None, "")})   # what this work typed wins; an empty field inherits
         cfg = base
     return cfg
@@ -637,6 +822,193 @@ def delete_preset(pid, box):
     return bool(rec)
 
 
+# ---------- credentials: named sets (teams, smtp, git, http ...) several nodes share; a node can still override any single field
+
+KIND_ID = re.compile(r"^[a-z][a-z0-9_-]{0,30}$")
+FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,40}$")
+CRED_KINDS = {                                     # builtin kinds; a package adds its own with nodes/*.cred.json
+    "teams": {"title": "Microsoft Teams", "hint": "Tenant and app registration, plus the Workflows URL and the listener secret the Teams nodes use.",
+              "fields": [{"name": "tenant_id", "label": "Tenant ID"}, {"name": "client_id", "label": "Client ID"}, {"name": "client_secret", "label": "Client secret", "secret": True},
+                         {"name": "webhook_url", "label": "Workflow URL (send)", "secret": True}, {"name": "hook_secret", "label": "Listener secret (receive)", "secret": True}]},
+    "smtp": {"title": "Mail server (SMTP)", "hint": "Login for send.smtp. A node can still set its own host, port, username or password.",
+             "fields": [{"name": "host", "label": "SMTP server"}, {"name": "security", "label": "Security (starttls, ssl, none)"}, {"name": "port", "label": "Port"},
+                        {"name": "username", "label": "Username"}, {"name": "password", "label": "Password / app password", "secret": True}]},
+    "slack": {"title": "Slack", "hint": "Incoming Webhook URL (send) and signing secret (receive) for the Slack nodes.", "fields": [{"name": "webhook_url", "label": "Webhook URL (send)", "secret": True}, {"name": "signing_secret", "label": "Signing secret (receive)", "secret": True}]},
+    "telegram": {"title": "Telegram bot", "hint": "Bot token from @BotFather, used by the Telegram nodes.", "fields": [{"name": "bot_token", "label": "Bot token", "secret": True}]},
+    "discord": {"title": "Discord", "hint": "Channel webhook URL for the Discord node.", "fields": [{"name": "webhook_url", "label": "Webhook URL", "secret": True}]},
+    "git": {"title": "Git login", "hint": "Used by the git nodes for that call only, instead of the Vault / credential helper. https only.",
+            "fields": [{"name": "username", "label": "Username (empty = x-access-token)"}, {"name": "token", "label": "Access token", "secret": True}]},
+    "http": {"title": "HTTP API", "hint": "Authorization header (and extra headers) for the HTTP request node.",
+             "fields": [{"name": "authorization", "label": "Authorization value", "secret": True, "help": "e.g. Bearer abc123"}, {"name": "headers", "label": "Other headers (Name: value per line)"}]},
+    "generic": {"title": "Generic key / values", "hint": "Any names; fields whose name looks like a secret (token, key, password ...) are stored encrypted. A node takes the ones named like its own fields.",
+                "free": True, "fields": []},
+}
+
+
+def _valid_kind(pkg, raw):
+    try:
+        kid = str(raw["kind"])
+        if not KIND_ID.match(kid):
+            return None
+        fields = [{"name": f["name"], "label": str(f.get("label", f["name"]))[:100], "secret": bool(f.get("secret")), "help": str(f.get("help", ""))[:300]}
+                  for f in raw.get("fields", []) if isinstance(f, dict) and FIELD_NAME.match(str(f.get("name", "")))][:30]
+        return {"kind": kid, "title": str(raw.get("title", kid))[:60], "hint": str(raw.get("hint", ""))[:400], "fields": fields, "free": bool(raw.get("free")), "package": pkg}
+    except (KeyError, TypeError):
+        return None
+
+
+def kinds():
+    """-> {kind: {kind, title, hint, fields, free, package}}: builtin kinds plus those shipped by installed packages (the same kind in a package replaces the builtin)."""
+    catalogue()
+    out = {k: dict(v, kind=k, package="", free=bool(v.get("free")), fields=[dict({"secret": False, "help": ""}, **f) for f in v["fields"]]) for k, v in CRED_KINDS.items()}
+    out.update(_cat.get("kinds") or {})
+    return out
+
+
+def _ckey(cid, field):
+    return "cred:%s:%s" % (cid, field)
+
+
+def _creds_file():
+    return os.path.join(store.ui_dir(), "credentials.json")
+
+
+def credentials():
+    """-> {id: {id, name, kind, fields, updated}}. Secret fields hold MARK; the values are in the box under cred:<id>:<field>."""
+    d = store._read(_creds_file(), {})
+    return {k: v for k, v in d.items() if PRESET_ID.match(k) and isinstance(v, dict) and isinstance(v.get("fields"), dict)} if isinstance(d, dict) else {}
+
+
+def credential(cid):
+    return credentials().get(cid) if isinstance(cid, str) and PRESET_ID.match(cid) else None
+
+
+def _is_secret_field(kd, name):
+    f = next((x for x in kd["fields"] if x["name"] == name), None)
+    return bool(f["secret"]) if f else bool(kd.get("free")) and bool(SECRETISH.search(name))
+
+
+def cred_map(spec, kd=None):
+    """{set field: node field} a node takes from its credential set (spec `credential.map`, else the same names)."""
+    cs = spec.get("credential") or {}
+    if cs.get("map"):
+        return dict(cs["map"])
+    names = {f["name"] for f in spec.get("fields", [])}
+    if kd and not kd.get("free"):
+        return {f["name"]: f["name"] for f in kd["fields"] if f["name"] in names}
+    return {n: n for n in names}
+
+
+def cred_values(node, spec, box):
+    """{node field: value} the node's credential set provides (secrets filled in from the box); {} when none / missing / the wrong kind."""
+    cs = spec.get("credential")
+    c = credential(node.get("credential")) if cs else None
+    if not c or c["kind"] != cs["kind"]:
+        return {}
+    kd = kinds().get(c["kind"]) or {"fields": [], "free": True}
+    names, allv, out = {f["name"] for f in spec["fields"]}, None, {}
+    for sf, nf in cred_map(spec, kd).items():
+        v = c["fields"].get(sf)
+        if v == MARK:
+            allv = allv if allv is not None else box.get_all()
+            v = allv.get(_ckey(c["id"], sf), "")
+        if nf in names and v not in (None, ""):
+            out[nf] = v
+    return out
+
+
+def credential_problem(node, spec):
+    """Why this node cannot get its credentials ('' = fine or none wanted)."""
+    cs = (spec or {}).get("credential")
+    cid = node.get("credential")
+    if cid:
+        c = credential(cid)
+        if not c:
+            return "the credential set '%s' this node uses was deleted: pick another set or fill in the fields, then remove the link" % cid
+        if cs and c["kind"] != cs["kind"]:
+            return "the credential set '%s' is a '%s' set but this node needs a '%s' one" % (c["name"], c["kind"], cs["kind"])
+    elif node.get("credential_kind") and cs:
+        return "this node needs a '%s' credential set (the workflow was shared without logins): pick or create one in the node's settings (Settings > Credentials)" % node["credential_kind"]
+    return ""
+
+
+def credential_usage():
+    """-> {set id: [{id, title, nodes: [labels]}] of the works that use it}."""
+    out = {}
+    for row in store.works():
+        w = store.get_work(row["id"]) or {}
+        for n in w.get("nodes", []):
+            if n.get("credential"):
+                lst = out.setdefault(n["credential"], [])
+                hit = next((x for x in lst if x["id"] == w["id"]), None)
+                if not hit:
+                    hit = {"id": w["id"], "title": w.get("title") or "Untitled", "nodes": []}
+                    lst.append(hit)
+                hit["nodes"].append(n.get("label") or n.get("type") or n["id"])
+    return out
+
+
+def credentials_view():
+    use, ks = credential_usage(), kinds()
+    return sorted(({**c, "used_in": use.get(c["id"], []), "missing": c["kind"] not in ks} for c in credentials().values()), key=lambda c: c["name"].lower())
+
+
+def save_credential(p, box):
+    """Create or update a set. A typed secret goes into the box and the file keeps MARK; MARK keeps the stored one; empty removes it."""
+    ks = kinds()
+    kd = ks.get(str(p.get("kind") or ""))
+    if not kd:
+        raise ValueError("unknown credential kind %r" % p.get("kind"))
+    name = " ".join(str(p.get("name") or "").split())[:60]
+    if not name:
+        raise ValueError("give the credential set a name")
+    have = credentials()
+    cid = str(p.get("id") or "")
+    if cid and (not PRESET_ID.match(cid) or cid not in have):
+        raise ValueError("no such credential set")
+    if cid and have[cid]["kind"] != kd["kind"]:
+        raise ValueError("the kind of a set cannot change")
+    if not cid:
+        base = slug(name).replace("_", "-")[:32] or "credentials"
+        cid, i = base, 1
+        while cid in have:
+            i += 1
+            cid = "%s-%d" % (base, i)
+    src = p.get("fields") if isinstance(p.get("fields"), dict) else {}
+    names = [f["name"] for f in kd["fields"]] + ([k for k in src if FIELD_NAME.match(str(k)) and k not in {f["name"] for f in kd["fields"]}][:30] if kd.get("free") else [])
+    fields = {}
+    for k in names:
+        v, sec = src.get(k), _is_secret_field(kd, k)
+        if not sec:
+            if v not in (None, ""):
+                fields[k] = str(v)[:4000]
+        elif isinstance(v, str) and v and v != MARK:
+            box.put(_ckey(cid, k), v)
+            fields[k] = MARK
+        elif v == MARK and cid in have and have[cid]["fields"].get(k) == MARK:
+            fields[k] = MARK
+        else:
+            box.remove(_ckey(cid, k))
+    for k, v in have.get(cid, {}).get("fields", {}).items():       # a field dropped from a free set loses its stored secret
+        if v == MARK and k not in fields:
+            box.remove(_ckey(cid, k))
+    rec = {"id": cid, "name": name, "kind": kd["kind"], "fields": fields, "updated": time.time()}
+    have[cid] = rec
+    store._write(_creds_file(), have)
+    return rec
+
+
+def delete_credential(cid, box):
+    have = credentials()
+    rec = have.pop(cid, None)
+    if rec:
+        for k, v in rec["fields"].items():
+            if v == MARK:
+                box.remove(_ckey(cid, k))
+        store._write(_creds_file(), have)
+    return bool(rec)
+
+
 # ---------- templating
 
 def render(tpl, ctx):
@@ -729,6 +1101,7 @@ def _trim_runs(d, keep):
             os.remove(os.path.join(d, f))
         except OSError:
             continue
+        shutil.rmtree(os.path.join(d, f[:-5]), ignore_errors=True)         # its node logs
         for sid in chats:
             try:
                 if isinstance(sid, str) and (store.get_session(sid) or {}).get("work"):
@@ -737,14 +1110,39 @@ def _trim_runs(d, keep):
                 pass
 
 
+def drop_work(wid):
+    """Delete a work for good: stop its queued/running runs, delete the chats its runs created, then the work file and ALL its run records, logs
+    and run folders (~/.aihub/ui/runs/<work>). -> number of runs stopped. Triggers end when the caller runs Engine.sync()."""
+    stopped = 0
+    with CTL_LOCK:
+        live = [rid for rid, c in CTL.items() if c.kind == "work" and c.work == wid]
+    for rid in live:
+        stopped += bool(stop_run(rid))
+    d = runs_dir(wid) if store.ID.match(str(wid)) else None
+    if d and os.path.isdir(d):
+        for f in os.listdir(d):
+            if not f.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(d, f), encoding="utf-8") as fh:
+                    r = json.load(fh)
+                for sid in r.get("chats") or ([r["chat"]] if r.get("chat") else []):
+                    if isinstance(sid, str) and (store.get_session(sid) or {}).get("work"):
+                        store.delete_session(sid)
+            except Exception:
+                pass
+    store.delete_work(wid)
+    return stopped
+
+
 def list_runs(wid):
     d = runs_dir(wid)
     out = []
-    for f in sorted(os.listdir(d), reverse=True)[:keep_of(wid)]:
+    for f in sorted((x for x in os.listdir(d) if x.endswith(".json")), reverse=True)[:keep_of(wid)]:
         try:
             with open(os.path.join(d, f), encoding="utf-8") as fh:
                 r = json.load(fh)
-            out.append({k: r.get(k) for k in ("id", "status", "started", "ended", "via", "text", "chat", "result", "origin", "card")})
+            out.append({k: r.get(k) for k in ("id", "status", "started", "ended", "via", "text", "chat", "result", "origin", "card", "trigger", "error")})
         except (OSError, ValueError):
             pass
     return out
@@ -763,14 +1161,18 @@ def save_chat_run(rec):
     for f in files[:-CHAT_KEEP]:
         try:
             os.remove(os.path.join(d, f))
+            shutil.rmtree(os.path.join(d, f[:-5]), ignore_errors=True)
         except OSError:
             pass
 
 
-def new_chat_run(spec, origin, card, cfg, text):
-    """A run record for one node started from a chat card. Secret field values are left out."""
+def new_chat_run(spec, origin, card, cfg, text, rid=None):
+    """A run record for one node started from a chat card. Secret field values are left out. RID: an id the card chose (so it can follow the log
+    while the run is going); ignored unless it looks like an id and is not used yet."""
     secret = {f["name"] for f in spec.get("fields", []) if f.get("secret")}
-    return {"id": time.strftime("%Y%m%d%H%M%S-") + uuid.uuid4().hex[:6], "kind": "node", "type": spec["type"], "title": spec.get("title") or spec["type"],
+    if not (isinstance(rid, str) and re.match(r"^[0-9a-z-]{8,40}$", rid) and not os.path.exists(os.path.join(runs_dir(CHAT_RUNS), rid + ".json")) and rid not in CTL):
+        rid = time.strftime("%Y%m%d%H%M%S-") + uuid.uuid4().hex[:6]
+    return {"id": rid, "kind": "node", "type": spec["type"], "title": spec.get("title") or spec["type"],
             "status": "running", "started": time.time(), "ended": None, "via": "chat", "origin": origin, "card": str(card or "")[:40],
             "config": {k: v for k, v in (cfg if isinstance(cfg, dict) else {}).items() if k not in secret and isinstance(k, str)}, "text": (text or "")[:300], "result": None}
 
@@ -792,6 +1194,16 @@ def chat_runs(origin=None, limit=60):
                 out.append(dict(r, kind="work", work=w["id"], title=w.get("title") or "Workflow"))
     out.sort(key=lambda r: -(r.get("started") or 0))
     return out[:limit]
+
+
+def get_chat_run(rid):
+    if not re.match(r"^[0-9a-z-]{8,40}$", str(rid)):
+        return None
+    try:
+        with open(os.path.join(runs_dir(CHAT_RUNS), rid + ".json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 def get_run(wid, rid):
@@ -931,7 +1343,246 @@ def _kill_tree(p):
             pass
 
 
-def run_package_node(spec, cfg, inputs, ctx, wd):
+class Stopped(RuntimeError):
+    """The person pressed Stop: not a failure."""
+
+
+LOG_MAX = 1_000_000                                                    # bytes kept per node log (the tail stays)
+NODE_FILE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def run_dir(wid, rid, nid=None, make=True):
+    """The ONE working folder of a run: ~/.aihub/ui/runs/<work>/<run>/work/, and per node <that>/<node id>/. Claude / Free chat nodes without a
+    `cwd` work in it, package programs get it as `workdir` and in `run.dir` / `run.node_dir` of their stdin; templates see {{run.dir}} / {{node.dir}}."""
+    d = os.path.join(runs_dir(wid), rid, "work")
+    if nid:
+        d = os.path.join(d, NODE_FILE.sub("_", nid)[:60])
+    if make:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            pass
+    return d
+
+
+def run_files(wid, rid, limit=300):
+    """-> [{path (relative to the run folder), node, size, mtime}] of the files written in the run folder, newest first."""
+    root, out = run_dir(wid, rid, make=False), []
+    for dp, dn, names in os.walk(root):
+        dn[:] = [x for x in dn if x != ".git" and x != "node_modules"]
+        for n in names:
+            fp = os.path.join(dp, n)
+            try:
+                st = os.stat(fp)
+            except OSError:
+                continue
+            rel = os.path.relpath(fp, root).replace(os.sep, "/")
+            out.append({"path": rel, "node": rel.split("/")[0] if "/" in rel else "", "size": st.st_size, "mtime": st.st_mtime})
+            if len(out) > 5000:
+                break
+    out.sort(key=lambda x: -x["mtime"])
+    return out[:limit]
+
+
+def log_path(wid, rid, nid):
+    """~/.aihub/ui/runs/<work>/<run>/<node>.log (node runs from a chat: runs/chat/<run>/node.log)."""
+    return os.path.join(runs_dir(wid), rid, NODE_FILE.sub("_", nid or "node")[:60] + ".log")
+
+
+class NodeLog:
+    """Append-only log of one node execution: command, stdout/stderr lines, steps, exit code. Secret values are replaced by ***,
+    the file is capped at LOG_MAX (the newest half is kept) and `<file>.base` remembers how many bytes were dropped, so a reader's
+    `after` offset stays valid while the node runs."""
+
+    def __init__(self, path, secrets=()):
+        self.path = path
+        self.secrets = sorted({s for s in secrets if isinstance(s, str) and len(s) >= 4}, key=len, reverse=True)
+        self.lock = threading.Lock()
+        self.base = 0
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb"):
+            pass
+        self.size = 0
+        try:
+            os.remove(path + ".base")
+        except OSError:
+            pass
+
+    def clean(self, text):
+        for s in self.secrets:
+            text = text.replace(s, "***")
+        return text
+
+    def write(self, text, tag=""):
+        t = self.clean(str(text if text is not None else "")).rstrip("\n")
+        stamp = time.strftime("%H:%M:%S ")
+        data = "".join("%s%s%s\n" % (stamp, tag, ln) for ln in (t.split("\n") if t else [""])).encode("utf-8", "replace")
+        with self.lock:
+            try:
+                with open(self.path, "ab") as f:
+                    f.write(data)
+                self.size += len(data)
+                if self.size > LOG_MAX:
+                    self._cut()
+            except OSError:
+                pass
+
+    def _cut(self):
+        with open(self.path, "rb") as f:
+            old = f.read()
+        k = len(old) - LOG_MAX // 2
+        nl = old.find(b"\n", k)
+        k = nl + 1 if nl >= 0 else k
+        mark = b"... [earlier output cut]\n"
+        new = mark + old[k:]
+        with open(self.path, "wb") as f:
+            f.write(new)
+        self.base += k - len(mark)
+        self.size = len(new)
+        write_private(self.path + ".base", str(self.base).encode())
+
+
+def read_log(wid, rid, nid, after=0, limit=200_000):
+    """-> {"text", "next", "size"} from byte offset AFTER of the logical stream (offsets stay valid after a cut). None if there is no log."""
+    if not (store.ID.match(str(wid)) or wid == CHAT_RUNS) or not re.match(r"^[0-9a-z-]{8,40}$", str(rid)):
+        return None
+    p = log_path(wid, rid, nid)
+    try:
+        base = int(open(p + ".base").read() or 0)
+    except (OSError, ValueError):
+        base = 0
+    try:
+        with open(p, "rb") as f:
+            f.seek(max(0, int(after or 0) - base))
+            raw = f.read(limit)
+            pos = f.tell()
+            end = os.fstat(f.fileno()).st_size
+    except OSError:
+        return None
+    return {"text": raw.decode("utf-8", "replace"), "next": base + pos, "size": base + end}
+
+
+class Ctl:
+    """Stop switch of one run (work run or node run from a chat): the processes and AI chats it started."""
+
+    def __init__(self, kind, run, work=None, total=0):
+        self.kind, self.run, self.work, self.total = kind, run, work, total
+        self.cancel = threading.Event()
+        self.procs = set()
+        self.chats = set()
+        self.lock = threading.Lock()
+
+    def add(self, p):
+        with self.lock:
+            self.procs.add(p)
+        if self.cancel.is_set():
+            _kill_tree(p)
+
+    def drop(self, p):
+        with self.lock:
+            self.procs.discard(p)
+
+    def stop(self):
+        self.cancel.set()
+        with self.lock:
+            procs, chats = list(self.procs), list(self.chats)
+        for p in procs:
+            _kill_tree(p)
+        for sid in chats:
+            try:
+                chat.stop(sid)
+            except Exception:
+                pass
+
+    def check(self):
+        if self.cancel.is_set():
+            raise Stopped("stopped")
+
+
+CTL = {}                                                               # run id -> Ctl, while the run is queued or running
+CTL_LOCK = threading.Lock()
+
+
+def ctl_for(rid, *a, **k):
+    with CTL_LOCK:
+        c = CTL.get(rid)
+        if c is None:
+            c = CTL[rid] = Ctl(*a, **k)
+        return c
+
+
+def ctl_drop(rid):
+    with CTL_LOCK:
+        CTL.pop(rid, None)
+
+
+def stop_run(rid):
+    """Stop a queued or running run. -> True when there was one."""
+    with CTL_LOCK:
+        c = CTL.get(rid)
+    if not c:
+        return False
+    c.stop()
+    return True
+
+
+def active():
+    """Everything queued or running now: work runs and node runs from chats. Cheap (memory only)."""
+    with CTL_LOCK:
+        items = list(CTL.items())
+    out, now = [], time.time()
+    for rid, c in items:
+        r = c.run
+        nodes = r.get("nodes") or {}
+        recs = list(nodes.values())
+        cur = [v.get("label") or k for k, v in list(nodes.items()) if v.get("status") == "running"]
+        cur_ids = [k for k, v in list(nodes.items()) if v.get("status") == "running"]
+        done = sum(1 for v in recs if v.get("status") in ("ok", "error", "stopped", "skipped"))
+        out.append({"id": rid, "kind": c.kind, "work": c.work if c.kind == "work" else CHAT_RUNS, "title": r.get("title") or "", "status": r.get("status") or "queued",
+                    "via": r.get("via") or "", "origin": r.get("origin") or "", "started": r.get("started"), "elapsed": round(now - (r.get("started") or now), 1),
+                    "current": cur[:3], "current_ids": cur_ids[:3], "done": done, "total": c.total, "stopping": c.cancel.is_set(), "chat": r.get("chat") or ""})
+    out.sort(key=lambda x: x.get("started") or 0)
+    return out
+
+
+def log_ai(ev, nlog, steps):
+    """Record one chat event of an AI node: the answer text and every tool call (a short step list for the UI, the full lines in the log)."""
+    if ev.get("k") == "msg":
+        for b in ev.get("blocks") or ():
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "text" and str(b.get("text") or "").strip():
+                nlog.write("answer: " + str(b["text"]).strip()[:600])
+            elif b.get("type") == "tool_use":
+                arg = b.get("input")
+                brief = ""
+                if isinstance(arg, dict):
+                    brief = next((str(v) for k in ("command", "file_path", "path", "pattern", "url", "query", "description") if (v := arg.get(k))), "")
+                nlog.write("tool %s %s" % (b.get("name") or "?", brief[:200]))
+                if len(steps) < 40:
+                    steps.append(_clip("%s %s" % (b.get("name") or "tool", brief), 90))
+    elif ev.get("k") in ("error", "note") or (ev.get("k") == "result" and ev.get("error")):
+        nlog.write("%s: %s" % (ev.get("k"), ev.get("text") or ""))
+
+
+def _pump(stream, sink, log, tag, cap=2_000_000):
+    """Read LINES from a pipe until EOF: keep them (capped) and write them to the log at once."""
+    n = 0
+    try:
+        for line in iter(stream.readline, ""):
+            if n < cap:
+                sink.append(line)
+                n += len(line)
+            if log:
+                log.write(line, tag)
+    except (OSError, ValueError):
+        pass
+
+
+def run_package_node(spec, cfg, inputs, ctx, wd, log=None, ctl=None, info=None):
+    """Run a node program: JSON on stdin, last JSON line on stdout. stdout/stderr stream into LOG while it runs; the call ends when the
+    PROGRAM ends (a detached grandchild that keeps the pipes open, such as the CLI's background updater, never holds it up).
+    INFO gets cmd and exit; CTL lets Stop kill the process group."""
     argv = _argv(spec)
     limit = spec["timeout"]
     if spec.get("timeout_key"):                                     # a node that lets the person set its own limit
@@ -940,28 +1591,72 @@ def run_package_node(spec, cfg, inputs, ctx, wd):
         except (TypeError, ValueError):
             pass
     payload = json.dumps({"config": cfg, "input": "\n\n".join(text_of(i) for i in inputs), "inputs": inputs, "run": ctx, "workdir": wd}, ensure_ascii=False)
+    if ctl:
+        ctl.check()
+    cmd = " ".join(argv)
+    if info is not None:
+        info["cmd"] = log.clean(cmd) if log else cmd
+    if log:
+        log.write("$ " + cmd + "   (timeout %ds, cwd %s)" % (limit, spec["dir"]))
     try:
-        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=spec["dir"], start_new_session=True,
-                                env=dict(os.environ, AIHUB_NODE=spec["type"], AIHUB_NODE_WORKDIR=wd))
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                                cwd=spec["dir"], start_new_session=True,
+                                env=dict(os.environ, AIHUB_NODE=spec["type"], AIHUB_NODE_WORKDIR=wd, AIHUB_NO_UPDATE="1", AIHUB_RUN_DIR=str((ctx or {}).get("dir") or wd), AIHUB_NODE_DIR=str((ctx or {}).get("node_dir") or "")))
     except OSError as e:
+        if log:
+            log.write("cannot start: %s" % e)
         raise RuntimeError("cannot start: %s" % e)
-    try:
-        so, se = proc.communicate(payload, timeout=limit)
-    except subprocess.TimeoutExpired:
-        _kill_tree(proc)
+    if ctl:
+        ctl.add(proc)
+    so, se = [], []
+    readers = [threading.Thread(target=_pump, args=(proc.stdout, so, log, ""), daemon=True),
+               threading.Thread(target=_pump, args=(proc.stderr, se, log, "[err] "), daemon=True)]
+
+    def feed():
         try:
-            proc.communicate(timeout=5)
-        except Exception:
+            proc.stdin.write(payload)
+            proc.stdin.close()
+        except (OSError, ValueError):
             pass
-        raise RuntimeError("timed out after %ds" % limit)
-    p = subprocess.CompletedProcess(argv, proc.returncode, so or "", se or "")
-    last = next((ln for ln in reversed(p.stdout.strip().splitlines()) if ln.strip().startswith("{")), "")
+    readers.append(threading.Thread(target=feed, daemon=True))
+    for t in readers:
+        t.start()
+    try:
+        try:
+            proc.wait(timeout=limit)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            if log:
+                log.write("timed out after %ds: killed" % limit)
+            raise RuntimeError("timed out after %ds" % limit)
+        end = time.time() + 3                                       # the program is done; give the pipes a moment, then go on without them
+        for t in readers[:2]:
+            t.join(max(0.05, end - time.time()))
+    finally:
+        if ctl:
+            ctl.drop(proc)
+        if proc.poll() is None:
+            _kill_tree(proc)
+        for t, st in zip(readers[:2], (proc.stdout, proc.stderr)):
+            if not t.is_alive():
+                try:
+                    st.close()
+                except OSError:
+                    pass
+    if info is not None:
+        info["exit"] = proc.returncode
+    if log:
+        log.write("exit %s" % proc.returncode)
+    if ctl and ctl.cancel.is_set():
+        raise Stopped("stopped")
+    stdout, stderr = "".join(so), "".join(se)
+    last = next((ln for ln in reversed(stdout.strip().splitlines()) if ln.strip().startswith("{")), "")
     try:
         res = json.loads(last) if last else {}
     except ValueError:
         res = {}
-    if p.returncode != 0 or res.get("ok") is False:
-        raise RuntimeError((res.get("error") or p.stderr.strip()[-400:] or "exit %d" % p.returncode))
+    if proc.returncode != 0 or res.get("ok") is False:
+        raise RuntimeError((res.get("error") or stderr.strip()[-400:] or "exit %s" % proc.returncode))
     out = res.get("output", "")
     ev = out if isinstance(out, dict) else {"text": out if isinstance(out, str) else json.dumps(out, ensure_ascii=False)}
     if "data" in res:
@@ -976,7 +1671,16 @@ def runnable(spec):
     return bool(spec) and spec.get("kind") == "action" and bool(spec.get("run")) and not spec.get("hidden")
 
 
-def node_brief(spec):
+def cred_fields(spec):
+    """Names of the node fields a credential set of the node's kind can fill (what the model must not ask for)."""
+    cs = spec.get("credential")
+    if not cs:
+        return []
+    kd = kinds().get(cs["kind"]) or {"fields": [], "free": True}
+    return sorted(set(cred_map(spec, kd).values()))
+
+
+def node_brief(spec, sets=None):
     """Prompt text for a mentioned node: what it does, its fields, and the protocol (ask for what is missing, else a ```node block)."""
     lines = []
     for f in spec["fields"]:
@@ -985,13 +1689,19 @@ def node_brief(spec):
             lines.append("- %s (%s): SECRET. Never ask for it and never write it; the card shows a password box to the user." % (f["name"], f["label"]))
         else:
             lines.append("- %s (%s; %s)%s" % (f["name"], f["label"], ", ".join(extra), (": " + f["help"]) if f.get("help") else ""))
-    need = [f for f in spec["fields"] if f.get("required") and not f.get("secret")]
+    cf = cred_fields(spec)
+    cred = ""
+    if cf:
+        names = [str(c.get("name"))[:40] for c in (sets or [])]
+        cred = ("\nCredentials: this node takes a saved credential set of kind \"%s\" (fields it fills: %s). %s The card has a picker for it. Do NOT ask the user for those fields and never write their values."
+                % (spec["credential"]["kind"], ", ".join(cf), ("Saved sets: " + ", ".join(names) + ".") if names else "No set is saved yet: the user can fill the fields in the card."))
+    need = [f for f in spec["fields"] if f.get("required") and not f.get("secret") and f["name"] not in cf]
     return ("[The user wants the node \"%s\" (@node:%s) run from this chat. %s%s\nFields:\n%s\n"
             "How to run it: work out each field from the user's message and this conversation. If a required field (%s) is still unknown, ask for ONLY the missing ones with a ```form block "
             "(fields named exactly like the node's, same types/options) and stop; do not guess values. Once every required field is known, answer with ONE ```node block and nothing that depends on its result: "
             "{\"type\":\"%s\",\"config\":{\"field\":\"value\"},\"input\":\"optional text for {{input}}\"} (config holds non-secret fields only, values as the field types expect). "
             "The page shows a card where the user checks the values and presses Run; the result comes back as the next message. Do not run the program yourself.]"
-            % (spec["title"], spec["type"], spec.get("desc") or "", ("\nGuide: " + spec["guide"]) if spec.get("guide") else "", "\n".join(lines) or "(no fields)",
+            % (spec["title"], spec["type"], spec.get("desc") or "", ("\nGuide: " + spec["guide"]) if spec.get("guide") else "", ("\n".join(lines) or "(no fields)") + cred,
                ", ".join(f["name"] for f in need) or "none", spec["type"]))
 
 
@@ -1025,16 +1735,37 @@ def clean_node_config(spec, cfg):
     return out
 
 
-def run_single(spec, cfg, text, wd):
-    """Run one node alone. -> {"text", "data", "log"}. Templated fields see {{input}}; secrets come in `cfg` for this run only."""
+def run_single(spec, cfg, text, wd, rid=None, rec=None, box=None):
+    """Run one node alone. -> {"text", "data", "log", "exit", "cmd"}. Templated fields see {{input}}; secrets come in `cfg` for this run only.
+    With RID the run has a log (runs/chat/<rid>/node.log) and can be stopped (stop_run); REC is the chat run record (kept up to date)."""
     cfg = clean_node_config(spec, cfg)
     ev = {"text": text}
     ctx = {"input": text, "data": {}, "in": {}}
     tpl = spec.get("templated") or ()
     if tpl:
         cfg = {k: (render(v, ctx) if k in tpl and isinstance(v, str) else v) for k, v in cfg.items()}
-    out, log = run_package_node(spec, cfg, [ev] if text else [], {"id": "chat", "work": "", "node": spec["type"]}, wd)
-    return {"text": text_of(out)[:20000], "data": out.get("data") if isinstance(out, dict) else None, "log": (log or "")[-1500:]}
+    ctl = log = None
+    info = {}
+    if rid:
+        t0 = time.time()
+        secrets = [cfg.get(f["name"]) for f in spec["fields"] if f.get("secret")] + list((box.get_all() if box else {}).values())
+        log = NodeLog(log_path(CHAT_RUNS, rid, "node"), [x for x in secrets if isinstance(x, str)])
+        ctl = ctl_for(rid, "node", rec if rec is not None else {"status": "running", "started": t0}, total=1)
+        nrec = {"status": "running", "label": spec.get("title") or spec["type"], "started": t0, "t0": t0, "logfile": True}
+        if rec is not None:
+            rec["nodes"] = {"node": nrec}
+    try:
+        out, lg = run_package_node(spec, cfg, [ev] if text else [], {"id": "chat", "work": "", "node": spec["type"], "dir": wd, "node_dir": wd}, wd, log=log, ctl=ctl, info=info)
+    except BaseException as e:
+        if rid and rec is not None:
+            nrec.update(status="stopped" if isinstance(e, Stopped) else "error", ended=time.time(), error=str(e)[:300], **info)
+        raise
+    finally:
+        if rid:
+            ctl_drop(rid)
+    if rid and rec is not None:
+        nrec.update(status="ok", ended=time.time(), **info)
+    return {"text": text_of(out)[:20000], "data": out.get("data") if isinstance(out, dict) else None, "log": (lg or "")[-1500:], **info}
 
 
 LOOP, ENDLOOP = "flow.loop", "flow.endloop"
@@ -1142,6 +1873,14 @@ class Engine:
         run = {"id": time.strftime("%Y%m%d%H%M%S-") + uuid.uuid4().hex[:6], "work": work["id"], "status": "queued", "started": time.time(), "ended": None,
                "via": via, "trigger": node["id"], "text": text_of(event)[:300], "nodes": {}, "chat": None, "result": None}
         run.update({k: v for k, v in (extra or {}).items() if k in ("origin", "card")})
+        try:                                                              # what started it, so the run can be started again with the same inputs
+            ev = {"text": text_of(event)[:20000], "data": event.get("data") if isinstance(event, dict) else {}}
+            if len(json.dumps(ev, ensure_ascii=False, default=str)) < 60000:
+                run["event"] = ev
+        except (TypeError, ValueError):
+            pass
+        run["title"] = work.get("title") or "Workflow"
+        ctl_for(run["id"], "work", run, work=work["id"], total=len(work.get("nodes") or ()))
         _save_run(run, trim=False)
         with self.lock:
             q = self.queues.get(work["id"])
@@ -1152,6 +1891,7 @@ class Engine:
             q.put_nowait((run, event))
         except queue.Full:
             run.update(status="failed", ended=time.time(), error="too many queued runs")
+            ctl_drop(run["id"])
             _save_run(run)
         return run["id"]
 
@@ -1164,14 +1904,21 @@ class Engine:
             if item is None:                                                 # its work was deleted
                 return
             run, event = item
+            ctl = ctl_for(run["id"], "work", run, work=run["work"])
+            if ctl.cancel.is_set():                                          # stopped while it waited in the queue
+                run.update(status="stopped", ended=time.time())
+                _save_run(run)
+                ctl_drop(run["id"])
+                continue
             with self.lock:
                 self.running += 1
             try:
                 self._execute(run, event)
             except Exception as e:                                           # never kill the worker
-                run.update(status="failed", ended=time.time(), error=str(e)[:300])
+                run.update(status="stopped" if ctl.cancel.is_set() else "failed", ended=time.time(), error="" if ctl.cancel.is_set() else str(e)[:300])
                 _save_run(run)
             finally:
+                ctl_drop(run["id"])
                 with self.lock:
                     self.running -= 1
 
@@ -1183,6 +1930,10 @@ class Engine:
         order, ins = topo(work)
         nodes = {n["id"]: n for n in work["nodes"]}
         run["status"] = "running"
+        run["title"] = work.get("title") or "Workflow"
+        ctl = ctl_for(run["id"], "work", run, work=work["id"], total=len(nodes))
+        ctl.total = len(nodes)
+        rdir = run["dir"] = run_dir(work["id"], run["id"])
         _save_run(run, trim=False)
         outs = {run["trigger"]: event}
         ctx_base = {"trigger": text_of(event), "data": event.get("data", {}) if isinstance(event, dict) else {}}
@@ -1248,7 +1999,7 @@ class Engine:
             end_ids = [e for e, l in ends.items() if l == lid]
             texts, bad, lines, k = [], 0, [], 0
             for k, it in enumerate(items, 1):
-                if self.stop.is_set():
+                if self.stop.is_set() or ctl.cancel.is_set():
                     break
                 text, extra = item_parts(it)
                 it_outs = dict(outs)
@@ -1291,7 +2042,11 @@ class Engine:
             spec = cat.get(n.get("type"))
             if nid == run["trigger"]:
                 with lock:
-                    run["nodes"][nid] = {"status": "ok", "output": text_of(event)[:2000]}
+                    run["nodes"][nid] = {"status": "ok", "output": text_of(event)[:2000], "label": n.get("label") or "", "started": run.get("started"), "ended": run.get("started")}
+                return
+            if ctl.cancel.is_set():                                         # Stop was pressed: the rest of the run is skipped
+                with lock:
+                    run["nodes"][nid] = {"status": "skipped", "label": n.get("label") or names[nid][0]}
                 return
             got = [(u, outs[u]) for u in ins[nid] if outs.get(u) is not None]
             if n.get("type") == ENDLOOP and ends.get(nid) in outs:             # the closing node of a loop sees the results of all passes
@@ -1315,15 +2070,22 @@ class Engine:
             inmap = {}
             for k, (u, o) in enumerate(got, 1):                            # {{in.1}} / {{in.<node>}}: one parent's text
                 inmap[str(k)] = inmap[names[u][1]] = text_of(o)
-            ctx = dict(ctx_base, input=text, data=cdata, **{"in": inmap})
+            ndir = run_dir(work["id"], run["id"], nid, make=bool(spec.get("run")) or n.get("type", "").startswith("ai."))
+            ctx = dict(ctx_base, input=text, data=cdata, run={"id": run["id"], "dir": rdir}, node={"id": nid, "dir": ndir}, **{"in": inmap})
             ctx_of[nid] = ctx
             with lock:
-                rec = run["nodes"][nid] = {"status": "running", "t0": time.time(), "input": text[:2000], "paths": _pointers(cdata, inputs),
+                rec = run["nodes"][nid] = {"status": "running", "t0": time.time(), "started": time.time(), "label": n.get("label") or names[nid][0], "logfile": True, "input": text[:2000], "paths": _pointers(cdata, inputs),
                                            "inputs": [{"from": u, "label": names[u][0], "kind": (cat.get((nodes.get(u) or {}).get("type")) or {}).get("out", "text"), "text": text_of(o)[:1200]} for u, o in got]}
             save()
             cfg = with_secrets(work["id"], n, spec, self.box)
+            nlog = NodeLog(log_path(work["id"], run["id"], nid), [cfg.get(f["name"]) for f in spec["fields"] if f.get("secret")] + list(self.box.get_all().values()))
+            nlog.write("node %s (%s) started" % (n.get("label") or nid, n.get("type")))
+            steps = rec["steps"] = []
             mine = []                                                      # shared chats this node holds (released when it ends)
             try:
+                bad = credential_problem(n, spec)
+                if bad:
+                    raise RuntimeError(bad)
                 if n.get("preset") and not preset(n["preset"]):
                     raise RuntimeError("the saved node '%s' this node uses was deleted: pick another one or fill in the fields, then remove the link" % n["preset"])
                 if n["type"] == LOOP:
@@ -1369,7 +2131,7 @@ class Engine:
                             busy["claude"] = True
                             mine.append("claude")
                         if sess is None or cfg.get("fresh") or not solo:
-                            s = store.update_session(store.create_session("Work: %s" % work["title"], "", chat.build_system(chat.freechat.WORK_RULES), cwd=folder)["id"], work=True)
+                            s = store.update_session(store.create_session("Work: %s" % work["title"], "", chat.build_system(chat.freechat.WORK_RULES), cwd=folder or rdir)["id"], work=True)
                             run.setdefault("chats", []).append(s["id"])
                             sess = s if sess is None and not folder else sess
                             cur = s
@@ -1389,12 +2151,18 @@ class Engine:
                     if not prompt.strip():
                         raise RuntimeError("empty prompt")
                     reply, err = "", None
+                    ctl.chats.add(cur["id"])
+                    upd(rec, chat=cur["id"], cmd="claude %s (mode %s)" % (cfg.get("model") or "default model", cfg.get("mode") or "auto"))
+                    nlog.write("Claude Code chat %s: %d characters of prompt" % (cur["id"], len(prompt)))
+                    ctl.check()
                     for ev in chat.turn(cur, prompt, str(cfg.get("model") or ""), str(cfg.get("effort") or ""), cfg.get("mode") if cfg.get("mode") in chat.MODES else "auto",
                                          extra_env=self.box.get_all(), **({"add_dirs": dirs} if (dirs := pointer_dirs(cdata, inputs)) else {})):
+                        log_ai(ev, nlog, steps)
                         if ev["k"] == "msg":
                             reply = "\n".join(b["text"] for b in ev["blocks"] if b["type"] == "text") or reply
                         elif ev["k"] == "error" or (ev["k"] == "result" and ev.get("error")):
                             err = ev.get("text") or "Claude failed"
+                    ctl.check()
                     if err:
                         raise RuntimeError(err)
                     if reply:
@@ -1408,7 +2176,7 @@ class Engine:
                             busy["free"] = True
                             mine.append("free")
                         if sess_free is None or cfg.get("fresh") or not solo:
-                            made = store.update_session(store.create_session("Work: %s" % work["title"], "", chat.build_system())["id"], engine="free", work=True,
+                            made = store.update_session(store.create_session("Work: %s" % work["title"], "", chat.build_system(), cwd=rdir)["id"], engine="free", work=True,
                                                         mcp=[x.strip() for x in str(cfg.get("mcp") or "").split(",") if x.strip()][:20])
                             run.setdefault("chats", []).append(made["id"])
                             sess_free = made if sess_free is None else sess_free
@@ -1424,11 +2192,17 @@ class Engine:
                     if not prompt.strip():
                         raise RuntimeError("empty prompt")
                     reply, err = "", None
+                    ctl.chats.add(made["id"])
+                    upd(rec, chat=made["id"], cmd="free chat %s" % (cfg.get("model") or "default model"))
+                    nlog.write("Free chat %s: %d characters of prompt" % (made["id"], len(prompt)))
+                    ctl.check()
                     for ev in freechat.turn(store.get_session(made["id"]), prompt, str(cfg.get("model") or ""), str(cfg.get("effort") or ""), "auto", extra_env=self.box.get_all()):
+                        log_ai(ev, nlog, steps)
                         if ev["k"] == "msg":
                             reply = "\n".join(b["text"] for b in ev["blocks"] if b["type"] == "text") or reply
                         elif ev["k"] == "error" or (ev["k"] == "result" and ev.get("error")):
                             err = ev.get("text") or "Free chat failed"
+                    ctl.check()
                     if err:
                         raise RuntimeError(err)
                     out = {"text": reply, "data": cdata}
@@ -1440,7 +2214,8 @@ class Engine:
                         v = cdata.get(k)
                         if not str(cfg.get(k) or "").strip() and v not in (None, "", [], {}):
                             cfg[k] = "\n".join(str(x) for x in v) if isinstance(v, list) else v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
-                    out, log = run_package_node(spec, cfg, inputs, {"id": run["id"], "work": work["id"], "node": nid}, store.session_dir(run["chat"]) if run["chat"] else os.path.expanduser("~"))
+                    out, log = run_package_node(spec, cfg, inputs, {"id": run["id"], "work": work["id"], "node": nid, "dir": rdir, "node_dir": ndir}, rdir,
+                                               log=nlog, ctl=ctl, info=rec)
                     if log:
                         upd(rec, log=log[-1500:])
                     if isinstance(out, dict) and out.get("skip"):
@@ -1448,10 +2223,17 @@ class Engine:
                 with lock:
                     rec.update(status="ok", ended=time.time(), output=(text_of(out)[:4000] if out is not None else ""))
                     outs[nid] = out
+                nlog.write("finished ok in %.1fs" % (rec["ended"] - rec["t0"]))
             except Exception as e:
-                with lock:
-                    rec.update(status="error", ended=time.time(), error=str(e)[:600])
-                    failed = failed or not inloop
+                if ctl.cancel.is_set() or isinstance(e, Stopped):
+                    with lock:
+                        rec.update(status="stopped", ended=time.time())
+                    nlog.write("stopped")
+                else:
+                    with lock:
+                        rec.update(status="error", ended=time.time(), error=str(e)[:600])
+                        failed = failed or not inloop
+                    nlog.write("failed: %s" % e)
             with lock:
                 for k in mine:
                     busy[k] = False
@@ -1480,11 +2262,11 @@ class Engine:
                         with lock:
                             run["nodes"][i] = {"status": "error", "error": str(f.exception())[:600]}
                             failed = True
-        if not run.get("result") and not failed:                            # no Output node: the last text produced is the answer
+        if not run.get("result") and not failed and not ctl.cancel.is_set():                            # no Output node: the last text produced is the answer
             last = [v for v in run["nodes"].values() if v.get("status") == "ok" and v.get("output") and v is not run["nodes"].get(run["trigger"])]
             if last:
                 run["result"] = {"title": "", "text": max(last, key=lambda v: v.get("ended") or 0)["output"]}
-        run.update(status="failed" if failed else "done", ended=time.time())
+        run.update(status="stopped" if ctl.cancel.is_set() else "failed" if failed else "done", ended=time.time())
         try:
             from . import hubusage
             hubusage.kick()                                       # a finished run is counted on the hub (its AI nodes are chat turns too)
@@ -1544,6 +2326,9 @@ class Engine:
             if key not in wanted:
                 self._kill(key)
         for key, (w, n, spec) in wanted.items():
+            if credential_problem(n, spec):                                # no set to start it with: not started (the editor shows why)
+                self._kill(key)
+                continue
             cfg = with_secrets(w["id"], n, spec, self.box)
             sig = hashlib.sha256(json.dumps([cfg, spec["run"]], sort_keys=True).encode()).hexdigest()
             cur = self.procs.get(key)
@@ -1669,7 +2454,7 @@ DATA: every node hands on text, plus a small data dict. In any text field (promp
 SHAPES
 - ai.claude (list the recipients, one per line) -> flow.loop -> ai.claude (write the mail for {{data.item}}) -> a mail node -> flow.endloop -> flow.output.
 - git.pull -> ai.claude (analyse, build dashboard/index.html, end with OUTPUT:) -> space.publish.
-- start.cron -> io.request / git.read -> ai.claude -> send.teams or send.smtp (mail through any server; action draft saves it for review), or pkg:aihub-nodes-outlook/outlook-send for the Outlook app when it is in the list.
+- start.cron -> io.request / git.read -> ai.claude -> send.teams / send.slack / send.discord / send.webhook or send.smtp (mail through any server; action draft saves it for review), or pkg:aihub-nodes-outlook/outlook-send for the Outlook app when it is in the list.
 - start.manual -> [git.read, io.request] in parallel -> ai.claude (prompt names {{in.<a>}} and {{in.<b>}}) -> flow.output.
 - Keep it as small as the request allows: 3 to 7 nodes.
 
@@ -1677,7 +2462,8 @@ EXAMPLE (valid):
 ```json
 """ + json.dumps(GEN_EXAMPLE, indent=1) + """
 ```
-Node types (out = what it hands on, needs = what it requires from before):
+Each node type below lists `in:` (name:type, * = required) and `out:` (name:type (what it is)). An output called `text` is {{input}} for the next node; every other output is {{data.name}}. Only write {{data.x}} when x is declared in `out:` of a node before it (or is an input of the Start node). Connect an `out` to an `in` of the same type (path -> path, url -> url); a `text` output can feed any `input`.
+Node types:
 """
 
 
@@ -1688,8 +2474,12 @@ def _gen_catalogue():
         if sp.get("hidden"):
             continue
         fl = ", ".join("%s%s%s" % (f["name"], "*" if f.get("required") else "", "=" + "/".join(f["options"]) if f.get("options") else "") for f in sp["fields"])
-        io = " | out: %s%s%s" % (sp.get("out", "text"), " (%s)" % sp["out_note"] if sp.get("out_note") else "", " | needs: " + sp["needs"] if sp.get("needs") else "")
-        lines.append("- %s (%s, %s): %s%s | fields: %s" % (t, sp["kind"], sp["group"], sp["desc"][:160], io, fl or "-"))
+        sio = sp.get("io") or {}
+        io = " | in: %s | out: %s" % (", ".join("%s:%s%s" % (i["name"], i["type"], "*" if i.get("required") else "") for i in sio.get("inputs", ())) or "-",
+                                      "; ".join("%s:%s%s" % (o["name"], o["type"], " (%s)" % o["desc"][:110] if o.get("desc") else "") for o in sio.get("outputs", ())) or "text")
+        ck = (sp.get("credential") or {}).get("kind")
+        lines.append("- %s (%s, %s): %s%s | fields: %s%s" % (t, sp["kind"], sp["group"], sp["desc"][:160], io, fl or "-",
+                                                         " | credential kind: %s (a saved login set is linked automatically: leave its secret fields out of config)" % ck if ck else ""))
     saved = [p for p in presets().values() if p["type"] in catalogue()]
     if saved:
         lines.append("\nSaved nodes (set up by the user, logins included). When one fits, use it: {\"id\",\"type\": <its type>, \"preset\": <its id>, \"config\": {}} and put in config only the fields this work changes (never logins):")
@@ -1814,7 +2604,52 @@ def repair(w, cat):
     return w
 
 
-def checked_work(w, strip_secrets_with=None):
+def _ancestors(by, parents, nid):
+    seen, todo = set(), list(parents.get(nid, ()))
+    while todo:
+        u = todo.pop()
+        if u not in seen and u in by:
+            seen.add(u)
+            todo.extend(parents.get(u, ()))
+    return seen
+
+
+def ref_warnings(w, cat):
+    return [t for _, t in ref_issues(w, cat)]
+
+
+def ref_issues(w, cat):
+    """Strings that say which `{{data.x}}` a node uses that no node before it declares as an output (typo, wrong order, missing edge).
+    Dynamic outputs (a `<key>` entry, e.g. code.python or the inputs of a manual Start) are respected: start.manual declares its own inputs."""
+    by = {n["id"]: n for n in w.get("nodes", [])}
+    parents = {i: [e["from"] for e in w.get("edges", []) if e["to"] == i] for i in by}
+    out = []
+    for n in by.values():
+        used = set()
+        for v in (n.get("config") or {}).values():
+            if isinstance(v, str) and "{{" in v:
+                used.update(m.group(1) for m in re.finditer(r"\{\{\s*data\.(\w+)", v))
+        if not used:
+            continue
+        have, dynamic = set(), False
+        for u in _ancestors(by, parents, n["id"]):
+            sp = cat.get(by[u].get("type")) or {}
+            for o in (sp.get("io") or {}).get("outputs", ()):
+                if o["name"].startswith("<"):
+                    dynamic = dynamic or by[u]["type"] != "start.manual"
+                elif o["name"] != "text":
+                    have.add(o["name"])
+            if by[u].get("type") == "start.manual":
+                have.update(f["name"] for f in store.parse_inputs((by[u].get("config") or {}).get("inputs")))
+            for k in sp.get("outputs") or ():
+                have.add(k)
+        for k in sorted(used - have):
+            if not dynamic:
+                out.append((n["id"], '"%s" uses {{data.%s}}, but no node before it declares an output called %s%s' % (n.get("label") or n["id"], k, k, " (declared: %s)" % ", ".join(sorted(have)) if have else "")))
+    return out
+
+
+def checked_work(w, strip_secrets_with=None, warnings=None):
     """A generated / chat-made work, made safe: known node types only, disabled, new id, secrets never taken from it."""
     cat = catalogue()
     w = dict(w)
@@ -1830,9 +2665,21 @@ def checked_work(w, strip_secrets_with=None):
         p = preset(n.get("preset"))
         if not p or p["type"] != n["type"]:
             n.pop("preset", None)                                            # only a saved node of this type that really exists
+        n.pop("credential", None)                                            # the generator names no sets: we pick below
+        n.pop("credential_kind", None)
+        n.pop("credential_name", None)
+        ck = (cat[n["type"]].get("credential") or {}).get("kind")
+        if ck:
+            fit = [c for c in credentials().values() if c["kind"] == ck]
+            if len(fit) == 1:
+                n["credential"] = fit[0]["id"]                               # exactly one set of that kind: use it
+            else:
+                n["credential_kind"] = ck                                    # none or several: the user is asked to pick
     if not any(cat[n["type"]]["kind"] == "trigger" for n in w["nodes"]):
         raise ValueError("a work needs a Start node")
     repair(w, cat)
+    if warnings is not None:
+        warnings.extend(ref_warnings(w, cat))
     _layout(w)
     w = store.clean_work(w)
     if not w["nodes"]:
@@ -1840,7 +2687,7 @@ def checked_work(w, strip_secrets_with=None):
     return w
 
 
-def generate(prompt, model="", box=None):
+def generate(prompt, model="", box=None, warnings=None):
     """Ask Claude to design a work from PROMPT; -> the saved (disabled) work. Raises RuntimeError.
     An answer that cannot be used (no JSON, unknown node type ...) is sent back once with the reason, in the same chat."""
     prompt = " ".join(str(prompt or "").split())[:4000]
@@ -1862,7 +2709,7 @@ def generate(prompt, model="", box=None):
         text, last = "Create this workflow:\n" + prompt, None
         for _ in range(2):
             try:
-                return store.save_work(checked_work(extract_work(ask(text))))
+                return store.save_work(checked_work(extract_work(ask(text)), warnings=warnings))
             except ValueError as e:
                 last = e
                 text = "That answer cannot be used: %s. Reply again with ONE corrected ```json block (only the listed node types and their fields, one Start node)." % e

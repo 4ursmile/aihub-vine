@@ -12,6 +12,7 @@ import signal
 import subprocess
 import threading
 import time
+import uuid
 
 from . import auth, freechat, store
 from .aihub import HOME, CLAUDE_HOME, settings_path
@@ -39,7 +40,7 @@ A side canvas shows the folder live: an .html file you write (relative assets ar
 so for a page, chart, diagram or small app write one index.html instead of pasting long code in the reply. Markdown, SVG and images render too.
 For a dashboard, form, table or cards you may instead answer with an OpenUI Lang block (a ```openui fenced block, language rules below): the canvas renders it with OpenUI components.
 Files the user attaches are saved under attachments/. Keep answers short; do not repeat file contents you just wrote.
-When the user asks you to build a workflow / work / automation (a flow of nodes that runs on a schedule, a message or a click), answer with a short explanation and ONE ```workflow block holding the JSON {"title","description","nodes":[{"id","type","label","x","y","config"}],"edges":[{"from","to"}]}; the page shows a button that saves it in Works (switched off) and opens it. Node types: start.manual, start.cron, git.pull, io.path, io.read_file, io.request, ai.claude, ai.free, flow.filter, flow.template, flow.loop, flow.endloop, flow.output, space.publish, send.teams, send.smtp (mail through any SMTP server; action send | draft (IMAP Drafts) | eml (a .eml file)), and package nodes written pkg:<package>/<id> (for example pkg:aihub-nodes-outlook/outlook-send for Outlook mail, when that package is installed). git.pull / io.path pass a PATH, not content: a later ai.claude reads the files itself and should end with `OUTPUT: /full/path` when it creates one."""
+When the user asks you to build a workflow / work / automation (a flow of nodes that runs on a schedule, a message or a click), answer with a short explanation and ONE ```workflow block holding the JSON {"title","description","nodes":[{"id","type","label","x","y","config"}],"edges":[{"from","to"}]}; the page shows a button that saves it in Works (switched off) and opens it. Node types: start.manual, start.cron, git.pull, io.path, io.read_file, io.request, ai.claude, ai.free, flow.filter, flow.template, flow.loop, flow.endloop, flow.output, space.publish, send.teams, send.slack, send.telegram, send.discord, send.webhook, send.smtp (mail through any SMTP server; action send | draft (IMAP Drafts) | eml (a .eml file)), and package nodes written pkg:<package>/<id> (for example pkg:aihub-nodes-outlook/outlook-send for Outlook mail, when that package is installed). git.pull / io.path pass a PATH, not content: a later ai.claude reads the files itself and should end with `OUTPUT: /full/path` when it creates one."""
 
 
 def knowledge_index():
@@ -125,8 +126,17 @@ def start(sess, *a, **kw):
 
     def go():
         try:
+            handed = None
             for ev in (freechat.turn if engine == "free" else turn)(sess, *a, **kw):
+                if ev.get("k") == "handoff":                         # free chat asks Claude Code to take this message
+                    handed = ev
+                    continue
                 run.add(ev)
+            if handed and not run.cancel.is_set():
+                for ev in _handoff(sid, a, kw, handed.get("reason") or ""):
+                    run.add(ev)
+            elif handed:
+                run.add({"k": "done"})
         except Exception as e:                                       # the thread must always end the run
             ev = {"k": "error", "text": "%s: %s" % (type(e).__name__, e)}
             store.append(sid, ev)
@@ -139,6 +149,30 @@ def start(sess, *a, **kw):
             t.start()
     threading.Thread(target=go, daemon=True).start()
     return run
+
+
+def _handoff(sid, a, kw, why):
+    """Free chat -> Claude Code in the same run: the chat becomes a Claude chat (new Claude session that gets the earlier conversation as text, like a
+    manual switch), a note says why, then the SAME user message is answered by Claude Code. The free part's tokens were counted by freechat;
+    Claude's own are in Claude's logs, so nothing is logged twice."""
+    rows = store.history(sid)
+    last = max((i for i, r in enumerate(rows) if r.get("k") == "user"), default=len(rows))
+    seed = store.transcript(rows[:last])
+    cur = store.update_session(sid, engine="claude", started=False, claude=str(uuid.uuid4()), themes=[], seed="")
+    prompt = a[0] if a else ""
+    files = kw.get("files") or []
+    if files:
+        prompt += "\n\n[Attached files in your working folder: %s]" % ", ".join(files)
+    if seed:
+        prompt = "[Earlier conversation of this chat, restored. Continue from it; its files are in your working folder.]\n" + seed + "\n[End of earlier conversation]\n\n" + prompt
+    ev = {"k": "note", "text": "Switched to Claude Code: " + why}
+    store.append(sid, ev)
+    yield ev
+    yield {"k": "engine", "engine": "claude"}
+    model = a[1] if len(a) > 1 and (a[1] or "").split("[")[0] in ("opus", "sonnet", "haiku") else ""       # a free-chat model id means nothing to Claude Code
+    rest = tuple(a[2:])
+    kw2 = {k: v for k, v in kw.items() if k != "files"}
+    yield from turn(cur, prompt, model, *rest, **kw2)
 
 
 def _forget(sid, run):
@@ -262,6 +296,20 @@ def _blocks(content):
             out.append({"type": "tool", "id": b.get("id"), "name": b.get("name"), "input": b.get("input")})
         elif t == "thinking" and b.get("thinking"):
             out.append({"type": "thinking", "text": b["thinking"]})
+    return out
+
+
+def _fresh(blocks, mid, seen):
+    """Only the blocks not shown yet in this turn. Claude Code may send one message several times (one event per block, or the whole
+    content again): a tool call (same tool_use id) or a block of the same message id must not become a second row, or a question shows as two cards."""
+    out = []
+    for b in blocks:
+        key = ("tool", b.get("id")) if b["type"] == "tool" and b.get("id") else ("m", mid, b["type"], b.get("text")) if mid else None
+        if key is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(b)
     return out
 
 
@@ -547,6 +595,7 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
     store.update_session(sid, started=True, model=model, effort=effort, mode=mode)       # (no write when nothing changed)
     ctx = None                                                       # context size: kept here, written once when the turn ends
     got_result = False
+    seen_blocks = set()                                              # blocks of this turn already shown (see _fresh)
     t0 = time.time()
     try:
         for ln in p.stdout:
@@ -578,7 +627,7 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
                 if used:
                     ctx = used
                     yield {"k": "ctx", "used": used}
-                blocks = _blocks((m.get("message") or {}).get("content"))
+                blocks = _fresh(_blocks((m.get("message") or {}).get("content")), (m.get("message") or {}).get("id"), seen_blocks)
                 if blocks:
                     ev = {"k": "msg", "blocks": blocks}
                     store.append(sid, ev)

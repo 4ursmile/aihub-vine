@@ -86,3 +86,25 @@ def pointer(text, workdir):
         if os.path.exists(p):
             return os.path.realpath(p)
     return ""
+
+
+def git_login(cfg, netloc):
+    """A login given to the git node itself (its own fields or its credential set) beats the Vault / credential helper for THIS call.
+    -> (git -c args, env updates), or ([], {}) when the node has no token. The token travels in the child's environment and an inline helper
+    that answers only for exactly this https host; it is never in argv, a file or the git config on disk."""
+    token = str(cfg.get("token") or "")
+    if not token:
+        return [], {}
+    if not re.match(r"^[A-Za-z0-9.\-]+(:\d{1,5})?$", netloc or "") or any(c in token for c in "\r\n\0"):
+        raise ValueError("the git login cannot be used with this address")
+    user = str(cfg.get("username") or "").strip() or "x-access-token"
+    if any(c in user for c in "\r\n\0"):
+        raise ValueError("bad git username")
+    key = "credential.https://%s.helper" % netloc.lower()
+    helper = '!f() { test "$1" = get && printf "username=%s\\npassword=%s\\n" "$AIHUB_NODE_GIT_USER" "$AIHUB_NODE_GIT_TOKEN"; }; f'
+    return ["-c", key + "=", "-c", key + "=" + helper], {"AIHUB_NODE_GIT_USER": user, "AIHUB_NODE_GIT_TOKEN": token}
+
+
+def scrub(text, cfg):
+    t = str(cfg.get("token") or "")
+    return str(text).replace(t, "***") if t else str(text)

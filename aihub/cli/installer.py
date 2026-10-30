@@ -342,7 +342,64 @@ def onboard(name, assume_yes=False, force=False):
     return code == 0
 
 
-def bot_command(name, args=()):
+def _venv_bin(venv):
+    return os.path.join(venv, "Scripts" if OS == "windows" else "bin")
+
+
+def _venv_python(venv):
+    for n in (("python.exe", "python3.exe") if OS == "windows" else ("python", "python3")):
+        f = os.path.join(_venv_bin(venv), n)
+        if os.path.isfile(f):
+            return f
+    return None
+
+
+def check_venv(venv=None, python=None):
+    """Validate `aihub run --venv PATH` / `--python PATH` -> {"venv": dir|None, "python": interpreter}. Raises ApiError."""
+    if venv:
+        d = os.path.abspath(os.path.expanduser(str(venv)))
+        if not os.path.isdir(d):
+            raise api.ApiError("--venv %s: no such folder" % venv)
+        py = _venv_python(d)
+        if not py:
+            raise api.ApiError("--venv %s: no python in %s" % (venv, _venv_bin(d)))
+        return {"venv": d, "python": py}
+    f = os.path.abspath(os.path.expanduser(str(python)))
+    if not (os.path.isfile(f) and os.access(f, os.X_OK)):
+        raise api.ApiError("--python %s: not an executable file" % python)
+    return {"venv": None, "python": f}
+
+
+def remember_venv(name, choice):
+    """Save (dict) or clear (None) the venv/python `aihub run NAME` uses for this package."""
+    st = state()
+    rec = st["packages"].get(name)
+    if rec is None:
+        return
+    if choice:
+        rec["run_venv"] = choice
+    else:
+        rec.pop("run_venv", None)
+    save_state(st)
+
+
+def run_python(name, rec, home, override=None):
+    """Which interpreter `aihub run` uses -> {"python", "venv", "how"}. Order: explicit choice > remembered choice (rec run_venv) >
+    .venv / venv in the bot home or the package folder > the package's own venv > the python aihub runs with."""
+    for how, c in (("flag", override), ("remembered", rec.get("run_venv"))):
+        if c and c.get("python") and os.path.isfile(c["python"]):
+            return {"python": c["python"], "venv": c.get("venv"), "how": how}
+    for base in (home, rec.get("path")):
+        for sub in (".venv", "venv"):
+            d = os.path.join(base or "", sub)
+            if base and os.path.isdir(d) and _venv_python(d):
+                return {"python": _venv_python(d), "venv": d, "how": "found " + sub}
+    if rec.get("venv") and _venv_python(rec["venv"]):
+        return {"python": _venv_python(rec["venv"]), "venv": rec["venv"], "how": "package"}
+    return {"python": sys.executable, "venv": None, "how": "aihub"}
+
+
+def bot_command(name, args=(), override=None):
     """-> (cmd, shell, cwd, env) that starts an installed bot with its .env, knowledge, MCP list and skill folders in the environment.
     Raises when it is not installed or a required setting is empty. `aihub run` builds it again on every (re)start, so .env edits apply."""
     found = bots()
@@ -363,8 +420,12 @@ def bot_command(name, args=()):
         raise api.ApiError("missing: %s" % ", ".join(e["name"] for e in missing))
     env.update(bot_env(name, rec, m))
     cmd, shell, _ = script_command(spec["run"], rec["path"])
-    if isinstance(cmd, list) and cmd[0] == sys.executable and rec.get("venv"):
-        cmd[0] = os.path.join(rec["venv"], "Scripts" if OS == "windows" else "bin", "python")
+    py = run_python(name, rec, home, override)
+    if py["venv"]:
+        env["VIRTUAL_ENV"] = py["venv"]
+        env["PATH"] = _venv_bin(py["venv"]) + os.pathsep + env.get("PATH", "")
+    if isinstance(cmd, list) and cmd[0] == sys.executable:
+        cmd[0] = py["python"]
     if isinstance(cmd, list):
         cmd = cmd + list(args)
     return cmd, shell, home, env
@@ -425,7 +486,7 @@ def _install_one(r, assume_yes, tools, requested, archive_path=None):
         if archive_path:
             src = archive_path
         else:
-            with ui.Spinner("Fetching %s %s" % (name, "through the hub" if registry.INDIRECT or registry.on_hub(r.get("repo")) else "from git")):
+            with ui.Spinner("Fetching %s %s" % (name, "through the hub" if registry.via_hub() or registry.on_hub(r.get("repo")) else "from git")):
                 src = _fetch(r, td)
         toml = os.path.join(src, "aihub.toml")          # the repo's aihub.toml is authoritative
         m = M.normalize(M.parse(open(toml, encoding="utf-8").read()))

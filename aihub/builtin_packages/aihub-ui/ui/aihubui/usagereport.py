@@ -114,3 +114,73 @@ def report(days=7, force=False):
                 for k in [k for k in _flight if k not in _cache and k != key and not _flight[k].locked()]:
                     _flight.pop(k, None)
         return out
+
+
+# ---------- By session view: one row per session (peak context, hint flags), sorted/filtered/paged here so the page stays small
+_scache = {}
+_sflight = {}
+SORTS = {"recent": lambda s: -s["end"], "cost": lambda s: -s["cost"], "tokens": lambda s: -(s["input"] + s["output"] + s["cache_write"] + s["cache_read"]),
+         "ctx": lambda s: -s["peak"], "requests": lambda s: -s["requests"]}
+SLIM = ("tool", "session", "id", "title", "cwd", "project", "start", "end", "requests", "input", "output", "cache_write", "cache_read", "cost",
+        "unpriced", "peak", "last", "cache_hit", "model", "models", "flags")
+
+
+def _days(days, hi=3650):
+    try:
+        return max(0, min(hi, int(days if days not in (None, "") else 30)))
+    except (TypeError, ValueError):
+        raise ValueError("days must be a whole number")
+
+
+def _all_sessions(days, force):
+    key = days
+    with _lock:
+        hit = _scache.get(key)
+        if hit and not force and time.time() - hit[0] < TTL:
+            return hit[1]
+        gate = _sflight.setdefault(key, threading.Lock())
+    with gate:
+        with _lock:
+            hit = _scache.get(key)
+        if hit and not force and time.time() - hit[0] < TTL:
+            return hit[1]
+        doc = A.run(["usage", "--sessions", "--days", str(days), "--top", "0"], timeout=240)
+        rows = [{k: s.get(k) for k in SLIM} for s in ((doc.get("data") or {}).get("sessions") or []) if isinstance(s, dict)]
+        for s in rows:
+            s["flags"] = s.get("flags") or {"cold": 0, "compact": 0, "big": 0}
+            s["_t"] = ("%s %s %s %s %s" % (s["session"], s["title"], s["cwd"], s["tool"], " ".join(s["models"] or {}))).lower()
+        with _lock:
+            _scache[key] = (time.time(), rows)
+            while len(_scache) > 8:
+                _scache.pop(min(_scache, key=lambda k: _scache[k][0]))
+        return rows
+
+
+def sessions(days=30, q="", sort="recent", offset=0, limit=50, force=False):
+    """-> {total, offset, rows (a page of sessions), big, max_peak}. days 0 = all time."""
+    days = _days(days)
+    rows = _all_sessions(days, force)
+    q = str(q or "").strip().lower()
+    if q:
+        rows = [s for s in rows if q in s["_t"]]
+    rows = sorted(rows, key=SORTS.get(sort, SORTS["recent"]))
+    try:
+        offset, limit = max(0, int(offset or 0)), max(1, min(200, int(limit or 50)))
+    except (TypeError, ValueError):
+        raise ValueError("offset and limit must be whole numbers")
+    page = [{k: v for k, v in s.items() if k != "_t"} for s in rows[offset:offset + limit]]
+    return {"days": days, "total": len(rows), "offset": offset, "rows": page, "cost": sum(s["cost"] for s in rows),
+            "max_peak": max([s["peak"] for s in rows] or [0])}
+
+
+def session(sid, days=30):
+    """-> one session with its per request `series` [[ts, context, output, cost, flags]] and the CLI tips. None when no session has this id."""
+    sid = str(sid or "").strip()
+    if not sid or len(sid) > 200:
+        raise ValueError("session id required")
+    doc = A.run(["usage", "--session", sid, "--days", str(_days(days)), "--json"], timeout=120)
+    got = [s for s in ((doc.get("data") or {}).get("sessions") or []) if isinstance(s, dict)]
+    s = next((x for x in got if x.get("session") == sid), got[0] if len(got) == 1 else None)
+    if not s:
+        return None
+    return {k: s.get(k) for k in SLIM + ("series", "tips")}

@@ -298,6 +298,8 @@ NODE_JSON = """{{
   "description": "{description}",
   "run": ["{{python}}", "nodes/{pyname}.py"],
   "timeout": 30,
+  "inputs": [{{"name": "input", "type": "text", "desc": "the text of the node before", "required": false}}],
+  "outputs": [{{"name": "text", "type": "text", "desc": "the text, upper-cased", "example": "HELLO"}}],
   "fields": [
     {{"name": "text", "label": "Text", "type": "textarea", "default": "{{{{input}}}}", "help": "{{{{input}}}} is the text from the previous node."}},
     {{"name": "token", "label": "Token", "type": "password", "help": "Stored encrypted; the program gets it on stdin."}}
@@ -306,7 +308,7 @@ NODE_JSON = """{{
 """
 
 NODE_PY = """#!/usr/bin/env python3
-\"\"\"Action node: ONE JSON document on stdin ({{config, input, inputs, run, workdir}}); print ONE JSON line: {{"ok": true, "output": "..."}} or {{"ok": false, "error": "..."}}.\"\"\"
+\"\"\"Action node: ONE JSON document on stdin ({{config, input, inputs, run (id, dir, node_dir), workdir}}); print ONE JSON line: {{"ok": true, "output": "..."}} or {{"ok": false, "error": "..."}}.\"\"\"
 import json
 import sys
 

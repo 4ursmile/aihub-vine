@@ -5,10 +5,70 @@
   "group": "Mail",
   "description": "Starts a run for each new mail in an Outlook folder that matches your conditions (regex on sender, subject, headers and content). Windows, classic Outlook. Only mail that arrives while the work is On.",
   "run": ["{python}", "{pkg}/nodes/outlook_receive.py"],
-  "outputs": ["from", "from_name", "subject", "to", "cc", "body", "received", "attachments", "message_id"],
-  "out": "text",
-  "out_note": "Subject, sender and body; {{data.from}}, {{data.subject}}, {{data.body}}, {{data.attachments}}",
   "guide": "Watches an Outlook folder (polled) and starts the work for each NEW mail that matches ALL the conditions you fill in (regex, case-insensitive; empty = no condition).\n- Sender: tested against 'Name <address>'.\n- Header: the raw transport headers (X-..., List-Id, Received ...), for example ^X-Priority: 1.\n- Content: the mail body.\nThe event text is the subject, sender and body; {{data.from}} / {{data.subject}} / {{data.body}} / {{data.attachments}} (saved file paths, when ticked) reach the next nodes, so a Send email node can answer {{data.from}} directly. The generic 'Only start when the text matches' filter still applies on top.",
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "text",
+      "type": "text",
+      "desc": "Subject, sender and body",
+      "example": "Subject: Hi\nFrom: a@x.com\n..."
+    },
+    {
+      "name": "from",
+      "type": "text",
+      "desc": "sender address",
+      "example": "a@x.com"
+    },
+    {
+      "name": "from_name",
+      "type": "text",
+      "desc": "",
+      "example": "Ada"
+    },
+    {
+      "name": "subject",
+      "type": "text",
+      "desc": "",
+      "example": "Hi"
+    },
+    {
+      "name": "to",
+      "type": "text",
+      "desc": "",
+      "example": "me@x.com"
+    },
+    {
+      "name": "cc",
+      "type": "text",
+      "desc": "",
+      "example": ""
+    },
+    {
+      "name": "body",
+      "type": "text",
+      "desc": "plain text body",
+      "example": "Hello"
+    },
+    {
+      "name": "received",
+      "type": "text",
+      "desc": "time received",
+      "example": "2026-01-01 10:00"
+    },
+    {
+      "name": "attachments",
+      "type": "path",
+      "desc": "saved attachment paths, one per line",
+      "example": ""
+    },
+    {
+      "name": "message_id",
+      "type": "text",
+      "desc": "Outlook entry id",
+      "example": ""
+    }
+  ],
   "fields": [
     {"name": "folder", "label": "Folder", "type": "select", "options": ["inbox", "junk", "sent", "drafts"], "default": "inbox"},
     {"name": "from_regex", "label": "Sender matches (regex)", "type": "text", "default": "", "help": "Example: @example\\.com>|^Alice"},

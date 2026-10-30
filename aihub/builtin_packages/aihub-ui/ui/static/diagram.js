@@ -47,7 +47,7 @@ function drawEcharts(host, spec) {
     const c = E.init(host, dark() ? "dark" : null, { renderer: "canvas" });
     c.setOption({ backgroundColor: "transparent", animationDuration: 600, ...spec });
     const ro = new ResizeObserver(() => c.resize()); ro.observe(host);
-    return { png: () => c.getDataURL({ pixelRatio: 2, backgroundColor: dark() ? "#30302e" : "#fff" }), stop: () => { ro.disconnect(); c.dispose(); } };
+    return { png: () => c.getDataURL({ pixelRatio: 2, backgroundColor: dark() ? "#1c1c1e" : "#fff" }), stop: () => { ro.disconnect(); c.dispose(); } };
   });
 }
 

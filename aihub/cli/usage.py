@@ -628,6 +628,21 @@ def notes_of(s):
     return out
 
 
+def flags_of(s):
+    """Counts of the per request flags of a session: {cold, compact, big} (JSON field `flags`)."""
+    out = {"cold": 0, "compact": 0, "big": 0}
+    for n in notes_of(s):
+        for k in n:
+            out[k] += 1
+    return out
+
+
+def series_of(s, rates=None):
+    """Per request series for charts: [[ts, context, output, cost, [flags]], ...] (JSON field `series` of --session)."""
+    rates = {} if rates is None else rates
+    return [[r["ts"], ctx(r), r["output"], cost(r, rates) or 0.0, n] for r, n in zip(s["reqs"], notes_of(s))]
+
+
 def tips(ss, rates=None):
     """Efficiency suggestions from sessions_of() rows -> [{id, level, title, detail, amount (USD affected), sessions [(tool, id)]}],
     biggest first. One pass over the requests."""

@@ -932,7 +932,7 @@ def session_new(h, q, b):
     cwd = _cwd_arg(b["cwd"]) if b.get("cwd") else (_cwd_arg(store.folder_dir(folder)) if store.folder_dir(folder) else "")   # a sidebar folder made from a working folder keeps it
     if cwd and not folder:
         folder = store.link_folder(cwd)                                   # a chosen working folder gets its own sidebar folder
-    s = store.create_session(str(b.get("title") or ""), folder, chat.build_system(extra), cwd=cwd, extra=extra)
+    s = store.create_session(str(b.get("title") or ""), folder, chat.build_system(extra), cwd=cwd, extra=extra, incognito=b.get("incognito") is True)
     return {"session": s}
 
 
@@ -969,6 +969,12 @@ def session_update(h, q, b):
         kw["title"] = str(b["title"])[:120] or "Chat"
     if "folder" in b:
         kw["folder"] = str(b["folder"])[:60]
+    if b.get("incognito") is False:                                        # "Keep this chat": it joins the sidebar and search
+        kw["incognito"] = False
+    elif b.get("incognito") is True and not s.get("incognito"):            # only a chat nothing was said in yet can turn incognito
+        if s.get("started") or store.count(s["id"]):
+            raise Err("only an empty chat can become incognito", 409)
+        kw["incognito"] = True
     extra = (b["extra"] if isinstance(b.get("extra"), str) else s.get("extra") or "")[:80000]
     if b.get("refresh_memory"):
         kw["system"] = chat.build_system(extra, s.get("soul"))
@@ -1343,6 +1349,26 @@ def chat_hint(h, q, b):
     return {"sent": True}
 
 
+def chat_card(h, q, b):
+    """/work:<name> typed in a chat: store the command as a user message plus a workflow card row right after it, so the card keeps its place
+    in the conversation (later messages come below it) and a reopened chat shows it where it was. -> the two rows."""
+    s = store.get_session(need(b, "id"))
+    if not s:
+        raise Err("no such chat", 404)
+    if chat.active(s["id"]):
+        raise Err("this chat is still answering", 409)
+    wid = str(need(b, "work"))[:80]
+    if not re.match(r"^[\w.-]+$", wid):
+        raise Err("bad workflow id")
+    key = re.sub(r"[^0-9a-z]", "", str(b.get("key") or "").lower())[:20] or secrets.token_hex(5)
+    text = str(b.get("text") or "")[:20000]
+    shown = str(b.get("shown") or "/work")[:2000]
+    rows = [{"k": "user", "text": shown}, {"k": "card", "kind": "work", "spec": {"id": wid, "text": text, "key": key, "auto": True, "quiet": True}}]
+    for r in rows:
+        store.append(s["id"], r)
+    return {"rows": rows}
+
+
 def chat_btw(h, q, b):
     """/btw <question>: a side answer from the chat's context; not added to the conversation, the running answer is not disturbed."""
     s = store.get_session(need(b, "id"))
@@ -1390,7 +1416,7 @@ def mentions(s, text):
         cat = cat or W.catalogue()
         spec = cat.get(nt)
         if W.runnable(spec):
-            out.append(W.node_brief(spec))
+            out.append(W.node_brief(spec, [c for c in W.credentials().values() if c["kind"] == (spec.get("credential") or {}).get("kind")]))
     for wid in list(dict.fromkeys(MENTION_WORK.findall(text)))[:3]:
         w = store.get_work(wid)
         if w:
@@ -1514,6 +1540,28 @@ def usage_get(h, q, b):
         raise Err(str(e), 502)
 
 
+def usage_sessions(h, q, b):
+    """By session view: a page of sessions (`days`, `q`, `sort` recent|cost|tokens|ctx|requests, `offset`, `limit`)."""
+    try:
+        return usagereport.sessions(q.get("days"), q.get("q"), q.get("sort") or "recent", q.get("offset"), q.get("limit"), force=q.get("fresh") == "1")
+    except ValueError as e:
+        raise Err(str(e))
+    except A.CliError as e:
+        raise Err(str(e), 502)
+
+
+def usage_session(h, q, b):
+    try:
+        r = usagereport.session(q.get("id"), q.get("days"))
+    except ValueError as e:
+        raise Err(str(e))
+    except A.CliError as e:
+        raise Err(str(e), 502)
+    if r is None:
+        raise Err("no such session in this period", 404)
+    return r
+
+
 SPACE_KINDS = ("auto", "doc", "slides", "report", "pdf", "sheet", "dashboard", "html")
 
 
@@ -1538,38 +1586,11 @@ def _share_block(s, b):
 
 
 def _space_stage(full, root, tmp):
-    """-> (path to publish, files inlined, files skipped). A page that refers to local files (data, css, js, images) becomes ONE
-    self-contained page (`spacebundle`), because a Space has no network and no folder next to the file; a folder is copied and
-    each of its pages bundled the same way. A folder without index.html but with one top-level page uses that page."""
-    if os.path.isfile(full):
-        if not full.lower().endswith((".html", ".htm")):
-            return full, [], []
-        text, used, skipped = spacebundle.bundle(full, root)
-        if not used:
-            return full, [], skipped
-        out = os.path.join(tmp, os.path.basename(full))
-        with open(out, "w", encoding="utf-8") as f:
-            f.write(text)
-        return out, used, skipped
-    site = os.path.join(tmp, os.path.basename(full.rstrip(os.sep)) or "site")
-    shutil.copytree(full, site, ignore=shutil.ignore_patterns(".git", "node_modules", ".*"))
-    if not os.path.isfile(os.path.join(site, "index.html")):
-        pages = [n for n in os.listdir(site) if n.lower().endswith((".html", ".htm")) and os.path.isfile(os.path.join(site, n))]
-        if len(pages) != 1:
-            raise Err("a folder is shared as a web page and needs an index.html at its top")
-        os.rename(os.path.join(site, pages[0]), os.path.join(site, "index.html"))
-    used, skipped = [], []
-    for d, _, names in os.walk(site):
-        for n in names:
-            if n.lower().endswith((".html", ".htm")):
-                p = os.path.join(d, n)
-                text, u, sk = spacebundle.bundle(p, site)
-                if u:
-                    with open(p, "w", encoding="utf-8") as f:
-                        f.write(text)
-                used += [x for x in u if x not in used]
-                skipped += sk
-    return site, used, sorted(set(skipped))
+    """-> (path to publish, files inlined, files skipped): see spacebundle.stage (also used by the Works Publish node)."""
+    try:
+        return spacebundle.stage(full, root, tmp)
+    except ValueError as e:
+        raise Err(str(e))
 
 
 def space_publish(h, q, b):
@@ -1678,12 +1699,24 @@ def works(h, q, b):
     return {"works": store.works()}
 
 
+def _warn_of(w):
+    """{warnings: [text], warning_nodes: {node id: [text]}}: `{{data.x}}` references that no earlier node declares."""
+    try:
+        iss = W.ref_issues(w, W.catalogue())
+    except Exception:
+        iss = []
+    nodes = {}
+    for nid, t in iss:
+        nodes.setdefault(nid, []).append(t)
+    return {"warnings": [t for _, t in iss], "warning_nodes": nodes}
+
+
 def work_get(h, q, b):
     w = store.get_work(q.get("id"))
     if not w:
         raise Err("no such work", 404)
     st = getattr(ENGINE, "status", None) if ENGINE else None
-    return {"work": w, "triggers": st(w.get("id")) if st else {}}
+    return {"work": w, "triggers": st(w.get("id")) if st else {}, **_warn_of(w)}
 
 
 def work_save(h, q, b):
@@ -1703,7 +1736,7 @@ def work_save(h, q, b):
                     raise Err("bad regex in a node: %s" % e)
     w = store.save_work(w)
     ENGINE.sync()
-    return {"work": w}
+    return {"work": w, **_warn_of(w)}
 
 
 def work_enable(h, q, b):
@@ -1718,20 +1751,21 @@ def work_enable(h, q, b):
 
 def work_delete(h, q, b):
     wid = need(b, "id")
-    store.delete_work(wid)
+    stopped = W.drop_work(wid)                          # stops its runs, deletes run chats, records, logs and folders
     BOX.remove_prefix("node:%s:" % wid)
-    ENGINE.sync()
-    return {"ok": True}
+    ENGINE.sync()                                       # the work is gone: its cron timers and trigger processes end
+    return {"ok": True, "stopped": stopped}
 
 
 def work_generate(h, q, b):
     """Design a work from a description (Works page box, or /workflow in a chat). Saved switched OFF."""
+    warns = []
     try:
-        w = W.generate(need(b, "prompt"), str(b.get("model") or ""), BOX)
+        w = W.generate(need(b, "prompt"), str(b.get("model") or ""), BOX, warnings=warns)
     except RuntimeError as e:
         raise Err(str(e), 502)
     ENGINE.sync()
-    return {"work": w}
+    return {"work": w, "warnings": warns}
 
 
 GEN_JOBS = {}                                       # id -> job dict of this process; a "running" file with no entry here was cut off by a restart
@@ -1779,9 +1813,10 @@ def work_generate_start(h, q, b):
 
     def run():
         try:
-            w = W.generate(prompt, model, BOX)
+            warns = []
+            w = W.generate(prompt, model, BOX, warnings=warns)
             ENGINE.sync()
-            job.update(state="done", work={"id": w["id"], "title": w.get("title", "")})
+            job.update(state="done", work={"id": w["id"], "title": w.get("title", "")}, warnings=warns)
         except Exception as e:
             job.update(state="failed", error=str(e) or "could not create the workflow")
         try:
@@ -1810,11 +1845,12 @@ def work_generate_status(h, q, b):
 
 def work_make(h, q, b):
     """Save a work that an answer proposed in a ```workflow block (unknown nodes refused, secrets emptied, switched OFF)."""
+    warns = []
     try:
-        w = store.save_work(W.checked_work(need(b, "work", dict)))
+        w = store.save_work(W.checked_work(need(b, "work", dict), warnings=warns))
     except ValueError as e:
         raise Err(str(e))
-    return {"work": w}
+    return {"work": w, "warnings": warns}
 
 
 def presets_list(h, q, b):
@@ -1830,6 +1866,29 @@ def presets_save(h, q, b):
     if ENGINE:
         ENGINE.sync()                                           # triggers that use it restart with the new settings
     return {"preset": p}
+
+
+def credentials_list(h, q, b):
+    """Credential sets (secret fields only say stored or not: the value is MARK or absent) and the kinds a set can have."""
+    return {"credentials": W.credentials_view(), "kinds": sorted(W.kinds().values(), key=lambda k: k["title"].lower())}
+
+
+def credentials_save(h, q, b):
+    try:
+        c = W.save_credential(need(b, "credential", dict), BOX)
+    except ValueError as e:
+        raise Err(str(e))
+    if ENGINE:
+        ENGINE.sync()                                           # triggers that use it restart with the new values
+    return {"credential": c}
+
+
+def credentials_delete(h, q, b):
+    if not W.delete_credential(need(b, "id"), BOX):
+        raise Err("no such credential set", 404)
+    if ENGINE:
+        ENGINE.sync()
+    return {"ok": True}
 
 
 def presets_delete(h, q, b):
@@ -1854,15 +1913,26 @@ def node_run(h, q, b):
     known = bool(sid and store.get_session(sid))
     wd = store.session_dir(sid) if known else os.path.expanduser("~")
     text = str(b.get("input") or "")[:50000]
-    rec = W.new_chat_run(spec, sid if known else "", b.get("card"), b.get("config"), text)
+    rec = W.new_chat_run(spec, sid if known else "", b.get("card"), b.get("config"), text, b.get("rid"))
+    cfg_in = b.get("config") if isinstance(b.get("config"), dict) else {}
+    if b.get("credential"):                                         # order: what the card typed > the credential set > defaults (same as a work's node)
+        cv = W.cred_values({"credential": str(b["credential"])}, spec, BOX)
+        if not cv:
+            raise Err("that credential set is missing or is not for this node", 400)
+        cfg_in = dict(cv, **{k: v for k, v in cfg_in.items() if v not in (None, "")})
     try:
-        W.clean_node_config(spec, b.get("config"))
+        W.clean_node_config(spec, cfg_in)
     except ValueError as e:
         raise Err(str(e), 400)
+    b = dict(b, config=cfg_in)
     W.save_chat_run(rec)
     hubusage.use("node:" + spec["type"], package=spec.get("package") or "aihub-ui", session=sid)
     try:
-        r = W.run_single(spec, b.get("config"), text, wd)
+        r = W.run_single(spec, b.get("config"), text, wd, rid=rec["id"], rec=rec, box=BOX)
+    except W.Stopped:
+        rec.update(status="stopped", ended=time.time())
+        W.save_chat_run(rec)
+        raise Err("stopped", 409)
     except (ValueError, RuntimeError) as e:
         rec.update(status="failed", ended=time.time(), error=str(e)[:600])
         W.save_chat_run(rec)
@@ -1871,9 +1941,88 @@ def node_run(h, q, b):
         rec.update(status="failed", ended=time.time(), error=str(e)[:600])
         W.save_chat_run(rec)
         raise
-    rec.update(status="done", ended=time.time(), result={"text": r["text"][:4000], "data": r.get("data")}, log=r.get("log", ""))
+    rec.update(status="done", ended=time.time(), result={"text": r["text"][:4000], "data": r.get("data")}, log=r.get("log", ""), cmd=r.get("cmd", ""), exit=r.get("exit"))
     W.save_chat_run(rec)
     return dict(r, run=rec["id"])
+
+
+def work_active(h, q, b):
+    """Everything queued or running now (work runs and node runs from chats): cheap, memory only."""
+    return {"active": W.active()}
+
+
+def work_stop(h, q, b):
+    """Stop a run: a queued one is dropped, a running one has its processes and AI chats killed; the rest of it is skipped (status stopped)."""
+    rid = str(b.get("run") or "")
+    if not re.match(r"^[0-9a-z-]{8,40}$", rid):
+        raise Err("bad run id")
+    if not W.stop_run(rid):
+        raise Err("that run is not running (any more)", 404)
+    return {"ok": True}
+
+
+def work_log(h, q, b):
+    """The log of one node of a run, from byte offset `after`: {text, next, size, done}. `work`=chat for a node run from a chat (node ignored)."""
+    wid, rid, nid = q.get("work", ""), q.get("run", ""), q.get("node", "") or "node"
+    try:
+        after = max(0, int(q.get("after") or 0))
+    except ValueError:
+        after = 0
+    r = W.read_log(wid, rid, nid, after)
+    if r is None:
+        raise Err("no log", 404)
+    run = (W.get_run(wid, rid) if wid != W.CHAT_RUNS else W.get_chat_run(rid)) or {}
+    rec = ((run.get("nodes") or {}).get(nid) or {}) if wid != W.CHAT_RUNS else ((run.get("nodes") or {}).get("node") or {})
+    live = rid in W.CTL
+    r.update(done=not live or rec.get("status") not in (None, "running"), status=rec.get("status") or run.get("status") or "", cmd=rec.get("cmd", ""), exit=rec.get("exit"),
+             chat=rec.get("chat", ""), steps=rec.get("steps") or [], started=rec.get("started") or rec.get("t0"), ended=rec.get("ended"))
+    return r
+
+
+def work_files(h, q, b):
+    """The run folder of a run (the one working folder every node of it shares) and the files in it."""
+    wid, rid = q.get("work", ""), q.get("run", "")
+    if not W.get_run(wid, rid):
+        raise Err("no such run", 404)
+    return {"dir": W.run_dir(wid, rid, make=False), "files": W.run_files(wid, rid)}
+
+
+def _os_open(path):
+    if sys.platform == "win32":
+        os.startfile(path)                                              # noqa: S606 (a local path we just checked)
+    else:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def work_open(h, q, b):
+    """Open a run's folder (or one file in it) with the system's own app. Local machine only, like the rest of the UI."""
+    wid, rid = str(b.get("work") or ""), str(b.get("run") or "")
+    if not W.get_run(wid, rid):
+        raise Err("no such run", 404)
+    root = W.run_dir(wid, rid)
+    full = store.safe_join(root, str(b.get("path"))) if b.get("path") else root
+    if not full or not os.path.exists(full):
+        raise Err("no such file", 404)
+    try:
+        _os_open(full)
+    except OSError as e:
+        raise Err("cannot open it: " + str(e))
+    return {"ok": True, "path": full}
+
+
+def work_rerun(h, q, b):
+    """Start a finished run again with the same trigger event (text + inputs)."""
+    wid, rid = str(b.get("work") or ""), str(b.get("run") or "")
+    r = W.get_run(wid, rid)
+    w = store.get_work(wid)
+    if not r or not w:
+        raise Err("no such run", 404)
+    node = next((n for n in w["nodes"] if n["id"] == r.get("trigger")), None)
+    if not node:
+        raise Err("the Start node of that run no longer exists")
+    ev = r.get("event") or {"text": r.get("text") or "manual run", "data": {}}
+    node = dict(node, config=dict(node.get("config") or {}, filter=""))
+    return {"run": ENGINE.fire(w, node, ev, "rerun")}
 
 
 def work_chat_runs(h, q, b):
@@ -1925,7 +2074,7 @@ def _slug(t):
 
 
 RISKS = {"io.read_file": "reads files on this computer", "io.request": "makes web requests", "code.python": "runs Python code written in the workflow on the installer's machine", "git.read": "reads git repositories with your Vault logins",
-         "start.webhook": "listens for local webhook calls", "start.teams": "listens for messages from outside (tunnel + secret)", "send.teams": "posts to Teams",
+         "start.webhook": "listens for local webhook calls", "start.teams": "listens for messages from outside (tunnel + secret)", "send.teams": "posts to Teams", "send.slack": "posts to Slack", "start.slack": "listens for Slack calls (tunnel + signing secret)", "start.telegram": "reads messages sent to your Telegram bot", "send.telegram": "posts to Telegram", "send.discord": "posts to Discord", "send.webhook": "sends data to an outside URL",
          "send.smtp": "sends mail (or saves drafts) through a mail server"}
 
 
@@ -1940,6 +2089,11 @@ def _risks(w):
             r = "runs Claude Code (can use your skills, tools and MCP servers)"
         if r and r not in out:
             out.append(r)
+        k = n.get("credential_kind")
+        if k and not n.get("credential"):
+            r2 = "needs a '%s' credential set: you pick or create one after installing (no logins are shared)" % k
+            if r2 not in out:
+                out.append(r2)
     return out
 
 
@@ -1997,6 +2151,9 @@ def work_export(h, q, b):
     out.pop("id", None)
     out.update(enabled=False)
     for n in out["nodes"]:
+        c = W.credential(n.pop("credential", None))
+        if c:                                                    # only the KIND travels: whoever installs it picks or creates their own set
+            n["credential_kind"], n["credential_name"] = c["kind"], c["name"]
         p = W.preset(n.pop("preset", None))
         if p and p["type"] == n["type"]:                         # saved nodes exist only here: the package gets their settings written in
             n["config"] = dict({k: v for k, v in p["config"].items() if v != W.MARK}, **{k: v for k, v in n["config"].items() if v not in (None, "")})
@@ -2085,6 +2242,30 @@ def work_samples(h, q, b):
     return {"samples": [{k: v for k, v in x.items() if k != "_path"} for x in _samples()]}
 
 
+def _bind_credentials(w):
+    """A shared workflow names credential kinds, never values: link a node to the set of that kind when exactly one fits (same name first)."""
+    have = W.credentials()
+    for n in w.get("nodes", []):
+        kind = n.get("credential_kind")
+        if kind and not n.get("credential"):
+            same = [c for c in have.values() if c["kind"] == kind]
+            pick = next((c for c in same if c["name"] == n.get("credential_name")), same[0] if len(same) == 1 else None)
+            if pick:
+                n["credential"] = pick["id"]
+    return w
+
+
+def _needs_credentials(w):
+    """[{kind, title, name, nodes}] of the credential sets this work still lacks (what an import should ask the person to pick or create)."""
+    ks, out = W.kinds(), {}
+    for n in w.get("nodes", []):
+        k = n.get("credential_kind")
+        if k and not n.get("credential"):
+            r = out.setdefault(k, {"kind": k, "title": (ks.get(k) or {}).get("title", k), "name": n.get("credential_name") or "", "nodes": []})
+            r["nodes"].append(n.get("label") or n.get("type"))
+    return list(out.values())
+
+
 def work_import(h, q, b):
     pkg, fn = str(b.get("package") or ""), need(b, "file")
     hit = next((x for x in (_workflows() if pkg else _samples()) if x["package"] == pkg and x["file"] == fn), None)
@@ -2095,8 +2276,9 @@ def work_import(h, q, b):
     w.pop("id", None)
     w["enabled"] = False
     w["package"] = pkg
-    w = store.save_work(store.clean_work(w))
-    return {"work": w, "risks": _risks(w)}
+    w = _bind_credentials(store.clean_work(w))
+    w = store.save_work(w)
+    return {"work": w, "risks": _risks(w), "needs_credentials": _needs_credentials(w)}
 
 
 def work_runs(h, q, b):
@@ -2350,10 +2532,10 @@ ROUTES = {
     ("POST", "knowledge/delete"): note_delete, ("POST", "knowledge/pull"): knowledge_pull,
     ("GET", "sessions"): sessions, ("POST", "sessions"): session_new, ("GET", "sessions/get"): session_get,
     ("POST", "sessions/update"): session_update, ("POST", "sessions/delete"): session_delete, ("POST", "sessions/delmsg"): session_delmsg, ("POST", "folders"): folders,
-    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("GET", "files/diff"): file_diff, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "update/apply"): update_act, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/hint"): chat_hint, ("POST", "chat/btw"): chat_btw, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("GET", "sessions/export"): chat_export, ("POST", "sessions/share"): chat_share, ("GET", "sessions/shared"): chats_shared, ("POST", "sessions/import"): chat_import, ("POST", "sessions/rewind"): session_rewind,
-    ("GET", "themes"): themes_list, ("POST", "themes/save"): theme_save, ("POST", "themes/delete"): theme_delete, ("GET", "usage"): usage_get, ("POST", "spaces/publish"): space_publish, ("GET", "spaces"): spaces_mine, ("GET", "prefs"): prefs_get, ("PUT", "prefs"): prefs_put, ("GET", "slash"): slash,
+    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("GET", "files/diff"): file_diff, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "update/apply"): update_act, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/hint"): chat_hint, ("POST", "chat/btw"): chat_btw, ("POST", "chat/card"): chat_card, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("GET", "sessions/export"): chat_export, ("POST", "sessions/share"): chat_share, ("GET", "sessions/shared"): chats_shared, ("POST", "sessions/import"): chat_import, ("POST", "sessions/rewind"): session_rewind,
+    ("GET", "themes"): themes_list, ("POST", "themes/save"): theme_save, ("POST", "themes/delete"): theme_delete, ("GET", "usage"): usage_get, ("GET", "usage/sessions"): usage_sessions, ("GET", "usage/session"): usage_session, ("POST", "spaces/publish"): space_publish, ("GET", "spaces"): spaces_mine, ("GET", "prefs"): prefs_get, ("PUT", "prefs"): prefs_put, ("GET", "slash"): slash,
     ("GET", "works"): works, ("GET", "works/get"): work_get, ("POST", "works/save"): work_save, ("POST", "works/delete"): work_delete,
-    ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("GET", "works/presets"): presets_list, ("POST", "works/presets/save"): presets_save, ("POST", "works/presets/delete"): presets_delete, ("POST", "nodes/run"): node_run, ("GET", "works/chatruns"): work_chat_runs, ("GET", "project/info"): project_info, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/generate/start"): work_generate_start, ("GET", "works/generate/status"): work_generate_status, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import,
+    ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("GET", "works/presets"): presets_list, ("GET", "works/credentials"): credentials_list, ("POST", "works/credentials/save"): credentials_save, ("POST", "works/credentials/delete"): credentials_delete, ("POST", "works/presets/save"): presets_save, ("POST", "works/presets/delete"): presets_delete, ("POST", "nodes/run"): node_run, ("GET", "works/chatruns"): work_chat_runs, ("GET", "works/active"): work_active, ("GET", "works/files"): work_files, ("POST", "works/open"): work_open, ("POST", "works/rerun"): work_rerun, ("POST", "works/stop"): work_stop, ("GET", "works/log"): work_log, ("GET", "project/info"): project_info, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/generate/start"): work_generate_start, ("GET", "works/generate/status"): work_generate_status, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import,
     ("GET", "works/run"): work_run_get, ("GET", "nodes/local"): nodes_local, ("GET", "nodes/starter"): nodes_starter, ("POST", "nodes/save"): nodes_save, ("POST", "nodes/delete"): nodes_delete,
     ("GET", "nodes/export-info"): nodes_export_info, ("POST", "nodes/export"): nodes_export, ("GET", "nodes/packages"): nodes_packages, ("POST", "works/layout"): works_layout, ("GET", "works/mentions"): works_mentions, ("GET", "works/sources"): works_sources, ("GET", "works/hook"): work_hook,
     ("GET", "auth"): auth_status, ("POST", "auth/check"): auth_check, ("POST", "auth/login"): auth_login,
@@ -2376,6 +2558,7 @@ def main():
         write_private(tokf, TOKEN.encode("utf-8"))
     BOX = Box(folder)
     ENGINE = W.Engine(BOX)
+    store.purge_incognito()                                       # incognito chats never outlive the UI process
     searchidx.warm()                                              # chat search index: brought up to date in the background
     want = int(os.environ.get("UI_PORT") or 8765)
     try:

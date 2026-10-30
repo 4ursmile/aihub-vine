@@ -38,13 +38,20 @@ except ValueError:
     limit = 20000
 env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never", GIT_ASKPASS="true", SSH_ASKPASS="true", GIT_CONFIG_NOSYSTEM="0")
 base = ["git", "-c", "core.symlinks=false", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "core.hooksPath=/dev/null", "-c", "credential.interactive=never"]
+try:
+    _login_args, _login_env = F.git_login(cfg, u.netloc)               # node-level / credential-set login overrides the Vault for this call only
+except ValueError as e:
+    done(ok=False, error=str(e))
+base += _login_args
+env.update(_login_env)
 
 
 def git(args, cwd=None, timeout=240):
-    return subprocess.run(base + args, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(base + args, cwd=cwd, env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout)
 
 
 def explain(err):
+    err = F.scrub(err, cfg)
     host = u.netloc
     if re.search(r"authentication failed|could not read (username|password)|403|401|invalid credentials|terminal prompts disabled", err, re.I):
         return "git asked for a login for %s and the Vault has none that works. Add it in Vault (or: aihub vault add https://%s --user NAME --token-stdin). Git said: %s" % (host, host, err.strip()[-200:])

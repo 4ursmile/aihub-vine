@@ -1,0 +1,26 @@
+{
+  "id": "discord-send",
+  "title": "Send as Discord bot",
+  "kind": "action",
+  "group": "Discord",
+  "description": "Sends a message as your bot to a channel, or replies to the message that started the work.",
+  "run": ["{python}", "nodes/discord_send.py"],
+  "timeout": 60,
+  "templated": ["channel_id", "reply_to"],
+  "takes": ["channel_id"],
+  "inputs": [
+    {"name": "input", "type": "text", "desc": "the message text when 'Message' is {{input}}", "required": false},
+    {"name": "channel_id", "type": "text", "desc": "from Start: Discord message, or set in the node", "required": false}
+  ],
+  "outputs": [
+    {"name": "text", "type": "text", "desc": "what was sent", "example": "sent"},
+    {"name": "message_id", "type": "text", "desc": "id of the sent message", "example": "1234567892"}
+  ],
+  "fields": [
+    {"name": "bot_token", "label": "Bot token", "type": "password", "required": false, "help": "Stored encrypted. Usually comes from the Discord bot credential set."},
+    {"name": "channel_id", "label": "Channel ID", "type": "text", "default": "{{data.channel_id}}", "required": true},
+    {"name": "text", "label": "Message", "type": "textarea", "default": "{{input}}", "required": true},
+    {"name": "reply_to", "label": "Reply to message ID (optional)", "type": "text", "default": "{{data.message_id}}"}
+  ],
+  "credential": {"kind": "discordbot", "map": {"bot_token": "bot_token"}}
+}

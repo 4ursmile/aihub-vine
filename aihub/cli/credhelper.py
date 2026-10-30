@@ -21,7 +21,10 @@ SERVICE = "aihub-git"
 
 
 def _run(args, inp=None):
-    return subprocess.run(args, input=inp, capture_output=True, text=True, timeout=20, **gitx.popen_kw())
+    try:
+        return subprocess.run(args, input=inp, capture_output=True, text=True, timeout=20, **gitx.popen_kw())
+    except FileNotFoundError:                                  # the program (git, security, ...) is not installed
+        return subprocess.CompletedProcess(args, 127, "", "%s: not found" % args[0])
 
 
 # ---- backends: each has put(host, blob) / get(host) -> blob|None / drop(host); a failure raises or returns falsy ----------------
@@ -357,6 +360,8 @@ def register(urls):
     (`aihub vault`); otherwise git falls through to your own helpers, so a login you already saved keeps working. The host's own earlier
     values are remembered in git-helpers.json and restored by unregister. Idempotent; re-synced when your global helper changes.
     Returns (changed, already_ok) host lists. An entry an older version wrote under `user@host` is removed (ours only)."""
+    if not gitx.available():
+        return [], []                                                        # no git, nothing to register a helper with
     want = helper_value()
     changed, ok = [], []
     wanted = set()

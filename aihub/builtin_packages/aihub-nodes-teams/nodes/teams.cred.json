@@ -1,0 +1,12 @@
+{
+  "kind": "teams",
+  "title": "Microsoft Teams",
+  "hint": "One set for every Teams node: the tenant and app registration, the Workflows URL used to send, and the secret the listener checks.",
+  "fields": [
+    {"name": "tenant_id", "label": "Tenant ID"},
+    {"name": "client_id", "label": "Client ID"},
+    {"name": "client_secret", "label": "Client secret", "secret": true},
+    {"name": "webhook_url", "label": "Workflow URL (send)", "secret": true, "help": "From the Workflows app: When a Teams webhook request is received."},
+    {"name": "hook_secret", "label": "Listener secret (receive)", "secret": true, "help": "12+ random characters for the receive listener."}
+  ]
+}

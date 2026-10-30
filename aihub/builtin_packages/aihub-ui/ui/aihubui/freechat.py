@@ -329,7 +329,23 @@ def system_text(sess, tools=False):
             soul = ""
     soul = (soul or "").strip()
     return (FREE_HELP + "\n" + (WITH_TOOLS if tools else NO_TOOLS) + (("\n\n# Soul (the user's persona)\n" + soul[:6000]) if soul else "")
-            + ("\n\n" + WORK_RULES if sess.get("work") else ""))
+            + ("\n\n" + WORK_RULES if sess.get("work") else "") + ("\n\n" + HANDOFF_RULE if handoff_on(sess) else ""))
+
+
+HANDOFF = "aihub_handoff"
+HANDOFF_SPEC = {"name": HANDOFF, "description": "Hand this message over to Claude Code (the agent engine with file and shell tools). Call it, with a short reason, when the task needs reading or writing files in the working folder, running commands, multi-step coding or other agentic work. Do not answer in text when you call it.",
+                "input_schema": {"type": "object", "properties": {"reason": {"type": "string", "description": "One short sentence for the user: why Claude Code is needed"}}, "required": ["reason"]}}
+HANDOFF_RULE = ("# Handing over\nYou have the tool aihub_handoff. When the user's request needs files read or written in the working folder, shell commands, multi-step coding "
+                "or other agentic work that this chat cannot do, call aihub_handoff with a short reason instead of explaining the limits. Questions, writing, explaining and "
+                "analysis you can do from the conversation stay here: answer them yourself.")
+
+
+def handoff_on(sess):
+    """The handoff tool is offered when the preference is on and the chat is not an unattended Works run."""
+    try:
+        return bool(store.prefs().get("auto_engine", True)) and not sess.get("work")
+    except Exception:
+        return False
 
 
 MAX_ROUNDS = 12                                                          # model calls per message when tools are on
@@ -465,20 +481,21 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
             msgs.append({"role": "user", "content": content})
         body = {"model": (store.prefs().get("free_model") if (model or "").strip().split("[")[0] in ("", "opus", "sonnet", "haiku") else "") or resolve_model(model, env), "max_tokens": MAX_OUT, "stream": True, "messages": msgs,
                 "system": [{"type": "text", "text": system_text(sess, bool(box and box.specs)), "cache_control": {"type": "ephemeral"}}]}
-        if box and box.specs:
-            body["tools"] = box.specs
+        hand = [HANDOFF_SPEC] if handoff_on(sess) else []
+        if (box and box.specs) or hand:
+            body["tools"] = (box.specs if box and box.specs else []) + hand
         budget = BUDGET.get(effort)
         if budget:
             body["thinking"] = {"type": "enabled", "budget_tokens": budget}
             body["max_tokens"] = MAX_OUT + budget
         store.update_session(sid, engine="free")
         total = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
-        all_text, err, retried, reauthed = [], "", False, False
+        all_text, err, retried, reauthed, handoff = [], "", False, False, None
         limit, rnd, finished = (MAX_ROUNDS if body.get("tools") else 1), 0, False
         while rnd < limit and not state["cancel"].is_set():
             res = None
             if box and box.specs:
-                body["tools"] = box.specs                               # aihub_mcp may have started, stopped or hidden something since the last round
+                body["tools"] = box.specs + hand                        # aihub_mcp may have started, stopped or hidden something since the last round
             for kind, val in _round(base, head, body, env, state, secrets):
                 if kind == "delta":
                     yield {"k": "delta", "text": val}
@@ -545,10 +562,16 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
                     ui_blocks.append({"type": "tool", "id": b["id"], "name": b["name"], "input": args})
                     api_blocks.append({"type": "tool_use", "id": b["id"], "name": b["name"], "input": args})
                     calls.append((b["id"], b["name"], args))
+            gave = next((c for c in calls if c[1] == HANDOFF), None)
+            if gave:                                                     # not a tool row: the page shows the switch as a note
+                ui_blocks = [x for x in ui_blocks if not (x["type"] == "tool" and x.get("name") == HANDOFF)]
+                handoff = str((gave[2] or {}).get("reason") or "this needs files or commands").strip()[:300]
             if ui_blocks:
                 ev = {"k": "msg", "blocks": ui_blocks}
                 store.append(sid, ev)
                 yield ev
+            if gave:
+                break
             if err or state["cancel"].is_set() or res["stop"] != "tool_use" or not calls:
                 finished = True
                 break
@@ -567,6 +590,11 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
             msgs.append({"role": "assistant", "content": api_blocks})
             msgs.append({"role": "user", "content": results})
             rnd += 1
+        if handoff and not state["cancel"].is_set():
+            total["cost"] = 0
+            store.add_usage(sid, total)                                  # the free part is counted (and sent to the hub) as free chat; Claude's part is in Claude's own logs
+            yield {"k": "handoff", "reason": handoff}
+            return
         if finished and not err and not all_text and not state["cancel"].is_set():
             err = "The model returned no answer, only thinking (stop reason: %s)%s" % (res["stop"] or "unknown", "; raise the output limit or lower the effort" if res["stop"] == "max_tokens" else "")
         if not finished and not state["cancel"].is_set() and not err:

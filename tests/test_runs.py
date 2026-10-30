@@ -361,3 +361,59 @@ class ServiceType(unittest.TestCase):
             runs._save(dict(first, sup_pid=None, beat=0, status="stopped"))      # the first one ended: a second name is fine now
             runs.start("one-svc", [], a)
         self.assertEqual(launch.call_count, 1)
+
+
+class VenvChoice(Home):
+    """`aihub run --venv/--python`: replaces the interpreter, remembered per package, survives the supervisor's rebuild of the command."""
+
+    def fake_venv(self, name="ve"):
+        d = os.path.join(tempfile.mkdtemp(), name)
+        os.makedirs(os.path.join(d, "Scripts" if os.name == "nt" else "bin"))
+        py = os.path.join(d, "Scripts" if os.name == "nt" else "bin", "python.exe" if os.name == "nt" else "python")
+        os.symlink(sys.executable, py)
+        return d, py
+
+    def cmd(self):
+        from aihub.cli import installer
+        return installer.bot_command("tick-bot")
+
+    def test_order_flag_remembered_autodetect_default(self):
+        from aihub.cli import installer
+        cmd, _, _, env = self.cmd()
+        self.assertEqual(cmd[0], sys.executable)                                  # nothing set: aihub's python
+        auto, autopy = self.fake_venv()
+        os.rename(auto, os.path.join(self.home, "bots", "tick-bot", ".venv"))
+        cmd, _, _, env = self.cmd()
+        self.assertIn(os.path.join(".venv"), cmd[0])                               # auto-detected in the bot home
+        d, py = self.fake_venv()
+        installer.remember_venv("tick-bot", installer.check_venv(venv=d))
+        cmd, _, _, env = self.cmd()
+        self.assertEqual(cmd[0], py)                                              # remembered beats auto-detect
+        self.assertEqual(env["VIRTUAL_ENV"], d)
+        self.assertTrue(env["PATH"].startswith(os.path.dirname(py) + os.pathsep))
+        d2, py2 = self.fake_venv("other")
+        cmd, *_ = installer.bot_command("tick-bot", override=installer.check_venv(venv=d2))
+        self.assertEqual(cmd[0], py2)                                             # explicit beats remembered
+        installer.remember_venv("tick-bot", None)
+        self.assertIn(".venv", self.cmd()[0][0])
+
+    def test_bad_paths_are_errors(self):
+        from aihub.cli import api, installer
+        with self.assertRaises(api.ApiError):
+            installer.check_venv(venv=os.path.join(self.home, "nope"))
+        with self.assertRaises(api.ApiError):
+            installer.check_venv(venv=self.home)                                   # a folder without a python
+        with self.assertRaises(api.ApiError):
+            installer.check_venv(python=os.path.join(self.home, "nopython"))
+
+    def test_cli_remembers_and_list_shows_it(self):
+        d, py = self.fake_venv("myenv")
+        self.assertEqual(Commands.cli(self, "run", "tick-bot", "--name", "v1", "--venv", d, "--", "100000"), 0)
+        self.addCleanup(lambda: Commands.cli(self, "run", "stop", "--all"))
+        self.assertEqual(self.cmd()[0][0], py)
+        self.assertEqual(runs.venv_of(runs.load("v1"))["venv"], d)
+        self.assertEqual(Commands.cli(self, "run", "list", "--json"), 0)
+        self.assertEqual(Commands.cli(self, "run", "stop", "v1"), 0)
+        self.assertEqual(Commands.cli(self, "run", "tick-bot", "--name", "v1", "--venv", "default", "--", "100000"), 0)
+        self.assertEqual(self.cmd()[0][0], sys.executable)
+        self.assertEqual(Commands.cli(self, "run", "tick-bot", "--name", "v2", "--venv", os.path.join(self.home, "missing")), 1)

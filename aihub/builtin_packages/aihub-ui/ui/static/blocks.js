@@ -5,11 +5,11 @@ import DOMPurify from "./vendor/purify.js";
 import { Ic } from "./icons.js";
 import { toast, escPush } from "./ui.js";
 import { Diagram, DIAGRAMS } from "./diagram.js";
+import { loadHl } from "./code.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 // highlight.js (~100 KB) loads on the first code block; blocks drawn before it arrives are highlighted when it does
-let hlLib = null, hlLoad = null;
-const withHl = (fn) => { if (hlLib) return fn(hlLib); (hlLoad ||= import("./vendor/highlight.js").then((m) => (hlLib = m.default)).catch(() => null)).then((h) => h && fn(h)); };
+const withHl = (fn) => loadHl().then((h) => h && fn(h));
 const SHELL = new Set(["sh", "bash", "zsh", "shell", "console", "terminal", "fish", "powershell", "ps1", "cmd"]);
 const PALETTE = ["#d97757", "#6a9bcc", "#788c5d", "#c4a05a", "#9b87b8", "#5f8f8a", "#b0645a"];
 
@@ -107,7 +107,7 @@ const unclosed = (t) => ((t || "").match(/^\s*```/gm) || []).length % 2 === 1;
 export function Md({ text, live, onRender, onSend }) {
   // Incremental: the answer is split into top-level blocks; a block whose source did not change keeps its DOM node, so tables,
   // charts and cards that are already written never flash while the rest streams. Only the block being written is rebuilt.
-  const ref = useRef(), pend = useRef(text), raf = useRef(0), blocks = useRef([]), prevLive = useRef(live), lexc = useRef(null), tm = useRef(0), lastP = useRef(0);
+  const ref = useRef(), pend = useRef(text), raf = useRef(0), blocks = useRef([]), prevLive = useRef(live), lexc = useRef(null), tm = useRef(0), lastP = useRef(0), latest = useRef(null);
   const build = (tok, links, isLast, t) => {
     const holder = el("div", "mdb"); holder.style.display = "contents"; const mounted = []; let rich = false;
     const part = [tok]; part.links = links;
@@ -185,10 +185,11 @@ export function Md({ text, live, onRender, onSend }) {
     if (live) { const last = root.lastElementChild && root.lastElementChild.lastElementChild; const c = el("span", "caret");
       (last && !last.classList.contains("bk") ? last : root.lastElementChild || root).append(c); }
   };
+  latest.current = paint;                                                   // a paint already queued must run with the newest `live`, or a form keeps its Writing… state for good
   useEffect(() => {
     pend.current = text; if (raf.current || tm.current) return;
     const wait = live && text.length > 20000 ? Math.max(0, 100 - (performance.now() - lastP.current)) : 0;           // a big live answer paints about 10 times a second
-    if (wait) tm.current = setTimeout(() => { tm.current = 0; raf.current = requestAnimationFrame(paint); }, wait); else raf.current = requestAnimationFrame(paint);
+    if (wait) tm.current = setTimeout(() => { tm.current = 0; raf.current = requestAnimationFrame(() => latest.current()); }, wait); else raf.current = requestAnimationFrame(() => latest.current());
   }, [text, live]);
   useEffect(() => () => { cancelAnimationFrame(raf.current); clearTimeout(tm.current); blocks.current.forEach((b) => b.mounted.forEach((d) => render(null, d))); }, []);
   return html`<div class="md" ref=${ref}></div>`;
@@ -227,41 +228,57 @@ export function Chart({ spec }) {
 }
 
 // ---------- form: the answer asks, the submit sends the values back as the next message
+// The fields scroll inside the card (.fb-body); the footer with the Send button is outside that scroll area, so it is always visible.
 export function FormBlock({ spec, onSend, disabled }) {
   const fields = (spec.fields || []).slice(0, 20).filter((f) => f && /^[\w.-]{1,40}$/.test(f.name || ""));
-  const [v, setV] = useState(() => Object.fromEntries(fields.map((f) => [f.name, f.default ?? (f.type === "checkbox" ? false : "")]))), [done, setDone] = useState(false);
-  const ok = fields.every((f) => !f.required || (f.type === "checkbox" ? true : String(v[f.name] ?? "").trim() !== ""));
-  const submit = (e) => { e.preventDefault(); if (!ok || done || !onSend) return; if (onSend("Form " + (spec.title ? "“" + spec.title + "” " : "") + "response:\n```json\n" + JSON.stringify(v, null, 2) + "\n```") !== false) setDone(true); };
-  return html`<form class="fb" onSubmit=${submit}><div class="bk-head"><span class="bk-title">${Ic("form", 14)}<span>${spec.title || "Form"}</span></span>${done && html`<span class="tag good">${Ic("check", 12)} sent</span>`}</div>
-    ${spec.description && html`<p class="mute small fb-d">${spec.description}</p>`}
+  const [v, setV] = useState(() => Object.fromEntries(fields.map((f) => [f.name, f.default ?? (f.type === "checkbox" ? false : "")]))), [done, setDone] = useState(false), [open, setOpen] = useState(true);
+  const missing = fields.filter((f) => f.required && f.type !== "checkbox" && String(v[f.name] ?? "").trim() === "");
+  const ok = missing.length === 0;
+  const submit = (e) => { e.preventDefault(); if (!ok || done || disabled || !onSend) return; if (onSend("Form " + (spec.title ? "“" + spec.title + "” " : "") + "response:\n```json\n" + JSON.stringify(v, null, 2) + "\n```") !== false) { setDone(true); setOpen(false); } };
+  return html`<form class=${"fb" + (done ? " done" : "") + (!done && !disabled ? " live" : "") + (open ? "" : " shut")} onSubmit=${submit}>
+    <button type="button" class="bk-head fb-toggle" aria-expanded=${open} disabled=${!done} onClick=${() => setOpen((o) => !o)}><span class="bk-title">${Ic("form", 14)}<span>${spec.title || "Form"}</span></span>
+      <span class="fb-end">${done ? html`<span class="tag good">${Ic("check", 12)} sent</span>` : !disabled && html`<span class="ask-wait"><i></i>Waiting for you</span>`}${done && html`<span class="chev">${Ic("down", 14)}</span>`}</span></button>
+    ${open && html`<div class="fb-body">${spec.description && html`<p class="mute small fb-d">${spec.description}</p>`}
     <div class="fb-grid">${fields.map((f) => { const set = (x) => setV((c) => ({ ...c, [f.name]: x })); const dis = done || disabled;
       return html`<label class=${"fb-f" + (f.type === "textarea" ? " wide" : "")}><span>${f.label || f.name}${f.required ? " *" : ""}</span>
         ${f.type === "textarea" ? html`<textarea rows="3" value=${v[f.name]} disabled=${dis} onInput=${(e) => set(e.target.value)}></textarea>`
         : f.type === "select" ? html`<select value=${v[f.name]} disabled=${dis} onChange=${(e) => set(e.target.value)}><option value="">Choose…</option>${(f.options || []).map((o) => html`<option>${String(o)}</option>`)}</select>`
         : f.type === "checkbox" ? html`<input type="checkbox" checked=${!!v[f.name]} disabled=${dis} onChange=${(e) => set(e.target.checked)}/>`
-        : html`<input type=${f.type === "number" ? "number" : "text"} value=${v[f.name]} disabled=${dis} onInput=${(e) => set(f.type === "number" ? e.target.value : e.target.value)}/>`}</label>`; })}</div>
-    <div class="fb-foot"><button class="btn pri" type="submit" disabled=${!ok || done || disabled}>${spec.submit || "Send"}</button></div></form>`;
+        : html`<input type=${f.type === "number" ? "number" : "text"} value=${v[f.name]} disabled=${dis} onInput=${(e) => set(e.target.value)}/>`}</label>`; })}</div></div>
+    <div class="fb-foot"><span class="mute small grow">${done ? "" : disabled ? "Writing…" : missing.length ? "Still needed: " + missing.map((f) => f.label || f.name).join(", ") : "Ready to send"}</span>
+      <button class="btn pri" type="submit" disabled=${!ok || done || disabled}>${done ? "Sent" : spec.submit || "Send"}</button></div>`}</form>`;
 }
 
 // ---------- questions: the same card for Claude's AskUserQuestion tool and for a ```ask block. Submit sends the answers as the next message.
+// Several questions = tabs (one at a time, saves space). While unanswered the card is highlighted; once sent it settles to a normal collapsed card with the answers.
 export const answersText = (qs, pick) => "My answers:\n" + qs.map((q, i) => "- " + (q.question || q.header || "Question " + (i + 1)) + " -> " + (pick[i] && pick[i].length ? pick[i].join("; ") : "(no answer)")).join("\n");
 export function AskCard({ spec, onSend, locked }) {
-  const qs = (spec.questions || []).slice(0, 6).filter((q) => q && q.question), [pick, setPick] = useState(() => qs.map(() => [])), [other, setOther] = useState(() => qs.map(() => "")), [sent, setSent] = useState(false), [step, setStep] = useState(0);
+  const qs = (spec.questions || []).slice(0, 6).filter((q) => q && q.question), [pick, setPick] = useState(() => qs.map(() => [])), [other, setOther] = useState(() => qs.map(() => "")), [sent, setSent] = useState(false), [step, setStep] = useState(0), [open, setOpen] = useState(true);
   if (!qs.length) return null;
   const choose = (qi, label) => setPick((p) => p.map((a, i) => i !== qi ? a : qs[qi].multiSelect ? (a.includes(label) ? a.filter((x) => x !== label) : [...a, label]) : [label]));
   const final = qs.map((q, i) => [...pick[i], ...(other[i].trim() ? [other[i].trim()] : [])]);
-  const ready = final.every((a) => a.length), dis = sent || locked || !onSend;
-  const advance = (i) => { if (!q_multi(i) && i < qs.length - 1) setTimeout(() => setStep((s) => Math.max(s, i + 1)), 160); };
-  const q_multi = (i) => qs[i].multiSelect;
-  const go = () => { if (!ready || dis) return; if (onSend(answersText(qs, final)) !== false) setSent(true); };
-  return html`<div class=${"ask" + (sent ? " sent" : "")}><div class="bk-head"><span class="bk-title">${Ic("chat", 14)}<span>${qs.length > 1 ? "A few questions" : "A question"}</span></span>${sent && html`<span class="tag good">${Ic("check", 12)} answered</span>`}</div>
-    ${qs.map((q, qi) => html`<section class=${"aq" + (qi > step && !sent ? " later" : "")} style=${`--i:${qi}`}>
-      <div class="aq-h">${q.header && html`<span class="chip2">${String(q.header).slice(0, 24)}</span>`}<b>${q.question}</b>${q.multiSelect && html`<span class="mute small">pick any</span>`}</div>
-      <div class="aopts">${(q.options || []).slice(0, 8).map((o) => { const label = String(o.label || o), on = pick[qi].includes(label);
-        return html`<button type="button" class=${"aopt" + (on ? " on" : "")} disabled=${dis} aria-pressed=${on} onClick=${() => { choose(qi, label); advance(qi); }}>
-          <span class=${"abox" + (q.multiSelect ? " sq" : "")}>${on && Ic("check", 12)}</span><span><b>${label}</b>${o.description && html`<span class="mute small adesc">${o.description}</span>`}</span></button>`; })}
-        <label class="aother"><span class="mute small">Something else</span><input type="text" placeholder="Type your own answer" disabled=${dis} value=${other[qi]} onInput=${(e) => setOther((o) => o.map((x, i) => i === qi ? e.target.value : x))}/></label></div></section>`)}
-    <div class="fb-foot"><span class="mute small grow">${final.filter((a) => a.length).length} of ${qs.length} answered</span><button class="btn pri" disabled=${!ready || dis} onClick=${go}>${sent ? "Sent" : "Send answers"}</button></div></div>`;
+  const ready = final.every((a) => a.length), dis = sent || locked || !onSend, multi = qs.length > 1, cur = Math.min(step, qs.length - 1), q = qs[cur];
+  const firstOpen = final.findIndex((a) => !a.length), waiting = !sent && !locked && !!onSend;
+  const advance = (i) => { if (!qs[i].multiSelect && i < qs.length - 1) setTimeout(() => setStep((s) => (s === i ? i + 1 : s)), 220); };
+  const go = () => { if (!ready || dis) return; if (onSend(answersText(qs, final)) !== false) { setSent(true); setOpen(false); } };
+  const keyTabs = (e) => { if (e.key === "ArrowRight") setStep(Math.min(cur + 1, qs.length - 1)); else if (e.key === "ArrowLeft") setStep(Math.max(cur - 1, 0)); };
+  return html`<div class=${"ask" + (sent ? " sent" : "") + (waiting ? " live" : "") + (open ? "" : " shut")}>
+    <button type="button" class="bk-head ask-top" aria-expanded=${open} onClick=${() => setOpen((o) => !o)}><span class="bk-title">${Ic("chat", 14)}<span>${multi ? qs.length + " questions" : "A question"}</span></span>
+      <span class="fb-end">${sent ? html`<span class="tag good">${Ic("check", 12)} answered</span>` : waiting ? html`<span class="ask-wait"><i></i>Waiting for you</span>` : null}<span class="chev">${Ic("down", 14)}</span></span></button>
+    ${open && sent && html`<ul class="asum">${qs.map((x, i) => html`<li><span class="mute small">${x.header || x.question}</span><b>${final[i].join(", ") || "—"}</b></li>`)}</ul>`}
+    ${open && !sent && html`<div>
+      ${multi && html`<div class="atabs" role="tablist" onKeyDown=${keyTabs}>${qs.map((x, i) => html`<button type="button" role="tab" aria-selected=${i === cur} class=${"atab" + (i === cur ? " on" : "") + (final[i].length ? " ok" : "")} onClick=${() => setStep(i)}>
+        <span class="atn">${final[i].length ? Ic("check", 11) : i + 1}</span><span class="atl">${String(x.header || "Question " + (i + 1)).slice(0, 22)}</span></button>`)}</div>`}
+      <section class="aq" key=${cur} role="tabpanel">
+        <div class="aq-h">${multi && q.header ? null : q.header && html`<span class="chip2">${String(q.header).slice(0, 24)}</span>`}<b>${q.question}</b>${q.multiSelect && html`<span class="mute small">pick any</span>`}</div>
+        <div class="aopts">${(q.options || []).slice(0, 8).map((o) => { const label = String(o.label || o), on = pick[cur].includes(label);
+          return html`<button type="button" class=${"aopt" + (on ? " on" : "")} disabled=${dis} aria-pressed=${on} onClick=${() => { choose(cur, label); advance(cur); }}>
+            <span class=${"abox" + (q.multiSelect ? " sq" : "")}>${on && Ic("check", 12)}</span><span><b>${label}</b>${o.description && html`<span class="mute small adesc">${o.description}</span>`}</span></button>`; })}
+          <label class="aother"><span class="mute small">Something else</span><input type="text" placeholder="Type your own answer" disabled=${dis} value=${other[cur]} onInput=${(e) => setOther((o) => o.map((x, i) => i === cur ? e.target.value : x))}/></label></div></section>
+      <div class="fb-foot"><span class="mute small grow">${final.filter((a) => a.length).length} of ${qs.length} answered${multi && !ready && firstOpen >= 0 && firstOpen !== cur ? " · next: " + String(qs[firstOpen].header || "Question " + (firstOpen + 1)).slice(0, 20) : ""}</span>
+        ${multi && cur > 0 && html`<button type="button" class="btn" onClick=${() => setStep(cur - 1)}>${Ic("left", 13)} Back</button>`}
+        ${multi && cur < qs.length - 1 && html`<button type="button" class="btn" onClick=${() => setStep(cur + 1)}>Next ${Ic("right", 13)}</button>`}
+        <button class="btn pri" disabled=${!ready || dis} onClick=${go}>Send answers</button></div></div>`}</div>`;
 }
 
 
@@ -269,12 +286,14 @@ export function AskCard({ spec, onSend, locked }) {
 let makeWork = null;
 export const setWorkMaker = (fn) => { makeWork = fn; };
 export function WorkCard({ spec, locked }) {
-  const [state, setState] = useState("");
-  const go = async () => { setState("busy"); try { const w = await makeWork(spec); setState("done"); location.hash = "#/works/" + w.id; } catch (e) { setState(""); toast(e.message || String(e)); } };
-  const types = [...new Set(spec.nodes.map((n) => n.type))];
+  const [state, setState] = useState(""), [err, setErr] = useState(""), [warn, setWarn] = useState(null);
+  const go = async () => { setState("busy"); setErr(""); try { if (!makeWork) throw new Error("The chat is not ready yet, try again in a moment."); const r = await makeWork(spec), w = r.work || r; setState("done"); if (r.warnings && r.warnings.length) setWarn({ id: w.id, list: r.warnings }); else location.hash = "#/works/" + w.id; } catch (e) { setState(""); setErr(e.message || String(e)); toast(e.message || String(e)); } };
+  const types = [...new Set(spec.nodes.map((n) => n && n.type))];
   return html`<div class="ask"><div class="bk-head"><span class="bk-title">${Ic("flow", 14)}<span>Workflow: ${spec.title || "Untitled"}</span></span>${state === "done" && html`<span class="tag good">${Ic("check", 12)} created</span>`}</div>
     <p class="small" style="margin:6px 0">${spec.description || ""}</p><p class="mute small">${spec.nodes.length} nodes: ${types.join(", ")}</p>
-    <button class="btn acc" disabled=${locked || state === "busy" || state === "done"} onClick=${go}>${Ic("plus", 14)} Create in Works</button></div>`;
+    ${warn && html`<div class="werr rc-pad">${Ic("alert", 14)}<span>Created, but check: ${warn.list.join(" · ")} <a class="lnk" href=${"#/works/" + warn.id}>Open in Works</a></span></div>`}
+    ${err && html`<div class="werr rc-pad">${Ic("alert", 14)}<span>${err}</span></div>`}
+    <button type="button" class="btn acc" disabled=${locked || state === "busy" || state === "done"} title=${locked ? "The answer is still being written" : ""} onClick=${go}>${Ic("plus", 14)} ${locked ? "Writing…" : state === "busy" ? "Creating…" : "Create in Works"}</button></div>`;
 }
 
 
@@ -292,9 +311,37 @@ function useAutoRun(key, locked, ready, runRef) {
 export const setNodeHost = (h) => { nodeHost = h; };
 const cardKey = (spec) => { const t = JSON.stringify(spec); let h = 5381; for (let i = 0; i < t.length; i++) h = ((h << 5) + h + t.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
 const nodeResultText = (title, res) => "Result of the node “" + title + "”:\n```\n" + (res.text || "(no text)") + "\n```" + (res.data ? "\nData:\n```json\n" + JSON.stringify(res.data, null, 2).slice(0, 8000) + "\n```" : "");
-const NODE_IC = { "io.read_file": "file", "io.request": "link", "git.read": "code", "git.pull": "code", "io.path": "folder", "space.publish": "upload", "send.teams": "send", "send.smtp": "send", "code.python": "code" };
-const ST_LABEL = { wait: "Waiting for approval", need: "Needs values", busy: "Running", done: "Done", error: "Failed", skip: "Declined" };
-const ST_OF = { done: "done", failed: "error", interrupted: "error", running: "busy", queued: "busy" };
+const NODE_IC = { "io.read_file": "file", "io.request": "link", "git.read": "code", "git.pull": "code", "io.path": "folder", "space.publish": "upload", "send.teams": "send", "send.slack": "send", "start.slack": "inbox", "start.telegram": "inbox", "send.telegram": "send", "send.discord": "send", "send.webhook": "send", "send.smtp": "send", "code.python": "code" };
+const ST_LABEL = { wait: "Waiting for approval", need: "Needs values", busy: "Running", done: "Done", error: "Failed", skip: "Declined / stopped" };
+const ST_OF = { done: "done", failed: "error", interrupted: "error", running: "busy", queued: "busy", stopped: "skip" };
+export const fmtDur = (s) => { if (s == null || !isFinite(s) || s < 0) return ""; if (s < 10) return s.toFixed(1) + "s"; if (s < 60) return Math.round(s) + "s"; const m = Math.floor(s / 60); return m + "m " + String(Math.round(s % 60)).padStart(2, "0") + "s"; };
+export function useTick(on) {                         // seconds since epoch, re-read every second while ON (a live clock for running things)
+  const [, set] = useState(0);
+  useEffect(() => { if (!on) return; const t = setInterval(() => { if (!document.hidden) set((x) => x + 1); }, 1000); return () => clearInterval(t); }, [on]);
+  return Date.now() / 1000;
+}
+const nodeSecs = (r, now) => (r && (r.started || r.t0) ? Math.max(0, (r.ended || now) - (r.started || r.t0)) : null);
+// The log of one node run, streamed while it runs. GET(after) -> {text, next, size, done, cmd, exit, chat, steps, status}; GKEY changes when it is another log.
+export function RunLog({ get, gkey, live }) {
+  const [txt, setTxt] = useState(""), [meta, setMeta] = useState({}), [err, setErr] = useState(""), pos = useRef(0), box = useRef(), stick = useRef(true), busy = useRef(false), g = useRef();
+  g.current = get;
+  const pull = async () => {
+    if (busy.current) return; busy.current = true;
+    try { for (let i = 0; i < 6; i++) { const r = await g.current(pos.current); if (r.text) setTxt((t) => (t + r.text).slice(-400000)); pos.current = r.next; setMeta(r); setErr(""); if (r.next >= r.size) break; } }
+    catch (e) { setErr(e.message || "No log yet"); } finally { busy.current = false; }
+  };
+  useEffect(() => {
+    pos.current = 0; setTxt(""); setMeta({}); pull();
+    if (!live) return; const t = setInterval(() => { if (!document.hidden) pull(); }, 1000); return () => clearInterval(t);
+  }, [gkey, live]);
+  useEffect(() => { const b = box.current; if (b && stick.current) b.scrollTop = b.scrollHeight; }, [txt]);
+  const secs = nodeSecs({ started: meta.started, ended: meta.ended }, Date.now() / 1000);
+  return html`<div class="rlog"><div class="rlog-h">${meta.status && html`<span class=${"tag " + (meta.status === "ok" ? "good" : meta.status === "error" ? "bad" : "")}>${meta.status}</span>`}${meta.exit != null && html`<span class="tag">exit ${meta.exit}</span>`}${secs != null && html`<span class="mute small">${fmtDur(secs)}</span>`}${live && html`<span class="shine small">live</span>`}
+      ${meta.chat && html`<a class="lnk small" href=${"#/chat/" + meta.chat}>${Ic("chat", 12)} chat</a>`}</div>
+    ${meta.cmd && html`<code class="rlog-cmd">${meta.cmd}</code>`}
+    ${meta.steps && meta.steps.length > 0 && html`<div class="rlog-steps">${meta.steps.map((x, i) => html`<span class="rc-chip" title=${x}><i></i>${x}</span>`)}</div>`}
+    <pre class="rlog-b" ref=${box} onScroll=${(e) => { const b = e.target; stick.current = b.scrollHeight - b.scrollTop - b.clientHeight < 24; }}>${txt || err || (live ? "Waiting for output…" : "(empty)")}</pre></div>`;
+}
 function RunHead({ icon, kind, title, sub, st }) {
   return html`<header class="rc-h"><span class=${"nico " + (kind || "")}>${Ic(icon, 16)}</span><div class="grow" style="min-width:0"><div class="nt">${title}</div><div class="ns">${sub}</div></div>
     ${st && ST_LABEL[st] && html`<span class=${"rc-st " + st}><i></i>${ST_LABEL[st]}</span>`}</header>`;
@@ -319,6 +366,21 @@ function RunFoot({ st, missing, locked, what, onRun, onDecline, works }) {
     ${st === "skip" || st === "done" || st === "error" ? html`<button class="btn" disabled=${locked || missing.length > 0} onClick=${onRun}>${Ic("refresh", 13)} Run again</button>`
       : html`<button class="btn acc" disabled=${locked || st === "busy" || missing.length > 0} onClick=${onRun}>${Ic("play", 13)} ${st === "busy" ? "Running…" : "Approve and run"}</button>`}</div>`;
 }
+// The node / workflow description a card needs. Waits for the chat to hand over `nodeHost` (it is set in an effect, so a card can be built first), gives up after 15 s,
+// and keeps the reason: a card that cannot run says why and offers Try again instead of staying blank or disabled.
+function useCardInfo(load, dep) {
+  const [info, setInfo] = useState(undefined), [err, setErr] = useState(""), [n, setN] = useState(0);
+  useEffect(() => {
+    let on = true, t = 0; const fail = (m) => { if (on) { setInfo(null); setErr(m); } };
+    const go = (left) => { if (!on) return; if (!nodeHost) { if (left) t = setTimeout(() => go(left - 1), 400); else fail("The chat is not ready yet."); return; }
+      const to = setTimeout(() => fail("Timed out while loading this card."), 15000);
+      Promise.resolve().then(load).then((i) => { clearTimeout(to); if (on) { setInfo(i || null); setErr(""); } }).catch((e) => { clearTimeout(to); fail((e && e.message) || String(e)); }); };
+    if (n) setInfo(undefined); go(8);
+    return () => { on = false; clearTimeout(t); };
+  }, [dep, n]);
+  return [info, err, () => setN((x) => x + 1)];
+}
+const CardGone = ({ err, what, retry }) => html`<p class="rc-note mute small">${err ? "Cannot load this card: " + err : what}${" "}<button type="button" class="linkbtn" onClick=${retry}>Try again</button></p>`;
 function usePast(key, ok) {                       // the last record of this card (same chat, same block) from the Works run history
   const [past, setPast] = useState(undefined);
   useEffect(() => { let on = true; (nodeHost && ok ? nodeHost.past(key) : Promise.resolve(null)).then((r) => on && setPast(r || null)).catch(() => on && setPast(null)); return () => { on = false; }; }, [key, ok]);
@@ -326,68 +388,106 @@ function usePast(key, ok) {                       // the last record of this car
 }
 export function NodeCard({ spec, onSend, locked }) {
   const key = cardKey(spec);
-  const [info, setInfo] = useState(undefined), [v, setV] = useState(() => ({ ...(spec.config && typeof spec.config === "object" ? spec.config : {}) })), [input, setInput] = useState(String(spec.input || ""));
-  const [st, setSt] = useState("wait"), [res, setRes] = useState(null), [err, setErr] = useState(""), runRef = useRef(null), started = useRef(false);
-  const past = usePast(key, !locked);
-  useEffect(() => { if (!past || started.current) return; autoRan.add(key); setSt(ST_OF[past.status] || "error"); if (past.result) setRes(past.result); if (past.error) setErr(past.error); }, [past]);
+  const [info, ierr, retry] = useCardInfo(() => nodeHost.info(spec.type), spec.type), [v, setV] = useState(() => ({ ...(spec.config && typeof spec.config === "object" ? spec.config : {}) })), [input, setInput] = useState(String(spec.input || ""));
+  const [st, setSt] = useState("wait"), [res, setRes] = useState(null), [err, setErr] = useState(""), runRef = useRef(null), started = useRef(false), [rid, setRid] = useState(""), [logOn, setLogOn] = useState(false), [t0, setT0] = useState(0), [took, setTook] = useState(null);
+  const past = usePast(key, !locked), now = useTick(st === "busy");
+  useEffect(() => {
+    if (!past || started.current) return; autoRan.add(key); setRid(past.id); if (past.started && past.ended) setTook(past.ended - past.started); if (past.result) setRes(past.result); if (past.error) setErr(past.error);
+    const gone = (past.status === "running" || past.status === "queued") && Date.now() / 1000 - (past.started || 0) > 45;      // nobody follows a node run after a reload: a record still "running" is a run that was cut off
+    setSt(gone ? "error" : ST_OF[past.status] || "error"); if (gone && !past.error) setErr("This run was interrupted before it finished. Run it again.");
+  }, [past]);
+  const [sets, setSets] = useState([]), [cred, setCred] = useState(""), ck = info && info.credential ? info.credential.kind : "";
+  useEffect(() => { if (!ck || !nodeHost || !nodeHost.creds) return; let on = true; nodeHost.creds().then((l) => { if (!on) return; const fit = (l || []).filter((c) => c.kind === ck); setSets(fit); if (fit.length === 1) setCred((c) => c || fit[0].id); }).catch(() => {}); return () => { on = false; }; }, [ck]);
+  const chosen = sets.find((c) => c.id === cred), cmap = info && info.credential ? info.credential.map || {} : {};
+  const given = chosen ? new Set(Object.keys(chosen.fields || {}).map((k) => (Object.keys(cmap).length ? cmap[k] : k)).filter(Boolean)) : new Set();     // node fields the picked set fills
   const fields = (info && info.fields) || [], val = (f) => (v[f.name] !== undefined ? v[f.name] : f.type === "checkbox" ? !!f.default : f.default ?? "");
-  const missing = fields.filter((f) => f.required && f.type !== "checkbox" && String(val(f) ?? "").trim() === "").map((f) => f.label || f.name);
+  const missing = fields.filter((f) => f.required && f.type !== "checkbox" && !given.has(f.name) && String(val(f) ?? "").trim() === "").map((f) => f.label || f.name);
   useAutoRun(key, locked, !!info && past === null && !missing.length, runRef);
-  useEffect(() => { let on = true; (nodeHost ? nodeHost.info(spec.type) : Promise.resolve(null)).then((i) => on && setInfo(i || null)).catch(() => on && setInfo(null)); return () => { on = false; }; }, [spec.type]);
   const pkg = String(spec.type).startsWith("pkg:"), icon = NODE_IC[spec.type] || (pkg ? "package" : "flow");
-  if (!info) return html`<div class="rc k-pkg"><${RunHead} icon=${icon} kind="k-pkg" title=${spec.type} sub="Node"/>${info === null && html`<p class="rc-note mute small">This node is not installed or cannot run on its own.</p>`}</div>`;
+  if (!info) return html`<div class="rc k-pkg"><${RunHead} icon=${icon} kind="k-pkg" title=${spec.type} sub="Node"/>${info === null && html`<${CardGone} err=${ierr} what="This node is not installed or cannot run on its own." retry=${retry}/>`}</div>`;
   const dis = st === "busy" || locked, set = (f, x) => setV((c) => ({ ...c, [f.name]: x }));
   const run = async () => {
-    if (missing.length || st === "busy" || locked) return; started.current = true; autoRan.add(key); setSt("busy"); setErr(""); setRes(null);
-    try { const r = await nodeHost.run({ type: spec.type, config: Object.fromEntries(fields.map((f) => [f.name, val(f)])), input, card: key }); setRes(r); setSt("done"); if (onSend) onSend(nodeResultText(info.title, r)); }
-    catch (e) { setErr(e.message || String(e)); setSt("error"); }
+    if (missing.length || st === "busy" || locked) return; started.current = true; autoRan.add(key); setSt("busy"); setErr(""); setRes(null); setTook(null);
+    const id = new Date().toISOString().replace(/\D/g, "").slice(0, 14) + "-" + Math.random().toString(36).slice(2, 8); setRid(id); const t0 = Date.now() / 1000; setT0(t0);
+    try { const r = await nodeHost.run({ type: spec.type, config: Object.fromEntries(fields.map((f) => [f.name, val(f)])), input, card: key, rid: id, ...(cred ? { credential: cred } : {}) }); setRes(r); setSt("done"); setTook(Date.now() / 1000 - t0); if (onSend) onSend(nodeResultText(info.title, r)); }
+    catch (e) { if (/^stopped$/i.test(e.message || "")) { setErr("Stopped."); setSt("skip"); } else { setErr(e.message || String(e)); setSt("error"); } }
   };
   runRef.current = () => { run(); };
   return html`<div class=${"rc k-pkg " + st}><${RunHead} icon=${icon} kind="k-pkg" title=${info.title} sub=${"Node · " + (info.group || (pkg ? "package" : "built in"))} st=${missing.length && st === "wait" ? "need" : st}/>
     ${info.desc && html`<p class="rc-d">${info.desc}</p>`}
-    ${(fields.length > 0 || (info.templated || []).length > 0) && html`<div class="rc-grid">${fields.map((f) => html`<${RunField} f=${f} val=${val} set=${set} dis=${dis} secretNote=${true}/>`)}
+    ${ck && html`<label class="rc-f wide"><span>${Ic("key", 11)} Credentials <small>${sets.length ? "a saved set fills " + [...given].join(", ") : "none saved for " + ck + ": type the fields below"}</small></span>
+      <select value=${cred} disabled=${dis || !sets.length} onChange=${(e) => setCred(e.target.value)}><option value="">${sets.length ? "None (use the fields below)" : "No saved set"}</option>${sets.map((c) => html`<option value=${c.id}>${c.name}</option>`)}</select></label>`}
+    ${(fields.length > 0 || (info.templated || []).length > 0) && html`<div class="rc-grid">${fields.filter((f) => !given.has(f.name)).map((f) => html`<${RunField} f=${f} val=${val} set=${set} dis=${dis} secretNote=${true}/>`)}
       ${(info.templated || []).length > 0 && html`<label class="rc-f wide"><span>Input text <small>for {{input}}</small></span><textarea rows="2" value=${input} disabled=${dis} onInput=${(e) => setInput(e.target.value)}></textarea></label>`}</div>`}
     ${st === "busy" && html`<div class="rc-bar"><span></span></div>`}
+    ${(rid && st !== "wait") && html`<div class="rc-meta"><span class="mute small">${st === "busy" ? "Running " + fmtDur(now - t0) : took != null ? "Took " + fmtDur(took) : ""}</span><span class="grow"></span>
+      ${st === "busy" && nodeHost.stop && html`<button class="btn bad" onClick=${() => nodeHost.stop(rid)}>${Ic("x", 12)} Stop</button>`}<button class=${"btn" + (logOn ? " on" : "")} onClick=${() => setLogOn(!logOn)}>${Ic("terminal", 12)} Log</button></div>`}
+    ${logOn && rid && html`<${RunLog} gkey=${rid} live=${st === "busy"} get=${(after) => nodeHost.log("chat", rid, "node", after)}/>`}
     ${err && html`<div class="werr rc-pad">${Ic("alert", 14)}<span>${err}</span></div>`}
     ${res && html`<div class="rc-out"><div class="io-k">Output</div><pre>${res.text || "(no text output)"}${res.data ? "\n\n" + JSON.stringify(res.data, null, 2).slice(0, 4000) : ""}</pre></div>`}
     <${RunFoot} st=${st} missing=${missing} locked=${locked} what=${"this node"} onRun=${run} onDecline=${() => { autoRan.add(key); setSt("skip"); }} works=${st !== "wait" && st !== "skip" ? "#/works" : ""}/></div>`;
 }
 
 // ---------- work: a mentioned workflow. Inputs are checked here; approving starts it on the server, the card follows its nodes and hands the result to the chat
+const stepIcon = (t) => NODE_IC[t] || (/^start\./.test(t) ? "play" : /^ai\./.test(t) ? "sparkles" : /^flow\.output/.test(t) ? "send" : /^flow\.loop|^flow\.endloop/.test(t) ? "refresh" : String(t).startsWith("pkg:") ? "package" : "flow");
+const WF_DONE = ["ok", "error", "skipped", "stopped"];
+const WF_NAME = { ok: "done", error: "failed", running: "running", queued: "queued", skipped: "skipped", stopped: "stopped" };
+// A workflow run in a chat: header (icon, name, status, live clock), a track of its steps (icon, status, time), a progress bar, the result (collapsible) and the actions.
+// The card is a row of the chat history (or a ```work block), so it keeps its place in the conversation; a reopened chat finds its run again by `card`.
 export function WorkRunCard({ spec, onSend, locked }) {
-  const key = cardKey(spec);
-  const [info, setInfo] = useState(undefined), [v, setV] = useState(() => ({ ...(spec.data && typeof spec.data === "object" ? spec.data : {}) })), [st, setSt] = useState("wait"), [run, setRun] = useState(null), [err, setErr] = useState(""), runRef = useRef(null), started = useRef(false);
-  const past = usePast(key, !locked);
-  const ins = (info && info.inputs) || [], val = (f) => (v[f.name] !== undefined ? v[f.name] : f.default ?? (f.type === "checkbox" ? false : ""));
+  const key = cardKey(spec), quiet = !!spec.quiet;
+  const [info, ierr, retry] = useCardInfo(() => nodeHost.workInfo(spec.id), spec.id), [v, setV] = useState(() => ({ ...(spec.data && typeof spec.data === "object" ? spec.data : {}) })), [st, setSt] = useState("wait"), [run, setRun] = useState(null), [err, setErr] = useState(""), runRef = useRef(null), started = useRef(false), [logOn, setLogOn] = useState(false), [logNode, setLogNode] = useState(""), [resOpen, setResOpen] = useState(true), [t0, setT0] = useState(0);
+  const past = usePast(key, !locked), now = useTick(st === "busy");
+  const ins = (info && info.inputs) || [], val = (f) => (v[f.name] !== undefined ? v[f.name] : f.default ?? (f.type === "checkbox" ? false : "")), steps = (info && info.steps) || [];
   const missing = ins.filter((f) => f.required && f.type !== "checkbox" && String(val(f) ?? "").trim() === "").map((f) => f.label || f.name);
   useAutoRun(key, locked, !!info && past === null && !missing.length, runRef);
-  useEffect(() => { let on = true; (nodeHost ? nodeHost.workInfo(spec.id) : Promise.resolve(null)).then((i) => on && setInfo(i || null)).catch(() => on && setInfo(null)); return () => { on = false; }; }, [spec.id]);
+  useEffect(() => { if (spec.auto && info && past === null && !missing.length && !started.current && !autoRan.has(key) && runRef.current) { autoRan.add(key); runRef.current(); } }, [past, info]);       // /work:<name> is a direct command: no approval question
+  const settle = (r, title) => { setRun(r); setSt(r.status === "done" ? "done" : r.status === "stopped" ? "skip" : "error"); if (r.status === "stopped") setErr("Stopped."); else if (r.status !== "done") setErr(r.err || "The workflow failed."); return title; };
   const finish = (r, title) => {
-    setRun(r); setSt(r.status === "done" ? "done" : "error"); if (r.status !== "done") setErr(r.err || "The workflow failed.");
-    if (onSend) onSend(r.status === "done" ? "Result of the workflow “" + title + "”:\n\n" + ((r.result && r.result.text) || "(it finished without text output)") : "The workflow “" + title + "” failed: " + (r.err || "unknown error"));
+    settle(r, title);
+    if (onSend && !quiet) onSend(r.status === "done" ? "Result of the workflow “" + title + "”:\n\n" + ((r.result && r.result.text) || "(it finished without text output)") : "The workflow “" + title + "” failed: " + (r.err || "unknown error"));
   };
   useEffect(() => {                                     // reopened chat: show the last run; one still going is followed (its result is not sent again)
     if (!past || !info || started.current) return; autoRan.add(key); setSt(ST_OF[past.status] || "error");
     let on = true;
     nodeHost.workGet(info.id, past.id).then((r) => { if (!on || !r) return; setRun(r); if (r.err && r.status !== "done") setErr(r.err);
-      if (r.status === "queued" || r.status === "running") nodeHost.workFollow(info.id, past.id, (x) => on && setRun(x)).then((x) => { if (on) { setRun(x); setSt(x.status === "done" ? "done" : "error"); if (x.status !== "done") setErr(x.err || "The workflow failed."); } }).catch(() => {}); }).catch(() => {});
+      if (r.status !== "queued" && r.status !== "running") setSt(ST_OF[r.status] || "error");               // the list said "running" but the record says it ended (or was cut off)
+      if (r.status === "queued" || r.status === "running") nodeHost.workFollow(info.id, past.id, (x) => on && setRun(x)).then((x) => { if (on) settle(x, info.title); }).catch(() => {}); }).catch(() => {});
     return () => { on = false; };
   }, [past, info]);
-  if (!info) return html`<div class="rc k-trigger"><${RunHead} icon="flow" kind="k-trigger" title=${spec.id} sub="Workflow"/>${info === null && html`<p class="rc-note mute small">This workflow no longer exists.</p>`}</div>`;
+  if (!info) return html`<div class="rc wf k-trigger"><${RunHead} icon="flow" kind="k-trigger" title=${spec.id} sub="Workflow"/>${info === null && html`<${CardGone} err=${ierr} what="This workflow no longer exists." retry=${retry}/>`}</div>`;
   const dis = st === "busy" || locked, set = (f, x) => setV((c) => ({ ...c, [f.name]: x }));
   const go = async () => {
-    if (missing.length || st === "busy" || locked) return; started.current = true; autoRan.add(key); setSt("busy"); setErr(""); setRun(null);
+    if (missing.length || st === "busy" || locked) return; started.current = true; autoRan.add(key); setSt("busy"); setErr(""); setRun(null); setT0(Date.now() / 1000);
     try { finish(await nodeHost.workRun(info.id, Object.fromEntries(ins.map((f) => [f.name, val(f)])), String(spec.text || ""), setRun, key), info.title); }
     catch (e) { setErr(e.message || String(e)); setSt("error"); }
   };
   runRef.current = () => { go(); };
-  const steps = (info.steps || []), rn = (run && run.nodes) || {}, okN = steps.filter((n) => rn[n.id] && rn[n.id].status === "ok").length;
-  return html`<div class=${"rc k-trigger " + st}><${RunHead} icon="flow" kind="k-trigger" title=${info.title} sub=${"Workflow · " + steps.length + " step" + (steps.length === 1 ? "" : "s") + (run && steps.length ? " · " + okN + " done" : "")} st=${missing.length && st === "wait" ? "need" : st}/>
+  const rn = (run && run.nodes) || {}, nst = (n) => (rn[n.id] && rn[n.id].status) || (st === "busy" || run ? (st === "busy" ? "queued" : "") : ""), fin = steps.filter((n) => WF_DONE.includes(nst(n))).length, okN = steps.filter((n) => nst(n) === "ok").length;
+  const pct = st === "done" ? 100 : steps.length ? Math.round((fin / steps.length) * 100) : 0, began = (run && run.started) || t0, clock = began ? fmtDur(Math.max(0, ((run && run.ended) || (st === "busy" ? now : began)) - began)) : "";
+  const text = run && run.result && run.result.text, sub = "Workflow · " + steps.length + " step" + (steps.length === 1 ? "" : "s") + (run && steps.length ? " · " + okN + " done" : "");
+  const stl = missing.length && st === "wait" ? "need" : st, logId = logNode || Object.keys(rn).find((k) => rn[k].status === "running") || [...steps].reverse().map((x) => x.id).find((k) => rn[k] && rn[k].logfile) || "";
+  return html`<div class=${"rc wf k-trigger " + st}>
+    <header class="rc-h"><span class="nico k-trigger">${Ic("flow", 16)}</span><div class="grow" style="min-width:0"><div class="nt">${info.title}</div><div class="ns">${sub}</div></div>
+      <span class="wf-clock" title="Elapsed">${clock && html`${Ic("clock", 12)}${clock}`}</span>${ST_LABEL[stl] && html`<span class=${"rc-st " + stl}><i></i>${ST_LABEL[stl]}</span>`}</header>
     ${info.description && html`<p class="rc-d">${info.description}</p>`}
-    ${steps.length > 0 && html`<div class="rc-flow">${steps.map((n, i) => html`${i > 0 && html`<span class="rc-arrow">${Ic("right", 11)}</span>`}<span class=${"rc-chip " + (rn[n.id] ? rn[n.id].status : "")} title=${(rn[n.id] && rn[n.id].error) || n.title}><i></i>${n.title}</span>`)}</div>`}
+    ${steps.length > 0 && html`<div class="wf-track" role="list">${steps.map((n, i) => { const s = nst(n), r = rn[n.id], d = nodeSecs(r, now);
+      return html`${i > 0 && html`<span class=${"wf-ln" + (WF_DONE.includes(nst(steps[i - 1])) ? " on" : "")} aria-hidden="true"><i></i></span>`}<button type="button" role="listitem" class=${"wf-n " + s} onClick=${() => { setLogNode(n.id); setLogOn(true); }} title=${(r && r.error) || n.title + " (click for its log)"}>
+        <span class="wf-ic">${s === "ok" ? Ic("check", 13) : s === "error" ? Ic("x", 13) : s === "stopped" ? Ic("stop", 11) : Ic(stepIcon(n.type), 13)}</span><span class="wf-nm" title=${n.title}>${n.title}</span><span class="wf-d">${d != null && s !== "queued" ? fmtDur(d) : s ? WF_NAME[s] || "" : ""}</span></button>`; })}</div>`}
+    <div class=${"wf-prog" + (st === "busy" ? " live" : "")} role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${pct}><span style=${"width:" + pct + "%"}></span></div>
     ${ins.length > 0 && html`<div class="rc-grid">${ins.map((f) => html`<${RunField} f=${f} val=${val} set=${set} dis=${dis}/>`)}</div>`}
-    ${st === "busy" && html`<div class="rc-bar"><span style=${steps.length ? "width:" + Math.max(6, Math.round((okN / steps.length) * 100)) + "%;animation:none" : ""}></span></div>`}
     ${err && html`<div class="werr rc-pad">${Ic("alert", 14)}<span>${err}</span></div>`}
-    ${run && run.result && run.result.text && html`<div class="rc-out"><div class="io-k">Output</div><div class="wres"><${Md} text=${run.result.text}/></div></div>`}
-    <${RunFoot} st=${st} missing=${missing} locked=${locked} what=${"this workflow"} onRun=${go} onDecline=${() => { autoRan.add(key); setSt("skip"); }} works=${"#/works/" + info.id}/></div>`;
+    ${text && html`<div class=${"wf-res" + (resOpen ? " open" : "")}><div class="wf-resh"><button type="button" class="wf-rt" aria-expanded=${resOpen} onClick=${() => setResOpen(!resOpen)}>${Ic(resOpen ? "down" : "right", 12)} Result${run.result.title ? html` <span class="mute">${run.result.title}</span>` : ""}</button><span class="grow"></span>
+        <button type="button" class="btn sm" title="Copy the result" onClick=${() => navigator.clipboard.writeText(text).then(() => toast("Copied"), () => toast("Could not copy"))}>${Ic("copy", 12)} Copy</button>${onSend && quiet && html`<button type="button" class="btn sm" title="Hand the result to Claude" onClick=${() => onSend("Result of the workflow “" + info.title + "”:\n\n" + text)}>${Ic("send", 12)} Send to Claude</button>`}</div>
+      <div class="wf-resb"><div class="wf-resi"><div class="wres"><${Md} text=${text}/></div></div></div></div>`}
+    ${st === "done" && !text && html`<p class="rc-note mute small" style="margin-left:12px">It finished without text output. Add an Output node to choose what it answers.</p>`}
+    ${logOn && run && run.id && (logId ? html`<${RunLog} gkey=${run.id + logId} live=${st === "busy"} get=${(after) => nodeHost.log(info.id, run.id, logId, after)}/>` : html`<div class="mute small rc-pad">No node has a log yet.</div>`)}
+    <div class=${"rc-foot wf-foot" + (st === "wait" && !missing.length && !locked ? " ask" : "")}>
+      <span class="grow small wf-msg">${locked ? "Writing…" : missing.length ? "Fill in: " + missing.join(", ") : st === "wait" ? (spec.auto ? "Fill in the values, then run." : nodeHost.bypass() ? "Bypass mode: runs without asking." : "Runs this workflow on this computer. Check the values, then approve.") : st === "busy" ? "Running" + (quiet ? "." : "; the result goes back to the chat.") : st === "skip" ? "Not run." : st === "done" ? (quiet ? "Finished." : "The result went back to the chat.") : ""}</span>
+      ${run && run.id && st !== "wait" && html`<button type="button" class=${"btn sm" + (logOn ? " on" : "")} onClick=${() => setLogOn(!logOn)}>${Ic("terminal", 12)} Log</button>`}
+      <a class="btn sm" href=${"#/works/" + info.id}>${Ic("flow", 12)} Open in Works</a>
+      ${st === "busy" && run && run.id && nodeHost.stop && html`<button type="button" class="btn sm bad" onClick=${() => nodeHost.stop(run.id)}>${Ic("stop", 12)} Stop</button>`}
+      ${st === "wait" && !missing.length && !locked && !spec.auto && html`<button type="button" class="btn sm" onClick=${() => { autoRan.add(key); setSt("skip"); }}>Decline</button>`}
+      ${st === "skip" || st === "done" || st === "error" ? html`<button type="button" class="btn sm" disabled=${locked || missing.length > 0} onClick=${go}>${Ic("refresh", 12)} Run again</button>`
+        : html`<button type="button" class="btn sm acc" disabled=${locked || st === "busy" || missing.length > 0} onClick=${go}>${Ic("play", 12)} ${st === "busy" ? "Running…" : spec.auto ? "Run" : "Approve and run"}</button>`}</div></div>`;
 }

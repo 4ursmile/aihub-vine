@@ -56,7 +56,11 @@ Every node hands on `{text, data}`. `text` is a string; `data` is a dict (only p
 - **Claude to Publish**: Claude only answers with text. A node after it (Publish to Space, email attachments) takes the path from the LAST line of that text that names an existing file or folder (`OUTPUT: /full/path`; backticks and quotes are ignored), or from the `path` data of a pointer node, or from its own File field. The prompt box offers **Add the instruction** (writes the `OUTPUT:` request into the prompt) and says so when a Publish node follows. The Data tab and the Publish log show which path was used and where it came from.
 - **Parallel branches**: nodes that do not depend on each other run at the same time (at most 4 per run); a node starts when all its parents are done. Claude nodes running side by side each get a chat of their own (the shared chat stays with whichever is alone); a sequence still shares one.
 - **Generate** (Works > describe a work, `/workflow` in chat): the generator is told the rules above, each node's output kind and needs, and a working example. Its answer is repaired before saving (duplicate ids, edges to nothing, `{{in.x}}` that names no parent, a Publish node with no path source gets an `OUTPUT:` request added to the Claude node before it); an answer that cannot be used is sent back once with the reason. The result is saved switched off.
-- A package node can declare `"out": "text|path|json|url"`, `"out_note"`, `"needs": "path"` and `"needs_note"` so the editor shows the same Receives/Produces strip.
+- **Input / output schema.** A node declares ONE explicit contract: `"inputs": [{"name","type","desc","required"}]` and `"outputs": [{"name","type","desc","example"}]` (`type` = `text|path|json|url`). The output called `text` is what the next node gets as `{{input}}`; every other output is `{{data.name}}` (a name like `<key>` means "dynamic keys", e.g. a Python function's return). An input called `input` is the text of the parent; other names are standard keys taken from the node before (`takes`) or a settings field. The editor's Inspector shows **Takes / Gives** (with the example and the exact `{{...}}` to use) and a **Works in** line; the prompt box lists the declared outputs of the parents; the generator's catalogue prints `in:` / `out:` for every node and is told to use `{{data.x}}` only for declared outputs; `checked_work` returns **warnings** for a `{{data.x}}` that no node before it declares. The old keys still work as a fallback: `"out"`/`"out_note"` (= the `text` output), `"outputs": ["path"]` (names = data outputs), `"needs": "path"`/`"needs_note"` (= a required path input). Every builtin node and the bundled node packages use the new schema.
+- **Working folder.** Every run has ONE folder, `~/.aihub/ui/runs/<work>/<run>/work/`, with a sub folder per node. `{{run.dir}}` and `{{node.dir}}` are template variables; a program gets `workdir` (= the run folder) and `run.dir` / `run.node_dir` in its stdin JSON, and `AIHUB_RUN_DIR` / `AIHUB_NODE_DIR` in its environment. Claude and Free chat nodes work in it unless their **Working folder** field says otherwise. The run view lists the files written and has **Open folder**. A node run alone from a chat uses that chat's folder as both.
+- **Chat cards and credentials.** A node run from a chat (`@node:`) lists the saved credential sets of its kind in the card (picked automatically when there is one); the set fills its fields on the server (a field typed in the card wins), so the model and the chat history never see the values. The generator links a generated node to the only set of its kind, or marks it `credential_kind` so you pick one.
+- **Warnings and undo.** `{{data.x}}` that no earlier node declares is flagged on the node (badge + Inspector) after open/save and in the /create-work card. The editor has undo/redo (Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z).
+- **Logs.** Every node execution of a run writes `runs/<work>/<run>/<node>.log` (command, stdout, `[err]` stderr lines, exit code, for AI nodes the chat id and tool steps; capped at 1 MB, newest kept; secret values replaced by `***`). `GET works/log?work=&run=&node=&after=` reads it from a byte offset (live tail); a node run from a chat uses `work=chat&node=node`. A program is judged finished when it EXITS: a background process it started that keeps stdout open no longer holds the node.
 
 Without `assist`, a textarea or a `templated` field gets `input` + `data`; the prompt of Claude task and Free chat gets all four. `"outputs": ["path"]` at node level names the data keys the program returns in `data`.
 
@@ -105,11 +109,23 @@ A complete, tested example lives in [`aihub/builtin_packages/aihub-nodes-teams`]
 | `group`, `title`, `description` | Where it appears in **Add node** and what the panel shows. |
 | `run` | The command as a list, never a shell string. `{python}` = the interpreter running the UI, `{pkg}` = your package folder. The working directory is the package folder. |
 | `timeout` | Seconds for an action (5..3600, default 120). Triggers run until stopped. |
+| `inputs`, `outputs` | The I/O schema (see "Input / output schema" above). Optional, but fill it in: it drives the editor, the prompt suggestions and the generator. |
 | `fields` | The settings form. `type`: `text`, `textarea`, `number`, `checkbox`, `select` (+ `options`), `password`, `model`, `effort`, `mode`. Also `label`, `default`, `required`, `help`, `secret`. |
 
 **Secrets.** A field with `"type": "password"` or `"secret": true` is stored encrypted (`~/.aihub/ui/secrets.bin`), the work file keeps only a marker, the editor never shows the value again, and your program receives the real value on **stdin** (never on the command line, never in the environment). A node package must not log it.
 
 Malformed node files are ignored silently, so check the node shows up in the editor.
+
+### Credentials: one set for several nodes
+
+A **credential set** is a named group of fields (for example `teams`: tenant, client id, client secret, Workflows URL, listener secret) that any number of nodes share. Sets live in Settings > Credentials (metadata `~/.aihub/ui/credentials.json`, secret values only in the encrypted box under `cred:<id>:<field>`; no API ever returns a secret, only "stored"). A node picks one in its settings; a field typed on the node still wins. Merge order in `works.with_secrets`: **node field > credential set > saved node > default** (an empty node field inherits). Triggers get the merged values on stdin like other secrets and restart when the set is edited.
+
+A package declares what its nodes take:
+
+- A kind definition, `nodes/<name>.cred.json`: `{"kind": "teams", "title": "Microsoft Teams", "hint": "...", "fields": [{"name": "tenant_id", "label": "Tenant ID"}, {"name": "client_secret", "label": "Client secret", "secret": true}]}`. Settings > Credentials then offers to create one set for the installed package. Builtin kinds: `teams`, `smtp`, `git`, `http`, `generic` (free key/values).
+- In each `*.node.json`: `"credential": {"kind": "teams", "map": {"webhook_url": "webhook_url"}}`. `map` is `{set field: node field}`; without it the set fields that have the same name as a node field are used. Several nodes (receive + send) point at the same kind, so one set serves them all.
+
+Git nodes (`git.read`, `git.pull`) have `username` / `token` fields (or the `git` set): they replace the Vault login for that call only, passed as environment variables plus an inline credential helper that answers for that one https host (never argv or disk). `io.request` takes the `http` set (Authorization, headers) and `send.smtp` the `smtp` set. Sharing a workflow keeps only `credential_kind` / `credential_name` on each node, never values; the importer's node is linked to the set of that kind when exactly one exists, otherwise the run fails with "needs a '<kind>' credential set" and the import lists it under risks / `needs_credentials`. Chat node cards (`@node:`) do not use sets.
 
 ### Action nodes: one request, one answer
 
@@ -119,8 +135,9 @@ The program is started for each run. It reads **one JSON document** from stdin:
 {"config": {"webhook_url": "https://...", "text": "{{input}}"},
  "input": "text of the previous node(s), joined",
  "inputs": [{"text": "...", "data": {"from": "alice"}}],
- "run": {"id": "20261028110105-fb1517", "work": "8e24267e", "node": "n1a2b"},
- "workdir": "/Users/me/.aihub/workingspace/sessions/ab12cd34"}
+ "run": {"id": "20261028110105-fb1517", "work": "8e24267e", "node": "n1a2b",
+         "dir": "/Users/me/.aihub/ui/runs/8e24267e/20261028110105-fb1517/work", "node_dir": "/Users/me/.aihub/ui/runs/8e24267e/20261028110105-fb1517/work/n1a2b"},
+ "workdir": "/Users/me/.aihub/ui/runs/8e24267e/20261028110105-fb1517/work"}
 ```
 
 and prints **one JSON line** as the last thing on stdout:
@@ -133,7 +150,9 @@ and prints **one JSON line** as the last thing on stdout:
 - `{"ok": false, "error": "why"}` or a non-zero exit fails the node: the branch stops and the run is `failed`. Write diagnostics to stderr.
 - `{"output": {"skip": true}}` ends the branch quietly (like a filter that did not match).
 - Template placeholders inside your own `config` values (`{{input}}`) are **not** expanded for you unless the node lists those fields in `"templated": ["to", "subject"]` (then the engine fills `{{input}}`, `{{trigger}}`, `{{data.x}}` before the program starts); otherwise do it in the program (the example does).
-- `workdir` is the run's chat folder when a Claude node ran before you, else your home folder. Files written there show in the chat's canvas.
+- `workdir` is the run folder (`run.dir`); relative paths start there, and files written there show under Files in the run view. `run.node_dir` is a sub folder for this node alone.
+- stdin of a program you start yourself is `/dev/null` unless you pass it data (a CLI that waits for input would hang); start it with `AIHUB_NO_UPDATE=1` and send its output to files or pipes you read until it EXITS.
+- Stop (Works > Running now, or the run view) kills your program's process group: do not detach children you need.
 
 ### Trigger nodes: a process that stays up
 
@@ -289,6 +308,7 @@ The *Browse…* button opens a file picker over your home folder (folders and `.
 | --- | --- |
 | Works | `~/.aihub/ui/works/<id>.json` (nodes, edges, `enabled`; secrets replaced by a marker) |
 | Runs | `~/.aihub/ui/runs/<work>/<run>.json`, last 40 per work |
+| Credential sets | `~/.aihub/ui/credentials.json` (secret fields hold a marker; values in `secrets.bin`) |
 | Node secrets | `~/.aihub/ui/secrets.bin` (encrypted), key `~/.aihub/ui/.key` (0600) |
 | Preferences (policy guard, auto-compact) | `~/.aihub/ui/prefs.json` |
 | Webhook key | `~/.aihub/ui/.hooks.key` (0600); tokens survive restarts |

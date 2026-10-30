@@ -923,3 +923,12 @@ body.sp-wide main{transition:padding .35s cubic-bezier(.22,.8,.2,1)}
 @media(prefers-reduced-transparency:reduce),(prefers-contrast:more){.dlg{backdrop-filter:none;-webkit-backdrop-filter:none;background:var(--glass-solid)}}
 @media(prefers-reduced-motion:reduce){.dlg[open]{animation:none}}
 @media(max-width:600px){.dlg{width:calc(100vw - 16px);max-height:calc(100vh - 24px)}}
+
+/* default brand mark (shown only when no admin logo is set): draws in once on load, dot pops once on hover; static under reduced motion */
+.brand .mark{color:var(--blue);flex:none}
+.brand .mark .lg-a{stroke-dasharray:1 2;animation:lg-draw 1.2s cubic-bezier(.2,.8,.2,1) both}
+.brand .mark .lg-d{transform-box:fill-box;transform-origin:center;animation:lg-in 1.2s cubic-bezier(.2,.8,.2,1) .5s both}
+.brand:hover .mark .lg-d{animation:lg-pop 1.2s cubic-bezier(.2,.8,.2,1) 1}
+@keyframes lg-draw{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}
+@keyframes lg-in{from{opacity:0;transform:scale(.3)}to{opacity:1;transform:none}}
+@keyframes lg-pop{0%{transform:scale(1)}40%{transform:scale(1.9)}100%{transform:scale(1)}}

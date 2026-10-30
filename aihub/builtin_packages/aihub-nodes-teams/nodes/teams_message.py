@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Trigger node: a long-lived process. aihub-ui writes ONE line of JSON to stdin ({"config": {...}, "run": {...}}) and then reads our stdout:
 every line {"event": {"text": ..., "data": {...}}} starts a run (after the generic `filter` regex of the trigger). Logs go to stderr (ignored)."""
+import hmac
 import json
 import re
 import sys
+from urllib.parse import parse_qs, urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 cfg = json.loads(sys.stdin.readline())["config"]
 sender_rx = re.compile(cfg.get("from_regex") or "", re.I) if cfg.get("from_regex") else None
 only_chat = cfg.get("chat") or ""
+SECRET = str(cfg.get("secret") or "")                 # optional; usually from the shared Teams credential set
 
 
 class H(BaseHTTPRequestHandler):
@@ -16,8 +19,10 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
-        if self.path != "/message":
+        if urlsplit(self.path).path != "/message":
             return self.send_error(404)
+        if SECRET and not hmac.compare_digest(str(self.headers.get("X-Hook-Secret") or parse_qs(urlsplit(self.path).query).get("key", [""])[0]), SECRET):
+            return self.send_error(401)
         try:
             m = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 65536)))
             text, who, chat = str(m["text"]), str(m.get("from", "")), str(m.get("chat", ""))

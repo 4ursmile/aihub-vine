@@ -1,9 +1,10 @@
 // AI Hub UI. Preact + htm, marked, DOMPurify, highlight.js and OpenUI come from jsDelivr (pinned). No build step, no npm.
 import { h, html, render, useState, useEffect, useRef, useCallback, useMemo } from "./vendor/preact-htm.js";
 import { Ic } from "./icons.js";
-import { toast, guard, setToaster, Seg, Pop, Switch, Modal, ask, AskHost, escPush, useInterval } from "./ui.js";
-import { Md, AskCard, setWorkMaker, setBlockSharer, setNodeHost } from "./blocks.js";
+import { toast, guard, setToaster, Seg, Pop, Switch, Modal, ask, confirmBox, AskHost, escPush, useInterval, Num } from "./ui.js";
+import { Md, AskCard, WorkRunCard, setWorkMaker, setBlockSharer, setNodeHost, RunLog, fmtDur, useTick } from "./blocks.js";
 import * as OUI from "./openui.js";
+import { CodeEditor, useHl, langOf, colorize, splitHl, esc, isMac as isMacUI } from "./code.js";
 import { UsagePage, AlertBar, useAlerts } from "./usage.js";
 
 // term.js, slides.js (+ export.js) and space.js load when first needed, not at start
@@ -46,7 +47,7 @@ async function api(path, { method = "GET", body, signal } = {}) {
 // The system's own file/folder dialog (the server runs on this machine). -> path, "" when cancelled, null when this machine has none.
 const nativePick = async (b) => { try { const r = await post("fs/pick", b); return r.unsupported ? null : r.path; } catch (e) { return null; } };
 const post = (p, b) => api(p, { method: "POST", body: b || {} });
-setWorkMaker(async (work) => (await post("works/make", { work })).work);
+setWorkMaker(async (work) => await post("works/make", { work }));
 const put = (p, b) => api(p, { method: "PUT", body: b });
 async function stream(path, body, on, signal) {
   const r = await fetch("/api/" + path, { method: "POST", signal, headers: { "Content-Type": "application/json", "X-AIHub-UI": "1" }, body: JSON.stringify(body) });
@@ -93,6 +94,7 @@ const UI_CMDS = [
   { name: "canvas", description: "Show or hide the canvas", action: "canvas" },
   { name: "create-work", description: "Describe a work; it is designed and opened in Works (also /workflow)", action: "workflow" },
   { name: "workflow", description: "Same as /create-work", action: "workflow" },
+  { name: "node", description: "Run a Works node from this chat: pick one (same as @node:)", action: "node" },
 ];
 // One of these shows in the empty message box (a new one per chat and after every send), so features get found while typing.
 const TIPS = ["/btw asks a side question without touching the chat", "@file: puts a project file in your message", "@folder: shares a folder's file list",
@@ -191,9 +193,10 @@ function McpPanel({ servers, on, onChange, engine, compact }) {
     ${!shown.length && html`<p class="mute small" style="padding:8px 4px">No server matches.</p>`}
     <p class="mcp-note">${engine === "free" ? "Ticked servers start for each answer; the model may call their tools without asking." : "Claude Code uses every server it knows. Switch to Free chat (/engine free) to choose per chat."}</p>${!compact && engine === "free" && html`<${OptKeys} n=${shown.length} what="toggle" enter="toggle"/>`}</div>`;
 }
-function EnginePick({ value, onChange, close, mcpAll, mcpOn, onMcp }) {
+function EnginePick({ value, onChange, close, mcpAll, mcpOn, onMcp, auto, onAuto }) {
   const keys = useOptKeys();
   return html`<div ...${keys} tabindex="-1" class="optlist"><h5>Engine</h5>${ENGINES.map(([k, ic, name, d]) => html`<button class=${"opt" + (k === value ? " on" : "")} onClick=${() => { onChange(k); close(); }}><span class="oi">${Ic(ic, 16)}</span><span class="grow"><b>${name}</b><span class="d">${d}</span></span><span class="ck">${Ic("check", 16)}</span></button>`)}
+    ${value === "free" && html`<div class="row" style="padding:8px 10px 2px"><div class="grow"><b class="small">Switch to Claude Code by itself</b><div class="mute small">When a task needs your files, commands or multi-step coding.</div></div><${Switch} on=${auto !== false} label="Switch to Claude Code by itself" onChange=${(v) => onAuto && onAuto(v)}/></div>`}
     ${value === "free" && html`<h5 style="margin-top:8px">Tools for free chat (MCP)</h5><div style="padding:0 6px"><${McpPanel} servers=${mcpAll} on=${mcpOn} onChange=${onMcp} engine="free" compact=${true}/></div>`}
     <div class="small mute" style="padding:6px 10px 4px">You can switch at any message (or type /engine): the earlier text carries over, tool calls do not.</div><${OptKeys} n=${ENGINES.length}/></div>`;
 }
@@ -251,18 +254,20 @@ function Grip({ cls, value, onChange, onDone, min, max, sign, reset }) {
   return html`<div class=${"grip " + cls} role="separator" aria-orientation="vertical" title="Drag to resize (double-click to reset)" onPointerDown=${down} onDblClick=${reset}></div>`;
 }
 function Editor({ id, path, ver, onSaved, dirtyRef }) {
-  const [d, setD] = useState(null), [text, setText] = useState(""), [dirty, setDirty] = useState(false), dr = useRef(false);
+  const [d, setD] = useState(null), [text, setText] = useState(""), [gen, setGen] = useState(0), dr = useRef(false);
+  const dirty = !!d && !d.err && text !== (d.text || "");
   dr.current = dirty; if (dirtyRef) dirtyRef.current = dirty;
   useEffect(() => () => { if (dirtyRef) dirtyRef.current = false; }, []);
   useEffect(() => { if (!dirty) return; const b = (e) => { e.preventDefault(); e.returnValue = ""; }; addEventListener("beforeunload", b); return () => removeEventListener("beforeunload", b); }, [dirty]);
-  const fetchIt = () => api(`files/content?id=${id}&path=${encodeURIComponent(path)}`).then((r) => { setD({ ...r, path }); setText(r.text || ""); setDirty(false); }).catch((e) => setD({ err: e.message, path }));
+  const fetchIt = () => api(`files/content?id=${id}&path=${encodeURIComponent(path)}`).then((r) => { setD({ ...r, path }); setText(r.text || ""); setGen((g) => g + 1); }).catch((e) => setD({ err: e.message, path }));
   useEffect(() => {
     if (dr.current && d && d.path === path) return;                        // keep the user's unsaved edits when a turn touches other files
     fetchIt();
   }, [id, path, ver]);
   // the server refuses a save when the file changed on disk since it was read (409 changed): reload it, or overwrite it with the edits
   const save = guard(async (force) => {
-    try { const r = await put("files/content", { id, path, text, ...(force === true || !d.mtime ? {} : { mtime: d.mtime }) }); setD((x) => ({ ...x, mtime: r && r.mtime !== undefined ? r.mtime : x.mtime })); setDirty(false); toast("Saved " + baseName(path)); onSaved && onSaved(); }
+    const body = text;
+    try { const r = await put("files/content", { id, path, text: body, ...(force === true || !d.mtime ? {} : { mtime: d.mtime }) }); setD((x) => ({ ...x, text: body, mtime: r && r.mtime !== undefined ? r.mtime : x.mtime })); toast("Saved " + baseName(path)); onSaved && onSaved(); }
     catch (e) {
       if (e.status !== 409 && !/changed/i.test(e.message)) throw e;
       const v = await ask({ title: "File changed on disk", text: baseName(path) + " was modified (by Claude or another program) after you opened it.", submit: "Apply", fields: [{ name: "c", label: "What to do", type: "select", value: "reload", options: [{ value: "reload", label: "Reload from disk (my edits are lost)" }, { value: "over", label: "Overwrite the file with my edits" }] }] });
@@ -271,9 +276,11 @@ function Editor({ id, path, ver, onSaved, dirtyRef }) {
   });
   if (!d) return html`<div class="empty"><div class="shine">Loading…</div></div>`;
   if (d.err || d.binary || d.big) return html`<div class="empty"><div>${Ic("file", 26)}<div>${d.err || (d.big ? "Too large to edit here (" + num(d.big) + "B)." : "This is a binary file.")}</div></div></div>`;
-  return html`<div class="editor"><textarea spellcheck="false" wrap="off" value=${text} onInput=${(e) => { setText(e.target.value); setDirty(true); }}
-      onKeyDown=${(e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); save(); } else if (e.key === "Tab" && !e.shiftKey) { e.preventDefault(); const t = e.target, a = t.selectionStart; t.setRangeText("  ", a, t.selectionEnd, "end"); setText(t.value); setDirty(true); } }}></textarea>
-    <div class="ebar"><span class="mute small grow">${dirty ? "Unsaved changes" : "Saved"} · ${text.split("\n").length} lines</span><button class="btn" disabled=${!dirty} onClick=${() => { setText(d.text || ""); setDirty(false); }}>Revert</button><button class="btn acc" disabled=${!dirty} onClick=${() => save()}>${Ic("check", 13)} Save</button></div></div>`;
+  const mk = isMacUI ? "⌘" : "Ctrl+";
+  // Revert goes through the editor's history, so Undo brings the edits back
+  return html`<div class="editor"><${CodeEditor} value=${text} onChange=${setText} doc=${path + ":" + gen} path=${path} onSave=${() => save()}
+    footer=${(t) => html`<div class="ebar"><button class="ibtn sm" title=${"Undo (" + mk + "Z)"} aria-label="Undo" disabled=${!t.canUndo} onClick=${t.undo}>${Ic("undo", 15)}</button><button class="ibtn sm" title=${"Redo (" + (isMacUI ? "⇧⌘Z" : "Ctrl+Y") + ")"} aria-label="Redo" disabled=${!t.canRedo} onClick=${t.redo}>${Ic("redo", 15)}</button><button class=${"ibtn sm" + (t.finding ? " on" : "")} title=${"Find and replace (" + mk + "F)"} aria-label="Find and replace" onClick=${t.find}>${Ic("search", 15)}</button>
+      <span class="mute small grow">${dirty ? "Unsaved changes" : "Saved"} · ${num(text.split("\n").length)} lines${t.lang ? " · " + t.lang : ""}</span><button class="btn" disabled=${!dirty} onClick=${() => setText(d.text || "")}>Revert</button><button class="btn acc" disabled=${!dirty} onClick=${() => save()}>${Ic("check", 13)} Save</button></div>`}/></div>`;
 }
 function lineDiff(a, b) {
   const A = a === "" ? [] : a.split("\n"), B = b === "" ? [] : b.split("\n");
@@ -291,7 +298,9 @@ function lineDiff(a, b) {
   return [...A.slice(0, s).map((t) => [" ", t]), ...mid, ...A.slice(ea).map((t) => [" ", t])];
 }
 function DiffView({ id, path, ver }) {
-  const [base, setBase] = useState("turn"), [d, setD] = useState(null);
+  const [base, setBase] = useState("turn"), [d, setD] = useState(null), hl = useHl();
+  const hlOf = useMemo(() => { const lang = langOf(hl, path); return (t) => splitHl(colorize(hl, lang, t || "")); }, [hl, path]);
+  const oldL = useMemo(() => d && typeof d.base === "string" ? hlOf(d.base) : [], [d, hlOf]), newL = useMemo(() => d && typeof d.now === "string" ? hlOf(d.now) : [], [d, hlOf]);
   useEffect(() => { setD(null); api(`files/diff?id=${id}&path=${encodeURIComponent(path)}&base=${base}`).then(setD).catch((e) => setD({ err: e.message })); }, [id, path, ver, base]);
   const seg = html`<div class="dbar"><${Seg} small value=${base} onChange=${setBase} items=${[{ id: "turn", label: "Since last message" }, { id: "git", label: "Since last commit" }]}/></div>`;
   if (!d) return html`<div class="diffv">${seg}<div class="empty"><div class="shine">Comparing…</div></div></div>`;
@@ -303,7 +312,7 @@ function DiffView({ id, path, ver }) {
   const rows = []; let o = 1, nn = 1, gap = 0;
   ops.forEach((op, i) => {
     if (keep.has(i)) { if (gap) { rows.push(html`<div class="dl gap">⋯ ${gap} unchanged line${gap > 1 ? "s" : ""}</div>`); gap = 0; }
-      rows.push(html`<div class=${"dl " + (op[0] === "+" ? "add" : op[0] === "-" ? "del" : "")}><span class="ln">${op[0] === "+" ? "" : o}</span><span class="ln">${op[0] === "-" ? "" : nn}</span><span class="tx">${op[0]} ${op[1]}</span></div>`); } else gap++;
+      rows.push(html`<div class=${"dl " + (op[0] === "+" ? "add" : op[0] === "-" ? "del" : "")}><span class="ln">${op[0] === "+" ? "" : o}</span><span class="ln">${op[0] === "-" ? "" : nn}</span><span class="tx syn"><span class="dm">${op[0]} </span><span dangerouslySetInnerHTML=${{ __html: (op[0] === "+" ? newL[nn - 1] : oldL[o - 1]) ?? esc(op[1]) }}></span></span></div>`); } else gap++;
     if (op[0] !== "+") o++; if (op[0] !== "-") nn++;
   });
   if (gap) rows.push(html`<div class="dl gap">⋯ ${gap} unchanged line${gap > 1 ? "s" : ""}</div>`);
@@ -333,27 +342,8 @@ function SoulDialog({ s, busy, close, saved }) {
 
 // ---------- chat
 let elSeq = 0;
+const discard = (name) => confirmBox({ title: "Discard unsaved changes?", text: name ? "Unsaved changes to " + name + " will be lost." : "Unsaved changes will be lost.", ok: "Discard", danger: true });
 const winOf = (models, id) => (models.find((m) => m.id === id) || models[0] || {}).window || 200000;
-function WorkCard({ r, submit, cancel, toChat, busy }) {
-  const ins = r.wk.inputs || [], [v, setV] = useState(() => Object.fromEntries(ins.map((f) => [f.name, f.default ?? (f.type === "checkbox" ? false : "")])));
-  const bad = ins.find((f) => f.required && f.type !== "checkbox" && String(v[f.name] ?? "").trim() === "");
-  const nodes = Object.entries(r.nodes || {}), done = nodes.filter(([, n]) => n.status === "ok" || n.status === "error").length;
-  const fin = r.status === "done" || r.status === "failed";
-  return html`<div class="msg"><div class="wrun"><div class="bk-head"><span class="bk-title">${Ic("flow", 14)}<span>${r.wk.title}</span></span>
-      ${r.phase === "run" ? html`<span class=${"tag " + (r.status === "done" ? "good" : r.status === "failed" ? "bad" : "")}>${r.status || "starting"}</span>` : html`<button class="ibtn" style="width:24px;height:24px" title="Remove" aria-label="Remove" onClick=${cancel}>${Ic("x", 14)}</button>`}</div>
-    ${r.phase === "input" ? html`<form onSubmit=${(e) => { e.preventDefault(); if (!bad) submit(v); }}><div class="fb-grid">${ins.map((f) => html`<label class=${"fb-f" + (f.type === "textarea" ? " wide" : "")}><span>${f.label}${f.required ? " *" : ""}</span>
-        ${f.type === "textarea" ? html`<textarea rows="3" value=${v[f.name]} onInput=${(e) => setV({ ...v, [f.name]: e.target.value })}></textarea>`
-        : f.type === "select" ? html`<select value=${v[f.name]} onChange=${(e) => setV({ ...v, [f.name]: e.target.value })}>${f.options.map((o) => html`<option>${o}</option>`)}</select>`
-        : f.type === "checkbox" ? html`<input type="checkbox" checked=${!!v[f.name]} onChange=${(e) => setV({ ...v, [f.name]: e.target.checked })}/>`
-        : html`<input type=${f.type === "number" ? "number" : "text"} value=${v[f.name]} onInput=${(e) => setV({ ...v, [f.name]: e.target.value })}/>`}</label>`)}</div>
-      <div class="fb-foot"><button class="btn pri" type="submit" disabled=${!!bad}>${Ic("play", 13)} Run</button></div></form>`
-    : html`<div class="wrun-b">${!fin && html`<div class="wsteps">${nodes.map(([id, n]) => html`<span class=${"wstep " + n.status}>${n.status === "ok" ? Ic("check", 11) : n.status === "error" ? Ic("x", 11) : html`<i></i>`}${(r.labels && r.labels[id]) || id}</span>`)}</div><span class="shine">Running the work… ${done}/${nodes.length || "?"}</span>`}
-      ${r.status === "failed" && html`<div class="werr">${Ic("alert", 13)} ${r.err || "The work failed."}</div>`}
-      ${r.result && html`<div class="wres">${r.result.title && html`<h3>${r.result.title}</h3>`}<${Md} text=${r.result.text}/></div>`}
-      ${fin && !r.result && r.status === "done" && html`<span class="mute small">The work finished without text output. Add an Output node to choose what it answers.</span>`}</div>
-      <div class="wfoot">${r.result && html`<button class="btn" onClick=${() => navigator.clipboard.writeText(r.result.text).then(() => toast("Copied"))}>${Ic("copy", 13)} Copy</button><button class="btn" disabled=${busy} onClick=${() => toChat("Result of the work \u201c" + r.wk.title + "\u201d:\n\n" + r.result.text)}>${Ic("send", 13)} Send to Claude</button>`}
-        ${r.chat && html`<a class="small" href=${"#/chat/" + r.chat}>Run's chat and files ${Ic("right", 12)}</a>`}<span class="grow"></span><a class="small" href="#/works">Open in Works</a></div>`}</div></div>`;
-}
 const DIRECT_PROMPT = "Stop using tools and stop exploring. Answer my last question directly and concisely right now, using only what you already know or have found so far.";
 const words = (t) => (String(t).trim().match(/\S+/g) || []).length;
 const fmtT = (sec) => (sec < 60 ? sec + "s" : Math.floor(sec / 60) + "m " + (sec % 60) + "s");
@@ -369,7 +359,7 @@ function Working({ act, since, live, steps, ctx, win, free, onStop, onDirect }) 
   const label = phase === "write" ? "Writing the answer" : phase === "tool" ? "Running " + act.name : live.think ? "Reasoning" : "Thinking";
   const done = steps.filter((x) => x.state !== "run").length, shown = steps.slice(-6), pct = win ? Math.min(100, Math.round((ctx / win) * 100)) : 0;
   return html`<div class=${"work2 p-" + phase}><i class="wbar"></i>
-    <div class="w-head"><span class="spark">${Ic("sparkles", 16)}</span><b class="shine">${label}…</b><span class="w-time">${fmtT(sec)}</span><span class="grow"></span>
+    <div class="w-head"><span class="spark lgk">${Ic("logo", 20, "lgm lg-think")}</span><b class="shine">${label}…</b><span class="w-time">${fmtT(sec)}</span><span class="grow"></span>
       ${(!free || steps.length > 0) && html`<button class="btn sm" title="Stop what it is doing and get a short answer from what it has so far" onClick=${onDirect}>${Ic("zap", 13)} Answer now</button>`}<button class="btn sm" onClick=${onStop}>${Ic("stop", 12)} Stop</button></div>
     <div class="w-phases"><span class=${"ph" + (phase === "think" ? " on" : live.think || steps.length || writing ? " done" : "")}>${Ic("sparkles", 12)} Reasoning</span>
       ${(!free || steps.length > 0) && html`<span class=${"ph" + (phase === "tool" ? " on" : steps.length ? " done" : "")}>${Ic("terminal", 12)} Tools${steps.length ? " · " + steps.length : ""}</span>`}
@@ -448,11 +438,25 @@ function pollGen(job, text, ui) {
   return j;
 }
 
-function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onBusy, onImport }) {
+// One question card per tool_use id, and only one card when an answer carries both the AskUserQuestion tool and an ```ask / ```form block.
+function cleanBlocks(blocks, hist, i) {
+  const isAsk = (b) => b.type === "tool" && b.name === "AskUserQuestion", fence = (b) => b.type === "text" && /```(ask|form)\b/.test(b.text || "");
+  if (!blocks.some(isAsk)) return blocks;
+  const before = new Set(); for (let j = 0; j < i; j++) if (hist[j].k === "msg") for (const b of hist[j].blocks) if (isAsk(b) && b.id) before.add(b.id);
+  const own = blocks.some(fence), seen = new Set();
+  return blocks.filter((b) => { if (!isAsk(b)) return true; if (own || (b.id && (before.has(b.id) || seen.has(b.id)))) return false; if (b.id) seen.add(b.id); return true; });
+}
+
+function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onBusy, onImport, onIncog }) {
   const [s, setS] = useState(null), [hist, setHist] = useState([]), [files, setFiles] = useState([]), [sig, setSig] = useState("");
   const [live, setLive] = useState({ text: "", think: "" }), [busy, setBusy] = useState(false), [text, setText] = useState("");
   const [model, setModel] = useState(pref("model", "")), [effort, setEffort] = useState(pref("effort", "")), [mode, setMode] = useState(pref("mode", "auto"));
   const [ctx, setCtx] = useState(0), [pop, setPop] = useState(null), [sidx, setSidx] = useState(0), [signin, setSignin] = useState(false);
+  const popWas = useRef(null);
+  useEffect(() => {                                                       // any composer popup closing (pick, Esc, click away) hands the cursor back to the box
+    const was = popWas.current; popWas.current = pop;
+    if (was && !pop) requestAnimationFrame(() => { const t = ta.current, a = document.activeElement; if (t && (!a || a === document.body || a.closest(".pw"))) t.focus(); });
+  }, [pop]);
   const [fresh, setFresh] = useState(null);                                           // model list re-read from settings.json (boot is read once)
   const [ment, setMent] = useState(null), [gen, setGen] = useState(null);                 // @ menu data (loaded on first @), /workflow being designed
   useEffect(() => setMent(null), [id]);
@@ -462,10 +466,16 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const [hints, setHints] = useState([]), [btws, setBtws] = useState([]);              // messages sent into the running answer, not read yet; /btw side answers
   const [tipN, setTipN] = useState(() => Math.floor(Math.random() * 1000)), nextTip = () => setTipN((n) => n + 1 + Math.floor(Math.random() * 5));
   useEffect(() => { setHints([]); setBtws([]); nextTip(); }, [id]);
-  const [themes, setThemes] = useState([]), [since, setSince] = useState(0), [act, setAct] = useState(null), [wr, setWr] = useState([]), [works, setWorks] = useState([]);
+  const [themes, setThemes] = useState([]), [since, setSince] = useState(0), [act, setAct] = useState(null), [works, setWorks] = useState([]);
   const end = useRef(), ctl = useRef(), ta = useRef(), sendRef = useRef(), sRef = useRef(null), pendingRef = useRef([]), stick = useRef(true), msgsRef = useRef(), actRef = useRef(null), alive = useRef(true), prevRef = useRef(""), fileIn = useRef(), [stuck, setStuck] = useState(true), [missing, setMissing] = useState(""), [dismissed, setDismissed] = useState(null);
+  useEffect(() => { if (!s) return; if (hist.length && matchMedia("(pointer: coarse)").matches) return;       // a new chat (or any chat with a mouse) opens with the caret in the composer; phones skip old chats so the keyboard does not cover them
+    const f = () => ta.current && ta.current.focus({ preventScroll: true }); f(); const r = requestAnimationFrame(f); return () => cancelAnimationFrame(r); }, [!!s]);
   sRef.current = s;
   useEffect(() => () => { alive.current = false; }, []);
+  const incog = !!(s && s.incognito);
+  useEffect(() => { if (s) onIncog && onIncog(id, incog); }, [incog, !!s]);
+  useEffect(() => { if (!incog || !hist.length) return; const w = (e) => { e.preventDefault(); e.returnValue = ""; }; addEventListener("beforeunload", w); return () => removeEventListener("beforeunload", w); }, [incog, !!hist.length]);   // a reload ends an incognito chat: ask first
+  const setIncog = guard(async (v) => { const r = await post("sessions/update", { id, incognito: v }); setS(r.session); refresh(); toast(v ? "Incognito: this chat is removed when you leave it" : "Chat kept: it is in the sidebar now"); });
   const load = async () => {
     let d; try { d = await api("sessions/get?id=" + id); } catch (x) { if (sRef.current) toast(x.message); else setMissing(x.message || "Chat not found"); return; }
     setMissing(""); setS(d.session); if (d.session.started || d.session.engine === "free") setEngine(d.session.engine === "free" ? "free" : "claude"); setDirInfo({ dir: d.dir, def: d.default_dir }); setHist(d.history); setFiles(d.files); setSig(d.sig); setBusy(d.busy); setLive({ text: "", think: "" }); setCtx(d.session.ctx || 0);
@@ -489,7 +499,11 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const win = prefs.window || winOf(boot.models.models, model), relPath = (p) => { p = (p || "").replace(/\\/g, "/"); const d = (dirInfo.dir || "").replace(/\\/g, "/").replace(/\/+$/, ""); if (d && p.startsWith(d + "/")) return p.slice(d.length + 1); const m = p.match(/sessions\/[0-9a-f]{8}\/(.+)$/); return m ? m[1] : null; };
   const showEl = (e) => { setEls((l) => [...l, { ...e, id: ++elSeq }].slice(-8)); setTab("elements"); setOpen(true); };
   const sm = /^\/([\w:.-]*)$/.exec(text), pool = sm ? [...UI_CMDS.map((c) => ({ ...c, source: "ui" })), ...works.map((x) => ({ name: "work:" + x.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""), description: "Run work: " + x.title, source: "work", wid: x.id })), ...slash.packages, ...slash.claude] : [];
-  const items = sm ? pool.filter((c) => c.name.toLowerCase().includes(sm[1].toLowerCase())).sort((a, b) => (b.name.toLowerCase().startsWith(sm[1].toLowerCase()) ? 1 : 0) - (a.name.toLowerCase().startsWith(sm[1].toLowerCase()) ? 1 : 0)).slice(0, 40) : [];
+  const sq = sm ? sm[1].toLowerCase() : "", nq = sq.replace(/^node:?/, "");
+  const [snodes, setSnodes] = useState([]);                              // /node, /node:<words>: runnable nodes, picked as an @node: mention
+  const wantNodes = !!sq && ("node:".startsWith(sq) || sq.startsWith("node"));
+  useEffect(() => { if (!wantNodes) return; let on = true; const t = setTimeout(() => api("works/sources?nodes=1&q=" + encodeURIComponent("node:" + nq)).then((d) => on && setSnodes((d.items || []).filter((x) => x.source === "node"))).catch(() => on && setSnodes([])), 120); return () => { on = false; clearTimeout(t); }; }, [wantNodes, nq]);
+  const items = sm ? [...pool.filter((c) => c.name.toLowerCase().includes(sq)), ...(wantNodes ? snodes.filter((c) => !nq || (c.name + " " + c.key).toLowerCase().includes(nq)) : [])].sort((a, b) => (b.name.toLowerCase().startsWith(sm[1].toLowerCase()) ? 1 : 0) - (a.name.toLowerCase().startsWith(sm[1].toLowerCase()) ? 1 : 0)).slice(0, 40) : [];
   const mm = !sm && /(?:^|\s)@([\w:.@\/-]*)$/.exec(text), mq = mm ? mm[1].toLowerCase() : "";
   // @ menu: themes, other chats (@chat:<id>, add :N for its last N messages) and tools (@tool:<name>: skills, commands, MCP servers)
   useEffect(() => { if (!mm || ment) return; setMent({ chats: [], tools: [] }); let on = true;
@@ -509,29 +523,20 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const menuItems = dismissed === text ? [] : sm ? items : mitems;
   useEffect(() => setSidx(0), [sm && sm[1], mm && mm[1]]);
 
-  const runUi = (a) => { setText(""); if (a === "clear") newChat(); else if (a === "canvas") setOpen((o) => !o); else if (a === "mcp") openMcp(); else if (a === "engine") setPop("engine"); else if (a === "ctx" || a === "model" || a === "effort" || a === "mode") setPop(a); };
+  const runUi = (a) => { setText(""); if (a === "clear") newChat(); else if (a === "canvas") setOpen((o) => !o); else if (a === "mcp") openMcp(); else if (a === "node") { setText("@node:"); ta.current && ta.current.focus(); } else if (a === "engine") setPop("engine"); else if (a === "ctx" || a === "model" || a === "effort" || a === "mode") setPop(a); };
   const openMcp = () => { setDlg("mcp"); api("mcp/free").then((d) => setMcpAll(d.servers)).catch(() => setMcpAll([])); };
   const setEng = (v) => { setEngine(v); post("sessions/update", { id, engine: v }).catch(() => {}); };
   const saveMcp = (list) => post("sessions/update", { id, mcp: list }).then((r) => setS(r.session)).catch((e) => toast(e.message));
-  const pickSlash = (c) => { if (["theme", "chat", "tool", "space", "knowledge", "file", "folder", "node", "work"].includes(c.source)) { setText(text.replace(/@[\w:.@\/-]*$/, "@" + c.name + " ")); ta.current && ta.current.focus(); return; } if (c.source === "ui" && c.action !== "send" && c.action !== "workflow" && c.action !== "btw") return runUi(c.action); setText("/" + c.name + " "); ta.current && ta.current.focus(); };
+  const pickSlash = (c) => { if (sm && c.source === "node") { setText("@" + c.name + " "); ta.current && ta.current.focus(); return; }
+    if (!sm && ["theme", "chat", "tool", "space", "knowledge", "file", "folder", "node", "work"].includes(c.source)) { setText(text.replace(/@[\w:.@\/-]*$/, "@" + c.name + " ")); ta.current && ta.current.focus(); return; } if (c.source === "ui" && c.action !== "send" && c.action !== "workflow" && c.action !== "btw") return runUi(c.action); setText("/" + c.name + " "); ta.current && ta.current.focus(); };
 
-  const upWr = (key, p) => setWr((l) => l.map((x) => (x.key === key ? { ...x, ...p } : x)));
-  const startWork = guard(async (key, wk, data, text) => {
-    upWr(key, { phase: "run", status: "queued", nodes: {}, data });
-    const [w, r] = await Promise.all([api("works/get?id=" + wk.id).then((d) => d.work), post("works/run", { id: wk.id, text, data })]);
-    if (!r.run) return upWr(key, { phase: "run", status: "failed", err: "The work did not start (it has no Start node)." });
-    upWr(key, { labels: Object.fromEntries(w.nodes.map((n) => [n.id, n.label || n.type])) });
-    for (let i = 0; i < 800 && alive.current; i++) {
-      await new Promise((ok) => setTimeout(ok, 1200)); if (!alive.current) break;
-      const d = (await api(`works/run?id=${wk.id}&run=${r.run}`)).run;
-      upWr(key, { status: d.status, nodes: d.nodes || {}, result: d.result, err: (Object.values(d.nodes || {}).find((n) => n.error) || {}).error, chat: d.chat });
-      if (d.status === "done" || d.status === "failed") break;
-    }
-  });
-  const runWork = guard(async (wk, input) => {
-    setText(""); const key = Math.random().toString(36).slice(2);
-    setWr((l) => [...l, { key, wk, phase: wk.inputs && wk.inputs.length ? "input" : "run", text: input || "" }]);
-    if (!(wk.inputs && wk.inputs.length)) startWork(key, wk, {}, input || "run from chat");
+  // /work:<name>: the command and a workflow card are saved as two history rows (server chat/card), so the card sits right after the message that started it
+  // and a reopened chat shows it in the same place; the card starts the run itself (spec.auto) and follows it.
+  const runWork = guard(async (wk, input, shown) => {
+    if (busyRef.current) return toast("Wait for the answer to finish first");
+    setText(""); if (ta.current) ta.current.style.height = "auto";
+    const r = await post("chat/card", { id, work: wk.id, text: input || "", shown: shown || "/work:" + wk.title, key: Math.random().toString(36).slice(2, 12) });
+    stick.current = true; setStuck(true); setHist((h) => [...h, ...r.rows]);
   });
   // The design runs on the server as a job (one poller per job id, see pollGen); this chat only shows its progress while it is open.
   const genWork = guard(async (t) => { setText(""); setGen({ text: t, since: Date.now() });
@@ -570,8 +575,8 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     if (!t || busyRef.current) return;
     if (engine === "free" && /^\/compact\b/.test(t)) return toast("Free chat has no compaction: switch to Claude Code, or start a new chat.");
     const m = override === undefined && /^\/([\w:.-]+)\s*([\s\S]*)$/.exec(t);
-    if (m) { const ui = UI_CMDS.find((c) => c.name === m[1]); if (m[1] === "workflow" || m[1] === "create-work") { if (!m[2]) return toast("Describe the work after /create-work, for example: /create-work pull data from git, build a dashboard, publish it as a space"); return genWork(m[2]); } if (m[1] === "engine" && m[2]) { const w = m[2].trim().toLowerCase(), e = /^(free|api|light)/.test(w) ? "free" : /^(claude|code|cc)/.test(w) ? "claude" : ""; if (!e) return toast("Use /engine claude or /engine free"); if (busyRef.current) return toast("Wait for the answer to finish first"); setText(""); setEng(e); return toast("Engine: " + (e === "free" ? "Free chat" : "Claude Code")); } if (ui && ui.action !== "send" && !m[2]) return runUi(ui.action); const wk = works.find((x) => "work:" + x.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") === m[1]); if (wk) return runWork(wk, m[2]); const pk = slash.packages.find((c) => c.name === m[1]); if (pk) t = pk.prompt.replace(/\$ARGUMENTS/g, m[2]); }
-    if (mode === "bypass" && engine !== "free" && !confirm("Bypass checks lets Claude run any tool without asking. Continue?")) return;
+    if (m) { const ui = UI_CMDS.find((c) => c.name === m[1]); if (m[1] === "workflow" || m[1] === "create-work") { if (!m[2]) return toast("Describe the work after /create-work, for example: /create-work pull data from git, build a dashboard, publish it as a space"); return genWork(m[2]); } if (m[1] === "engine" && m[2]) { const w = m[2].trim().toLowerCase(), e = /^(free|api|light)/.test(w) ? "free" : /^(claude|code|cc)/.test(w) ? "claude" : ""; if (!e) return toast("Use /engine claude or /engine free"); if (busyRef.current) return toast("Wait for the answer to finish first"); setText(""); setEng(e); return toast("Engine: " + (e === "free" ? "Free chat" : "Claude Code")); } if (ui && ui.action !== "send" && !m[2]) return runUi(ui.action); const wk = works.find((x) => "work:" + x.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") === m[1]); if (wk) return runWork(wk, m[2], t); const pk = slash.packages.find((c) => c.name === m[1]); if (pk) t = pk.prompt.replace(/\$ARGUMENTS/g, m[2]); }
+    if (mode === "bypass" && engine !== "free" && !(await confirmBox({ title: "Bypass checks?", text: "Bypass checks lets Claude run any tool without asking.", ok: "Continue", danger: true }))) return;
     const typed = override === undefined, atts = typed ? att : [], draft = text;       // the draft comes back if the server never starts the turn
     if (typed) { setText(""); setAtt([]); if (ta.current) ta.current.style.height = "auto"; nextTip(); }
     stick.current = true; setStuck(true);
@@ -596,6 +601,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
         if (ev.k === "delta") { setActK({ k: "write" }); buf.text += ev.text; if (!buf.raf) buf.raf = requestAnimationFrame(flush); }
         else if (ev.k === "think") { setActK({ k: "think" }); buf.think += ev.text; if (!buf.raf) buf.raf = requestAnimationFrame(flush); }
         else if (ev.k === "ctx") setCtx(ev.used);
+        else if (ev.k === "engine") { if (ev.engine === "claude" || ev.engine === "free") setEngine(ev.engine); }          // free chat handed the message to Claude Code
         else if (ev.k === "msg") { drop(); setLive({ text: "", think: "" }); setHist((h) => [...h, ev]); lastText = ev.blocks.filter((b) => b.type === "text").map((b) => b.text).join("\n"); const tl = ev.blocks.filter((b) => b.type === "tool").pop(); if (tl) setActK({ k: "tool", name: tl.name, hint: toolHint(tl) }); }
         else if (ev.k === "files") {                                           // a report or page was made: show it on the canvas
           setHist((h) => [...h, ev]); refreshFiles();
@@ -666,7 +672,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   }, [hist]);
   const u = s ? s.usage : {}, tot = (u.input || 0) + (u.cache_read || 0) + (u.cache_write || 0);
   const refreshMem = guard(async () => {
-    if (!confirm("Reload soul and notes into this chat? It starts a fresh Claude session and the next turn rewrites the prompt cache.")) return;
+    if (!(await confirmBox({ title: "Reload memory?", text: "Reload soul and notes into this chat? It starts a fresh Claude session and the next turn rewrites the prompt cache.", ok: "Reload" }))) return;
     const extra = await OUI.languagePrompt(); await post("sessions/update", { id, refresh_memory: true, extra }); toast("Memory reloaded"); load();
   });
   const shareRef = useRef(null);                                       // chat blocks share through this chat (blocks.js setBlockSharer)
@@ -675,7 +681,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   useEffect(() => { let on = true; chatRuns.current = null;
     const catalog = () => (nodeCat.current = nodeCat.current || api("works/nodes").then((d) => d.nodes || []).catch((e) => { nodeCat.current = null; throw e; }));
     const runs = () => (chatRuns.current = chatRuns.current || api("works/chatruns?chat=" + id).then((d) => d.runs || []).catch(() => { chatRuns.current = null; return []; }));
-    const shape = (d) => { const nodes = d.nodes || {}; return { status: d.status, nodes, result: d.result, err: d.error || (Object.values(nodes).find((n) => n.error) || {}).error }; };
+    const shape = (d) => { const nodes = d.nodes || {}; return { id: d.id, started: d.started, ended: d.ended, status: d.status, nodes, result: d.result, err: d.error || (Object.values(nodes).find((n) => n.error) || {}).error }; };
     const follow = async (wid, rid, onStep) => {
       for (let i = 0; i < 800; i++) {
         await new Promise((ok) => setTimeout(ok, 1200)); if (!on) throw new Error("Stopped: the chat was closed.");
@@ -686,13 +692,16 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     };
     setNodeHost({ info: async (t) => (await catalog()).find((n) => n.type === t && n.runnable) || null,
     bypass: () => bypassRef.current,
+    creds: async () => (await api("works/credentials")).credentials || [],
     past: async (card) => (await runs()).find((r) => r.card === card) || null,
     run: async (b) => { try { return await post("nodes/run", { ...b, id }); } finally { chatRuns.current = null; } },
     workInfo: async (wid) => {
       const w = ((await api("works")).works || []).find((x) => x.id === wid); if (!w) return null;
       const [full, cat] = await Promise.all([api("works/get?id=" + wid).then((d) => d.work).catch(() => null), catalog().catch(() => [])]), by = Object.fromEntries(cat.map((n) => [n.type, n]));
-      return { ...w, steps: ((full && full.nodes) || []).filter((n) => n.type !== "flow.note").map((n) => ({ id: n.id, title: n.label || (by[n.type] && by[n.type].title) || n.type })) };
+      return { ...w, steps: ((full && full.nodes) || []).filter((n) => n.type !== "flow.note").map((n) => ({ id: n.id, type: n.type, title: n.label || (by[n.type] && by[n.type].title) || n.type })) };
     },
+    stop: async (rid) => { try { await post("works/stop", { run: rid }); } catch (e) { toast(e.message || "Could not stop"); } },
+    log: (wid, rid, node, after) => api(`works/log?work=${encodeURIComponent(wid)}&run=${encodeURIComponent(rid)}&node=${encodeURIComponent(node)}&after=${after || 0}`),
     workGet: async (wid, rid) => shape((await api(`works/run?id=${wid}&run=${rid}`)).run),
     workFollow: follow,
     workRun: async (wid, data, text, onStep, card) => {
@@ -706,9 +715,9 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const mdl = pickList.find((m) => m.id === model) || (model ? { id: model, label: model, group: "picker", kind: "chat", note: "Model of this chat (not in your settings list)." } : pickList[0]);
   const lastCompact = [...hist].reverse().find((e) => e.k === "compact");
   const canPrev = (p) => /\.(html?|svg|png|jpe?g|gif|webp|pdf|md|txt|docx|xlsx|pptx)$/i.test(p || ""), fver = (files.find((f) => f.path === prev) || {}).mtime || 0;
-  const leaveOk = () => { if (!dirtyRef.current) return true; if (!confirm("Discard unsaved changes to " + baseName(prevRef.current) + "?")) return false; dirtyRef.current = false; return true; };
-  const changeTab = (t) => { if (t !== tab && tab === "edit" && !leaveOk()) return; setTab(t); };
-  const pickFile = (f) => { if (!leaveOk()) return; setPrev(f.path); setTab(canPrev(f.path) ? "preview" : "edit"); };
+  const leaveOk = async () => { if (!dirtyRef.current) return true; if (!(await discard(baseName(prevRef.current)))) return false; dirtyRef.current = false; return true; };
+  const changeTab = async (t) => { if (t !== tab && tab === "edit" && !(await leaveOk())) return; setTab(t); };
+  const pickFile = async (f) => { if (!(await leaveOk())) return; setPrev(f.path); setTab(canPrev(f.path) ? "preview" : "edit"); };
   const refreshFiles = () => api("files?id=" + id).then((d) => { setFiles(d.files); setSig(d.sig); }).catch(() => {});
   const noFile = html`<div class="empty"><div>${Ic("file", 26)}<div>Pick a file in Files first.</div></div></div>`;
   const previewEl = prev ? (/\.html?$/i.test(prev) ? html`<${Viewer} url=${src(prev)} name=${prev} ver=${fver} sandbox="allow-scripts allow-forms allow-modals allow-popups"/>`
@@ -721,12 +730,12 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const [proj, setProj] = useState([]), [pub, setPub] = useState(null);                 // aihub packages of the working folder: a Publish button shows only when there are some
   useEffect(() => { setProj([]); api("project/info?id=" + id).then((d) => setProj(d.packages || [])).catch(() => {}); }, [id, s && s.cwd, busy]);
   const openCode = guard(async (path) => { await post("files/vscode", { id, path: path || "" }); toast("Opening in VS Code"); });
-  const switchTo = (f) => { if (f.path === prev) return; if (dirtyRef.current && !confirm("Discard unsaved changes to " + baseName(prev) + "?")) return; dirtyRef.current = false; setPrev(f.path); };
+  const switchTo = async (f) => { if (f.path === prev) return; if (dirtyRef.current && !(await discard(baseName(prev)))) return; dirtyRef.current = false; setPrev(f.path); };
   const editEl = prev && html`<div class="edlay">${rail && html`<div class="edfiles" style=${"width:" + ew + "px"}><${FileTree} files=${files} sel=${prev} src=${src} onPick=${switchTo}/></div><${Grip} cls="ed-grip" value=${() => ew} onChange=${setEw} onDone=${(v) => setPref("edw", String(v))} min=${120} max=${420} sign=${1} reset=${() => { setEw(200); setPref("edw", "200"); }}/>`}<${Editor} key=${prev} id=${id} path=${prev} ver=${fver} onSaved=${refreshFiles} dirtyRef=${dirtyRef}/></div>`, diffEl = prev && html`<${DiffView} key=${prev} id=${id} path=${prev} ver=${fver}/>`;
   // the message list is rebuilt only when the history, the busy state, the edit box or the folder signature change, not for every streamed token
   const histEl = useMemo(() => hist.map((e, i) => e.k === "user" ? html`<div class="msg user">${edit && edit.i === i ? null : acts(e, i, true)}${edit && edit.i === i ? html`<div class="bub editing"><textarea rows="3" value=${edit.text} autofocus onInput=${(x) => setEdit({ ...edit, text: x.target.value })} onKeyDown=${(x) => { if (x.key === "Escape") setEdit(null); else if (x.key === "Enter" && (x.metaKey || x.ctrlKey)) saveEdit(); }}></textarea>
             <div class="row" style="justify-content:flex-end;gap:8px;margin-top:6px"><button class="btn" onClick=${() => setEdit(null)}>Cancel</button><button class="btn acc" disabled=${!edit.text.trim()} onClick=${saveEdit}>Resend</button></div></div>` : html`<div class="bub">${e.hint && html`<div class="htag">${Ic("bolt", 11)} sent while Claude was working</div>`}${e.text}${(e.files || []).map((f) => html`<div class="chip" style="margin-top:6px">${Ic("clip", 12)} ${f.split("/").pop()}</div>`)}</div>`}</div>`
-          : e.k === "msg" ? html`<div class="msg bot"><div class="body">${acts(e, i, true)}${e.blocks.map((b) => b.type === "text" ? html`<${Md} text=${b.text} onRender=${showEl} onSend=${(t) => sendRef.current(t)}/>`
+          : e.k === "msg" ? html`<div class="msg bot"><div class="body">${acts(e, i, true)}${cleanBlocks(e.blocks, hist, i).map((b) => b.type === "text" ? html`<${Md} text=${b.text} onRender=${showEl} onSend=${(t) => sendRef.current(t)}/>`
               : b.type === "thinking" ? html`<details class="thinkd"><summary>${Ic("sparkles", 13)} <b>Reasoning</b> <span class="mute small">${words(b.text)} words</span></summary><div class="thinkb">${b.text}</div></details>`
               : b.name === "AskUserQuestion" && b.input && b.input.questions ? html`<${AskCard} spec=${b.input} onSend=${(t) => sendRef.current(t)} locked=${busy || hist.slice(i + 1).some((x) => x.k === "user")}/>`
               : html`<${ToolRow} b=${b} res=${results[b.id]} hint=${toolHint(b)}/>`)}</div></div>`
@@ -734,16 +743,17 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
               ${e.items.map((f) => { const open = /\.(html?|svg|png|jpe?g|gif|webp|pdf|md|txt)$/i.test(f.path), img = /\.(png|jpe?g|gif|webp|svg)$/i.test(f.path);
                 return html`<div class="fc-r"><span class="fc-i">${img ? html`<img src=${src(f.path)} alt=""/>` : Ic(/\.(pptx?|docx?|xlsx?)$/i.test(f.path) ? "file" : /\.html?$/i.test(f.path) ? "eye" : "file", 16)}</span>
                   <span class="grow fc-n"><b>${f.path.split("/").pop()}</b><span class="mute small">${f.path.includes("/") ? f.path.split("/").slice(0, -1).join("/") + " · " : ""}${num(f.size)}B${f.new ? "" : " · changed"}</span></span>
-                  ${open && html`<button class="btn" onClick=${() => { if (!dirtyRef.current || confirm("Discard unsaved changes to " + baseName(prevRef.current) + "?")) { dirtyRef.current = false; setPrev(f.path); setTab("preview"); setOpen(true); } }}>${Ic("eye", 13)} Open</button>`}
+                  ${open && html`<button class="btn" onClick=${async () => { if (!dirtyRef.current || (await discard(baseName(prevRef.current)))) { dirtyRef.current = false; setPrev(f.path); setTab("preview"); setOpen(true); } }}>${Ic("eye", 13)} Open</button>`}
                   <button class="btn" title="Share to a Space on the hub" onClick=${() => share(f.path, false)}>${Ic("upload", 13)}</button><a class="btn" href=${src(f.path) + "?download=1"} download title="Download">${Ic("download", 13)}</a></div>`; })}
               <div class="fc-f"><button type="button" class="lnk" onClick=${() => { setTab("files"); setOpen(true); }}>All files ${Ic("right", 12)}</button></div></div></div>`
           : e.k === "result" ? html`<div class="stats"><span>${(e.ms / 1000).toFixed(1)}s</span><span>in ${num(e.usage.input)}</span><span title="Tokens the model wrote for this turn">${num(e.usage.output)} tokens written</span><span>cache read ${num(e.usage.cache_read)}</span><span>cache write ${num(e.usage.cache_write)}</span>${e.error && html`<span class="tag bad">failed</span>`}</div>`
+          : e.k === "card" && e.kind === "work" && e.spec ? html`<div class="msg wcard"><${WorkRunCard} spec=${e.spec} onSend=${(t) => sendRef.current(t)} locked=${false}/></div>`
           : e.k === "note" ? html`<div class="note-line">${Ic("info", 14)} ${e.text}</div>`
           : e.k === "compact" ? html`<div class="note-line">${Ic("compact", 14)} Context compacted · ${num(e.pre)} → ${num(e.post)} tokens (${e.trigger})</div>`
           : e.k === "error" ? html`<div class="msg"><span class="tag bad">${Ic("alert", 12)} error</span> ${linkify(e.text)} ${e.auth && html`<button class="btn" onClick=${() => setSignin(true)}>Sign in</button>`}</div>` : null), [hist, busy, edit, sig, boot]);
   if (!s) return missing ? html`<div class="empty"><div>${Ic("alert", 28)}<h1>Chat not found</h1><p class="mute">${missing}</p><div class="row" style="justify-content:center;gap:8px"><button class="btn acc" onClick=${newChat}>${Ic("plus", 14)} New chat</button><button class="btn" onClick=${load}>${Ic("refresh", 14)} Try again</button></div></div></div>` : html`<div class="empty"><div>${Ic("sparkles", 28)}<div>Loading…</div></div></div>`;
   return html`<div class="chatwrap">${signin && html`<${SignIn} close=${() => setSignin(false)}/>`}
-    <div class=${"chat" + (engine === "free" ? "" : " eng-claude")}>
+    <div class=${"chat" + (engine === "free" ? "" : " eng-claude") + (incog ? " incog" : "")}>
       ${pickF && html`<${FilePicker} ext="" title=${pickF === "dir" ? "Choose a folder to mention" : "Choose a file to mention"} start=${dirInfo.dir || ""} dirs=${pickF === "dir"} onPick=${(p) => { const kind = pickF === "dir" ? "@folder:" : "@file:"; setPickF(false); const d = (dirInfo.dir || "").replace(/\\/g, "/").replace(/\/+$/, ""), q = p.replace(/\\/g, "/"); setText((t) => (t && !/\s$/.test(t) ? t + " " : t) + kind + (d && q.startsWith(d + "/") ? q.slice(d.length + 1) : q) + " "); ta.current && ta.current.focus(); }} close=${() => setPickF(false)}/>`}
       ${dlg === "mcp" && html`<${Modal} wide=${true} close=${() => setDlg(null)}><div class="row"><h1 class="grow" style="margin:0">MCP servers</h1><button class="ibtn" aria-label="Close" onClick=${() => setDlg(null)}>${Ic("x", 17)}</button></div>
         <p class="sub" style="margin-top:4px">Engine: <b>${engine === "free" ? "Free chat" : "Claude Code"}</b> · <button class="linkbtn" onClick=${() => setEng(engine === "free" ? "claude" : "free")}>switch to ${engine === "free" ? "Claude Code" : "Free chat"}</button></p>
@@ -751,7 +761,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
         <div class="row" style="margin-top:14px"><a class="btn" href="#/mcp">${Ic("sliders", 14)} Manage servers</a><span class="grow"></span><button class="btn acc" onClick=${() => setDlg(null)}>Done</button></div><//>`}
       ${dlg === "dir" && html`<${WorkDirDialog} s=${s} cur=${dirInfo.dir} busy=${busy} close=${() => setDlg(null)} saved=${(n) => { setDlg(null); setS(n); load(); refresh(); }}/>`}
       ${dlg === "soul" && html`<${SoulDialog} s=${s} busy=${busy} close=${() => setDlg(null)} saved=${(n) => { setDlg(null); setS(n); load(); }}/>`}
-      <div class="chat-top"><button class="ibtn burger" title="Chats and pages" aria-label="Chats and pages" onClick=${onMenu}>${Ic("menu", 18)}</button><b class="grow ctitle" title="Rename" onClick=${rename}>${s.title}</b><button class="ibtn" title="Rename chat" aria-label="Rename chat" onClick=${rename}>${Ic("edit", 16)}</button><button class="ibtn" title="Share or export this chat" aria-label="Share or export this chat" onClick=${sendOut}>${Ic("share", 16)}</button><button class="ibtn" title="Import a chat (link, text or file)" aria-label="Import a chat" onClick=${onImport}>${Ic("import", 16)}</button>
+      <div class="chat-top"><button class="ibtn burger" title="Chats and pages" aria-label="Chats and pages" onClick=${onMenu}>${Ic("menu", 18)}</button><b class="grow ctitle" title="Rename" onClick=${rename}>${s.title}</b>${incog ? html`<button class="incog-pill" title="Incognito: not in the sidebar or search, removed with its files when you leave this chat. Click to keep it." aria-label="Incognito chat. Keep this chat" onClick=${() => setIncog(false)}>${Ic("incognito", 15)}<span>Incognito</span><span class="kp">Keep</span></button>` : !hist.length && !busy && !s.started && html`<button class="ibtn" title="Make this chat incognito (not saved)" aria-label="Make this chat incognito" onClick=${() => setIncog(true)}>${Ic("incognito", 17)}</button>`}<button class="ibtn" title="Rename chat" aria-label="Rename chat" onClick=${rename}>${Ic("edit", 16)}</button><button class="ibtn" title="Share or export this chat" aria-label="Share or export this chat" onClick=${sendOut}>${Ic("share", 16)}</button><button class="ibtn" title="Import a chat (link, text or file)" aria-label="Import a chat" onClick=${onImport}>${Ic("import", 16)}</button>
         <span class="dirwrap">${(() => { const fresh = !hist.length && !busy && !hintOff; return html`<button class=${"dirchip" + (s.cwd ? " set" : "") + (fresh ? " nudge" : "")} title=${"Working folder: " + dirInfo.dir + "\nClick to change"} onClick=${() => { setHintOff(true); setDlg("dir"); }}>${Ic("folder", fresh ? 17 : 14)}<span>${s.cwd ? baseName(s.cwd) : "Private folder"}</span></button>${fresh && !s.cwd && html`<div class="tip-hint" role="tooltip"><b>Choose a project</b><span>Pick your work project folder, or stay in the blank private one.</span><div class="row" style="gap:6px;margin-top:8px"><button class="btn acc" onClick=${() => { setHintOff(true); setDlg("dir"); }}>Choose project</button><button class="btn" onClick=${() => setHintOff(true)}>Blank</button></div></div>`}`; })()}</span>
         <button class=${"ibtn" + (s.soul != null ? " on" : "")} title=${s.soul != null ? "This chat has its own soul" : "Soul for this chat"} aria-label="Soul for this chat" onClick=${() => setDlg("soul")}>${Ic("user", 16)}</button>
         <button class="ibtn" title="Reload soul and notes (rewrites cache)" aria-label="Reload soul and notes (rewrites cache)" onClick=${refreshMem}>${Ic("refresh", 16)}</button>
@@ -759,11 +769,11 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
         <button class=${"ibtn" + (term ? " on" : "")} title="Terminal in the working folder" aria-label="Terminal in the working folder" aria-pressed=${term} onClick=${() => { setTermOn(true); setTerm(!term); }}>${Ic("terminal", 17)}</button>
         <button class=${"ibtn cvb" + (!hist.length && !busy && !open && !hintOff ? " nudge" : "")} title=${files.length ? `Canvas - ${files.length} file${files.length > 1 ? "s" : ""}` : "Canvas"} aria-label="Canvas" aria-pressed=${open} onClick=${() => setOpen(!open)} style=${open ? "color:var(--accent2)" : ""}>${Ic("panel", 18)}${files.length > 0 && !open && html`<i class="cnt">${files.length}</i>`}</button></div>
       <div class="msgs" ref=${msgsRef} onScroll=${onScroll}><div class="col">
-        ${!hist.length && !busy && html`<div class="hello"><div><span class="herologo">${Ic("logo", 44, "")}</span><h1>What shall we work on?</h1><p>Claude Code runs in this chat's own folder with every skill, agent and MCP server aihub installed.<br/>Type <span class="kbd">/</span> for commands.</p></div></div>`}
+        ${!hist.length && !busy && incog && html`<div class="hello incog-hello"><div><span class="herologo">${Ic("incognito", 40)}</span><h1>Incognito chat</h1><p>Not shown in the sidebar or search. When you leave it, the chat, its private folder and Claude Code's transcript are removed.<br/><span class="mute small">Token usage is still counted. A project folder you choose is never deleted.</span></p></div></div>`}
+        ${!hist.length && !busy && !incog && html`<div class="hello"><div><span class="herologo">${Ic("logo", 44, "")}</span><h1>What shall we work on?</h1><p>Claude Code runs in this chat's own folder with every skill, agent and MCP server aihub installed.<br/>Type <span class="kbd">/</span> for commands.</p></div></div>`}
         ${histEl}
         ${gen && html`<${GenBar} gen=${gen}/>`}
         ${live.text && html`<div class="msg bot"><div class="body"><${Md} live=${true} text=${live.text} onRender=${showEl}/></div></div>`}
-        ${wr.map((r) => html`<${WorkCard} key=${r.key} r=${r} busy=${busy} submit=${(d) => startWork(r.key, r.wk, d, r.text)} cancel=${() => setWr((l) => l.filter((x) => x.key !== r.key))} toChat=${(t) => sendRef.current(t)}/>`)}
         ${busy && html`<${Working} act=${act} since=${since} live=${live} steps=${steps} ctx=${ctx} win=${win} free=${engine === "free"} onStop=${stop} onDirect=${answerNow}/>`}
         <div ref=${end}></div>
       </div>${!stuck && (hist.length > 0 || busy) && html`<div class="jumpw"><button class="jump" onClick=${jump}>${Ic("down", 14)} Jump to latest</button></div>`}</div>
@@ -781,7 +791,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
             <button class="ibtn" title="Attach files" aria-label="Attach files" onClick=${() => fileIn.current && fileIn.current.click()}>${Ic("clip", 17)}</button><input type="file" multiple hidden ref=${fileIn} onChange=${(e) => { pick(e.target.files); e.target.value = ""; }}/>
             <button class="ibtn" title="Choose a file from this project (adds @file:path)" aria-label="Choose a file from this project (adds @file:path)" onClick=${() => setPickF("file")}>${Ic("file", 17)}</button>
             <button class="ibtn" title="Choose a folder from this project (adds @folder:path)" aria-label="Choose a folder from this project (adds @folder:path)" onClick=${() => setPickF("dir")}>${Ic("folder", 17)}</button>
-            <${Pop} open=${pop === "engine"} setOpen=${(v) => setPop(v ? "engine" : null)} button=${html`<${Pill} icon=${engine === "free" ? "zap" : "terminal"} label=${engine === "free" ? "Free chat" + ((s.mcp || []).length ? " · " + s.mcp.length + " tool" + (s.mcp.length > 1 ? "s" : "") : "") : "Claude Code"} tone=${engine === "free" ? "" : "claude"} active=${pop === "engine" || engine === "free"} title="Engine" onClick=${() => { setPop(pop === "engine" ? null : "engine"); if (!mcpAll) api("mcp/free").then((d) => setMcpAll(d.servers)).catch(() => setMcpAll([])); }}/>`}><${EnginePick} mcpAll=${mcpAll} mcpOn=${s.mcp || []} onMcp=${saveMcp} value=${engine} onChange=${setEng} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>
+            <${Pop} open=${pop === "engine"} setOpen=${(v) => setPop(v ? "engine" : null)} button=${html`<${Pill} icon=${engine === "free" ? "zap" : "terminal"} label=${engine === "free" ? "Free chat" + ((s.mcp || []).length ? " · " + s.mcp.length + " tool" + (s.mcp.length > 1 ? "s" : "") : "") : "Claude Code"} tone=${engine === "free" ? "" : "claude"} active=${pop === "engine" || engine === "free"} title="Engine" onClick=${() => { setPop(pop === "engine" ? null : "engine"); if (!mcpAll) api("mcp/free").then((d) => setMcpAll(d.servers)).catch(() => setMcpAll([])); }}/>`}><${EnginePick} auto=${prefs.auto_engine} onAuto=${(v) => savePrefs({ auto_engine: v })} mcpAll=${mcpAll} mcpOn=${s.mcp || []} onMcp=${saveMcp} value=${engine} onChange=${setEng} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>
             <i class="tsep" aria-hidden="true"></i>
             ${engine !== "free" && html`<${Pop} open=${pop === "mode"} setOpen=${(v) => setPop(v ? "mode" : null)} button=${html`<${Pill} icon=${MODE_INFO[mode][0]} label=${MODE_INFO[mode][1]} tone=${MODE_TONE[mode]} active=${pop === "mode"} title=${"Permission mode: " + MODE_INFO[mode][1]} onClick=${() => setPop(pop === "mode" ? null : "mode")}/>`}><${ModePick} modes=${boot.modes} value=${mode} onChange=${setMode} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>`}
             <${Pop} open=${pop === "effort"} setOpen=${(v) => setPop(v ? "effort" : null)} button=${html`<${Pill} lead=${EffMeter(effort)} label=${effort ? (effort === "xhigh" ? "XHigh" : effort[0].toUpperCase() + effort.slice(1)) : "Effort"} tone=${EFFORT_TONE[effort]} active=${pop === "effort"} title=${"Thinking effort: " + (effort || "default")} onClick=${() => setPop(pop === "effort" ? null : "effort")}/>`}><${EffortPick} value=${effort} onChange=${setEffort} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>
@@ -852,7 +862,7 @@ function Packages({ focus }) {
       <div class="grow"><b>${p.name}</b> <span class="mute">${p.version || p.latest_version || ""}</span> ${p.type && html`<span class="tag">${p.type}</span>`}
         ${tab === "installed" && p.enabled === false && html`<span class="tag bad">disabled</span>`}<div class="mute small">${p.description || (p.components || []).join(", ")}</div></div>
       ${tab === "installed" ? html`<button class="btn" disabled=${!!busy} onClick=${act(p.enabled === false ? "enable" : "disable", p.name)}>${p.enabled === false ? "Enable" : "Disable"}</button>
-          <button class="btn" disabled=${!!busy} onClick=${act("update", p.name)}>Update</button><button class="btn bad" disabled=${!!busy} onClick=${() => confirm("Uninstall " + p.name + "?") && act("uninstall", p.name)()}>${Ic("trash", 14)}</button>`
+          <button class="btn" disabled=${!!busy} onClick=${act("update", p.name)}>Update</button><button class="btn bad" disabled=${!!busy} onClick=${async () => (await confirmBox({ title: "Uninstall " + p.name + "?", ok: "Uninstall", danger: true })) && act("uninstall", p.name)()}>${Ic("trash", 14)}</button>`
         : have.has(p.name) ? html`<span class="tag good">${Ic("check", 12)} installed</span>` : html`<button class="btn acc" onClick=${() => setDlg(p)}>${Ic("download", 14)} Install</button>`}</div>`)}
     ${tab === "find" && !found.length && html`<p class="mute">No matches.</p>`}
     ${dlg && html`<${InstallDialog} p=${dlg} close=${() => setDlg(null)} done=${(r) => { setDlg(null); load(); if (r.setup && r.setup.length) setSetup(r.setup); }}/>`}
@@ -964,7 +974,7 @@ function Vault({ embedded }) {
     ${d && d.backend && html`<p class="mute small">Backend: ${d.backend}</p>`}
     ${((d && d.remotes) || []).map((r) => html`<div class="card row"><span class="nico" style="width:32px;height:32px;border-radius:9px;background:var(--soft2);display:grid;place-items:center">${Ic("key", 16)}</span><div class="grow"><b>${r.host}</b> <span class="mute">${r.username}</span> <span class=${"tag " + (r.login === "stored" ? "good" : "bad")}>${r.login}</span></div>
       <button class="btn" onClick=${guard(async () => { const t = await post("vault/test", { host: r.host }); toast(JSON.stringify((t.result || [])[0] || {}).slice(0, 120)); })}>Test</button>
-      <button class="btn bad" onClick=${guard(async () => { if (confirm("Remove login for " + r.host + "?")) { await post("vault/remove", { host: r.host }); load(); } })}>${Ic("trash", 14)}</button></div>`)}
+      <button class="btn bad" onClick=${guard(async () => { if (await confirmBox({ title: "Remove login?", text: "Remove the saved login for " + r.host + "?", ok: "Remove", danger: true })) { await post("vault/remove", { host: r.host }); load(); } })}>${Ic("trash", 14)}</button></div>`)}
     <h2>Add a login</h2><div class="card row"><input class="grow" placeholder="https://git.example.com" value=${f.url} onInput=${(e) => setF({ ...f, url: e.target.value })}/><input placeholder="user" value=${f.user} onInput=${(e) => setF({ ...f, user: e.target.value })}/>
       <input type="password" autocomplete="off" placeholder="token" value=${f.token} onInput=${(e) => setF({ ...f, token: e.target.value })}/>
       <button class="btn acc" onClick=${guard(async () => { await post("vault/add", { url: f.url, user: f.user, token: f.token }); setF({ url: "", user: "", token: "" }); toast("Stored"); load(); })}>Save</button></div></div>`;
@@ -983,14 +993,14 @@ function Knowledge({ focus }) {
       <div class="row"><input class="grow" placeholder="new-note" value=${nn} onInput=${(e) => setNn(e.target.value)}/><button class="btn" onClick=${() => { if (/^[a-z0-9][a-z0-9._-]*$/.test(nn)) { setCur(nn); setBody(""); setDirty(true); setNn(""); } else toast("lowercase letters, digits, . _ -"); }}>${Ic("plus", 14)}</button></div>
       <button class="btn" style="margin-top:10px" onClick=${guard(async () => { await post("knowledge/pull"); toast("Pulled from hub"); list(); open(cur); })}>${Ic("download", 14)} Pull from hub</button></div>
       <div class="grow"><textarea rows="24" style="font:13px var(--mono)" value=${body} onInput=${(e) => { setBody(e.target.value); setDirty(true); }}></textarea>
-        <div class="row" style="margin-top:10px"><span class="mute small grow">${cur}.md${dirty ? " · unsaved" : ""}</span>${cur !== "soul" && html`<button class="btn bad" onClick=${guard(async () => { if (confirm("Delete " + cur + "?")) { await post("knowledge/delete", { name: cur }); list(); open("soul"); } })}>${Ic("trash", 14)}</button>`}<button class="btn acc" disabled=${!dirty} onClick=${save}>Save</button></div></div></div></div>`;
+        <div class="row" style="margin-top:10px"><span class="mute small grow">${cur}.md${dirty ? " · unsaved" : ""}</span>${cur !== "soul" && html`<button class="btn bad" onClick=${guard(async () => { if (await confirmBox({ title: "Delete note?", text: "Delete " + cur + "? Its shares go too.", ok: "Delete", danger: true })) { await post("knowledge/delete", { name: cur }); list(); open("soul"); } })}>${Ic("trash", 14)}</button>`}<button class="btn acc" disabled=${!dirty} onClick=${save}>Save</button></div></div></div></div>`;
 }
 
 // ---------- works: palette, canvas, inspector
 const NW = 230;
 // first grid slot (300 x 140 apart, 4 rows per column) where a new 230 x 100 card touches no other card
 const freeSpot = (nodes) => { for (let col = 0; col < 12; col++) for (let row = 0; row < 4; row++) { const x = 40 + col * 300, y = 40 + row * 140; if (!nodes.some((n) => Math.abs(n.x - x) < NW + 16 && Math.abs(n.y - y) < 112)) return { x, y }; } return { x: 40, y: 40 + nodes.length * 140 }; };
-const nodeIcon = (type, sp) => ({ "start.manual": "play", "start.cron": "clock", "start.webhook": "inbox", "ai.claude": "sparkles", "flow.filter": "filter", "flow.template": "template", "flow.note": "note", "flow.memory": "layers", "start.teams": "chat", "send.teams": "send", "send.smtp": "send", "io.read_file": "file", "io.request": "link", "git.read": "code", "flow.output": "check" }[type] || (sp && sp.kind === "trigger" ? "zap" : "package"));
+const nodeIcon = (type, sp) => ({ "start.manual": "play", "start.cron": "clock", "start.webhook": "inbox", "ai.claude": "sparkles", "flow.filter": "filter", "flow.template": "template", "flow.note": "note", "flow.memory": "layers", "start.teams": "chat", "send.teams": "send", "send.slack": "send", "start.slack": "inbox", "start.telegram": "inbox", "send.telegram": "send", "send.discord": "send", "send.webhook": "send", "send.smtp": "send", "io.read_file": "file", "io.request": "link", "git.read": "code", "flow.output": "check" }[type] || (sp && sp.kind === "trigger" ? "zap" : "package"));
 const nodeKind = (type, sp) => (sp && sp.kind === "trigger" ? "k-trigger" : type === "ai.claude" ? "k-ai" : type.startsWith("pkg:") ? "k-pkg" : "");
 const summary = (n) => { const c = n.config || {}; return String(c.prompt || c.url || c.path || c.schedule || (c.source ? "memory: " + c.source : "") || c.title || c.regex || c.template || c.text || c.filter || "").slice(0, 90); };
 function Palette({ cat, onPick, close, more, presets = [] }) {
@@ -1005,6 +1015,7 @@ function Palette({ cat, onPick, close, more, presets = [] }) {
   return html`<${Modal} close=${close}><div style="margin:-22px;"><div class="palette" style="width:auto;border:0;border-radius:18px;box-shadow:none;animation:none"><div class="q">${Ic("search", 17)}<input ref=${ref} placeholder="Add a node: start, Claude, filter, send…" value=${q} onInput=${(e) => { setQ(e.target.value); setHi(0); }} onKeyDown=${key}/><span class="kbd">esc</span></div>
     <div class="plist">${Object.entries(groups).map(([g, items]) => html`<h5>${g}</h5>${items.map((s) => html`<button class=${"opt" + (flat[hi] === s ? " hi" : "")} onMouseEnter=${() => setHi(flat.indexOf(s))} onClick=${() => onPick(s.type, s.preset)}><span class="oi">${Ic(s.preset ? "key" : nodeIcon(s.type, s), 16)}</span><span class="grow"><b>${s.title}</b><span class="d">${s.desc}</span></span><span class=${"tag" + (s.kind === "trigger" ? " acc" : "")}>${s.preset ? "saved" : s.kind === "trigger" ? "start" : "step"}</span></button>`)}`)}
       ${!flat.length && html`<p class="mute" style="padding:16px">No node matches “${q}”. Install a node package to add more.</p>`}</div>
+    <div class="row" style="padding:8px 12px;border-top:1px solid var(--line)"><span class="mute small grow"><kbd class="kbd">Space</kbd> on the canvas opens this, <kbd class="kbd">Esc</kbd> closes it</span></div>
     ${more && html`<div class="row" style="padding:8px 12px;border-top:1px solid var(--line)"><span class="mute small grow">Need another node?</span><button class="btn" onClick=${more}>${Ic("layers", 13)} Create, share, install nodes</button></div>`}</div></div><//>`;
 }
 
@@ -1059,7 +1070,8 @@ function PromptBox({ f, val, set, ctx, one }) {
       items.push({ label: "trigger", insert: "{{trigger}}", group: "Input of this node", hint: "text that started the run" });
       if (n > 1) ctx.parents.forEach((p) => items.push({ label: "in." + p.slug, insert: "{{in." + p.slug + "}}", group: "One parent only", hint: "only " + p.name + " · " + (OUT_TAG[p.out] || "text") }));
     }
-    if (assist.includes("data")) ctx.keys.forEach((k) => items.push({ label: "data." + k.name, insert: "{{data." + k.name + "}}", group: "Data", hint: k.from + (k.name === "path" ? " · a file or folder path" : "") }));
+    if (assist.includes("data")) ctx.keys.forEach((k) => items.push({ label: "data." + k.name, insert: "{{data." + k.name + "}}", group: "Data", hint: k.from + (k.desc ? " · " + k.desc : k.name === "path" ? " · a file or folder path" : "") + (k.example ? " e.g. " + String(k.example).slice(0, 40) : "") }));
+    if (assist.includes("data") && ctx.rundir) { items.push({ label: "run.dir", insert: "{{run.dir}}", group: "Working folder", hint: "the folder every node of this run shares" }); items.push({ label: "node.dir", insert: "{{node.dir}}", group: "Working folder", hint: "a private sub folder of this node" }); }
     return items;
   };
   const open = (from, to, items, kind, q) => setPop((p) => ({ from, to, items, kind, q: q || "", hi: 0, x: null }));
@@ -1131,12 +1143,12 @@ function PromptBox({ f, val, set, ctx, one }) {
       : ai && !hasOut ? html`<div class="pbx-chips"><button type="button" class="chip" onMouseDown=${(e) => e.preventDefault()} onClick=${() => set(val.replace(/\s+$/, "") + OUTPUT_HINT)} title="Only needed when a later node must open a file Claude makes">+ Make Claude hand on a file (OUTPUT: path)</button></div>` : ""}
     <div class="pbx-tip mute small">${[assist.includes("file") && html`<span><mark class="t-file">@file</mark> a path</span>`, assist.includes("skill") && html`<span><mark class="t-skill">/skill</mark> a skill</span>`, assist.some((a) => a === "input" || a === "data") && html`<span>Ctrl+Space: all variables</span>`]}</div></div>`;
 }
-function Field({ f, v, set, boot, stored, ctx, inherit }) {
+function Field({ f, v, set, boot, stored, ctx, inherit, via }) {
   const from = inherit !== undefined && (v === undefined || v === "");                 // empty here: the saved node's value is used
   const val = from && !f.secret ? inherit : v === undefined ? f.default ?? "" : v;
   stored = stored || (from && f.secret && inherit === "__stored__");
   const common = { value: val, onInput: (e) => set(e.target.value) };
-  return html`<div class=${"field" + (from ? " inh" : "")}><label>${f.label}${f.required ? " *" : ""}${from ? html` <span class="tag" title="Comes from the saved node. Type here to change it for this work only.">${Ic("key", 10)} saved</span>` : v !== undefined && v !== "" && inherit !== undefined ? html` <button type="button" class="lnk small" title="Use the saved node's value again" onClick=${() => set("")}>reset</button>` : ""}</label>
+  return html`<div class=${"field" + (from ? " inh" : "")}><label>${f.label}${f.required ? " *" : ""}${from ? html` <span class="tag" title=${"Comes from the " + (via ? via : "saved node") + ". Type here to override it for this node only."}>${Ic("key", 10)} ${via || "saved"}</span>` : v !== undefined && v !== "" && inherit !== undefined ? html` <button type="button" class="lnk small" title="Use the inherited value again" onClick=${() => set("")}>reset</button>` : ""}</label>
     ${(f.type === "textarea" || (f.type === "text" && !f.secret)) && f.assist && f.assist.length && ctx ? html`<${PromptBox} f=${f} val=${String(val)} set=${set} ctx=${ctx} one=${f.type === "text"}/>`
     : f.type === "folder" ? html`<div class="row" style="gap:6px">${f.assist && f.assist.length && ctx ? html`<div class="grow"><${PromptBox} f=${f} val=${String(val)} set=${set} ctx=${ctx} one=${true}/></div>` : html`<input class="grow" type="text" ...${common}/>`}<button class="btn" type="button" onClick=${async () => { const p = await nativePick({ dirs: true, start: String(val).replace(/^@/, ""), title: "Choose a working folder" }); if (p) set(p); }}>${Ic("folder", 14)} Browse…</button></div>`
     : f.type === "code" ? html`<textarea class="codebox" rows="16" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" ...${common} onKeyDown=${(e) => { if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.metaKey) { e.preventDefault(); const t = e.target, a = t.selectionStart; set(t.value.slice(0, a) + "    " + t.value.slice(t.selectionEnd)); requestAnimationFrame(() => { t.selectionStart = t.selectionEnd = a + 4; }); } }}></textarea>`
@@ -1146,21 +1158,30 @@ function Field({ f, v, set, boot, stored, ctx, inherit }) {
     : f.type === "effort" ? html`<select value=${val} onChange=${(e) => set(e.target.value)}>${LEVELS.map((x) => html`<option value=${x}>${x || "default"}</option>`)}</select>`
     : f.type === "mode" ? html`<select value=${val} onChange=${(e) => set(e.target.value)}>${boot.modes.map((m) => html`<option value=${m}>${(MODE_INFO[m] || [0, m])[1]}</option>`)}</select>`
     : f.type === "select" ? html`<select value=${val} onChange=${(e) => set(e.target.value)}>${f.options.map((o) => html`<option>${o}</option>`)}</select>`
-    : f.secret ? html`<input type="password" autocomplete="off" placeholder=${stored ? (from ? "•••••• from the saved node (type to use another)" : "•••••• stored (type to replace)") : ""} value=${stored ? "" : val} onInput=${(e) => set(e.target.value)}/>`
+    : f.secret ? html`<input type="password" autocomplete="off" placeholder=${stored ? (from ? "•••••• from the " + (via || "saved node") + " (type to use another)" : "•••••• stored (type to replace)") : ""} value=${stored ? "" : val} onInput=${(e) => set(e.target.value)}/>`
     : html`<input type=${f.type === "number" ? "number" : "text"} ...${common}/>`}
     ${f.help && html`<span class="mute small">${f.help}</span>`}</div>`;
 }
 function IoStrip({ node, spec, ctx }) {
-  const ps = ctx.parents, many = ps.length > 1, trig = spec.kind === "trigger";
-  const pathField = String((node.config || {}).path || "").trim(), bad = spec.needs === "path" && !ctx.canPath && !pathField;
+  const ps = ctx.parents, many = ps.length > 1, trig = spec.kind === "trigger", io = spec.io || { inputs: [], outputs: [{ name: "text", type: spec.out || "text", desc: spec.out_note || "" }] };
+  const pathField = String((node.config || {}).path || "").trim(), bad = spec.needs === "path" && !ctx.canPath && !pathField, cwd = String((node.config || {}).cwd || "").trim();
+  const ai = /^ai\./.test(node.type), prog = !!spec.run;
+  const usage = (o) => (o.name === "text" ? "{{input}} in the next node" : "{{data." + o.name + "}}");
   return html`<div class="io-strip">
-    ${!trig && html`<div class="io-row"><span class="io-k">Receives</span><div class="grow">${ps.length ? ps.map((p, k) => html`<div class="io-p"><span class="tag">${OUT_TAG[p.out] || "text"}</span> <b>${p.name}</b> ${many && html`<code class="mute small">{{in.${p.slug}}}</code>`}</div>`) : html`<span class="mute small">Nothing connected yet: draw a line from another node.</span>`}
+    ${ctx.warn && ctx.warn.length > 0 && html`<div class="io-row warn"><span class="io-k">Check</span><div class="grow small">${ctx.warn.map((t) => html`<div>${Ic("alert", 12)} ${t}</div>`)}</div></div>`}
+    ${!trig && html`<div class="io-row"><span class="io-k">Takes</span><div class="grow">${ps.length ? ps.map((p, k) => html`<div class="io-p"><span class="tag">${OUT_TAG[p.out] || "text"}</span> <b>${p.name}</b> ${many && html`<code class="mute small">{{in.${p.slug}}}</code>`}</div>`) : html`<span class="mute small">Nothing connected yet: draw a line from another node.</span>`}
+      ${io.inputs.filter((i) => i.name !== "input").map((i) => html`<div class="io-p small"><span class="tag">${OUT_TAG[i.type] || "text"}</span> <code>${i.name}</code>${i.required ? " *" : ""} <span class="mute">${i.desc}</span></div>`)}
       ${many && html`<div class="mute small" style="margin-top:4px">Several inputs: <code>{{input}}</code> puts them one under another with a “## From …” heading, in the order the lines were drawn; <code>{{in.name}}</code> takes just one. The node waits for all of them.</div>`}</div></div>`}
-    <div class="io-row"><span class="io-k">Produces</span><div class="grow"><span class="tag">${OUT_TAG[spec.out] || "text"}</span> <span class="small">${spec.out_note || "text for the next node"}</span></div></div>
-    ${spec.needs && html`<div class=${"io-row" + (bad ? " warn" : "")}><span class="io-k">Needs</span><div class="grow small">${bad ? Ic("alert", 12) : Ic("check", 12)} ${spec.needs_note || "a " + spec.needs + " from the node before"}${bad ? html`<div>Nothing before this node gives a path yet. Add a “File / folder (path)” or “Read from git (path)” node, or a Claude task that ends with OUTPUT: /path.</div>` : ""}</div></div>`}</div>`;
+    <div class="io-row"><span class="io-k">Gives</span><div class="grow">${io.outputs.map((o) => html`<div class="io-p small"><span class="tag">${OUT_TAG[o.type] || "text"}</span> <code>${o.name === "text" ? "text" : o.name}</code> <span class="mute">${o.desc || ""}</span>${o.example ? html` <span class="mute">e.g.</span> <code class="io-ex">${String(o.example).slice(0, 60)}</code>` : ""}<div class="mute small"><code>${usage(o)}</code></div></div>`)}</div></div>
+    ${spec.needs && html`<div class=${"io-row" + (bad ? " warn" : "")}><span class="io-k">Needs</span><div class="grow small">${bad ? Ic("alert", 12) : Ic("check", 12)} ${spec.needs_note || "a " + spec.needs + " from the node before"}${bad ? html`<div>Nothing before this node gives a path yet. Add a “File / folder (path)” or “Read from git (path)” node, or a Claude task that ends with OUTPUT: /path.</div>` : ""}</div></div>`}
+    ${(ai || prog) && html`<div class="io-row"><span class="io-k">Works in</span><div class="grow small">${ai ? (cwd ? html`The folder you set in “Working folder”: <code>${cwd}</code>.` : html`The run folder, shared by every node of the run (<code>{{run.dir}}</code>; this node's own sub folder is <code>{{node.dir}}</code>). Files it writes show under Files in the run view.`) : html`Programs get <code>workdir</code> = the run folder, plus <code>run.dir</code> and <code>run.node_dir</code> in their input. Relative paths start there.`}</div></div>`}</div>`;
 }
-function Inspector({ w, node, spec, cat, run, boot, hook, trig, upd, close, remove, presets = [], editPreset }) {
+function Inspector({ warn = [], w, node, spec, cat, run, boot, hook, trig, upd, close, remove, presets = [], editPreset }) {
   const pre = node.preset ? presets.find((p) => p.id === node.preset) : null;
+  const cs = spec && spec.credential, [cd, loadCreds] = useCreds(!!cs), [ce, setCe] = useState(null);
+  const ckd = cs ? cd.kinds.find((k) => k.kind === cs.kind) : null, cmap = cs ? credMap(cs, ckd, spec) : {};
+  const csets = cs ? cd.credentials.filter((c) => c.kind === cs.kind) : [], cset = cs && node.credential ? cd.credentials.find((c) => c.id === node.credential) : null;
+  const credInh = (f) => { if (!cset) return undefined; const sf = Object.keys(cmap).find((k) => cmap[k] === f.name); return sf && cset.fields[sf] !== undefined ? cset.fields[sf] : undefined; };
   const [tab, setTab] = useState("settings"), rn = run && run.nodes && run.nodes[node.id];
   const incoming = w.edges.filter((e) => e.to === node.id), nameOf = (n) => n.label || (cat[n.type] && cat[n.type].title) || n.type;
   const slugs = nodeSlugs(w, cat);
@@ -1168,25 +1189,37 @@ function Inspector({ w, node, spec, cat, run, boot, hook, trig, upd, close, remo
     const seen = new Set(), keys = [], anc = [], q = [node.id];
     while (q.length) { const id = q.pop(); w.edges.filter((e) => e.to === id).forEach((e) => { if (seen.has(e.from)) return; seen.add(e.from); q.push(e.from); const n = w.nodes.find((x) => x.id === e.from); if (!n) return; anc.push(n);
       if (n.type === "start.manual") String((n.config || {}).inputs || "").split("\n").map((l) => l.split("|")[0].trim()).filter(Boolean).forEach((k) => keys.push({ name: k, from: "input of " + nameOf(n) }));
-      ((cat[n.type] || {}).outputs || []).forEach((k) => keys.push({ name: k, from: "from " + nameOf(n) })); }); }
+      (((cat[n.type] || {}).io || {}).outputs || []).filter((o) => o.name !== "text" && !o.name.startsWith("<")).forEach((o) => keys.push({ name: o.name, from: "from " + nameOf(n), desc: o.desc, example: o.example, type: o.type })); if (!((cat[n.type] || {}).io)) ((cat[n.type] || {}).outputs || []).forEach((k) => keys.push({ name: k, from: "from " + nameOf(n) })); }); }
     const parents = incoming.map((e) => w.nodes.find((x) => x.id === e.from)).filter(Boolean).map((n) => ({ id: n.id, name: nameOf(n), slug: slugs[n.id], out: (cat[n.type] || {}).out || "text", note: (cat[n.type] || {}).out_note || "" }));
     const down = new Set(), dq = [node.id]; while (dq.length) { const id = dq.pop(); w.edges.filter((e) => e.from === id).forEach((e) => { if (!down.has(e.to)) { down.add(e.to); dq.push(e.to); } }); }
     const need = [...down].map((id) => w.nodes.find((x) => x.id === id)).filter((n) => n && (cat[n.type] || {}).needs === "path").map(nameOf);
     const canPath = anc.some((n) => (cat[n.type] || {}).out === "path" || (n.type || "").startsWith("ai."));
-    return { type: node.type, parents, last: parents.map((p) => p.name).join(", "), keys: keys.filter((k, i) => keys.findIndex((o) => o.name === k.name) === i), needsPath: need.length ? need[0] : "", canPath };
+    return { rundir: true, warn, type: node.type, parents, last: parents.map((p) => p.name).join(", "), keys: keys.filter((k, i) => keys.findIndex((o) => o.name === k.name) === i), needsPath: need.length ? need[0] : "", canPath };
   })();
   const set = (fn) => upd((c) => (fn(c.nodes.find((q) => q.id === node.id)), c));
+  const pickSet = (id) => { if (id === "__new") { setCe({ kind: cs.kind, name: ckd ? ckd.title : "" }); return; }
+    set((n) => { delete n.credential_kind; delete n.credential_name; if (!id) { delete n.credential; return; } n.credential = id;
+      spec.fields.forEach((f) => { if (Object.values(cmap).includes(f.name) || (!Object.keys(cmap).length && ckd && ckd.free)) { const v = n.config[f.name]; if (v === "" || v == null || v === f.default) delete n.config[f.name]; } }); }); };
+  const credBox = cs ? html`<div class="card pre-b"><div class="row">${Ic("key", 14)}<div class="grow small"><b>Credentials</b> (${ckd ? ckd.title : cs.kind}): one set can serve several nodes. A field typed below overrides the set for this node only.</div></div>
+      ${node.credential_kind && !node.credential ? html`<div style="margin-top:6px"><span class="tag bad">${Ic("alert", 12)} Shared without logins: pick or create a “${node.credential_kind}” set.</span></div>` : ""}
+      ${node.credential && cd.credentials.length && !cset ? html`<div style="margin-top:6px"><span class="tag bad">${Ic("alert", 12)} The set “${node.credential}” was deleted.</span></div>` : ""}
+      <div class="row" style="margin-top:8px;gap:6px"><select class="grow" value=${node.credential || ""} onChange=${(e) => pickSet(e.target.value)}><option value="">Custom (no set)</option>${csets.map((c) => html`<option value=${c.id}>${c.name}</option>`)}${node.credential && !cset ? html`<option value=${node.credential}>${node.credential} (missing)</option>` : ""}<option value="__new">New set…</option></select>
+        ${cset ? html`<button type="button" class="btn" onClick=${() => setCe({ ...cset })}>Edit set</button>` : ""}</div>
+      ${cset ? html`<div class="mute small" style="margin-top:6px">${Object.keys(cmap).length ? Object.entries(cmap).map(([sf, nf]) => { const f = spec.fields.find((x) => x.name === nf), ov = node.config[nf] !== undefined && node.config[nf] !== "";
+        return cset.fields[sf] === undefined && !ov ? null : html`<span class=${"tag " + (ov ? "" : "good")} style="margin:2px 4px 2px 0">${f ? f.label : nf}: ${ov ? "overridden here" : "from the set"}</span>`; }) : "Takes the fields named like its own."}</div>` : ""}
+      ${ce && html`<${CredEditor} initial=${ce} kinds=${cd.kinds} close=${() => setCe(null)} saved=${(c) => { setCe(null); loadCreds().then(() => pickSet(c.id)); }}/>`}</div>` : "";
   return html`<aside class="insp" key=${node.id}><div class="insp-h"><span class="nico">${Ic(nodeIcon(node.type, spec), 17)}</span><input class="grow" placeholder=${spec ? spec.title : node.type} value=${node.label || ""} onInput=${(e) => set((n) => (n.label = e.target.value))}/><button class="ibtn" onClick=${close}>${Ic("x", 16)}</button></div>
-    <div class="insp-t"><${Seg} small value=${tab} onChange=${setTab} items=${[{ id: "settings", label: "Settings" }, { id: "data", label: "Data" }, { id: "about", label: "About" }]}/></div>
-    <div class="insp-b">${tab === "settings" ? html`${spec && html`<${IoStrip} node=${node} spec=${spec} ctx=${fctx}/>`}${spec && node.preset ? (pre ? html`<div class="card pre-b"><div class="row">${Ic("key", 14)}<div class="grow small">Uses the saved node <b>${pre.name}</b>. Empty fields take its values (logins too); what you type here changes this work only.</div></div>
+    <div class="insp-t"><${Seg} small value=${tab} onChange=${setTab} items=${[{ id: "settings", label: "Settings" }, { id: "data", label: "Data" }, { id: "log", label: "Log" }, { id: "about", label: "About" }]}/></div>
+    <div class="insp-b">${tab === "settings" ? html`${spec && html`<${IoStrip} node=${node} spec=${spec} ctx=${fctx}/>`}${credBox}${spec && node.preset ? (pre ? html`<div class="card pre-b"><div class="row">${Ic("key", 14)}<div class="grow small">Uses the saved node <b>${pre.name}</b>. Empty fields take its values (logins too); what you type here changes this work only.</div></div>
           <div class="row" style="margin-top:8px;gap:6px"><button type="button" class="btn" onClick=${() => editPreset({ ...pre })}>Edit saved node</button><button type="button" class="btn" title="Copy its settings into this node and stop following it (logins must be typed again)" onClick=${() => set((n) => { n.config = Object.fromEntries(Object.entries({ ...pre.config, ...Object.fromEntries(Object.entries(n.config).filter(([, v]) => v !== "" && v != null)) }).filter(([, v]) => v !== "__stored__")); delete n.preset; })}>Detach</button></div></div>`
           : html`<div class="card pre-b"><span class="tag bad">${Ic("alert", 12)} The saved node “${node.preset}” was deleted.</span> <button type="button" class="lnk" onClick=${() => set((n) => { delete n.preset; })}>Remove the link</button></div>`) : ""}
         ${spec && !node.preset && spec.fields.length ? html`<div class="row" style="justify-content:flex-end;margin:-4px 0 6px"><button type="button" class="lnk small" title="Keep these settings (logins too) to reuse in other works" onClick=${() => editPreset({ type: node.type, name: node.label || spec.title, description: "", config: { ...node.config }, copy: w.id ? { work: w.id, node: node.id } : null })}>${Ic("key", 11)} Save as saved node</button></div>` : ""}
-        ${spec && spec.guide && html`<details class="guide" open=${!Object.keys(node.config).length}><summary>${Ic("book", 14)} How to set this up</summary><div class="guide-b">${linkify(spec.guide)}</div></details>`}${spec ? spec.fields.map((f) => html`<${Field} key=${node.id + f.name} ctx=${fctx} f=${f} v=${node.config[f.name]} inherit=${pre ? pre.config[f.name] : undefined} stored=${node.config[f.name] === "__stored__"} boot=${boot} set=${(v) => set((n) => (n.config[f.name] = v))}/>`) : html`<p class="tag bad">${Ic("alert", 12)} This node's package is not installed.</p>`}
+        ${spec && spec.guide && html`<details class="guide" open=${!Object.keys(node.config).length}><summary>${Ic("book", 14)} How to set this up</summary><div class="guide-b">${linkify(spec.guide)}</div></details>`}${spec ? spec.fields.map((f) => html`<${Field} key=${node.id + f.name} ctx=${fctx} f=${f} v=${node.config[f.name]} inherit=${credInh(f) !== undefined ? credInh(f) : pre ? pre.config[f.name] : undefined} via=${credInh(f) !== undefined ? "credential set" : undefined} stored=${node.config[f.name] === "__stored__"} boot=${boot} set=${(v) => set((n) => (n.config[f.name] = v))}/>`) : html`<p class="tag bad">${Ic("alert", 12)} This node's package is not installed.</p>`}
         ${trig && trig[node.id] && (() => { const t = trig[node.id]; return html`<div class="field"><label>Trigger process</label><span class=${"tag " + (t.running ? "good" : "bad")}>${t.running ? "Running" : "Stopped" + (t.exit != null ? " (exit " + t.exit + ")" : "")}</span>${t.fails ? html` <span class="mute small">${t.fails} restart${t.fails > 1 ? "s" : ""}</span>` : ""}${t.stderr && t.stderr.length ? html`<pre class="small" style="max-height:160px;overflow:auto;white-space:pre-wrap">${t.stderr.join("\n")}</pre>` : ""}</div>`; })()}
         ${node.type === "start.webhook" && html`<div class="field"><label>Webhook URL (local only)</label><input readonly value=${hook || "Save the work first"} onClick=${(e) => e.target.select()}/><span class="mute small">POST text or {"text":…,"data":{…}} here. The work must be On.</span></div>`}
         ${incoming.length ? html`<h2>Inputs</h2>${incoming.map((e) => html`<div class="row small" style="margin:4px 0"><span class="grow">${Ic("link", 12)} from ${(w.nodes.find((q) => q.id === e.from) || {}).label || ((w.nodes.find((q) => q.id === e.from) || {}).type)}</span><button type="button" class="lnk" onClick=${() => upd((c) => ((c.edges = c.edges.filter((x) => !(x.from === e.from && x.to === e.to))), c))}>disconnect</button></div>`)}` : ""}
         <div style="margin-top:18px"><button class="btn bad" onClick=${remove}>${Ic("trash", 14)} Delete node</button></div>`
+      : tab === "log" ? (rn && rn.logfile && run && run.id && w.id ? html`<${RunLog} gkey=${run.id + node.id} live=${rn.status === "running"} get=${(after) => api(`works/log?work=${w.id}&run=${run.id}&node=${node.id}&after=${after || 0}`)}/>` : html`<div class="empty" style="height:200px"><div>${Ic("terminal", 24)}<div>${rn ? "This node has no log (it ran before logs existed)." : "Run the work, then pick a run<br/>to read this node's log."}</div></div></div>`)
       : tab === "data" ? (rn ? html`<dl class="kv"><dt>Status</dt><dd><span class=${"tag " + (rn.status === "ok" ? "good" : rn.status === "error" ? "bad" : "")}>${rn.status}</span> ${rn.note || ""}</dd>${rn.ended && rn.t0 ? html`<dt>Took</dt><dd>${(rn.ended - rn.t0).toFixed(1)}s</dd>` : ""}</dl>
           ${rn.error && html`<h2>Error</h2><div class="io" style="color:var(--bad)">${rn.error}</div>`}${rn.inputs && rn.inputs.length > 1 ? html`<h2>Inputs (${rn.inputs.length})</h2>${rn.inputs.map((x, k) => html`<div class="io-in"><div class="io-h"><span class="tag">${k + 1}</span><b>${x.label}</b><span class="tag">${OUT_TAG[x.kind] || "text"}</span><code class="mute small">{{in.${(fctx.parents.find((p) => p.id === x.from) || {}).slug || k + 1}}}</code></div><div class="io">${x.text}</div></div>`)}`
             : rn.input && html`<h2>Input</h2><div class="io">${rn.input}</div>`}${rn.paths && rn.paths.length ? html`<h2>Paths passed on</h2><div class="io">${rn.paths.join("\n")}</div><span class="mute small">Claude may read these folders; a Publish node can send them.</span>` : ""}${rn.output && html`<h2>Output</h2><div class="io">${rn.output}</div>`}${rn.log && html`<h2>Log</h2><div class="io">${rn.log}</div>`}`
@@ -1260,7 +1293,7 @@ function NodeEditor({ initial, close, saved }) {
       <label class="fb-f"><span>Kind</span><select value=${n.kind} onChange=${(e) => set({ kind: e.target.value })}><option value="action">action (a step)</option><option value="trigger">trigger (starts runs)</option></select></label>
       <label class="fb-f"><span>Group in Add node</span><input value=${n.group} onInput=${(e) => set({ group: e.target.value })}/></label>
       <label class="fb-f wide"><span>Description</span><input value=${n.description} onInput=${(e) => set({ description: e.target.value })}/></label>
-      <label class="fb-f"><span>Timeout (s)</span><input type="number" value=${n.timeout} onInput=${(e) => set({ timeout: e.target.value })}/></label>
+      <label class="fb-f"><span>Timeout (s)</span><${Num} value=${n.timeout} onInput=${(e) => set({ timeout: e.target.value })}/></label>
       <label class="fb-f"><span>Data keys it returns (comma separated)</span><input value=${Array.isArray(n.outputs) ? n.outputs.join(", ") : n.outputs} placeholder="path, id" onInput=${(e) => set({ outputs: e.target.value })}/></label></div>
       <h2>Settings fields</h2>
       ${n.fields.map((f, i) => html`<div class="card" style="padding:10px 12px;margin-bottom:8px"><div class="row" style="gap:8px;flex-wrap:wrap">
@@ -1289,7 +1322,7 @@ function Nodes({ close, boot, changed }) {
       ${mine.map((m) => html`<div class="card row"><div class="grow"><b>${m.node.title}</b> <span class=${"tag" + (m.node.kind === "trigger" ? " acc" : "")}>${m.node.kind === "trigger" ? "start" : "step"}</span><div class="mute small">${m.node.group} · pkg:local/${m.id}${m.node.description ? " · " + m.node.description : ""}</div></div>
         <button class="btn" onClick=${() => setEd(m)}>Edit</button>
         <button class="btn" onClick=${guard(async () => setShare({ id: m.id, info: await api("nodes/export-info?id=" + m.id) }))}>${Ic("upload", 14)} Share</button>
-        <button class="btn bad" onClick=${guard(async () => { if (confirm("Delete node " + m.node.title + "? Works that use it stop working.")) { await post("nodes/delete", { id: m.id }); loadMine(); changed(); } })}>${Ic("trash", 14)}</button></div>`)}`
+        <button class="btn bad" onClick=${guard(async () => { if (await confirmBox({ title: "Delete node " + m.node.title + "?", text: "Works that use it stop working.", ok: "Delete", danger: true })) { await post("nodes/delete", { id: m.id }); loadMine(); changed(); } })}>${Ic("trash", 14)}</button></div>`)}`
     : tab === "installed" ? html`${!pk.length && html`<p class="mute">No node package installed. Use “Find on the hub”, or run <code>aihub install NAME</code>.</p>`}
       ${pk.map((m) => html`<div class="card row"><div class="grow"><b>${m.package}</b> <span class="mute small">${m.version || ""}</span><div class="mute small">${m.nodes.join(", ")}${m.description ? " · " + m.description : ""}</div></div><span class="tag good">${Ic("check", 12)} ${m.enabled ? "ready" : "disabled"}</span></div>`)}`
     : html`<div class="row"><input class="grow" placeholder="Search node packages" value=${q} onInput=${(e) => setQ(e.target.value)} onKeyDown=${(e) => e.key === "Enter" && find()}/><button class="btn" onClick=${find}>Search</button></div>
@@ -1357,9 +1390,54 @@ function PresetEditor({ initial, cat, boot, close, saved }) {
       <p class="mute small">Leave a field empty to let each work fill it (for example To and Subject of a mail, with the login saved here).</p></div>
     <div class="row" style="margin-top:14px"><span class="grow"></span><button class="btn" onClick=${close}>Cancel</button><button class="btn acc" disabled=${busy || !p.name.trim() || !sp} onClick=${save}>${busy ? "Saving…" : "Save"}</button></div><//>`;
 }
+// ---------- credentials: named sets (teams, smtp, git ...) that several nodes share; a node field typed on the node still wins
+const CRED_SECRET = /secret|token|password|passwd|key|auth|webhook/i;
+function useCreds(on = true) {
+  const [d, setD] = useState({ credentials: [], kinds: [] });
+  const load = () => (on ? api("works/credentials").then(setD).catch(() => {}) : Promise.resolve());
+  useEffect(() => { load(); }, [on]);
+  return [d, load];
+}
+function credMap(cs, kd, spec) {                       // {set field: node field}: the spec's map, else the same names
+  if (cs.map && Object.keys(cs.map).length) return cs.map;
+  const names = new Set(spec.fields.map((f) => f.name));
+  return Object.fromEntries((kd && !kd.free ? kd.fields.map((f) => f.name) : []).filter((n) => names.has(n)).map((n) => [n, n]));
+}
+function CredEditor({ initial, kinds, close, saved }) {
+  const [c, setC] = useState({ name: "", fields: {}, ...initial }), [busy, setBusy] = useState(false), [nk, setNk] = useState("");
+  const kd = kinds.find((k) => k.kind === c.kind);
+  const fl = kd ? kd.fields.map((f) => ({ name: f.name, label: f.label, help: f.help, type: f.secret ? "password" : "text", secret: !!f.secret })) : [];
+  const extra = kd && kd.free ? Object.keys(c.fields).filter((k) => !fl.some((f) => f.name === k)).map((k) => ({ name: k, label: k, type: CRED_SECRET.test(k) ? "password" : "text", secret: CRED_SECRET.test(k) })) : [];
+  const setF = (k, v) => setC({ ...c, fields: { ...c.fields, [k]: v } });
+  const save = guard(async () => { setBusy(true); try { const r = await post("works/credentials/save", { credential: { id: c.id, kind: c.kind, name: c.name, fields: c.fields } }); toast("Credential set " + r.credential.name); saved(r.credential); } finally { setBusy(false); } });
+  return html`<${Modal} wide=${true} close=${close}><h1>${c.id ? "Edit credential set" : "New credential set"}</h1>
+    <p class="sub">Fill it in once; every node that uses the set takes these values (a value typed on a node still wins). Secrets are stored encrypted and never shown again.</p>
+    ${kd && kd.hint ? html`<p class="mute small">${kd.hint}</p>` : ""}
+    <div style="max-height:58vh;overflow:auto;padding:2px">
+      <div class="fb-grid" style="padding:0"><label class="fb-f"><span>Kind</span><select value=${c.kind || ""} disabled=${!!c.id} onChange=${(e) => setC({ ...c, kind: e.target.value, fields: {} })}>${!c.kind ? html`<option value="">Choose…</option>` : ""}${kinds.map((k) => html`<option value=${k.kind}>${k.title}${k.package ? " (" + k.package + ")" : ""}</option>`)}</select></label>
+        <label class="fb-f"><span>Name</span><input value=${c.name} placeholder="Company Teams" onInput=${(e) => setC({ ...c, name: e.target.value })}/></label></div>
+      ${c.id && c.used_in && c.used_in.length ? html`<p class="mute small">Used by ${c.used_in.map((x) => x.title).join(", ")}: a change reaches all of them (triggers restart).</p>` : ""}
+      ${fl.concat(extra).map((f) => html`<${Field} key=${f.name} f=${f} v=${c.fields[f.name]} stored=${c.fields[f.name] === "__stored__"} boot=${{}} set=${(v) => setF(f.name, v)}/>`)}
+      ${kd && kd.free ? html`<div class="row" style="gap:6px"><input class="grow" placeholder="New field name (for example api_key)" value=${nk} onInput=${(e) => setNk(e.target.value)}/><button type="button" class="btn" disabled=${!/^[A-Za-z_][A-Za-z0-9_]*$/.test(nk)} onClick=${() => { setF(nk, ""); setNk(""); }}>Add field</button></div>` : ""}</div>
+    <div class="row" style="margin-top:14px"><span class="grow"></span><button class="btn" onClick=${close}>Cancel</button><button class="btn acc" disabled=${busy || !c.name.trim() || !kd} onClick=${save}>${busy ? "Saving…" : "Save"}</button></div><//>`;
+}
+function Credentials() {                                // Settings section, next to the Vault
+  const [d, load] = useCreds(true), [ed, setEd] = useState(null);
+  const del = guard(async (c) => { if (!(await confirmBox({ title: "Delete the credential set " + c.name + "?", text: c.used_in.length ? c.used_in.length + " work(s) use it (" + c.used_in.map((x) => x.title).join(", ") + "); their nodes will fail until you pick another set." : "", ok: "Delete", danger: true }))) return; await post("works/credentials/delete", { id: c.id }); toast("Deleted " + c.name); load(); });
+  const offer = d.kinds.filter((k) => k.package && !d.credentials.some((c) => c.kind === k.kind));
+  return html`<h2>Credentials</h2><p class="sub">Named sets of logins that Works nodes share (for example one Teams set for the receive and the send node). Choose a set in a node's settings; a field typed on the node still overrides it. Secrets are encrypted (<code>~/.aihub/ui/secrets.bin</code>) and never shown again.</p>
+    ${offer.map((k) => html`<div class="card row"><span class="grow small">The package <b>${k.package}</b> defines <b>${k.title}</b> credentials. Create one set for all its nodes.</span><button class="btn acc" onClick=${() => setEd({ kind: k.kind, name: k.title })}>Create</button></div>`)}
+    ${d.credentials.map((c) => { const kd = d.kinds.find((k) => k.kind === c.kind), n = Object.keys(c.fields).length;
+      return html`<div class="card row"><span class="nico">${Ic("key", 15)}</span><div class="grow" style="min-width:0"><b>${c.name}</b> <span class="tag">${kd ? kd.title : c.kind}</span> ${c.missing ? html`<span class="tag bad">kind not installed</span>` : ""}
+          <div class="mute small">${n} field${n === 1 ? "" : "s"} set${c.used_in.length ? " · used by " + c.used_in.map((x) => x.title + " (" + x.nodes.join(", ") + ")").join("; ") : " · not used yet"}</div></div>
+        <button class="btn" onClick=${() => setEd({ ...c })}>Edit</button><button class="btn bad" onClick=${() => del(c)}>${Ic("trash", 14)}</button></div>`; })}
+    ${!d.credentials.length && !offer.length ? html`<div class="card mute">No credential set yet.</div>` : ""}
+    <div class="row" style="margin:8px 0 18px"><button class="btn" onClick=${() => setEd({})}>${Ic("plus", 14)} New credential set</button></div>
+    ${ed && html`<${CredEditor} initial=${ed} kinds=${d.kinds} close=${() => setEd(null)} saved=${() => { setEd(null); load(); }}/>`}`;
+}
 function SavedNodes({ cat, presets, reload, boot, edit }) {
   const [pick, setPick] = useState(false);
-  const del = guard(async (p) => { if (confirm("Delete the saved node " + p.name + "?" + (p.used_in.length ? "\n" + p.used_in.length + " work(s) use it (" + p.used_in.map((x) => x.title).join(", ") + "); their node then fails until you fill it in or pick another one." : "") + "\nIts stored logins go too.")) { await post("works/presets/delete", { id: p.id }); reload(); } });
+  const del = guard(async (p) => { if (await confirmBox({ title: "Delete the saved node " + p.name + "?", text: (p.used_in.length ? p.used_in.length + " work(s) use it (" + p.used_in.map((x) => x.title).join(", ") + "); their node then fails until you fill it in or pick another one.\n" : "") + "Its stored logins go too.", ok: "Delete", danger: true })) { await post("works/presets/delete", { id: p.id }); reload(); } });
   return html`<p class="sub" style="margin-top:4px">Set up a node once (a mail server with its login, an API with its token, a Teams webhook …), then add it to any work from <b>Add node > Saved nodes</b>. A work can use it as it is, or change some fields for itself; editing it here updates every work that uses it. Logins are stored encrypted on this machine and never leave it, not even when a work is shared.</p>
     <div class="row wkactions"><button class="btn acc" onClick=${() => setPick(true)}>${Ic("plus", 14)} New saved node</button></div>
     ${!presets.length && html`<div class="card mute" style="margin-top:12px">No saved node yet. Tip: in a work, a node's settings have “Save as saved node” too.</div>`}
@@ -1370,6 +1448,60 @@ function SavedNodes({ cat, presets, reload, boot, edit }) {
         <button class="btn" disabled=${!sp} title="A copy with the same settings and logins" onClick=${() => edit({ type: p.type, name: p.name + " (copy)", description: p.description, config: { ...p.config }, copy: { preset: p.id } })}>${Ic("copy", 14)} Duplicate</button>
         <button class="btn bad" onClick=${() => del(p)}>${Ic("trash", 14)}</button></div>`; })}
     ${pick && html`<${Palette} cat=${Object.fromEntries(Object.entries(cat).filter(([, s]) => s.fields.length))} close=${() => setPick(false)} onPick=${(t) => { setPick(false); edit({ type: t, name: cat[t].title, config: {} }); }}/>`}`;
+}
+// Everything running or queued right now (work runs, node runs from chats): progress, Open, Log, Stop. Hidden when nothing runs.
+function RunningBar({ openRun }) {
+  const [rows, setRows] = useState([]), [logId, setLogId] = useState(""), [stopping, setStopping] = useState({});
+  const pull = () => api("works/active").then((d) => setRows(d.active || [])).catch(() => {});
+  useEffect(() => { pull(); }, []);
+  useInterval(pull, 2000);
+  const now = useTick(rows.length > 0);
+  if (!rows.length) return null;
+  const stop = guard(async (r) => { setStopping((c) => ({ ...c, [r.id]: true })); try { await post("works/stop", { run: r.id }); toast("Stopping…"); } catch (e) { setStopping((c) => ({ ...c, [r.id]: false })); throw e; } pull(); });
+  return html`<div class="runbar" role="status"><div class="rb-h">${Ic("play", 13)} <b>Running now</b> <span class="mute small">${rows.length}</span></div>
+    ${rows.map((r) => { const pct = r.total ? Math.min(100, Math.round((r.done / r.total) * 100)) : 0, node = r.kind === "work" ? (r.current_ids && r.current_ids[0]) || "" : "node";
+      return html`<div class="rb-row" key=${r.id}><div class="rb-main"><div class="rb-t"><b>${r.title || "Run"}</b> <span class="tag">${r.kind === "work" ? (r.via || "run") : "node from chat"}</span> <span class=${"tag " + (r.status === "running" ? "good" : "")}>${r.stopping || stopping[r.id] ? "stopping" : r.status}</span></div>
+        <div class="mute small">${r.status === "queued" ? "waiting in the queue" : r.current && r.current.length ? "now: " + r.current.join(", ") : "starting"} · ${fmtDur(now - (r.started || now))}</div>
+        <div class="rb-bar"><span style=${"width:" + (r.status === "queued" ? 4 : Math.max(6, pct)) + "%"}></span></div></div>
+        <div class="rb-act"><span class="mute small">${r.done}/${r.total}</span>
+          <button class="btn" onClick=${() => (r.kind === "work" ? openRun(r.work, r.id) : r.origin ? (location.hash = "#/chat/" + r.origin) : setLogId(logId === r.id ? "" : r.id))}>Open</button>
+          <button class=${"btn" + (logId === r.id ? " on" : "")} disabled=${!node} onClick=${() => setLogId(logId === r.id ? "" : r.id)}>${Ic("terminal", 12)} Log</button>
+          <button class="btn bad" disabled=${r.stopping || stopping[r.id]} onClick=${() => stop(r)}>${Ic("x", 12)} Stop</button></div>
+        ${logId === r.id && node && html`<div class="rb-log"><${RunLog} gkey=${r.id + node} live=${true} get=${(after) => api(`works/log?work=${encodeURIComponent(r.work)}&run=${r.id}&node=${node}&after=${after || 0}`)}/></div>`}</div>`; })}</div>`;
+}
+// Run history: filter by status, per-run timeline (inputs, outputs, duration, log, files), the run's folder, and "Run again with the same inputs".
+const RUN_TAG = { done: "good", failed: "bad", interrupted: "bad" };
+function TimelineRow({ w, run, id, label, rec, total, files, now }) {
+  const [open, setOpen] = useState(false), t0 = rec.started || rec.t0, secs = t0 ? Math.max(0, (rec.ended || now) - t0) : null, from = run.started || t0 || 0;
+  const left = t0 && total ? Math.max(0, Math.min(96, ((t0 - from) / total) * 100)) : 0, wide = secs != null && total ? Math.max(2, Math.min(100 - left, (secs / total) * 100)) : 2;
+  return html`<div class="tl-row"><button type="button" class="tl-h" onClick=${() => setOpen(!open)}><span class=${"tag " + (RUN_TAG[rec.status === "ok" ? "done" : rec.status === "error" ? "failed" : ""] || "")}>${rec.status}</span><b class="grow">${label}</b><span class="mute small">${secs != null ? fmtDur(secs) : ""}</span></button>
+    <div class="tl-bar"><span class=${rec.status} style=${`margin-left:${left}%;width:${wide}%`}></span></div>
+    ${open && html`<div class="tl-b">${rec.error && html`<div class="werr rc-pad">${Ic("alert", 13)}<span>${rec.error}</span></div>`}${rec.note && html`<div class="mute small">${rec.note}</div>`}
+      ${rec.input && html`<div class="io-k">Input</div><div class="io">${rec.input}</div>`}${rec.output && html`<div class="io-k">Output</div><div class="io">${rec.output}</div>`}
+      ${files.length > 0 && html`<div class="io-k">Files written</div>${files.map((f) => html`<div class="small"><button type="button" class="lnk" onClick=${guard(() => post("works/open", { work: w.id, run: run.id, path: f.path }))}>${f.path}</button> <span class="mute">${f.size} bytes</span></div>`)}`}
+      ${rec.chat && html`<a class="small" href=${"#/chat/" + rec.chat}>${Ic("chat", 12)} its chat</a>`}
+      ${rec.logfile && html`<div class="io-k">Log</div><${RunLog} gkey=${run.id + id} live=${rec.status === "running"} get=${(after) => api(`works/log?work=${w.id}&run=${run.id}&node=${id}&after=${after || 0}`)}/>`}</div>`}</div>`;
+}
+function RunsPanel({ w, cat, runs, run, setRun, refresh, now }) {
+  const [flt, setFlt] = useState("all"), [files, setFiles] = useState(null);
+  const shown = runs.filter((r) => flt === "all" || (flt === "active" ? ["queued", "running"].includes(r.status) : r.status === flt));
+  useEffect(() => { setFiles(null); if (run && run.id) api(`works/files?work=${w.id}&run=${run.id}`).then(setFiles).catch(() => setFiles({ dir: "", files: [] })); }, [run && run.id, run && run.status]);
+  const label = (id) => { const n = w.nodes.find((q) => q.id === id); return n ? n.label || (cat[n.type] && cat[n.type].title) || n.type : id; };
+  const total = run && run.started ? Math.max(0.5, (run.ended || now) - run.started) : 0, nodes = run && run.nodes ? Object.entries(run.nodes).sort((a, b) => (a[1].started || a[1].t0 || 1e12) - (b[1].started || b[1].t0 || 1e12)) : [];
+  const open = guard(async (r) => setRun((await api(`works/run?id=${w.id}&run=${r.id}`)).run));
+  return html`<aside class="insp"><div class="insp-h"><b class="grow">Runs</b><select class="small" value=${flt} onChange=${(e) => setFlt(e.target.value)} aria-label="Filter runs by status"><option value="all">All</option><option value="active">Running</option><option value="done">Done</option><option value="failed">Failed</option><option value="stopped">Stopped</option></select><button class="ibtn" title="Refresh runs" aria-label="Refresh runs" onClick=${refresh}>${Ic("refresh", 15)}</button></div>
+    <div class="insp-b">${!runs.length && html`<p class="mute small">No runs yet. Double-click the canvas or press Add node to build the flow.</p>`}${runs.length > 0 && !shown.length && html`<p class="mute small">No run with that status.</p>`}
+      ${shown.slice(0, 30).map((r) => html`<div class=${"item" + (run && run.id === r.id ? " on" : "")} onClick=${() => open(r)}><span class=${"tag " + (RUN_TAG[r.status] || "")}>${r.status}</span><span class="t small">${r.via}${r.trigger && w.nodes.some((n) => n.id === r.trigger) ? " · " + label(r.trigger) : ""} · ${r.text}</span><span class="mute small" title=${r.started ? new Date(r.started * 1000).toLocaleString() : ""}>${ago(r.started)}${r.started ? " · " + fmtDur((r.ended || now) - r.started) : ""}</span></div>`)}
+      ${run && run.started && html`<div class="runsum"><div class="row small" style="gap:8px;flex-wrap:wrap"><span class=${"tag " + (RUN_TAG[run.status] || "")}>${run.status}</span>${["queued", "running"].includes(run.status) ? html`<b>Running ${fmtDur(now - run.started)}</b>` : html`<span>Total ${fmtDur((run.ended || run.started) - run.started)}</span>`}<span class="mute">${new Date(run.started * 1000).toLocaleString()}</span></div>
+        <div class="row" style="gap:6px;margin:8px 0;flex-wrap:wrap">${["queued", "running"].includes(run.status) ? html`<button class="btn bad" onClick=${guard(async () => { await post("works/stop", { run: run.id }); toast("Stopping…"); })}>${Ic("x", 12)} Stop</button>`
+          : html`<button class="btn" title="Start again with the same text and inputs" onClick=${guard(async () => { const r = await post("works/rerun", { work: w.id, run: run.id }); toast("Run queued"); refresh(); setTimeout(() => api(`works/run?id=${w.id}&run=${r.run}`).then((d) => setRun(d.run)), 600); })}>${Ic("refresh", 12)} Run again</button>`}
+          ${run.chat && html`<a class="btn" href=${"#/chat/" + run.chat}>${Ic("chat", 12)} Chat</a>`}</div>
+        ${run.error && html`<div class="werr rc-pad">${Ic("alert", 13)}<span>${run.error}</span></div>`}
+        <div class="io-k">Run folder <span class="mute small">(shared by every node; <code>{{run.dir}}</code>)</span></div>
+        <div class="row small" style="gap:6px"><code class="rlog-cmd grow" title=${(files && files.dir) || run.dir || ""}>${(files && files.dir) || run.dir || "(none: this run is from before run folders)"}</code>${run.dir && html`<button class="btn" onClick=${guard(() => post("works/open", { work: w.id, run: run.id }))}>${Ic("folder", 12)} Open folder</button>`}</div>
+        ${files && files.files.length > 0 ? html`<div class="tl-files">${files.files.slice(0, 40).map((f) => html`<div class="small"><button type="button" class="lnk" onClick=${guard(() => post("works/open", { work: w.id, run: run.id, path: f.path }))}>${f.path}</button> <span class="mute">${f.size < 1024 ? f.size + " B" : Math.round(f.size / 1024) + " KB"}</span></div>`)}</div>` : html`<div class="mute small">No files written in the run folder.</div>`}
+        <div class="io-k" style="margin-top:10px">Timeline</div>
+        ${nodes.map(([id, rec]) => html`<${TimelineRow} key=${id} w=${w} run=${run} id=${id} label=${rec.label || label(id)} rec=${rec} total=${total} now=${now} files=${(files ? files.files : []).filter((f) => f.node === id)}/>`)}</div>`}</div></aside>`;
 }
 function Works({ boot, openId }) {
   const [trig, setTrig] = useState({});
@@ -1382,17 +1514,56 @@ function Works({ boot, openId }) {
   const loadCat = () => { loadPresets(); return api("works/nodes").then((d) => setCat(Object.fromEntries(d.nodes.map((n) => [n.type, n])))).catch(() => {}); };
   const presetDlg = pe && html`<${PresetEditor} initial=${pe} cat=${cat} boot=${boot} close=${() => setPe(null)} saved=${() => { setPe(null); loadPresets(); }}/>`;
   useEffect(() => { load(); loadCat(); }, []);
-  const open = guard(async (id) => { const d = await api("works/get?id=" + id); setW(d.work); setTrig(d.triggers || {}); setSel(null); setRun(null); setDirty(false); });
+  const open = guard(async (id) => { const d = await api("works/get?id=" + id); setWarns(d.warning_nodes || {}); setW(d.work); setTrig(d.triggers || {}); setSel(null); setRun(null); setDirty(false); });
   useEffect(() => { if (openId) open(openId); }, [openId]);
+  const openRun = guard(async (wid, rid) => { await open(wid); setRun((await api(`works/run?id=${wid}&run=${rid}`)).run); });
+  const wRef = useRef(null), hist = useRef({ past: [], future: [], t: 0 }), [warns, setWarns] = useState({});
+  wRef.current = w;
+  const snap = (o) => { const h = hist.current, now = Date.now(); if (!wRef.current) return; if (!(o && o.hard) && now - h.t < 700 && h.past.length) { h.t = now; return; } h.t = now; h.past.push(JSON.stringify(wRef.current)); if (h.past.length > 50) h.past.shift(); h.future = []; };
+  const undo = (redo) => { const h = hist.current, from = redo ? h.future : h.past, to = redo ? h.past : h.future; if (!from.length || !wRef.current) return; to.push(JSON.stringify(wRef.current)); const v = JSON.parse(from.pop()); h.t = 0; setW(v); setDirty(true); setSel((x) => (v.nodes.some((n) => n.id === x) ? x : null)); setSelEdge(""); };
+  useEffect(() => {
+    const kd = (e) => { if (!(e.ctrlKey || e.metaKey) || !wRef.current) return; const k = e.key.toLowerCase(); if (!["z", "y"].includes(k)) return; if (/^(INPUT|TEXTAREA|SELECT)$/.test((e.target || {}).tagName || "") || (e.target && e.target.isContentEditable)) return; e.preventDefault(); undo(k === "y" || e.shiftKey); };
+    addEventListener("keydown", kd); return () => removeEventListener("keydown", kd);
+  }, []);
+  useEffect(() => { hist.current = { past: [], future: [], t: 0 }; }, [w && w.id]);
+  const spc = useRef({}), ptr = useRef(null);                          // Space on the canvas opens the add-node palette where the pointer is (canvas centre if it is outside); one selected node = connect from it
+  spc.current = { open: !!(pal || share || shared || wf || nd || pe), sel, has: !!w };
+  useEffect(() => {
+    const mv = (e) => { ptr.current = { x: e.clientX, y: e.clientY }; };
+    const kd = (e) => {
+      const c = spc.current; if (e.key !== " " || e.ctrlKey || e.metaKey || e.altKey || e.repeat || !c.has || c.open || e.defaultPrevented) return;
+      const t = e.target || {}; if (/^(INPUT|TEXTAREA|SELECT|BUTTON|A)$/.test(t.tagName || "") || t.isContentEditable || (t.closest && t.closest("[contenteditable],.pbox,[role=dialog],dialog"))) return;
+      const g = graph.current; if (!g) return; e.preventDefault();
+      const r = g.getBoundingClientRect(), p = ptr.current, inside = p && p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom, cx = inside ? p.x : r.left + r.width / 2, cy = inside ? p.y : r.top + r.height / 2;
+      setMouse({ x: cx - r.left + g.scrollLeft, y: cy - r.top + g.scrollTop });
+      setPal({ x: Math.max(0, Math.round(cx - r.left + g.scrollLeft - 20)), y: Math.max(0, Math.round(cy - r.top + g.scrollTop - 20)), ...(c.sel ? { from: c.sel } : {}) });
+    };
+    addEventListener("pointermove", mv); addEventListener("keydown", kd); return () => { removeEventListener("pointermove", mv); removeEventListener("keydown", kd); };
+  }, []);
+  const [selEdge, setSelEdge] = useState(""), dragRef = useRef(null), lastDrag = useRef(0), now = useTick(!!(run && ["queued", "running"].includes(run.status)));
+  const delEdge = (k) => { upd((c) => ((c.edges = c.edges.filter((e) => e.from + ">" + e.to !== k)), c), { hard: true }); setSelEdge(""); };
+  useEffect(() => {
+    if (!selEdge) return;
+    const kd = (e) => { if ((e.key === "Delete" || e.key === "Backspace") && !/^(INPUT|TEXTAREA|SELECT)$/.test((e.target || {}).tagName || "") && !(e.target && e.target.isContentEditable)) { e.preventDefault(); delEdge(selEdge); } else if (e.key === "Escape") setSelEdge(""); };
+    addEventListener("keydown", kd); return () => removeEventListener("keydown", kd);
+  }, [selEdge]);
+  const delNode = (nid) => { upd((c) => ((c.nodes = c.nodes.filter((q) => q.id !== nid)), (c.edges = c.edges.filter((x) => x.from !== nid && x.to !== nid)), c), { hard: true }); setSel(null); setLink(null); };
+  useEffect(() => {                                                    // Delete / Backspace removes the selected node (not while typing or with a dialog open)
+    if (!sel || selEdge) return;
+    const kd = (e) => { if ((e.key !== "Delete" && e.key !== "Backspace") || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented || spc.current.open) return; const t = e.target || {};
+      if (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || "") || t.isContentEditable || (t.closest && t.closest("[contenteditable],.pbox,[role=dialog],dialog"))) return; e.preventDefault(); delNode(sel); };
+    addEventListener("keydown", kd); return () => removeEventListener("keydown", kd);
+  }, [sel, selEdge]);
   const refreshRuns = useCallback(() => w && w.id && api("works/runs?id=" + w.id).then((d) => setRuns(d.runs)).catch(() => {}), [w && w.id]);
   useEffect(() => { if (w && w.id) refreshRuns(); }, [w && w.id]);
   useInterval(() => { refreshRuns(); if (sel && w.enabled) api("works/get?id=" + w.id).then((d) => setTrig(d.triggers || {})).catch(() => {}); if (run && ["queued", "running"].includes(run.status)) api(`works/run?id=${w.id}&run=${run.id}`).then((d) => setRun(d.run)).catch(() => {}); }, w && w.id ? 2000 : null);
   const node = w && sel ? w.nodes.find((n) => n.id === sel) : null, spec = node ? cat[node.type] : null;
   useEffect(() => { setHook(""); if (w && w.id && node && node.type === "start.webhook") api(`works/hook?id=${w.id}&node=${node.id}`).then((d) => setHook(d.url)).catch(() => {}); }, [sel, w && w.id]);
-  const upd = (fn) => { setDirty(true); setW((c) => fn({ ...c, nodes: c.nodes.map((n) => ({ ...n, config: { ...n.config } })), edges: [...c.edges] })); };
-  const save = guard(async () => { const r = await post("works/save", { work: w }); setW(r.work); setDirty(false); load(); toast("Saved"); return r.work; });
+  const upd = (fn, o) => { if (!(o && o.nopush)) snap(o); setDirty(true); setW((c) => fn({ ...c, nodes: c.nodes.map((n) => ({ ...n, config: { ...n.config } })), edges: [...c.edges] })); };
+  const save = guard(async () => { const r = await post("works/save", { work: w }); setW(r.work); setWarns(r.warning_nodes || {}); setDirty(false); load(); toast("Saved"); return r.work; });
 
   if (!w) return html`<div class="page wkpage"><h1>Works</h1><p class="sub">Flows that start on a schedule, a webhook, a message or a click, then run Claude tasks, filters and package nodes.</p>
+    <${RunningBar} openRun=${openRun}/>
     <${Seg} value=${tab} onChange=${pickTab} items=${[{ id: "works", label: `Works (${list.length})`, icon: "flow" }, { id: "saved", label: `Saved nodes (${presets.length})`, icon: "key" }]}/>
     ${tab === "saved" ? html`<${SavedNodes} cat=${cat} presets=${presets} reload=${loadPresets} boot=${boot} edit=${setPe}/>${presetDlg}` : html`<div style="margin-top:14px"></div>
     <div class="card"><b>Generate a workflow</b><p class="mute small" style="margin:4px 0 8px">Describe it in your words; Claude designs the nodes and opens the result (switched off). You can also say it in a chat with /workflow.</p>
@@ -1402,46 +1573,75 @@ function Works({ boot, openId }) {
     <button class="btn acc" onClick=${() => { setW({ title: "Untitled work", enabled: false, nodes: [{ id: "s" + Math.random().toString(36).slice(2, 6), type: "start.manual", x: 60, y: 80, config: {} }], edges: [] }); setSel(null); setRuns([]); setRun(null); setDirty(true); }}>${Ic("plus", 14)} New work</button>
     ${!list.length && html`<div class="card mute" style="margin-top:16px">No works yet. Add a Start node, a Claude task, connect them, then switch the work On.</div>`}
     ${wf && html`<${Workflows} close=${() => setWf(false)} opened=${(nw) => { setWf(false); load(); setW(nw); setSel(null); setRun(null); setDirty(false); }}/>`}
-    ${list.map((x) => html`<div class="card row"><span class="nico" style="width:34px;height:34px;border-radius:10px;background:var(--soft2);display:grid;place-items:center">${Ic("flow", 17)}</span><div class="grow"><b>${x.title}</b> <span class=${"tag " + (x.enabled ? "good" : "")}>${x.enabled ? "on" : "off"}</span> <span class="mute small">${x.nodes} nodes · ${ago(x.updated)}</span>${x.description && html`<div class="mute small">${x.description}</div>`}</div><button class="btn" onClick=${() => open(x.id)}>Open</button>
-      <button class="btn bad" onClick=${guard(async () => { if (confirm("Delete " + x.title + "? Its stored node secrets go too.")) { await post("works/delete", { id: x.id }); load(); } })}>${Ic("trash", 14)}</button></div>`)}
+    ${list.map((x) => html`<div class="card row wkrow" role="button" tabindex="0" title="Open the design" onClick=${(e) => { if (!e.target.closest("button,.wksw")) open(x.id); }} onKeyDown=${(e) => { if (e.key === "Enter" && e.target === e.currentTarget) open(x.id); }}><span class="nico" style="width:34px;height:34px;border-radius:10px;background:var(--soft2);display:grid;place-items:center">${Ic("flow", 17)}</span><div class="grow"><b>${x.title}</b> <span class="mute small">${x.nodes} nodes · ${ago(x.updated)}</span>${x.description && html`<div class="mute small">${x.description}</div>`}</div>
+      <span class="wksw row small" title=${x.enabled ? "On: its triggers are live. Click to switch off" : "Off: click to switch its triggers on"}><${Switch} on=${!!x.enabled} label=${"Work " + x.title + " on"} onChange=${guard(async (on) => { await post("works/enable", { id: x.id, enabled: on }); load(); toast(on ? x.title + " is on" : x.title + " is off"); })}/><span>${x.enabled ? "On" : "Off"}</span></span>
+      <button class="btn bad" title="Delete" onClick=${guard(async () => { if (await confirmBox({ title: "Delete " + x.title + "?", text: "Its run history, logs and stored node secrets go too, and its triggers stop.", ok: "Delete", danger: true })) { await post("works/delete", { id: x.id }); load(); } })}>${Ic("trash", 14)}</button></div>`)}
     <${ChatRuns}/>`}</div>`;
 
-  const add = (type, pos, pid) => { const sp = cat[type], pre = pid && presets.find((p) => p.id === pid); const cfg = {}; if (!pre) (sp ? sp.fields : []).forEach((f) => { if (f.default !== undefined && f.default !== "" && !f.secret) cfg[f.name] = f.default; });   // a saved node: empty fields follow it
-    const id = "n" + Math.random().toString(36).slice(2, 7); upd((c) => (c.nodes.push({ id, type, ...(pos ? { x: pos.x, y: pos.y } : freeSpot(c.nodes)), label: pre ? pre.name : "", config: cfg, ...(pre ? { preset: pre.id } : {}) }), c)); setSel(id); setPal(null); };
-  const drag = (n, e) => { if (e.target.closest("button")) return; e.preventDefault(); setSel(n.id); const sx = e.clientX - n.x, sy = e.clientY - n.y; const mv = (ev) => upd((c) => (Object.assign(c.nodes.find((q) => q.id === n.id), { x: Math.max(0, Math.round(ev.clientX - sx)), y: Math.max(0, Math.round(ev.clientY - sy)) }), c)); const up = () => { removeEventListener("pointermove", mv); removeEventListener("pointerup", up); }; addEventListener("pointermove", mv); addEventListener("pointerup", up); };
+  const add = (type, pos, pid, from) => { const sp = cat[type], pre = pid && presets.find((p) => p.id === pid); const cfg = {}; if (!pre) (sp ? sp.fields : []).forEach((f) => { if (f.default !== undefined && f.default !== "" && !f.secret) cfg[f.name] = f.default; });   // a saved node: empty fields follow it
+    const id = "n" + Math.random().toString(36).slice(2, 7); upd((c) => (c.nodes.push({ id, type, ...(pos ? { x: pos.x, y: pos.y } : freeSpot(c.nodes)), label: pre ? pre.name : "", config: cfg, ...(pre ? { preset: pre.id } : {}) }), from && sp && sp.kind !== "trigger" && c.nodes.some((q) => q.id === from) && c.edges.push({ from, to: id }), c), { hard: true }); setSel(id); setPal(null); setLink(null); };
+  const drag = (n, e) => { if (e.target.closest("button")) return; e.preventDefault(); setSel(n.id); const sx = e.clientX - n.x, sy = e.clientY - n.y; let moved = false; const mv = (ev) => { if (!moved && Math.hypot(ev.clientX - e.clientX, ev.clientY - e.clientY) < 4) return; if (!moved) snap({ hard: true }); moved = true; upd((c) => (Object.assign(c.nodes.find((q) => q.id === n.id), { x: Math.max(0, Math.round(ev.clientX - sx)), y: Math.max(0, Math.round(ev.clientY - sy)) }), c), { nopush: true }); }; const up = () => { if (moved) lastDrag.current = Date.now(); removeEventListener("pointermove", mv); removeEventListener("pointerup", up); }; addEventListener("pointermove", mv); addEventListener("pointerup", up); };
   const st = (id) => (run && run.nodes && run.nodes[id] ? run.nodes[id].status : "");
   const toggle = guard(async (on) => { const saved = dirty || !w.id ? await save() : w; const r = await post("works/enable", { id: saved.id, enabled: on }); setW(r.work); load(); toast(on ? "Work is on: triggers are live while this service runs" : "Work is off"); });
-  const go = guard(async () => { const saved = dirty || !w.id ? await save() : w; const r = await post("works/run", { id: saved.id, node: node && cat[node.type] && cat[node.type].kind === "trigger" ? sel : undefined, text: prompt("Event text for this run", "manual run") || "manual run" }); toast("Run queued"); setTimeout(() => api(`works/run?id=${saved.id}&run=${r.run}`).then((d) => setRun(d.run)), 600); });
+  const go = guard(async () => { const ev = !(node && cat[node.type] && cat[node.type].kind === "trigger") ? {} : await ask({ title: "Run this trigger", text: "Event text for this run", submit: "Run", fields: [{ name: "t", label: "Event text", value: "manual run", max: 400 }] }); if (!ev) return; const saved = dirty || !w.id ? await save() : w; const r = await post("works/run", { id: saved.id, node: node && cat[node.type] && cat[node.type].kind === "trigger" ? sel : undefined, text: ev.t || "manual run" }); toast("Run queued"); setTimeout(() => api(`works/run?id=${saved.id}&run=${r.run}`).then((d) => setRun(d.run)), 600); });
+  const removeWork = guard(async () => {
+    const live = runs.filter((r) => ["queued", "running"].includes(r.status)), trig = w.enabled ? w.nodes.filter((n) => (cat[n.type] || {}).kind === "trigger").length : 0;
+    const text = "Its " + (runs.length ? runs.length + " saved run" + (runs.length === 1 ? "" : "s") + " with their logs and run folders" : "run history, logs and run folders") + " and stored node secrets are deleted too. This cannot be undone."
+      + (w.enabled ? "\nThe work is on: its " + (trig > 1 ? trig + " triggers stop" : "trigger stops") + " and nothing will start it again." : "")
+      + (live.length ? "\n\n" + (live.length === 1 ? "A run is in progress." : live.length + " runs are in progress.") + " Deleting stops " + (live.length === 1 ? "it" : "them") + " first." : "");
+    if (!(await confirmBox({ title: "Delete " + (w.title || "this work") + "?", text, ok: live.length ? "Stop and delete" : "Delete", danger: true }))) return;
+    const r = await post("works/delete", { id: w.id });
+    setDirty(false); setW(null); setRun(null); load(); location.hash = "#/works"; toast("Deleted " + (w.title || "the work") + (r.stopped ? " (stopped " + r.stopped + " run" + (r.stopped === 1 ? "" : "s") + ")" : ""));
+  });
+  const portDrag = (from, e) => {                                      // dragging out of an output port: dropping on empty canvas opens the add-node menu there
+    dragRef.current = { from, x0: e.clientX, y0: e.clientY };
+    const up = (ev) => {
+      removeEventListener("pointerup", up); const d = dragRef.current; dragRef.current = null;
+      if (!d || Math.hypot(ev.clientX - d.x0, ev.clientY - d.y0) < 8) return;               // a click: stay in click-to-connect mode
+      lastDrag.current = Date.now(); const t = ev.target && ev.target.closest ? ev.target : null;
+      if (t && t.closest(".port.i")) return;                                                 // the input port connects by itself
+      const nd = t && t.closest(".node");
+      if (nd) { const tid = nd.getAttribute("data-id"), to = w.nodes.find((q) => q.id === tid), tsp = to && cat[to.type]; if (to && tid !== d.from && !(tsp && tsp.kind === "trigger")) upd((c) => (c.edges.some((x) => x.from === d.from && x.to === tid) || c.edges.push({ from: d.from, to: tid }), c), { hard: true }); setLink(null); return; }
+      if (!graph.current || !t || !t.closest(".graph")) { setLink(null); return; }
+      const r = graph.current.getBoundingClientRect(), x = Math.max(0, Math.round(ev.clientX - r.left + graph.current.scrollLeft - 20)), y = Math.max(0, Math.round(ev.clientY - r.top + graph.current.scrollTop - 20));
+      setMouse({ x: x + 20, y: y + 20 }); setPal({ x, y, from: d.from });
+    };
+    addEventListener("pointerup", up);
+  };
   const track = (e) => { if (!link || !graph.current) return; const r = graph.current.getBoundingClientRect(); setMouse({ x: e.clientX - r.left + graph.current.scrollLeft, y: e.clientY - r.top + graph.current.scrollTop }); };
   const P = (n, out) => ({ x: n.x + (out ? NW : 0), y: n.y + 27 });
   const curve = (a, b) => `M${a.x},${a.y} C${a.x + 80},${a.y} ${b.x - 80},${b.y} ${b.x},${b.y}`;
-  return html`<div class="wk"><div class="wkbar"><button class="ibtn" title="Back" aria-label="Back" onClick=${() => { if (!dirty || confirm("Discard unsaved changes?")) { setW(null); load(); } }}>${Ic("left", 18)}</button>
+  return html`<div class="wk"><${RunningBar} openRun=${openRun}/><div class="wkbar"><button class="ibtn" title="Back" aria-label="Back" onClick=${async () => { if (!dirty || (await discard(""))) { setW(null); load(); } }}>${Ic("left", 18)}</button>
       <input class="grow" style="font:600 16px var(--serif);border-color:transparent;background:transparent" value=${w.title} onInput=${(e) => upd((c) => ((c.title = e.target.value), c))}/>
-      <label class="row small" style="gap:6px" title="How many runs are kept on disk, and offered to Memory nodes"><span class="mute">History</span><input type="number" min="1" max="500" style="width:64px" value=${w.keep || 40} onInput=${(e) => upd((c) => ((c.keep = Math.max(1, Math.min(500, +e.target.value || 40))), c))}/></label>
+      <label class="row small" style="gap:6px" title="How many runs are kept on disk, and offered to Memory nodes"><span class="mute">History</span><${Num} min="1" max="500" style="width:80px" value=${w.keep || 40} onInput=${(e) => upd((c) => ((c.keep = Math.max(1, Math.min(500, +e.target.value || 40))), c))}/></label>
       ${w.id && html`<button class="btn" title="Share as an aihub workflow package" onClick=${guard(async () => { const saved = dirty ? await save() : w; setShare({ id: saved.id, info: await api("works/export-info?id=" + saved.id) }); })}>${Ic("upload", 14)} Share</button>`}
+      ${w.id && html`<button class="ibtn bad" title="Delete this work" aria-label="Delete this work" onClick=${removeWork}>${Ic("trash", 16)}</button>`}
       <button class="btn" title="Re-arrange the nodes so none overlap" onClick=${guard(async () => { const r = await post("works/layout", { nodes: w.nodes, edges: w.edges }); upd((c) => (c.nodes.forEach((n) => { const p = r.positions[n.id]; if (p) { n.x = p.x; n.y = p.y; } }), c)); })}>${Ic("layers", 14)} Tidy</button>
-      <button class="btn" onClick=${() => setPal({})}>${Ic("plus", 14)} Add node</button>
+      <button class="ibtn" title="Undo (Ctrl/Cmd+Z)" aria-label="Undo" disabled=${!hist.current.past.length} onClick=${() => undo(false)}>${Ic("left", 16)}</button><button class="ibtn" title="Redo (Shift+Ctrl/Cmd+Z)" aria-label="Redo" disabled=${!hist.current.future.length} onClick=${() => undo(true)}>${Ic("right", 16)}</button>
+      <button class="btn" title="Add node (Space on the canvas)" onClick=${() => setPal({})}>${Ic("plus", 14)} Add node</button>
       <label class="row small" style="gap:8px"><${Switch} on=${w.enabled} onChange=${toggle} label="Work on"/>${w.enabled ? "On" : "Off"}</label>
       <button class="btn" onClick=${save} disabled=${!dirty}>Save</button><button class="btn acc" onClick=${go}>${Ic("play", 13)} Run now</button></div>
     <div class="wkdesc">${Ic("note", 13)}<input placeholder="Short description: what this work does (shown in lists and when shared)" maxlength="300" value=${w.description || ""} onInput=${(e) => upd((c) => ((c.description = e.target.value), c))}/></div>
-    <div class="wkbody"><div class="graph" ref=${graph} onPointerMove=${track} onPointerDown=${(e) => { if (e.target.classList.contains("gin")) { setSel(null); setLink(null); } }}>
-        <div class="gin" onDblClick=${(e) => { if (e.target.classList.contains("gin")) setPal({ x: e.nativeEvent.offsetX - 20, y: e.nativeEvent.offsetY - 20 }); }}>
-          <svg width="2600" height="1700" style="position:absolute;inset:0;pointer-events:none">${w.edges.map((e) => { const a = w.nodes.find((n) => n.id === e.from), b = w.nodes.find((n) => n.id === e.to); return a && b ? html`<path class="edge" d=${curve(P(a, true), P(b, false))}/>` : null; })}
+    <div class="wkbody"><div class="graph" ref=${graph} onPointerMove=${track} onPointerDown=${(e) => { if (e.target.classList.contains("gin")) { setSel(null); setLink(null); setSelEdge(""); } }}>
+        <div class="gin" onDblClick=${(e) => { if (e.target.classList.contains("gin") && Date.now() - lastDrag.current > 500) setPal({ x: e.nativeEvent.offsetX - 20, y: e.nativeEvent.offsetY - 20 }); }}>
+          <svg width="2600" height="1700" style="position:absolute;inset:0;pointer-events:none">${w.edges.map((e) => { const a = w.nodes.find((n) => n.id === e.from), b = w.nodes.find((n) => n.id === e.to); if (!a || !b) return null; const pa = P(a, true), pb = P(b, false), k = e.from + ">" + e.to, d = curve(pa, pb), mx = (pa.x + pb.x) / 2, my = (pa.y + pb.y) / 2;
+              return html`<g class=${"eg" + (selEdge === k ? " sel" : "")} key=${k}><path class="edge-hit" d=${d} onPointerDown=${(ev) => { ev.stopPropagation(); setSelEdge(k); setSel(null); setLink(null); }}><title>Click to select, then Delete</title></path><path class="edge" d=${d}/>
+                <g class="edge-x" transform=${`translate(${mx},${my})`} onPointerDown=${(ev) => { ev.stopPropagation(); delEdge(k); }}><title>Delete this connection</title><circle r="9"/><path d="M-3.5,-3.5L3.5,3.5M3.5,-3.5L-3.5,3.5"/></g></g>`; })}
             ${link && mouse && (() => { const a = w.nodes.find((n) => n.id === link); return a ? html`<path class="edge live" d=${curve(P(a, true), mouse)}/>` : null; })()}</svg>
-          ${w.nodes.map((n) => { const sp = cat[n.type]; return html`<div class=${`node ${nodeKind(n.type, sp)} ${st(n.id)} ${sel === n.id ? "sel" : ""}`} style=${`left:${n.x}px;top:${n.y}px;width:${NW}px`} onPointerDown=${() => setSel(n.id)}>
-            ${(!sp || sp.kind !== "trigger") && html`<span class=${"port i" + (link ? " act" : "")} title="Input" onPointerUp=${() => { if (link && link !== n.id) upd((c) => (c.edges.some((e) => e.from === link && e.to === n.id) || c.edges.push({ from: link, to: n.id }), c)); setLink(null); }}></span>`}
-            <span class=${"port o" + (link === n.id ? " act" : "")} title="Drag to connect, then click the next node's left dot" onPointerDown=${(e) => { e.stopPropagation(); setLink(n.id); setSel(n.id); }}></span>
+          ${w.nodes.map((n) => { const sp = cat[n.type]; const nr = run && run.nodes && run.nodes[n.id], secs = nr && (nr.started || nr.t0) ? Math.max(0, (nr.ended || now) - (nr.started || nr.t0)) : null; return html`<div data-id=${n.id} class=${`node ${nodeKind(n.type, sp)} ${st(n.id)} ${sel === n.id ? "sel" : ""}`} style=${`left:${n.x}px;top:${n.y}px;width:${NW}px`} onPointerDown=${() => { setSel(n.id); setSelEdge(""); }}>
+            ${warns[n.id] && html`<span class="nwarn" title=${warns[n.id].join("\n")}>${Ic("alert", 11)} ${warns[n.id].length}</span>`}
+            ${nr && html`<span class=${"dur " + nr.status} title=${nr.status + (secs != null ? " · " + fmtDur(secs) : "")}>${nr.status === "running" ? Ic("play", 9) : nr.status === "queued" ? "queued" : ""}${secs != null ? fmtDur(secs) : nr.status === "skipped" ? "skipped" : ""}</span>`}
+            ${(!sp || sp.kind !== "trigger") && html`<span class=${"port i" + (link ? " act" : "")} title="Input" onPointerUp=${() => { if (link && link !== n.id) upd((c) => (c.edges.some((e) => e.from === link && e.to === n.id) || c.edges.push({ from: link, to: n.id }), c), { hard: true }); setLink(null); }}></span>`}
+            <span class=${"port o" + (link === n.id ? " act" : "")} title="Drag to connect, then click the next node's left dot" onPointerDown=${(e) => { e.stopPropagation(); setLink(n.id); setSel(n.id); setSelEdge(""); portDrag(n.id, e); }}></span>
             <header onPointerDown=${(e) => drag(n, e)}><span class="nico">${Ic(nodeIcon(n.type, sp), 16)}</span><div class="grow" style="min-width:0"><div class="nt">${n.label || (sp ? sp.title : n.type)}</div><div class="ns">${sp ? (sp.kind === "trigger" ? "Start" : sp.group) : "missing package"}</div></div><span class="st"></span>
-              <button class="rm" title="Delete" onClick=${() => { upd((c) => ((c.nodes = c.nodes.filter((q) => q.id !== n.id)), (c.edges = c.edges.filter((x) => x.from !== n.id && x.to !== n.id)), c)); setSel(null); }}>${Ic("x", 13)}</button></header>
+              <button class="rm" title="Delete (or select the node and press Delete)" onClick=${() => delNode(n.id)}>${Ic("x", 13)}</button></header>
             <div class="nb">${summary(n) || (n.preset ? html`<span class="mute">${Ic("key", 11)} ${(presets.find((p) => p.id === n.preset) || { name: "saved node missing" }).name}</span>` : html`<span class="mute">Not set up</span>`)}</div></div>`; })}
-        </div>${link && html`<div class="toast" style="position:sticky;bottom:12px;left:40%;display:inline-block">Click the left dot of the next node <button type="button" class="lnk" style="color:var(--accent)" onClick=${() => setLink(null)}>cancel</button></div>`}</div>
-      ${node ? html`<${Inspector} w=${w} node=${node} spec=${spec} cat=${cat} run=${run} boot=${boot} hook=${hook} trig=${trig} upd=${upd} presets=${presets} editPreset=${setPe} close=${() => setSel(null)} remove=${() => { upd((c) => ((c.nodes = c.nodes.filter((q) => q.id !== node.id)), (c.edges = c.edges.filter((x) => x.from !== node.id && x.to !== node.id)), c)); setSel(null); }}/>`
-        : html`<aside class="insp"><div class="insp-h"><b class="grow">Runs</b><button class="ibtn" title="Refresh runs" aria-label="Refresh runs" onClick=${refreshRuns}>${Ic("refresh", 15)}</button></div><div class="insp-b">${!runs.length && html`<p class="mute small">No runs yet. Double-click the canvas or press Add node to build the flow.</p>`}
-          ${runs.slice(0, 14).map((r) => html`<div class=${"item" + (run && run.id === r.id ? " on" : "")} onClick=${guard(async () => setRun((await api(`works/run?id=${w.id}&run=${r.id}`)).run))}><span class=${"tag " + (r.status === "done" ? "good" : r.status === "failed" ? "bad" : "")}>${r.status}</span><span class="t small">${r.via} · ${r.text}</span><span class="mute small">${ago(r.started)}</span></div>`)}
-          ${run && run.chat && html`<a class="small" href=${"#/chat/" + run.chat}>Open the run's chat and files ${Ic("right", 12)}</a>`}</div></aside>`}</div>
+        </div>${link && !pal && html`<div class="toast" style="position:sticky;bottom:12px;left:40%;display:inline-block">Click the left dot of the next node <button type="button" class="lnk" style="color:var(--accent)" onClick=${() => setLink(null)}>cancel</button></div>`}</div>
+      ${node ? html`<${Inspector} warn=${warns[node.id] || []} w=${w} node=${node} spec=${spec} cat=${cat} run=${run} boot=${boot} hook=${hook} trig=${trig} upd=${upd} presets=${presets} editPreset=${setPe} close=${() => setSel(null)} remove=${() => delNode(node.id)}/>`
+        : html`<${RunsPanel} w=${w} cat=${cat} runs=${runs} run=${run} setRun=${setRun} refresh=${refreshRuns} now=${now}/>`}</div>
     ${share && html`<${ShareForm} id=${share.id} info=${share.info} close=${() => setShare(null)} done=${(r) => { setShare(null); setShared(r); }}/>`}
     ${shared && html`<${PublishSteps} r=${shared} boot=${boot} close=${() => setShared(null)}/>`}
-    ${pal && html`<${Palette} cat=${cat} presets=${presets} more=${() => { setPal(null); setNd(true); }} close=${() => setPal(null)} onPick=${(t, pid) => add(t, pal.x !== undefined ? pal : null, pid)}/>`}${presetDlg}</div>`;
+    ${pal && html`<${Palette} cat=${cat} presets=${presets} more=${() => { setPal(null); setNd(true); }} close=${() => { setPal(null); setLink(null); }} onPick=${(t, pid) => add(t, pal.x !== undefined ? pal : null, pid, pal.from)}/>`}${presetDlg}</div>`;
 }
 
 // ---------- settings
@@ -1478,7 +1678,7 @@ function UpdateCard({ prefs, savePrefs }) {
   useInterval(load, live || down ? 1500 : 20000);
   const check = async () => { setBusy(true); try { setU((await post("update/check", {})).update); } catch (e) { toast(e.message); } finally { setBusy(false); } };
   const act = async (what) => {
-    if (!confirm(what === "update" ? "Install the newest version and restart now? Running chats and works are cut off." : "Restart AI Hub UI now? Running chats and works are cut off.")) return;
+    if (!(await confirmBox({ title: what === "update" ? "Update and restart?" : "Restart AI Hub UI?", text: what === "update" ? "Install the newest version and restart now? Running chats and works are cut off." : "Restart AI Hub UI now? Running chats and works are cut off.", ok: what === "update" ? "Update" : "Restart", danger: true }))) return;
     try { setU((await post("update/apply", { what })).update); } catch (e) { toast(e.message); }
   };
   const st = u && (u.stage || (u.restarting ? "restarting" : "")), at = UPD_STEPS.findIndex((x) => x[0] === st);
@@ -1512,12 +1712,13 @@ function Settings({ boot, reload, prefs, savePrefs, focus }) {
     <div class="card"><div class="row"><div class="grow"><b>Auto-compact</b><div class="mute small">Summarise older turns near the limit. Applies to chats and Claude nodes.</div></div><${Switch} on=${prefs.autocompact} label="Auto-compact" onChange=${(v) => savePrefs({ autocompact: v })}/></div>
       ${prefs.autocompact && html`<div class="row" style="margin-top:10px"><span class="small">Limit</span><input type="range" min="40" max="95" step="5" value=${prefs.compact_pct} class="grow" onChange=${(e) => savePrefs({ compact_pct: +e.target.value })}/><b>${prefs.compact_pct}%</b></div>`}</div>
     <div class="card"><div class="row"><div class="grow"><b>Online search</b><div class="mute small">Search (<kbd>⌘K</kbd>) always answers from this machine first: chats, and a local copy of the hub's Spaces and packages. On: when the local answer is thin it asks the hub once (per query, every 2 min) and keeps the answer, and the local copy is refreshed in the background while you search. Off: the hub is never asked; <code>@hub:</code> and <code>@package:</code> show only what is already cached.</div></div><${Switch} on=${prefs.online_search !== false} label="Online search" onChange=${(v) => savePrefs({ online_search: v })}/></div></div>
+    <div class="card"><div class="row"><div class="grow"><b>Free chat hands over to Claude Code</b><div class="mute small">On by default. When a free chat message needs your files, shell commands or multi-step coding, the model can hand it to Claude Code: the chat switches engine, the conversation carries over and the same message is answered there. Never in Works runs.</div></div><${Switch} on=${prefs.auto_engine !== false} label="Free chat hands over to Claude Code" onChange=${(v) => savePrefs({ auto_engine: v })}/></div></div>
     <div class="card"><div class="row"><div class="grow"><b>Model picker options</b><div class="mute small">List the <code>modelPicker.options</code> of your settings.json (chat, image and text-to-speech models) in the model menu. On by default. Off: only Opus, Sonnet and Haiku (the three tiers).</div></div><${Switch} on=${!!prefs.model_picker} label="Model picker options" onChange=${async (v) => { if (await savePrefs({ model_picker: v })) reload(); }}/></div></div>
     <div class="card"><div class="row"><div class="grow"><b>Free chat model</b><div class="mute small">The model id free chat sends when the chat's model is Default or an alias. Empty = built-in default; if your key does not have it, the first free message finds one that works and fills this in.</div></div>
       <input style="width:260px" placeholder="e.g. claude-sonnet-4-5" value=${fm} onInput=${(e) => setFm(e.target.value)} onKeyDown=${(e) => e.key === "Enter" && savePrefs({ free_model: fm.trim() })}/><button class="btn" disabled=${fm.trim() === (prefs.free_model || "")} onClick=${() => savePrefs({ free_model: fm.trim() })}>Save</button></div></div>
     <div class="card"><div class="row"><div class="grow"><b>Context window</b><div class="mute small">The size the context ring in chats measures against, and where auto-compact counts from. Claude Code only has 1M when the model supports it (pick a model marked 1M).</div></div>
       <select value=${WINDOWS.some((w) => w[0] === prefs.window) ? String(prefs.window) : "custom"} onChange=${(e) => e.target.value !== "custom" && savePrefs({ window: +e.target.value })}>${WINDOWS.map((w) => html`<option value=${w[0]}>${w[1]}</option>`)}<option value="custom">Custom…</option></select></div>
-      <div class="row" style="margin-top:10px"><span class="small">Tokens</span><input type="number" min="50000" step="10000" style="width:160px" value=${cw} onInput=${(e) => setCw(e.target.value)} onChange=${() => +cw >= 50000 ? savePrefs({ window: +cw }) : toast("At least 50000 tokens")}/><span class="mute small">= ${num(+cw || 0)}</span></div></div>
+      <div class="row" style="margin-top:10px"><span class="small">Tokens</span><${Num} min="50000" step="10000" style="width:170px" value=${cw} onInput=${(e) => setCw(e.target.value)} onChange=${() => +cw >= 50000 ? savePrefs({ window: +cw }) : toast("At least 50000 tokens")}/><span class="mute small">= ${num(+cw || 0)}</span></div></div>
     <${HelperStatus}/>
     <${Themes} api=${api} post=${post}/>
     <h2>Claude settings file</h2><div class="card"><div class="row"><div class="grow"><b>${cl.custom ? "Custom file" : "Default file"}</b><div class="mono small" style="overflow-wrap:anywhere">${cl.path}${cl.exists ? "" : " (not found)"}</div></div>
@@ -1530,6 +1731,7 @@ function Settings({ boot, reload, prefs, savePrefs, focus }) {
       ${Object.entries(cl.env).map(([k, v]) => html`<div class="mono">${k} = ${v === "set" ? "•••••• (hidden)" : v}</div>`)}
       <p class="mute">Models, login and environment come from Claude's own configuration. Secret values are never read into this page.</p></div>
     <${Vault} embedded=${true}/>
+    <${Credentials}/>
     <h2>Encrypted secrets for chats</h2><p class="sub">Extra environment variables given only to the Claude process of your chats (for example a provider key). Stored encrypted (<code>~/.aihub/ui/secrets.bin</code>, key file mode 0600); values are never shown again.</p>
     ${sec.error && html`<p class="tag bad">${sec.error}</p>`}
     ${sec.names.filter((n) => !n.startsWith("node:")).map((n) => html`<div class="card row"><span class="grow mono">${n}</span><span class="tag">${Ic("key", 12)} encrypted</span><button class="btn bad" onClick=${guard(async () => { await post("secrets/remove", { name: n }); load(); })}>${Ic("trash", 14)}</button></div>`)}
@@ -1572,10 +1774,12 @@ const parseSpot = (t) => {                                             // -> {al
   return hit && m[2] ? { alias: k, words: m[3].trim() } : { typing: k };
 };
 const fit = (q, ...xs) => { const w = q.toLowerCase().split(/\s+/).filter(Boolean), s = xs.join(" ").toLowerCase(); return w.every((x) => s.includes(x)); };
+const MAC = /Mac|iP/.test(navigator.platform), NEW_KEY = MAC ? "⇧⌘O" : "Ctrl ⇧ O";
 function Spotlight({ close, go, sessions, nav, hub, importLink, projects = [], dirs = {}, newChat, newChatIn }) {
   const [q, setQ] = useState(""), [idx, setIdx] = useState(0), [remote, setRemote] = useState({ key: "", rows: null }), [local, setLocal] = useState({}), [busy, setBusy] = useState(false), box = useRef(), inp = useRef();
   const t = q.trim(), P = parseSpot(t), lc = (P.words || "").toLowerCase();
   useEffect(() => { const off = escPush(close); return off; }, []);
+  useEffect(() => { const f = () => inp.current && inp.current.focus({ preventScroll: true }); f(); const r = requestAnimationFrame(f); return () => cancelAnimationFrame(r); }, []);   // autofocus does not fire on a node mounted after load; rAF beats the composer/clicked button taking focus back
   const need = P.alias === "workflow" ? "works" : P.alias === "knowledge" ? "knowledge" : P.alias === "package" ? "packages" : "";
   useEffect(() => { if (need && !local[need]) spotGet(need).then((d) => setLocal((l) => ({ ...l, [need]: d }))).catch(() => setLocal((l) => ({ ...l, [need]: {} }))); }, [need]);
   // remote half: message search (plain, 2+ letters), hub spaces, hub packages. Debounced; a newer query aborts the older one.
@@ -1631,7 +1835,8 @@ function Spotlight({ close, go, sessions, nav, hub, importLink, projects = [], d
     const chat = (c, snip) => ({ key: "c" + c.id, group: t ? "Chats" : "Recent chats", icon: "chat", title: t ? hilite(c.title, t) : c.title, sub: snip ? hilite(c.snippet, t) : c.folder ? "Project " + c.folder : "Chat", run: () => go("chat/" + c.id) });
     const chats = [...(rem || []).map((c) => (seen.add(c.id), chat(c, !!c.snippet))), ...titles.filter((c) => !seen.has(c.id)).slice(0, 30).map((c) => chat(c, false))];
     const viaLink = hubRef(t) ? [{ key: "lnk", group: "Hub link", icon: "import", title: html`Import with <span class="sp-alias">@open:</span>`, sub: t, keep: true, run: () => setQ("@open:" + t) }] : [];
-    rows = t ? [...viaLink, ...chats, ...projRows(lc, 4, "Projects"), ...pages.slice(0, 4)] : [...chats, ...pages];
+    const fresh = !lc || "new chat".includes(lc) || "new chat".startsWith(lc.split(/\s+/)[0]) ? [{ key: "new", group: "Actions", icon: "plus", title: "New chat", sub: "Start a fresh conversation", tag: NEW_KEY, run: () => newChat() }] : [];
+    rows = t ? [...viaLink, ...fresh, ...chats, ...projRows(lc, 4, "Projects"), ...pages.slice(0, 4)] : [...fresh, ...chats, ...pages];
     hint = t.length >= 2 ? "Titles and what was said" : "Type @ to search folders, the hub, workflows, knowledge or packages";
   }
   const loading = busy || (need && !local[need]);
@@ -1658,18 +1863,26 @@ const SORTS = [["recent", "Recent activity"], ["created", "Newest first"], ["old
 const sortChats = (list, how) => { const l = [...list]; if (how === "created") l.sort((a, b) => (b.created || 0) - (a.created || 0)); else if (how === "oldest") l.sort((a, b) => (a.created || 0) - (b.created || 0)); else if (how === "name") l.sort((a, b) => String(a.title).localeCompare(String(b.title), undefined, { sensitivity: "base", numeric: true })); else l.sort((a, b) => (b.updated || 0) - (a.updated || 0)); return l; };
 const NAV = [["packages", "package", "Packages"], ["services", "server", "Services"], ["mcp", "plug", "MCP servers"], ["works", "flow", "Works"], ["knowledge", "book", "Knowledge"], ["usage", "chart", "Usage"]];
 function App() {
-  const [sw, setSw] = useState(() => +pref("sidew", "272") || 272);
+  const [sw, setSw] = useState(() => +pref("sidew", "272") || 272), [sbHide, setSbHide] = useState(() => pref("sidehide", "0") === "1");
+  const hideSide = (v) => { setSbHide(v); setPref("sidehide", v ? "1" : "0"); };
+  const narrow = () => matchMedia("(max-width:860px)").matches;
+  const openSide = () => (narrow() ? setDrawer(true) : hideSide(false));          // phones: the drawer; desktop: bring a collapsed sidebar back
   const [boot, setBoot] = useState(null), [sess, setSess] = useState({ folders: [], sessions: [] }), [route, setRoute] = useState(location.hash.slice(2) || "chat"), [msg, setMsg] = useState(""), [err, setErr] = useState("");
   const [spotOpen, setSpotOpen] = useState(false), [sortBy, setSortBy] = useState(() => pref("chatsort", "recent")), [sortPop, setSortPop] = useState(false), [drawer, setDrawer] = useState(false);
   const [folded, setFolded] = useState(() => { try { return JSON.parse(pref("chatfold", "[]")) || []; } catch (e) { return []; } });
   const fold = (k) => setFolded((l) => { const n = l.includes(k) ? l.filter((x) => x !== k) : [...l, k]; setPref("chatfold", JSON.stringify(n)); return n; });
   const chooseSort = (k) => { setSortBy(k); setPref("chatsort", k); setSortPop(false); };
-  useEffect(() => { const h = (e) => { if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") { e.preventDefault(); setSpotOpen(true); } }; addEventListener("keydown", h); return () => removeEventListener("keydown", h); }, []);      // <=860px: the sidebar is a drawer
+  const newRef = useRef();
+  useEffect(() => { const h = (e) => { if (!(e.metaKey || e.ctrlKey) || e.altKey) return; const k = e.key.toLowerCase();
+    if (!e.shiftKey && k === "k") { e.preventDefault(); setSpotOpen(true); }
+    else if (e.shiftKey && k === "o") { e.preventDefault(); setSpotOpen(false); newRef.current && newRef.current(); }
+    else if (!e.shiftKey && k === "b" && !(e.target && e.target.isContentEditable) && !narrow()) { e.preventDefault(); setSbHide((v) => { setPref("sidehide", v ? "0" : "1"); return !v; }); } };      // Cmd/Ctrl+N belongs to the browser
+    addEventListener("keydown", h); return () => removeEventListener("keydown", h); }, []);      // <=860px: the sidebar is a drawer
   const [prefs, setPrefs] = useState({ policy: "off", autocompact: true, compact_pct: 80, window: 1000000 }), [slash, setSlash] = useState({ claude: [], packages: [] });
   setToaster(setMsg);
   const [brand, setBrand] = useState({});
   useEffect(() => { api("brand").then((b) => { setBrand(b || {}); applyBrand(b); }).catch(() => {}); }, []);
-  const hubName = brand.name || "AI Hub", Logo = (n) => Ic("logo", n);
+  const hubName = brand.name || "AI Hub", Logo = (n) => Ic("logo", n, "lgm");
   useEffect(() => { const k = route.split("/")[0] || "chat", l = (NAV.find((n) => n[0] === k) || [])[2] || k.charAt(0).toUpperCase() + k.slice(1); document.title = hubName + " \u00b7 " + l; }, [route, hubName]);       // tab title = hub name + open page
   const reloadBoot = () => api("boot").then(setBoot).catch((e) => setErr(e.message));
   const [running, setRunning] = useState({});
@@ -1687,8 +1900,15 @@ function App() {
   const importLink = guard(async (ref) => { toast("Importing " + ref + "…"); const extra = await OUI.languagePrompt().catch(() => ""); const r = await post("sessions/import", { link: ref, extra }); toast("Imported " + r.messages + " messages" + (r.files ? " and " + r.files + " files" : "")); await reloadSess(); go("chat/" + r.session.id); });
   const newChatIn = guard(async (cwd) => { const extra = await OUI.languagePrompt(); const r = await post("sessions", { cwd, extra }); await reloadSess(); go("chat/" + r.session.id); });     // a folder on disk: it becomes a project
   const newChat = guard(async (folder = "") => { const extra = await OUI.languagePrompt(); const r = await post("sessions", { folder: typeof folder === "string" ? folder : "", extra }); await reloadSess(); go("chat/" + r.session.id); });
+  newRef.current = newChat;
+  const newIncog = guard(async () => { const extra = await OUI.languagePrompt(); const r = await post("sessions", { incognito: true, extra }); go("chat/" + r.session.id); });
+  const incogRef = useRef(null);                                       // the incognito chat open now: removed as soon as the page leaves it
+  const markIncog = useCallback((sid, v) => { if (v) incogRef.current = sid; else if (incogRef.current === sid) incogRef.current = null; }, []);
+  useEffect(() => { const cur = incogRef.current, [pg, a] = route.split("/"); if (cur && !(pg === "chat" && a === cur)) { incogRef.current = null; post("sessions/delete", { id: cur }).catch(() => {}); } }, [route]);
+  useEffect(() => { const bye = () => { const cur = incogRef.current; if (cur) fetch("/api/sessions/delete", { method: "POST", keepalive: true, headers: { "Content-Type": "application/json", "X-AIHub-UI": "1" }, body: JSON.stringify({ id: cur }) }).catch(() => {}); };
+    addEventListener("pagehide", bye); return () => removeEventListener("pagehide", bye); }, []);
   if (err) return html`<div class="empty"><div>${Ic("alert", 28)}<h1>AI Hub UI</h1><p>${err}</p><p class="mute">Open the address from <code>~/.aihub/ui/url.txt</code>.</p></div></div>`;
-  if (!boot) return html`<div class="empty"><div>${Ic("logo", 30)}<div>Starting…</div></div></div>`;
+  if (!boot) return html`<div class="empty"><div>${Ic("logo", 34, "lgm lg-think")}<div>Starting…</div></div></div>`;
   const [page, arg] = route.split("/");
   const groups = [["", sortChats(sess.sessions.filter((s) => !s.folder), sortBy)], ...sess.folders.map((f) => [f, sortChats(sess.sessions.filter((s) => s.folder === f), sortBy)])];
   const move = guard(async (s) => {
@@ -1708,9 +1928,9 @@ function App() {
   const newFolder = guard(async () => { const v = await ask({ title: "New project", text: "Projects group chats in the sidebar. Choosing a working folder for a chat makes a project of the same name.", fields: [{ name: "name", label: "Project name", required: true, placeholder: "Project X", max: 60 }], submit: "Create project" }); if (!v) return;
     const n = v.name.trim(); if (sess.folders.includes(n)) return toast("That project already exists"); await post("folders", { folders: [...sess.folders, n] }); reloadSess(); });
   const c = boot.context;
-  return html`<div class="shell" style=${"--sw:" + sw + "px"}>${drawer && html`<div class="sdback" onClick=${() => setDrawer(false)}></div>`}<aside class=${"side" + (drawer ? " open" : "")}><${Grip} cls="sd-grip" value=${() => sw} onChange=${setSw} onDone=${(v) => setPref("sidew", String(Math.round(v)))} min=${200} max=${460} sign=${1} reset=${() => { setSw(272); setPref("sidew", "272"); }}/>
-      <div class="brand"><span class="logo">${Logo(16)}</span>${hubName}</div>
-      <div class="nav"><button class="srow" onClick=${() => { setDrawer(false); newChat(); }}>${Ic("plus", 17)}<span class="grow">New chat</span></button><button class="srow" onClick=${() => { setDrawer(false); setSpotOpen(true); }} aria-label="Search chats and pages">${Ic("search", 17)}<span class="grow">Search</span><kbd>${/Mac|iP/.test(navigator.platform) ? "⌘K" : "Ctrl K"}</kbd></button></div>
+  return html`<div class=${"shell" + (sbHide ? " sbhide" : "")} style=${"--sw:" + sw + "px"}>${drawer && html`<div class="sdback" onClick=${() => setDrawer(false)}></div>`}<aside class=${"side" + (drawer ? " open" : "")}><${Grip} cls="sd-grip" value=${() => sw} onChange=${setSw} onDone=${(v) => setPref("sidew", String(Math.round(v)))} min=${200} max=${460} sign=${1} reset=${() => { setSw(272); setPref("sidew", "272"); }}/>
+      <div class="brand"><span class="logo">${Logo(16)}</span><span class="grow">${hubName}</span><button class="ibtn sb-x" title=${"Hide sidebar (" + (MAC ? "⌘B" : "Ctrl+B") + ")"} aria-label="Hide sidebar" onClick=${() => hideSide(true)}>${Ic("sidebar", 17)}</button></div>
+      <div class="nav"><div class="srow2"><button class="srow" onClick=${() => { setDrawer(false); newChat(); }}>${Ic("plus", 17)}<span class="grow">New chat</span><kbd>${NEW_KEY}</kbd></button><button class="ibtn" title="New incognito chat (not saved)" aria-label="New incognito chat" onClick=${() => { setDrawer(false); newIncog(); }}>${Ic("incognito", 17)}</button></div><button class="srow" onClick=${() => { setDrawer(false); setSpotOpen(true); }} aria-label="Search chats and pages">${Ic("search", 17)}<span class="grow">Search</span><kbd>${MAC ? "⌘K" : "Ctrl K"}</kbd></button></div>
       <div class="nav" onClick=${() => setDrawer(false)}>${NAV.map(([k, ic, l]) => html`<a class=${page === k ? "on" : ""} href=${"#/" + k}>${Ic(ic, 17)}${l}</a>`)}</div>
       <div class="hist">${groups.map(([f, items]) => !!(f || items.length) && html`<h6 class="gh"><button class="gtoggle" aria-expanded=${!folded.includes(f)} title=${folded.includes(f) ? "Expand" : "Collapse"} onClick=${() => fold(f)}><span class=${"chev" + (folded.includes(f) ? " shut" : "")}>${Ic("down", 12)}</span><span class="gname" title=${(sess.folder_dirs || {})[f] ? "Working folder: " + sess.folder_dirs[f] : ""}>${f || "Chats"}</span>${(sess.folder_dirs || {})[f] ? Ic("folder", 12) : ""}<span class="cnt">${items.length}</span></button>
           <span class="hbtns">${!f && html`<button class="ibtn gnew" style="width:28px;height:28px" title="New chat" aria-label="New chat" onClick=${() => { setDrawer(false); newChat(); }}>${Ic("plus", 17)}</button><${Pop} open=${sortPop} setOpen=${setSortPop} up=${false} align="right" button=${html`<button class="ibtn" style="width:28px;height:28px" title=${"Sort: " + (SORTS.find((x) => x[0] === sortBy) || SORTS[0])[1]} aria-label="Sort chats" onClick=${() => setSortPop(!sortPop)}>${Ic("filter", 16)}</button>`}><h5>Sort by</h5>${SORTS.map(([k, l]) => html`<button class=${"opt" + (k === sortBy ? " on" : "")} onClick=${() => chooseSort(k)}><span class="grow"><b>${l}</b></span><span class="ck">${Ic("check", 15)}</span></button>`)}<//>`}
@@ -1720,7 +1940,7 @@ function App() {
         <h6><span></span><button class="linkbtn" onClick=${newFolder}>${Ic("folder", 14)} New project</button></h6></div>
       <div class="acct item" role="button" tabindex="0" aria-label="Account and settings" onClick=${() => go(c.signed_in ? "settings" : "settings/login")} onKeyDown=${(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(c.signed_in ? "settings" : "settings/login"); } }}><div class="av">${(c.username || "?")[0].toUpperCase()}</div><div class="grow"><b>${c.signed_in ? c.username : "Sign in"}</b><div class="mute small">${c.hub_configured ? c.hub.replace(/^https?:\/\//, "") : "local only"}</div></div>${Ic("sliders", 16)}</div>
     </aside>${imp && html`<${ImportLazy} get=${api} post=${post} close=${() => setImp(false)} extra=${impExtra} done=${async (n) => { setImp(false); await reloadSess(); go("chat/" + n.id); }}/>`}${spotOpen && html`<${Spotlight} close=${() => setSpotOpen(false)} go=${go} sessions=${sortChats(sess.sessions, "recent")} nav=${NAV} hub=${boot.context.hub_configured ? boot.context.hub : ""} importLink=${importLink} projects=${sess.folders} dirs=${sess.folder_dirs || {}} newChat=${newChat} newChatIn=${newChatIn}/>`}
-    <main class="main">${!(page === "chat" && arg) && html`<button class="ibtn burger fab" title="Chats and pages" aria-label="Chats and pages" onClick=${() => setDrawer(true)}>${Ic("menu", 18)}</button>`}<${AlertBar} alerts=${alerts}/>${page === "chat" && arg ? html`<${Chat} key=${arg} id=${arg} onBusy=${markBusy} onImport=${() => setImp(true)} onMenu=${() => setDrawer(true)} boot=${boot} refresh=${reloadSess} newChat=${() => newChat()} prefs=${prefs} savePrefs=${savePrefs} slash=${slash}/>`
+    <main class="main">${!(page === "chat" && arg) && html`<button class="ibtn burger fab" title="Chats and pages" aria-label="Chats and pages" onClick=${openSide}>${Ic("menu", 18)}</button>`}<${AlertBar} alerts=${alerts}/>${page === "chat" && arg ? html`<${Chat} key=${arg} id=${arg} onBusy=${markBusy} onImport=${() => setImp(true)} onMenu=${openSide} onIncog=${markIncog} boot=${boot} refresh=${reloadSess} newChat=${() => newChat()} prefs=${prefs} savePrefs=${savePrefs} slash=${slash}/>`
       : page === "packages" ? html`<${Packages} key=${route} focus=${route.startsWith("packages/find/") ? decodeURIComponent(route.slice(14)) : ""}/>` : page === "services" ? html`<${Services}/>` : page === "mcp" ? html`<${Mcp}/>`
       : page === "works" ? html`<${Works} boot=${boot} openId=${arg}/>` : page === "knowledge" ? html`<${Knowledge} key=${route} focus=${arg}/>` : page === "usage" ? html`<${UsagePage} api=${api} prefs=${prefs} savePrefs=${savePrefs}/>` : page === "settings" || page === "vault" ? html`<${Settings} boot=${boot} reload=${reloadBoot} prefs=${prefs} savePrefs=${savePrefs} focus=${arg}/>`
       : html`<div class="hello"><div><span class="herologo">${Logo(44)}</span><h1>${hubName}</h1><p>Chat with Claude Code, manage packages, services, MCP servers and logins.</p><button class="btn acc" onClick=${() => newChat()}>${Ic("plus", 14)} New chat</button></div></div>`}</main>

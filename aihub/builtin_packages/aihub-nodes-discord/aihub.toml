@@ -1,0 +1,16 @@
+[package]
+name = "aihub-nodes-discord"
+version = "1.0.0"
+type = "node"
+description = "Works nodes for a full Discord bot: start a work from any channel message (gateway connection, no tunnel) and send or reply as the bot. discord.py is installed into the package's own environment."
+tags = ["aihub", "ui", "works", "nodes", "discord", "bot"]
+readme = "README.md"
+license = "MIT"
+
+[python]
+requires = ["discord.py>=2.3"]         # installed into ~/.aihub/venvs/aihub-nodes-discord; aihub-ui runs these nodes with that python
+
+[git]
+url = "https://github.com/4ursmile/aihub-vine"
+branch = "git_db"
+subdir = "aihub/builtin_packages/aihub-nodes-discord"

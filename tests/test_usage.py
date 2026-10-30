@@ -127,6 +127,11 @@ class UsageTest(unittest.TestCase):
         self.assertEqual(len(usage.find_sessions(ss, "build")), 1)
         self.assertEqual(usage.find_sessions(ss, "nope"), [])
         self.assertEqual(usage.sort_sessions(ss, "cost")[0]["session"], "s1")
+        self.assertEqual(usage.flags_of(s), {"cold": 2, "compact": 1, "big": 3})    # additive JSON fields: flags, series
+        ser = usage.series_of(s)
+        self.assertEqual(len(ser), 7)
+        self.assertEqual((ser[3][1], ser[6][4]), (160500, ["cold", "compact"]))
+        self.assertEqual([t["id"] for t in usage.tips([s])][:1] != [], True)
 
     def test_codex_session_title_from_first_message(self):
         tc = lambda i: {"timestamp": self.ts, "type": "event_msg", "payload": {"type": "token_count", "info": {

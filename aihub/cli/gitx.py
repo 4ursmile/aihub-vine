@@ -195,6 +195,15 @@ def _trusted_env(env, cwd):
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0   # CREATE_NO_WINDOW: on Windows every git call otherwise flashes a console window
 
 
+def available():
+    """True when a git program is on PATH. The CLI works without it (hub installs, usage, policy); only git sources need it."""
+    import shutil
+    return bool(shutil.which("git"))
+
+
+NO_GIT = "git is not installed on this machine (only needed for packages that live in a git repo; hub installs work without it)"
+
+
 def popen_kw():
     """Extra subprocess arguments so a child never opens a console window on Windows (empty elsewhere)."""
     return {"creationflags": NO_WINDOW} if NO_WINDOW else {}
@@ -234,7 +243,12 @@ def run(args, cwd=None, check=True, timeout=None, input=None, extra_env=None):
         timeout = NETWORK_TIMEOUT
     if isinstance(input, str):
         input = textsafe.clean(input)              # a path or message with a non-UTF-8 byte must not fail the encode of git's stdin
-    r = _tried(attempts, lambda env: _git(args, cwd, env, timeout, input))
+    try:
+        r = _tried(attempts, lambda env: _git(args, cwd, env, timeout, input))
+    except GitError as e:
+        if not check and str(e) == NO_GIT:
+            return ""                                  # a probe (check=False) on a machine without git just finds nothing
+        raise
     if r is None:
         if check:
             msg = "git %s timed out after %ss" % (args[0], timeout)
@@ -357,8 +371,11 @@ def fetch_tip(cwd, remote, branch, ref, depth=None, timeout=120):
 
 
 def _batch(cwd, mode, names, timeout):
-    r = subprocess.run(["git", "cat-file", mode], cwd=cwd, env=_env(None, cwd), capture_output=True, timeout=timeout, **popen_kw(),
-                       input="".join(textsafe.clean(n) + "\n" for n in names).encode("utf-8", "replace"))
+    try:
+        r = subprocess.run(["git", "cat-file", mode], cwd=cwd, env=_env(None, cwd), capture_output=True, timeout=timeout, **popen_kw(),
+                           input="".join(textsafe.clean(n) + "\n" for n in names).encode("utf-8", "replace"))
+    except FileNotFoundError:
+        raise GitError(NO_GIT)
     if r.returncode != 0:
         raise GitError(explain(r.stderr.decode("utf-8", "replace").strip() or "git cat-file failed"))
     return r.stdout
@@ -443,8 +460,11 @@ def _sound(d):
     g = os.path.join(d, ".git")
     if not (os.path.isfile(os.path.join(g, "HEAD")) and os.path.isdir(os.path.join(g, "objects"))):
         return False
-    r = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=d, env=_env(None, d), capture_output=True, text=True, encoding="utf-8",
-                       errors="replace", timeout=60, **popen_kw())
+    try:
+        r = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=d, env=_env(None, d), capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=60, **popen_kw())
+    except FileNotFoundError:
+        raise GitError(NO_GIT)
     if "dubious ownership" in (r.stderr or ""):
         raise GitError(explain(r.stderr.strip()))     # intact but not ours to open: deleting and re-cloning would only fail the same way
     return r.returncode == 0 and r.stdout.strip() == ".git"
@@ -648,18 +668,26 @@ def _git(args, cwd, env, timeout, input=None):
                               timeout=timeout, input=input, **popen_kw())
     except subprocess.TimeoutExpired:
         return None
+    except FileNotFoundError:
+        raise GitError(NO_GIT)
 
 
 def remote_empty(url):
     """True when the remote is reachable but has no commits at all (a freshly created repo). An unreachable or
     unauthorised remote is NOT empty: that stays an error."""
-    r = _ls(url)
+    try:
+        r = _ls(url)
+    except GitError:
+        return False
     return bool(r) and r.returncode == 0 and not r.stdout.strip()
 
 
 def reachable(url):
     """True when `git ls-remote` succeeds (the repo exists and we may read it), whether or not it has any branch."""
-    r = _ls(url)
+    try:
+        r = _ls(url)
+    except GitError:
+        return False
     return bool(r) and r.returncode == 0
 
 

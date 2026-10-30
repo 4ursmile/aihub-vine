@@ -647,6 +647,34 @@ def show_link(bot_manifest, open_it=True, since=0):
     return True
 
 
+def pick_venv(bot, rec, a):
+    """--venv PATH / --python PATH / --venv default: validate and remember the choice for this package (every later start, restart and
+    hub restart rebuilds the command and reads it back)."""
+    v, py = getattr(a, "venv", None), getattr(a, "python", None)
+    v, py = (v if isinstance(v, str) else None), (py if isinstance(py, str) else None)
+    if v and py:
+        raise ValueError("--venv and --python contradict each other")
+    if not v and not py:
+        return
+    if v == "default" and not py:
+        installer.remember_venv(bot, None)
+        ui.info("%s: venv choice cleared (auto-detect, then the package's own, then aihub's python)" % bot)
+        return
+    choice = installer.check_venv(venv=v, python=py)
+    installer.remember_venv(bot, choice)
+    rec["run_venv"] = choice
+    ui.info("%s: will run with %s (remembered; clear: aihub run %s --venv default)" % (bot, choice["venv"] or choice["python"], bot))
+
+
+def venv_of(r):
+    """What a run uses -> {"python","venv","how"} or None (bot no longer installed)."""
+    found = installer.bots()
+    if r.get("bot") not in found:
+        return None
+    rec = found[r["bot"]][0]
+    return installer.run_python(r["bot"], rec, rec.get("bot_home") or installer.bot_home(r["bot"], installer.runnable_kind(r["bot"], rec) or "bot"))
+
+
 def start(target, args, a, resume=False):
     found = installer.bots()
     rid = rid_of(a.name or target)
@@ -674,6 +702,7 @@ def start(target, args, a, resume=False):
             raise api.ApiError("%s is already running in the background (aihub run stop %s first, or --name OTHER)" % (rid, rid))
         raise api.ApiError("%s is already running (pid %s). Use: aihub run restart %s | logs %s -f | stop %s, or --name OTHER"
                            % (rid, old.get("pid") or old.get("sup_pid"), rid, rid, rid))
+    pick_venv(bot, found[bot][0], a)
     if target == bot and not (resume and old and old.get("bot") == bot):
         if a.restart and a.restart not in RESTARTS:
             raise ValueError("--restart: no, on-failure or always")
@@ -747,7 +776,7 @@ def stop_all():
 def cmd_list(a):
     rows = all_runs()
     if getattr(a, "json", False):
-        print(json.dumps([dict(r, state=status_of(r), alive=alive(r)) for r in rows], indent=2))
+        print(json.dumps([dict(r, state=status_of(r), alive=alive(r), python=venv_of(r)) for r in rows], indent=2))
         return
     ui.out()
     if not rows:
@@ -758,12 +787,14 @@ def cmd_list(a):
     out = []
     for r in rows:
         st = status_of(r)
+        vi = venv_of(r)
         up = _dur(now - r["last_start"]) if st == "running" and r.get("last_start") else \
             ("in " + _dur(r["next_at"] - now)) if st == "waiting" and r.get("next_at") else "-"
         out.append([ui.bold(r["id"]), r.get("bot", ""), color.get(st, ui.dim)(st), str(r.get("pid") or "-"), up,
                     r.get("schedule") or "-", r.get("restart") or "-", str(r.get("runs") or 0),
-                    "-" if r.get("last_exit") is None else str(r["last_exit"])])
-    ui.table(["NAME", "BOT", "STATUS", "PID", "UP / NEXT", "SCHEDULE", "RESTART", "STARTS", "EXIT"], out)
+                    "-" if r.get("last_exit") is None else str(r["last_exit"]),
+                    os.path.basename(vi["venv"]) if vi and vi["venv"] else (os.path.basename(vi["python"]) if vi and vi["how"] != "aihub" else "-")])
+    ui.table(["NAME", "BOT", "STATUS", "PID", "UP / NEXT", "SCHEDULE", "RESTART", "STARTS", "EXIT", "VENV"], out)
     ui.out()
     if not hub_on():
         ui.info(ui.dim("runs show on the hub's Running page after: aihub login"))
@@ -850,6 +881,8 @@ def cli(a):
         return stop(rid, r)
     if t == "restart":
         rid, r = _need(rest, "restart")
+        if (isinstance(a.venv, str) or isinstance(a.python, str)) and r.get("bot") in installer.bots():
+            pick_venv(r["bot"], installer.bots()[r["bot"]][0], a)
         if alive(r):
             control(rid, "restart")
             return ui.good("%s restarting" % rid)
@@ -873,11 +906,13 @@ def cli(a):
     if t in ("status", "show"):
         rid, r = _need(rest, t)
         if a.json:
-            return print(json.dumps(dict(r, state=status_of(r), alive=alive(r)), indent=2))
+            return print(json.dumps(dict(r, state=status_of(r), alive=alive(r), python=venv_of(r)), indent=2))
         ui.out()
         for k in ("id", "bot", "args", "schedule", "restart", "mode", "runs", "last_exit", "pid", "error"):
             ui.out("  %-9s %s" % (k, r.get(k) if r.get(k) not in (None, "", []) else "-"))
         ui.out("  %-9s %s" % ("status", status_of(r)))
+        vi = venv_of(r)
+        ui.out("  %-9s %s" % ("python", "%s (%s)" % (vi["python"], vi["how"]) if vi else "-"))
         ui.out("  %-9s %s" % ("log", _f(rid, ".log")))
         return
     if t == "start":

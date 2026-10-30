@@ -20,7 +20,10 @@ def fetch(hub=None, timeout=8):
 
 
 def _git(*args, **kw):
-    return subprocess.run(["git"] + list(args), capture_output=True, text=True, **kw, **gitx.popen_kw())
+    try:
+        return subprocess.run(["git"] + list(args), capture_output=True, text=True, **kw, **gitx.popen_kw())
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(["git"] + list(args), 127, "", gitx.NO_GIT)
 
 
 def ensure_helper(urls=()):
@@ -124,9 +127,11 @@ def with_access(url, fn):
 
 
 def ensure_git_access(url):
-    """Make sure `git ls-remote url` works; if it needs credentials we do not have, ask for them once."""
+    """Make sure `git ls-remote url` works; if it needs credentials we do not have, ask for them once. No git installed = nothing to check."""
+    if not gitx.available():
+        return True
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **tls.git_env())
-    r = subprocess.run(["git", "ls-remote", "--exit-code", "-h", url, "HEAD"], env=env, capture_output=True, text=True, **gitx.popen_kw())
+    r = _git("ls-remote", "--exit-code", "-h", url, "HEAD", env=env)
     if r.returncode in (0, 2):
         return True
     if not is_auth_error(r.stderr):
@@ -148,7 +153,7 @@ def ensure_git_access(url):
             raise gitx.GitError(gitx.explain("a username is needed for %s (with 2FA: your username and a personal access token)" % host, url, "auth"))
         tok = getpass.getpass("token/password: ")
         store_git(url, user, tok)
-        r = subprocess.run(["git", "ls-remote", "--exit-code", "-h", url, "HEAD"], env=env, capture_output=True, text=True, **gitx.popen_kw())
+        r = _git("ls-remote", "--exit-code", "-h", url, "HEAD", env=env)
         if r.returncode in (0, 2):
             return True
         if attempt == 0 and is_auth_error(r.stderr):
@@ -212,6 +217,8 @@ def ensure_access(interactive=None):
     and nothing is asked. Only when access fails for lack of credentials, and a person is at a terminal, ask for them once."""
     from . import registry, telemetry
     interactive = ui.INTERACTIVE if interactive is None else interactive
+    if not gitx.available():
+        return                                             # no git: the hub serves everything, there are no git logins to set up
     urls = []
     for u in (registry.source()["url"], telemetry.target()):
         if u and u.startswith("http") and u not in urls:

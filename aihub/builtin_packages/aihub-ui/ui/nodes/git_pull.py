@@ -42,6 +42,12 @@ dest = os.path.join(home, "workingspace", "data", "git", slug)       # workingsp
 env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never", GIT_ASKPASS="true", SSH_ASKPASS="true")
 base = ["git", "-c", "core.symlinks=false", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "core.hooksPath=/dev/null",
         "-c", "credential.interactive=never"]
+try:
+    _login_args, _login_env = F.git_login(cfg, u.netloc)               # node-level / credential-set login overrides the Vault for this call only
+except ValueError as e:
+    done(ok=False, error=str(e))
+base += _login_args
+env.update(_login_env)
 
 
 DEADLINE = time.time() + 270                                          # clone + fetch + LFS share one budget, below the node limit
@@ -51,10 +57,11 @@ def git(args, cwd=None, timeout=None):
     left = DEADLINE - time.time()
     if left < 3:
         raise subprocess.TimeoutExpired(args, 0)
-    return subprocess.run(base + args, cwd=cwd, env=env, capture_output=True, text=True, timeout=min(timeout or 270, left))
+    return subprocess.run(base + args, cwd=cwd, env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=min(timeout or 270, left))
 
 
 def explain(err):
+    err = F.scrub(err, cfg)
     if re.search(r"authentication failed|could not read (username|password)|403|401|invalid credentials|terminal prompts disabled", err, re.I):
         return "git asked for a login for %s and the Vault has none that works. Add it in Vault (or: aihub vault add https://%s --user NAME --token-stdin). Git said: %s" % (u.netloc, u.netloc, err.strip()[-200:])
     if re.search(r"not found|does not exist|404", err, re.I):

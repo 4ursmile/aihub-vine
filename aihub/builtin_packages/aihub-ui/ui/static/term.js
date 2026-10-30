@@ -21,7 +21,7 @@ export async function runInstall(host, body, { post, api }, onExit) {
   const [{ Terminal }, { FitAddon }] = libs;
   const dark = matchMedia("(prefers-color-scheme: dark)").matches;
   const t = new Terminal({ fontFamily: "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace", fontSize: 12.5, cursorBlink: true, convertEol: false, scrollback: 5000,
-    theme: dark ? { background: "#1a1917", foreground: "#e8e4dc" } : { background: "#26241f", foreground: "#ece8df" } });
+    theme: dark ? { background: "#0e0e10", foreground: "#e5e5ea" } : { background: "#1c1c1e", foreground: "#e5e5ea" } });
   const fit = new FitAddon(); t.loadAddon(fit); t.open(host); try { fit.fit(); } catch (e) {}
   const r = await post("term/start", body), id = r.id; let pos = 0, dead = false, code = null;
   // Input goes out ONE request at a time, in order (parallel posts could reorder a paste), in chunks the server accepts whole.
@@ -75,7 +75,7 @@ export async function runInstall(host, body, { post, api }, onExit) {
 // Fallback without xterm.js: output in a <pre>, input through a line box (answers to prompts, Enter sends).
 async function plainRun(host, body, { post, api }, onExit) {
   const pre = document.createElement("pre"), row = document.createElement("form"), inp = document.createElement("input");
-  pre.style.cssText = "margin:0;padding:10px;max-height:300px;overflow:auto;white-space:pre-wrap;background:#26241f;color:#ece8df;font:12.5px ui-monospace,Menlo,Consolas,monospace;border-radius:8px 8px 0 0";
+  pre.style.cssText = "margin:0;padding:10px;max-height:300px;overflow:auto;white-space:pre-wrap;background:#1c1c1e;color:#e5e5ea;font:12.5px ui-monospace,Menlo,Consolas,monospace;border-radius:8px 8px 0 0";
   row.style.cssText = "display:flex"; inp.placeholder = "Type an answer and press Enter"; inp.style.cssText = "flex:1;font:12.5px ui-monospace,Menlo,monospace;padding:6px 10px;border-radius:0 0 8px 8px";
   row.appendChild(inp); host.append(pre, row);
   const r = await post("term/start", body), id = r.id; let pos = 0, dead = false;

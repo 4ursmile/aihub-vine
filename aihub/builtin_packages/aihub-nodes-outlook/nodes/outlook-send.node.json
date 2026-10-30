@@ -8,10 +8,65 @@
   "timeout": 120,
   "templated": ["to", "cc", "bcc", "subject", "body", "attachments"],
   "takes": ["to", "cc", "bcc", "subject", "body", "attachments"],
-  "outputs": ["to", "subject", "attachments", "action"],
-  "out": "text",
-  "out_note": "what was sent",
   "guide": "Sends mail through the Outlook desktop app on Windows (classic Outlook, COM automation).\n1. Install the package: aihub install aihub-nodes-outlook. It creates its own Python environment with pywin32; nothing else to install.\n2. Outlook must be installed and signed in (the 'new Outlook' has no COM). Action 'draft' only saves it, 'display' opens the window so you press Send.\n3. Leave a field empty to take the same-named key from the node before it ({{data.to}}, {{data.subject}} ...): a Loop over a JSON list of {to, subject, body} objects sends one mail per object.\n4. Attachments: one file path per line ({{input}} or an earlier node's OUTPUT path works too). Key and secret files are refused.",
+  "inputs": [
+    {
+      "name": "to",
+      "type": "text",
+      "desc": "empty field = {{data.to}} from the node before",
+      "required": false
+    },
+    {
+      "name": "subject",
+      "type": "text",
+      "desc": "empty field = {{data.subject}}",
+      "required": false
+    },
+    {
+      "name": "body",
+      "type": "text",
+      "desc": "empty field = {{data.body}}, else the incoming text",
+      "required": false
+    },
+    {
+      "name": "attachments",
+      "type": "path",
+      "desc": "one path per line",
+      "required": false
+    }
+  ],
+  "outputs": [
+    {
+      "name": "text",
+      "type": "text",
+      "desc": "what was sent",
+      "example": "Sent to a@x.com"
+    },
+    {
+      "name": "to",
+      "type": "text",
+      "desc": "recipients",
+      "example": "a@x.com"
+    },
+    {
+      "name": "subject",
+      "type": "text",
+      "desc": "",
+      "example": "Report"
+    },
+    {
+      "name": "attachments",
+      "type": "path",
+      "desc": "",
+      "example": "/tmp/r.pdf"
+    },
+    {
+      "name": "action",
+      "type": "text",
+      "desc": "send | draft | display",
+      "example": "send"
+    }
+  ],
   "fields": [
     {"name": "to", "label": "To (; or , between)", "type": "text", "default": "", "help": "Empty = {{data.to}} from the node before."},
     {"name": "cc", "label": "Cc", "type": "text", "default": ""},

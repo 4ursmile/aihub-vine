@@ -1,7 +1,7 @@
 // Inline SVG icons (24 grid, 1.75 stroke). No emoji, no icon font, no network.
 import { html } from "./vendor/preact-htm.js";
 const P = {
-  logo: '<g stroke-width="2.6" stroke-linejoin="miter" stroke-linecap="square"><path d="M3.5 21 12 3l8.5 18M7.6 15.5H12"/><path d="M15.5 15.5h2.2" opacity=".55"/></g>',
+  logo: '<g stroke-width="2.5"><path class="lg-g" opacity="0" d="M4.5 20 10.2 7.6a2 2 0 0 1 3.6 0L19.5 20"/><path class="lg-a" pathLength="1" d="M4.5 20 10.2 7.6a2 2 0 0 1 3.6 0L19.5 20"/><circle class="lg-d" cx="12" cy="15.6" r="1.5" fill="currentColor" stroke="none"/></g>',
   chat: '<path d="M21 11.5a8.4 8.4 0 0 1-12.2 7.5L3 20.5l1.6-5A8.5 8.5 0 1 1 21 11.5z"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   package: '<path d="M21 8v8a2 2 0 0 1-1 1.7l-7 4a2 2 0 0 1-2 0l-7-4A2 2 0 0 1 3 16V8a2 2 0 0 1 1-1.7l7-4a2 2 0 0 1 2 0l7 4A2 2 0 0 1 21 8z"/><path d="M3.3 7 12 12l8.7-5M12 22V12"/>',
@@ -30,6 +30,7 @@ const P = {
   up: '<path d="m6 15 6-6 6 6"/>',
   right: '<path d="m9 6 6 6-6 6"/>',
   left: '<path d="m15 6-6 6 6 6"/>',
+  list: '<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   sparkles: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z"/>',
   cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/>',
@@ -45,10 +46,14 @@ const P = {
   download: '<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>',
   share: '<circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M8.2 10.8l7.6-4.4M8.2 13.2l7.6 4.4"/>',
   import: '<path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4M3 12h11M10 8l4 4-4 4"/>',
+  undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
+  redo: '<path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/>',
   refresh: '<path d="M20 11a8 8 0 0 0-14-4L4 9M4 4v5h5M4 13a8 8 0 0 0 14 4l2-2M20 20v-5h-5"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
   file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5z"/><path d="M14 3v5h5"/>',
   panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/>',
+  sidebar: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
+  incognito: '<path d="M2.5 11h19"/><path d="M5 11l1.6-5.4a1 1 0 0 1 1.3-.7L12 6l4.1-1.1a1 1 0 0 1 1.3.7L19 11"/><circle cx="7" cy="16" r="3"/><circle cx="17" cy="16" r="3"/><path d="M10 16c1.3-.8 2.7-.8 4 0"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   inbox: '<path d="M4 13l3-8h10l3 8v6H4v-6z"/><path d="M4 13h5l1 2h4l1-2h5"/>',
   filter: '<path d="M3 5h18l-7 8v6l-4 2v-8L3 5z"/>',

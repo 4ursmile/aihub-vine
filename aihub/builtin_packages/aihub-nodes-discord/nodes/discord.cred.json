@@ -1,0 +1,8 @@
+{
+  "kind": "discordbot",
+  "title": "Discord bot",
+  "hint": "Bot token of your Discord application (Developer Portal > Bot). Used by both Discord bot nodes.",
+  "fields": [
+    {"name": "bot_token", "label": "Bot token", "secret": true}
+  ]
+}

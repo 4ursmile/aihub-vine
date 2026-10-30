@@ -414,3 +414,73 @@ class Hints(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoGitInstalled(unittest.TestCase):
+    """A machine without git: nothing may crash with FileNotFoundError; git sources fail with one clear GitError."""
+
+    def setUp(self):
+        p = mock.patch("shutil.which", side_effect=lambda n, *a, **k: None if n == "git" else "/usr/bin/" + n)
+        p.start()
+        self.addCleanup(p.stop)
+        q = mock.patch("subprocess.run", side_effect=FileNotFoundError(2, "No such file or directory", "git"))
+        q.start()
+        self.addCleanup(q.stop)
+
+    def test_git_call_is_a_clean_error(self):
+        with self.assertRaises(gitx.GitError) as c:
+            gitx.run(["status"])
+        self.assertIn("not installed", str(c.exception))
+
+    def test_probes_find_nothing(self):
+        self.assertEqual(gitx.run(["rev-parse", "HEAD"], check=False), "")
+        self.assertFalse(gitx.reachable("https://example.com/x.git"))
+        self.assertFalse(gitx.remote_empty("https://example.com/x.git"))
+
+    def test_logins_and_access_checks_skip(self):
+        self.assertEqual(ch.register(["https://example.com/x.git"]), ([], []))
+        self.assertTrue(rc.ensure_git_access("https://example.com/x.git"))
+        self.assertIsNone(rc.ensure_access())
+
+    def test_install_goes_straight_to_the_hub(self):
+        """No git: -i is implied up front (one info line), no git attempt first; --from repo is a clear error."""
+        from types import SimpleNamespace as NS
+        from aihub.cli import main, registry
+        a = NS(source=None, indirect=False)
+        registry._TOLD = False
+        with mock.patch("aihub.cli.paths.hub_configured", return_value=True), mock.patch.object(registry.ui, "info") as info:
+            self.assertEqual(main._source_mode(a), (True, False))
+            self.assertEqual(info.call_count, 1)
+            self.assertIn("git is not installed", info.call_args[0][0])
+            with self.assertRaises(ValueError) as c:
+                main._source_mode(NS(source="repo", indirect=False))
+            self.assertIn(gitx.NO_GIT, str(c.exception))
+        with mock.patch("aihub.cli.paths.hub_configured", return_value=False):
+            self.assertEqual(main._source_mode(a), (False, False))      # no hub: nothing changes
+        r = {"name": "x", "version": "1.0.0", "repo": {"url": "https://example.com/x.git", "branch": "main"}}
+        old = registry.INDIRECT
+        registry.INDIRECT = True
+        try:
+            with mock.patch.object(registry, "_from_hub", return_value="rev") as hub, mock.patch.object(registry, "_checkout_git") as g:
+                self.assertEqual(registry.checkout(r, tempfile.mkdtemp()), "rev")
+                hub.assert_called_once()
+                g.assert_not_called()
+        finally:
+            registry.INDIRECT = old
+
+    def test_update_sync_and_builtin_paths_use_the_hub_up_front(self):
+        """Not only `install`: any checkout/prefetch (update, sync, builtin, policy) goes to the hub first, one info line per process."""
+        from aihub.cli import registry
+        registry._TOLD = False
+        r = {"name": "x", "version": "1.0.0", "repo": {"url": "https://example.com/x.git", "branch": "main"}}
+        with mock.patch("aihub.cli.paths.hub_configured", return_value=True), mock.patch.object(registry.ui, "info") as info, \
+                mock.patch.object(registry, "_from_hub", return_value="rev") as hub, mock.patch.object(registry, "_checkout_git") as g:
+            with registry.quiet():
+                self.assertEqual(registry.checkout(r, tempfile.mkdtemp()), "rev")
+            self.assertEqual(registry.checkout(r, tempfile.mkdtemp()), "rev")
+            out = registry.prefetch([dict(r), dict(r, name="y")], tempfile.mkdtemp())
+            g.assert_not_called()
+            self.assertEqual(sorted(out), ["x", "y"])
+            self.assertEqual(info.call_count, 1)
+        with mock.patch("aihub.cli.paths.hub_configured", return_value=False):
+            self.assertFalse(registry.no_git_uses_hub())

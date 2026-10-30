@@ -178,10 +178,11 @@ def _save_index(d):
 
 
 def sessions(full=False):
-    """Folders + chats for the list (newest first). Rows are SLIM (no system / extra / seed); FULL=True loads those too."""
+    """Folders + chats for the list (newest first). Rows are SLIM (no system / extra / seed); FULL=True loads those too.
+    Incognito chats are never listed (sidebar, search, @chat: mentions); `get_session` still finds them."""
     with _lock:
         d = _index(True)
-        rows = sorted(d["sessions"].values(), key=lambda s: -s.get("updated", 0))
+        rows = sorted((s for s in d["sessions"].values() if not s.get("incognito")), key=lambda s: -s.get("updated", 0))
         return {"folders": d["folders"], "folder_dirs": d.get("folder_dirs") or {}, "sessions": [_full(s) for s in rows] if full else rows}
 
 
@@ -196,13 +197,15 @@ def get_session(sid, full=True):
         return _full(s) if full else dict(s)
 
 
-def create_session(title="", folder="", system="", cwd="", extra=""):
+def create_session(title="", folder="", system="", cwd="", extra="", incognito=False):
     sid = uuid.uuid4().hex[:8]
     if not cwd:
         os.makedirs(work_dir(sid), exist_ok=True)
     now = time.time()
     s = {"id": sid, "title": title or "New chat", "folder": folder, "created": now, "updated": now, "claude": str(uuid.uuid4()),
          "started": False, "cwd": cwd, "soul": None, "engine": "claude", "mcp": [], "model": "", "effort": "", "mode": "auto", "usage": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "cost": 0.0, "turns": 0}}
+    if incognito:
+        s["incognito"] = True
     for k, v in (("system", system), ("extra", extra)):
         _side_put(sid, k, v)
     with _lock:
@@ -224,6 +227,13 @@ def update_session(sid, **kw):
             if k in kw:
                 _side_put(sid, k, kw.pop(k))
         if any(k not in s or s[k] != v for k, v in kw.items()):
+            if s.get("incognito") and kw.get("claude") and s.get("claude") and kw["claude"] != s["claude"]:
+                s["claude_old"] = (s.get("claude_old") or [])[-20:] + [s["claude"]]     # every Claude log of an incognito chat goes with it
+            if kw.get("incognito") is False:
+                kw.pop("incognito")
+                s.pop("incognito", None)
+                s.pop("claude_old", None)
+                searchidx.touch(sid, rewrite=True)                                     # kept now: searchable from here on
             s.update(kw)
             _save_index(d)
         return _full(s)
@@ -250,13 +260,40 @@ def add_usage(sid, u):
         pass
 
 
+def is_incognito(sid):
+    return bool((_index(True)["sessions"].get(sid) or {}).get("incognito"))
+
+
+def _claude_logs(ids):
+    """Claude Code's own transcripts of these session ids (~/.claude/projects/<folder>/<id>.jsonl)."""
+    base = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+    want = {i + ".jsonl" for i in ids if re.match(r"^[0-9a-f-]{36}$", str(i))}
+    try:
+        dirs = os.listdir(base) if want else []
+    except OSError:
+        return []
+    return [os.path.join(base, d, f) for d in dirs for f in want if os.path.isfile(os.path.join(base, d, f))]
+
+
+def purge_incognito():
+    """UI start: incognito chats left by a closed page or a restart are removed (nothing answers at start)."""
+    for sid in [k for k, s in _index(True)["sessions"].items() if s.get("incognito")]:
+        delete_session(sid)
+
+
 def delete_session(sid):
     if not ID.match(str(sid)):
         return
     with _lock:
         d = _index()
-        d["sessions"].pop(sid, None)
+        gone = d["sessions"].pop(sid, None) or {}
         _save_index(d)
+    if gone.get("incognito"):                                         # leaves no trace: Claude Code's transcript too
+        for p in _claude_logs([gone.get("claude")] + list(gone.get("claude_old") or [])):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
     _counts.pop(sid, None)
     _scache.pop(sid, None)
     searchidx.touch(sid, rewrite=True)
@@ -292,7 +329,8 @@ def append(sid, ev):
         f.write(json.dumps(ev, ensure_ascii=False) + "\n")
         if sid in _counts:
             _counts[sid] += 1
-    searchidx.touch(sid)
+    if not is_incognito(sid):                                       # incognito chats are never indexed for search
+        searchidx.touch(sid)
 
 
 def history(sid, upto=None):
@@ -767,7 +805,10 @@ def clean_work(w):
     for n in list(w.get("nodes", []))[:200]:
         if isinstance(n, dict) and re.match(r"^[A-Za-z0-9_-]{1,20}$", str(n.get("id", ""))) and isinstance(n.get("config", {}), dict):
             nodes.append({"id": n["id"], "type": str(n.get("type", "flow.note"))[:80], "x": int(n.get("x", 0) or 0), "y": int(n.get("y", 0) or 0), "label": str(n.get("label", ""))[:60], "config": n.get("config", {}),
-                          **({"preset": n["preset"]} if re.match(r"^[a-z0-9][a-z0-9_-]{0,39}$", str(n.get("preset") or "")) else {})})
+                          **({"preset": n["preset"]} if re.match(r"^[a-z0-9][a-z0-9_-]{0,39}$", str(n.get("preset") or "")) else {}),
+                          **({"credential": n["credential"]} if re.match(r"^[a-z0-9][a-z0-9_-]{0,39}$", str(n.get("credential") or "")) else {}),
+                          **({"credential_kind": n["credential_kind"]} if re.match(r"^[a-z][a-z0-9_-]{0,30}$", str(n.get("credential_kind") or "")) else {}),
+                          **({"credential_name": str(n["credential_name"])[:60]} if n.get("credential_name") else {})})
     ids = {n["id"] for n in nodes}
     edges = [{"from": e["from"], "to": e["to"]} for e in list(w.get("edges", []))[:400] if isinstance(e, dict) and e.get("from") in ids and e.get("to") in ids and e["from"] != e["to"]]
     w = {"id": wid, "title": str(w.get("title") or "Untitled")[:80], "enabled": bool(w.get("enabled")), "nodes": nodes, "edges": edges, "updated": time.time(),
@@ -829,7 +870,7 @@ def save_ui_mcp(d):
 
 
 # ---- preferences (not secret): policy guard for UI chats, auto-compact
-PREF_DEFAULTS = {"policy": "off", "autocompact": True, "compact_pct": 80, "claude_settings": "", "window": 1_000_000, "free_model": "", "model_picker": True, "online_search": True, "alerts": [], "auto_update": "on"}
+PREF_DEFAULTS = {"policy": "off", "autocompact": True, "compact_pct": 80, "claude_settings": "", "window": 1_000_000, "free_model": "", "model_picker": True, "online_search": True, "auto_engine": True, "alerts": [], "auto_update": "on"}
 ALERT_PERIODS = ("today", "week", "month", "quarter", "last")
 
 
@@ -887,6 +928,8 @@ def save_prefs(new):
         d["auto_update"] = new["auto_update"]
     if isinstance(new.get("model_picker"), bool):
         d["model_picker"] = new["model_picker"]
+    if isinstance(new.get("auto_engine"), bool):                       # free chat may hand a message over to Claude Code
+        d["auto_engine"] = new["auto_engine"]
     if isinstance(new.get("online_search"), bool):                     # off: Search answers only from this machine, the hub is never asked
         d["online_search"] = new["online_search"]
     try:

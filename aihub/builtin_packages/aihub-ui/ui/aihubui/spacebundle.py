@@ -149,3 +149,40 @@ def bundle(path, root):
         html = html[:h.end()] + shim + html[h.end():] if h else shim + html
     return html, ctx.used, sorted(set(ctx.skipped))
 
+
+
+def stage(full, root, tmp):
+    """-> (path to publish, files inlined, files skipped). A page that refers to local files (data, css, js, images) becomes ONE
+    self-contained page, because a Space has no network and no folder next to the file; a folder is copied (no .git, node_modules or
+    dot files) and each of its pages bundled the same way. A folder without index.html but with one top-level page uses that page.
+    Raises ValueError with a person-readable reason. Shared by the chat's Share to Space and the Works Publish node."""
+    import shutil
+    if os.path.isfile(full):
+        if not full.lower().endswith((".html", ".htm")):
+            return full, [], []
+        text, used, skipped = bundle(full, root)
+        if not used:
+            return full, [], skipped
+        out = os.path.join(tmp, os.path.basename(full))
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(text)
+        return out, used, skipped
+    site = os.path.join(tmp, os.path.basename(full.rstrip(os.sep)) or "site")
+    shutil.copytree(full, site, ignore=shutil.ignore_patterns(".git", "node_modules", ".*"))
+    if not os.path.isfile(os.path.join(site, "index.html")):
+        pages = [n for n in os.listdir(site) if n.lower().endswith((".html", ".htm")) and os.path.isfile(os.path.join(site, n))]
+        if len(pages) != 1:
+            raise ValueError("a folder is shared as a web page and needs an index.html at its top")
+        os.rename(os.path.join(site, pages[0]), os.path.join(site, "index.html"))
+    used, skipped = [], []
+    for d, _, names in os.walk(site):
+        for n in names:
+            if n.lower().endswith((".html", ".htm")):
+                p = os.path.join(d, n)
+                text, u, sk = bundle(p, site)
+                if u:
+                    with open(p, "w", encoding="utf-8") as f:
+                        f.write(text)
+                used += [x for x in u if x not in used]
+                skipped += sk
+    return site, used, sorted(set(skipped))

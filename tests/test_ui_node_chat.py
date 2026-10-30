@@ -110,5 +110,35 @@ class ChatRunRecords(unittest.TestCase):
         self.assertEqual(W.chat_runs("bbbb2222"), [])
 
 
+class ChatCard(unittest.TestCase):
+    """/work:<name> saves the command and a card row right after it, in order, so the card keeps its place in the history."""
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = os.environ.get("AIHUB_HOME")
+        os.environ["AIHUB_HOME"] = self.tmp
+
+    def tearDown(self):
+        if self.old is None:
+            os.environ.pop("AIHUB_HOME", None)
+        else:
+            os.environ["AIHUB_HOME"] = self.old
+
+    def test_card_rows_follow_the_command_and_later_messages_come_after(self):
+        import server
+        from aihubui import store
+        s = store.create_session("t")
+        sid = s["id"]
+        store.append(sid, {"k": "user", "text": "hello"})
+        r = server.chat_card(None, {}, {"id": sid, "work": "my-flow", "text": "go", "shown": "/work:My Flow go", "key": "AB12"})
+        store.append(sid, {"k": "user", "text": "later"})
+        rows = store.history(sid)
+        self.assertEqual([x["k"] for x in rows], ["user", "user", "card", "user"])
+        self.assertEqual(rows[2]["spec"]["id"], "my-flow")
+        self.assertEqual(rows[2]["spec"]["key"], "ab12")
+        self.assertEqual(r["rows"], rows[1:3])
+        with self.assertRaises(server.Err):
+            server.chat_card(None, {}, {"id": sid, "work": "../x"})
+
+
 if __name__ == "__main__":
     unittest.main()

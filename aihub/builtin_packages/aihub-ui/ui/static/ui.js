@@ -64,6 +64,8 @@ export function Modal({ children, close, wide }) {
 // ---------- small form dialogs (replace prompt()/confirm()): ask({title, text, fields, submit, danger}) -> values or null
 let asker = () => Promise.resolve(null);
 export const ask = (spec) => asker(spec);
+// Promise<boolean> replacement for window.confirm: confirmBox({title, text, ok, danger}). Cancel comes first in the tab order, so focus starts there and Esc cancels.
+export const confirmBox = async (o) => !!(await ask({ title: o.title || "Are you sure?", text: o.text, submit: o.ok || "OK", danger: !!o.danger, fields: [] }));
 export function AskHost() {
   const [q, setQ] = useState(null);
   useEffect(() => { asker = (spec) => new Promise((ok) => setQ({ spec, ok, n: Math.random() })); return () => { asker = () => Promise.resolve(null); }; }, []);
@@ -76,11 +78,21 @@ function AskForm({ spec, done }) {
   useEffect(() => { first.current && first.current.focus(); first.current && first.current.select && first.current.select(); }, []);
   const shown = fields.filter((f) => !f.when || f.when(v)), bad = shown.find((f) => f.required && !String(v[f.name] ?? "").trim());
   const submit = (e) => { e.preventDefault(); if (!bad) done(v); };
-  return html`<${Modal} close=${() => done(null)}><form onSubmit=${submit}><h1>${spec.title}</h1>${spec.text && html`<p class="sub">${spec.text}</p>`}
+  return html`<${Modal} close=${() => done(null)}><form onSubmit=${submit}><h1>${spec.title}</h1>${spec.text && html`<p class="sub" style="white-space:pre-line">${spec.text}</p>`}
     ${shown.map((f, i) => html`<div class="field"><label>${f.label}${f.required ? " *" : ""}</label>
       ${f.type === "select" ? html`<select ref=${i === 0 ? first : null} value=${v[f.name]} onChange=${(e) => setV({ ...v, [f.name]: e.target.value })}>${f.options.map((o) => html`<option value=${o.value}>${o.label}</option>`)}</select>`
       : html`<input ref=${i === 0 ? first : null} type="text" maxlength=${f.max || 120} placeholder=${f.placeholder || ""} value=${v[f.name]} onInput=${(e) => setV({ ...v, [f.name]: e.target.value })}/>`}
       ${f.help && html`<span class="mute small">${f.help}</span>`}</div>`)}
     <div class="row" style="margin-top:18px"><span class="grow"></span><button type="button" class="btn" onClick=${() => done(null)}>Cancel</button>
       <button type="submit" class=${"btn " + (spec.danger ? "bad" : "acc")} disabled=${!!bad}>${spec.submit || "OK"}</button></div></form><//>`;
+}
+
+// Number box with our own stepper arrows (the browser's spin buttons ignore the theme). Same props as <input>; `style` goes on the wrapper.
+export function Num({ style, ...rest }) {
+  const el = useRef();
+  const bump = (dir) => { const i = el.current; if (!i) return; try { dir > 0 ? i.stepUp() : i.stepDown(); } catch (e) { return; } i.dispatchEvent(new Event("input", { bubbles: true })); i.dispatchEvent(new Event("change", { bubbles: true })); i.focus(); };
+  const arrow = (up) => html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d=${up ? "m6 15 6-6 6 6" : "m6 9 6 6 6-6"}/></svg>`;
+  return html`<span class="numw" style=${style}><input type="number" ref=${el} ...${rest}/>
+    <button type="button" class="nb up" tabindex="-1" aria-label="Increase" onMouseDown=${(e) => e.preventDefault()} onClick=${() => bump(1)}>${arrow(true)}</button>
+    <button type="button" class="nb dn" tabindex="-1" aria-label="Decrease" onMouseDown=${(e) => e.preventDefault()} onClick=${() => bump(-1)}>${arrow(false)}</button></span>`;
 }

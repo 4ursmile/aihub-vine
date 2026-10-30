@@ -1,0 +1,25 @@
+{
+  "id": "discord-message",
+  "title": "Start: Discord message",
+  "kind": "trigger",
+  "group": "Discord",
+  "description": "Starts the work for each Discord message the bot can read. Connects out to Discord, so no tunnel or open port is needed. Messages sent while the work was off are skipped.",
+  "run": ["{python}", "nodes/discord_message.py"],
+  "inputs": [],
+  "outputs": [
+    {"name": "text", "type": "text", "desc": "the message text", "example": "deploy now"},
+    {"name": "from", "type": "text", "desc": "sender name", "example": "alice"},
+    {"name": "channel_id", "type": "text", "desc": "channel to reply in", "example": "1234567890"},
+    {"name": "message_id", "type": "text", "desc": "message to reply to", "example": "1234567891"},
+    {"name": "guild_id", "type": "text", "desc": "server id (empty in a DM)", "example": ""}
+  ],
+  "fields": [
+    {"name": "bot_token", "label": "Bot token", "type": "password", "required": false, "help": "Developer Portal > Bot. Message Content Intent must be on. Usually comes from the Discord bot credential set."},
+    {"name": "channel_ids", "label": "Only these channel IDs (space or comma separated)", "type": "text", "default": ""},
+    {"name": "guild_id", "label": "Only this server ID", "type": "text", "default": ""},
+    {"name": "from_regex", "label": "Only from names matching (regex)", "type": "text", "default": ""},
+    {"name": "only_mentions", "label": "Only messages that mention the bot (and DMs)", "type": "checkbox", "default": false},
+    {"name": "include_bots", "label": "Include other bots", "type": "checkbox", "default": false}
+  ],
+  "credential": {"kind": "discordbot", "map": {"bot_token": "bot_token"}}
+}
