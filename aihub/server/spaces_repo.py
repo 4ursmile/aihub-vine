@@ -60,9 +60,14 @@ class SpaceRepos:
         r = self.db.conn().execute("SELECT " + COLS + " " + FROM + " WHERE s.id=?", (sid,)).fetchone()
         return _row(r) if r else None
 
-    def space_list(self, viewer, q="", kind="", sort="top", owner="", mine_uid=None, limit=24, offset=0):
+    def space_list(self, viewer, q="", kind="", sort="top", owner="", mine_uid=None, limit=24, offset=0, since=None):
+        """SINCE (unix time): only spaces changed at or after it, OLDEST change first (a cursor: the next call passes the last `updated`;
+        `>=` so equal timestamps on a page edge are not lost, callers upsert). Uses the spaces_updated index; no COUNT for it."""
         vs, va = self.space_visible_sql(viewer)
         where, args = [vs], list(va)
+        if since is not None:
+            where.append("s.updated>=?")
+            args.append(float(since))
         if kind:
             where.append("s.kind=?")
             args.append(kind)
@@ -79,6 +84,9 @@ class SpaceRepos:
         order = {"new": "s.updated DESC", "top": "s.views DESC, s.updated DESC", "name": "s.slug"}.get(sort, "s.views DESC, s.updated DESC")
         c = self.db.conn()
         w = " WHERE " + " AND ".join(where)
+        if since is not None:
+            rows = c.execute("SELECT " + COLS + " " + FROM + w + " ORDER BY s.updated, s.id LIMIT ? OFFSET ?", args + [int(limit), int(offset)]).fetchall()
+            return [_row(r) for r in rows], len(rows)
         total = c.execute("SELECT COUNT(*) " + FROM + w, args).fetchone()[0]
         rows = c.execute("SELECT " + COLS + " " + FROM + w + " ORDER BY " + order + " LIMIT ? OFFSET ?", args + [int(limit), int(offset)]).fetchall()
         return [_row(r) for r in rows], total

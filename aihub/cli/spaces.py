@@ -99,6 +99,8 @@ def _list(a, sort):
         q["q"] = a.query
     if getattr(a, "mine", False):
         q["mine"] = "true"
+    if getattr(a, "since", None) is not None:          # spaces changed since then, oldest first (an older hub ignores it: newest first)
+        q["since"] = a.since
     res = api.call("GET", "/spaces?" + urllib.parse.urlencode(q))
     ui.result(res)
     ui.out()

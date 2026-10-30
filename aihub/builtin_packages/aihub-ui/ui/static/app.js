@@ -8,6 +8,7 @@ import { UsagePage, AlertBar, useAlerts } from "./usage.js";
 
 // term.js, slides.js (+ export.js) and space.js load when first needed, not at start
 const runInstall = (...a) => import("./term.js").then((m) => m.runInstall(...a));
+const chatsMod = () => import("./chats.js");
 const shareToSpace = (...a) => import("./space.js").then((m) => m.shareToSpace(...a));
 function lazy(load, name) {
   let C = null, bad = "";
@@ -94,71 +95,112 @@ const UI_CMDS = [
 ];
 const SLASH_ICON = { folder: "folder", file: "file", theme: "palette", chat: "chat", tool: "bolt", work: "flow", ui: "slash", command: "terminal", skill: "sparkles", plugin: "plug", package: "package" };
 
-function Pill({ icon, label, active, onClick, title }) {
-  return html`<button class=${"pill" + (active ? " on" : "")} onClick=${onClick} title=${title}>${Ic(icon, 15)}<span>${label}</span><span class="chev">${Ic("down", 12)}</span></button>`;
+function Pill({ icon, lead, label, active, onClick, title, tone }) {
+  return html`<button class=${"pill" + (active ? " on" : "") + (tone ? " t-" + tone : "")} onClick=${onClick} title=${title}>${lead || Ic(icon, 15)}<span>${label}</span><span class="chev">${Ic("down", 12)}</span></button>`;
 }
+// composer tones: only the settings worth noticing get colour
+const MODE_TONE = { auto: "auto", edits: "acc", plan: "good", ask: "good", bypass: "bad" };
+const EFFORT_TONE = { high: "acc", xhigh: "acc2", max: "hot" };
+// effort clock: an arc that fills with the level; high and up pulse softly
+const EffMeter = (v) => { const n = Math.max(0, LEVELS.indexOf(v)), c = 2 * Math.PI * 5;
+  return html`<svg class=${"eclock" + (n >= 3 ? " live" : "")} width="15" height="15" viewBox="0 0 14 14" aria-hidden="true"><circle class="bg" cx="7" cy="7" r="5"/><circle class="fg" cx="7" cy="7" r="5" stroke-dasharray=${c} stroke-dashoffset=${c * (1 - n / 5)}/></svg>`; };
 function ModelPick({ models, value, onChange, close }) {
   const [q, setQ] = useState("");
   const row = (m) => html`<button class=${"opt" + (m.id === value ? " on" : "")} onClick=${() => { onChange(m.id); close(); }}><span class="oi">${Ic("cpu", 16)}</span>
     <span class="grow"><b>${m.label} ${m.window >= 1e6 && html`<span class="tag acc">1M</span>`}${m.kind === "image" && html` <span class="tag">Image</span>`}${m.kind === "tts" && html` <span class="tag">Speech</span>`}</b><span class="d">${m.note}${m.real && m.real !== m.label.toLowerCase() && m.real !== m.label ? " · " + m.real : ""}</span></span><span class="ck">${Ic("check", 16)}</span></button>`;
   const ok = (m) => !q || (m.id + " " + m.label).toLowerCase().includes(q.toLowerCase()), g = (k) => models.filter((m) => (m.group || "alias") === k && ok(m));
-  const al = g("alias"), pk = g("picker"), st = g("settings");
-  return html`<h5>Model</h5>${models.length > 10 && html`<input class="mq" placeholder="Search models" value=${q} onInput=${(e) => setQ(e.target.value)} autofocus/>`}
+  const al = g("alias"), pk = g("picker"), st = g("settings"), keys = useOptKeys();
+  return html`<div ...${keys} tabindex="-1" class="optlist"><h5>Model</h5>${models.length > 10 && html`<input class="mq" placeholder="Search models" value=${q} onInput=${(e) => setQ(e.target.value)}/>`}
     <div class="mlist">${al.map(row)}${pk.length > 0 && html`<h5 style="margin-top:6px">Your model picker</h5>${pk.map(row)}`}${st.length > 0 && html`<h5 style="margin-top:6px">From your API</h5>${st.map(row)}`}
     ${!al.length && !pk.length && !st.length && html`<p class="mute small" style="padding:8px 10px">No model matches.</p>`}</div>
-    <div class="small mute" style="padding:6px 10px 4px">Models come from your Claude settings.json (three tiers, <code>modelPicker.options</code>) and, in Free chat, the list your API returns. Changing model mid-chat rewrites the prompt cache.</div>`;
+    <div class="small mute" style="padding:6px 10px 4px">Models come from your Claude settings.json (three tiers, <code>modelPicker.options</code>) and, in Free chat, the list your API returns. Changing model mid-chat rewrites the prompt cache.</div><${OptKeys} n=${models.length > 10 ? 0 : al.length + pk.length + st.length}/></div>`;
 }
 const LEVELS = ["", "low", "medium", "high", "xhigh", "max"];
-function EffortPick({ value, onChange }) {
-  const i = Math.max(0, LEVELS.indexOf(value)), pct = (i / (LEVELS.length - 1)) * 100;
-  return html`<div class="eff"><div class="row"><b>Effort</b><span class="grow"></span><span class="tag acc">${value || "default"}</span></div>
-    <div class="eff-track"><div class="eff-fill" style=${`width:${pct}%`}></div>${LEVELS.map((l, k) => html`<button class=${"eff-dot" + (k <= i ? " on" : "")} style=${`left:${(k / (LEVELS.length - 1)) * 100}%`} title=${l || "default"} onClick=${() => onChange(l)}></button>`)}</div>
-    <div class="eff-labels">${LEVELS.map((l) => html`<span class=${l === value ? "b" : ""}>${l === "" ? "Auto" : l === "xhigh" ? "XHigh" : l[0].toUpperCase() + l.slice(1)}</span>`)}</div>
-    <div class="small mute">${EFFORT_INFO[value]}</div></div>`;
+function EffortPick({ value, onChange, close }) {
+  const i = Math.max(0, LEVELS.indexOf(value)), pct = (i / (LEVELS.length - 1)) * 100, el = useRef(), name = (l) => l === "" ? "Auto" : l === "xhigh" ? "XHigh" : l[0].toUpperCase() + l.slice(1);
+  useEffect(() => { el.current && el.current.focus(); }, []);
+  const go = (k) => onChange(LEVELS[Math.max(0, Math.min(LEVELS.length - 1, k))]);
+  const onKey = (e) => {
+    const k = e.key, m = { ArrowRight: i + 1, ArrowUp: i + 1, ArrowLeft: i - 1, ArrowDown: i - 1, Home: 0, End: LEVELS.length - 1 }[k];
+    if (m !== undefined) go(m); else if (/^[0-5]$/.test(k)) go(+k); else if (k === "Enter" || k === " ") close(); else return;
+    e.preventDefault();
+  };
+  return html`<div class=${"eff lv" + i} ref=${el} tabindex="0" role="slider" aria-label="Thinking effort" aria-valuemin="0" aria-valuemax="5" aria-valuenow=${i} aria-valuetext=${name(value)} onKeyDown=${onKey}>
+    <div class="row"><b>Effort</b><span class="grow"></span><span class="eff-now">${EffMeter(value)}${name(value)}</span></div>
+    <div class="eff-track"><div class="eff-fill" style=${`width:${pct}%`}></div>${LEVELS.map((l, k) => html`<button tabindex="-1" class=${"eff-dot" + (k <= i ? " on" : "") + (k === i ? " cur" : "")} style=${`left:${(k / (LEVELS.length - 1)) * 100}%`} title=${name(l)} onClick=${() => onChange(l)}></button>`)}</div>
+    <div class="eff-labels">${LEVELS.map((l) => html`<span class=${l === value ? "b" : ""}>${name(l)}</span>`)}</div>
+    <div class="small eff-d">${EFFORT_INFO[value]}</div>
+    <div class="eff-keys"><kbd>←</kbd><kbd>→</kbd> change · <kbd>0</kbd>–<kbd>5</kbd> jump · <kbd>Enter</kbd> done</div></div>`;
 }
+// keyboard for every composer panel: focus the search box or the current option on open; ↑ ↓ Home End move over
+// options, MCP cards, switches and fields; 1-9 pick an option / toggle a card; Enter/Space choose (native click)
+const NAV = ".opt, .mcp-card, .sw, .mq, .mcp-q input, input[type=range], .ctxp .btn";
+const isText = (el) => el && el.tagName === "INPUT" && el.type !== "range";
+function useOptKeys(ready = true) {
+  const el = useRef();
+  const items = () => el.current ? [...el.current.querySelectorAll(NAV)].filter((x) => !x.disabled && !(x.classList.contains("sw") && x.closest(".mcp-card"))) : [];
+  useEffect(() => { const b = el.current && (el.current.querySelector(".mq") || el.current.querySelector(".opt.on") || items()[0]); b && b.focus(); }, [!!ready]);
+  const onKeyDown = (e) => {
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+    const all = items(), t = e.target, k = e.key, txt = isText(t);
+    if (!all.length || !(t === el.current || all.includes(t))) return;
+    const at = all.indexOf(t), picks = all.filter((x) => x.matches(".opt, .mcp-card"));
+    const to = { ArrowDown: at + 1, ArrowUp: at < 0 ? all.length - 1 : at - 1, ...(txt ? {} : { Home: 0, End: all.length - 1 }) }[k];
+    if (to !== undefined) all[(to + all.length) % all.length].focus();
+    else if (txt && k === "Enter" && picks[0]) picks[0].click();
+    else if (!txt && /^[1-9]$/.test(k) && picks[+k - 1]) picks[+k - 1].click();
+    else if (!txt && (k === "Enter" || k === " ") && t.classList.contains("mcp-card")) { const sw = t.querySelector(".sw"); sw && sw.click(); }
+    else return;
+    e.preventDefault();
+  };
+  return { ref: el, onKeyDown };
+}
+const OptKeys = ({ n, what = "pick", enter = "choose" }) => html`<div class="eff-keys opt-keys"><kbd>↑</kbd><kbd>↓</kbd> move${n > 0 && html` · <kbd>1</kbd>–<kbd>${Math.min(9, n)}</kbd> ${what}`} · <kbd>Enter</kbd> ${enter}</div>`;
 function ModePick({ modes, value, onChange, close }) {
-  return html`<h5>Permission mode</h5>${modes.map((m) => { const [ic, name, d] = MODE_INFO[m] || ["shield", m, ""]; return html`<button class=${"opt" + (m === value ? " on" : "") + (m === "bypass" ? " danger" : "")} onClick=${() => { onChange(m); close(); }}><span class="oi">${Ic(ic, 16)}</span><span class="grow"><b>${name}</b><span class="d">${d}</span></span><span class="ck">${Ic("check", 16)}</span></button>`; })}`;
+  const keys = useOptKeys();
+  return html`<div ...${keys} tabindex="-1" class="optlist"><h5>Permission mode</h5>${modes.map((m) => { const [ic, name, d] = MODE_INFO[m] || ["shield", m, ""]; return html`<button class=${"opt" + (m === value ? " on" : "") + (m === "bypass" ? " danger" : "")} onClick=${() => { onChange(m); close(); }}><span class="oi">${Ic(ic, 16)}</span><span class="grow"><b>${name}</b><span class="d">${d}</span></span><span class="ck">${Ic("check", 16)}</span></button>`; })}<${OptKeys} n=${modes.length}/></div>`;
 }
 const ENGINES = [["claude", "terminal", "Claude Code", "The full harness: tools, files in the working folder, skills, agents and MCP servers."],
   ["free", "zap", "Free chat", "Our own light harness: straight to the model, answers fast. No shell or files; it can use the MCP servers you tick below. Needs ANTHROPIC_API_KEY (Settings > Encrypted secrets) or your Claude settings env / key helper."]];
 const MCP_TONE = { package: "package", claude: "terminal", ui: "sliders" };
 function McpPanel({ servers, on, onChange, engine, compact }) {
-  const [q, setQ] = useState("");
+  const [q, setQ] = useState(""), keys = useOptKeys(servers && servers.length);
   if (!servers) return html`<div class="mcp-empty"><div class="shine">Looking for MCP servers…</div></div>`;
   if (!servers.length) return html`<div class="mcp-empty">${Ic("plug", 26)}<b>No MCP servers yet</b><span>Install an MCP package or add one on the <a href="#/mcp">MCP servers</a> page.</span></div>`;
   const live = servers.filter((m) => !m.off && on.includes(m.name)).length, shown = servers.filter((m) => !q || (m.name + " " + (m.origin || "")).toLowerCase().includes(q.toLowerCase()));
   const toggle = (m, v) => onChange(v ? [...on, m.name] : on.filter((x) => x !== m.name));
-  return html`<div class=${"mcp" + (compact ? " compact" : "")}>
+  return html`<div ...${compact ? {} : keys} tabindex=${compact ? undefined : "-1"} class=${"mcp optlist" + (compact ? " compact" : "")}>
     <div class="mcp-head"><span class="mcp-sum"><i class=${"dot" + (live ? " live" : "")}></i><b>${engine === "free" ? live + " of " + servers.length + " on for this chat" : servers.length + " server" + (servers.length === 1 ? "" : "s")}</b></span>
       ${servers.length > 6 && html`<label class="mcp-q">${Ic("search", 13)}<input placeholder="Filter" value=${q} onInput=${(e) => setQ(e.target.value)}/></label>`}</div>
     <div class="mcp-grid">${shown.map((m) => { const act = engine === "free" && !m.off && on.includes(m.name);
-      return html`<div class=${"mcp-card" + (act ? " on" : "") + (m.off ? " off" : "")} key=${m.name}>
+      return html`<div class=${"mcp-card" + (act ? " on" : "") + (m.off ? " off" : "")} key=${m.name} tabindex="0" role=${engine === "free" ? "switch" : undefined} aria-checked=${engine === "free" ? act : undefined} aria-label=${m.name}>
         <span class="mcp-ico">${Ic("plug", 17)}<i class=${"dot" + (m.off ? " off" : act || engine !== "free" ? " live" : "")}></i></span>
         <span class="grow"><b>${m.name}</b><span class="d">${m.off ? "Switched off on the MCP page" : m.command ? String(m.command).slice(0, 70) : "MCP server"}</span>
           <span class="mcp-tags"><span class="tag">${m.origin || "server"}</span>${(m.tools_off || []).length > 0 && html`<span class="tag">${m.tools_off.length} hidden</span>`}${m.default && !m.off && html`<span class="tag acc">default</span>`}</span></span>
         ${engine === "free" ? html`<${Switch} on=${act} label=${"Use " + m.name} onChange=${(v) => !m.off && toggle(m, v)}/>` : html`<span class="tag acc">${Ic("check", 11)} ready</span>`}</div>`; })}</div>
     ${!shown.length && html`<p class="mute small" style="padding:8px 4px">No server matches.</p>`}
-    <p class="mcp-note">${engine === "free" ? "Ticked servers start for each answer; the model may call their tools without asking." : "Claude Code uses every server it knows. Switch to Free chat (/engine free) to choose per chat."}</p></div>`;
+    <p class="mcp-note">${engine === "free" ? "Ticked servers start for each answer; the model may call their tools without asking." : "Claude Code uses every server it knows. Switch to Free chat (/engine free) to choose per chat."}</p>${!compact && engine === "free" && html`<${OptKeys} n=${shown.length} what="toggle" enter="toggle"/>`}</div>`;
 }
 function EnginePick({ value, onChange, close, mcpAll, mcpOn, onMcp }) {
-  return html`<h5>Engine</h5>${ENGINES.map(([k, ic, name, d]) => html`<button class=${"opt" + (k === value ? " on" : "")} onClick=${() => { onChange(k); close(); }}><span class="oi">${Ic(ic, 16)}</span><span class="grow"><b>${name}</b><span class="d">${d}</span></span><span class="ck">${Ic("check", 16)}</span></button>`)}
+  const keys = useOptKeys();
+  return html`<div ...${keys} tabindex="-1" class="optlist"><h5>Engine</h5>${ENGINES.map(([k, ic, name, d]) => html`<button class=${"opt" + (k === value ? " on" : "")} onClick=${() => { onChange(k); close(); }}><span class="oi">${Ic(ic, 16)}</span><span class="grow"><b>${name}</b><span class="d">${d}</span></span><span class="ck">${Ic("check", 16)}</span></button>`)}
     ${value === "free" && html`<h5 style="margin-top:8px">Tools for free chat (MCP)</h5><div style="padding:0 6px"><${McpPanel} servers=${mcpAll} on=${mcpOn} onChange=${onMcp} engine="free" compact=${true}/></div>`}
-    <div class="small mute" style="padding:6px 10px 4px">You can switch at any message (or type /engine): the earlier text carries over, tool calls do not.</div>`;
+    <div class="small mute" style="padding:6px 10px 4px">You can switch at any message (or type /engine): the earlier text carries over, tool calls do not.</div><${OptKeys} n=${ENGINES.length}/></div>`;
 }
 function Ring({ pct, size = 22 }) {
   const r = (size - 4) / 2, c = 2 * Math.PI * r;
   return html`<svg class="ring" width=${size} height=${size} viewBox=${`0 0 ${size} ${size}`}><circle class="bg" cx=${size / 2} cy=${size / 2} r=${r}/><circle class=${"fg" + (pct > 0.9 ? " hot" : "")} cx=${size / 2} cy=${size / 2} r=${r} stroke-dasharray=${c} stroke-dashoffset=${c * (1 - Math.min(1, pct))}/></svg>`;
 }
 function CtxPick({ used, win, prefs, savePrefs, compact, note, busy }) {
-  const pct = win ? used / win : 0;
-  return html`<div class="ctxp"><div class="row"><b>Context window</b><span class="grow"></span>${win >= 1e6 && html`<span class="tag acc">1M</span>`}</div>
+  const pct = win ? used / win : 0, keys = useOptKeys();
+  return html`<div class="ctxp optlist" ...${keys} tabindex="-1"><div class="row"><b>Context window</b><span class="grow"></span>${win >= 1e6 && html`<span class="tag acc">1M</span>`}</div>
     <div class="big">${num(used)} <span class="mute" style="font:14px var(--font)">of ${num(win)} tokens · ${Math.round(pct * 100)}%</span></div>
     <div class="ctxbar"><i style=${`width:${Math.min(100, pct * 100)}%`}></i>${prefs.autocompact && html`<u style=${`left:${prefs.compact_pct}%`} title="auto-compact limit"></u>`}</div>
     <div class="small mute">${note || (used ? "What Claude re-reads each turn, mostly from cache." : "Nothing yet.")}</div>
     <div class="row" style="margin-top:14px"><div class="grow"><b>Auto-compact</b><div class="small mute">Summarise old turns when the limit is reached.</div></div><${Switch} on=${prefs.autocompact} label="Auto-compact" onChange=${(v) => savePrefs({ autocompact: v })}/></div>
     ${prefs.autocompact && html`<div style="margin-top:10px"><div class="row small"><span class="grow">Compact limit</span><b>${prefs.compact_pct}%</b> <span class="mute">≈ ${num((win * prefs.compact_pct) / 100)}</span></div>
       <input type="range" min="40" max="95" step="5" value=${prefs.compact_pct} style="width:100%" onChange=${(e) => savePrefs({ compact_pct: +e.target.value })}/></div>`}
-    <div class="row" style="margin-top:12px"><button class="btn" disabled=${busy || !used} onClick=${compact}>${Ic("compact", 14)} Compact now</button></div></div>`;
+    <div class="row" style="margin-top:12px"><button class="btn" disabled=${busy || !used} onClick=${compact}>${Ic("compact", 14)} Compact now</button></div><div class="eff-keys"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>←</kbd><kbd>→</kbd> limit · <kbd>Space</kbd> switch</div></div>`;
 }
 function SlashMenu({ items, idx, pick }) {
   const ref = useRef();
@@ -336,16 +378,39 @@ function GenBar({ gen }) {
     <div class="genbar-track"><i></i></div><div class="mute small">${step}…</div></div>`;
 }
 
-function ChatTerm({ id, close }) {
-  const host = useRef(null), tm = useRef(null), [ended, setEnded] = useState(null), [n, setN] = useState(0), [h, setH] = useState(() => +pref("termh", "280") || 280);
+// One shell inside a terminal tab. It stays mounted while another tab (or a hidden panel) is in front, so nothing running is lost.
+function TermPane({ id, active, onEnd, regStop }) {
+  const host = useRef(null), tm = useRef(null), [n, setN] = useState(0), [ended, setEnded] = useState(null);
   useEffect(() => {
     let gone = false; setEnded(null);
-    (async () => { try { const x = await runInstall(host.current, { shell: true, session: id }, { post, api }, (code) => !gone && setEnded(code)); if (gone) x.stop(); else tm.current = x; } catch (e) { if (!gone) toast(e.message || "Cannot open a terminal"); } })();
+    (async () => { try { const x = await runInstall(host.current, { shell: true, session: id }, { post, api }, (code) => { if (!gone) { setEnded(code); onEnd(code); } }); if (gone) x.stop(); else tm.current = x; } catch (e) { if (!gone) { toast(e.message || "Cannot open a terminal"); setEnded(-1); onEnd(-1); } } })();
     return () => { gone = true; if (tm.current) { tm.current.stop(); tm.current = null; } };
   }, [id, n]);
-  const drag = (e) => { e.preventDefault(); const y0 = e.clientY, h0 = h; document.body.classList.add("dragging-y"); const mv = (m) => setH(Math.max(120, Math.min(innerHeight - 220, h0 + y0 - m.clientY))); const up = () => { document.body.classList.remove("dragging-y"); removeEventListener("pointermove", mv); removeEventListener("pointerup", up); removeEventListener("pointercancel", up); }; addEventListener("pointermove", mv); addEventListener("pointerup", up); addEventListener("pointercancel", up); };
+  return html`<div class=${"ct-pane" + (active ? " on" : "")}><div class="ct-b" ref=${host}></div>${ended != null && html`<div class="ct-end"><span>Process exited (${ended})</span><button class="btn" onClick=${() => setN(n + 1)}>Restart</button></div>`}</div>`;
+}
+
+// Terminal panel like VS Code's: several shells as tabs, a "+" to open another, full screen, hide (shells keep running) and per-tab kill.
+let termSeq = 0;
+function ChatTerm({ id, show, hide }) {
+  const root = useRef(null), mk = () => ({ k: ++termSeq, no: 0 });
+  const [tabs, setTabs] = useState(() => { const t = mk(); t.no = 1; return [t]; }), [act, setAct] = useState(() => tabs[0].k), [full, setFull] = useState(false), [h, setH] = useState(() => +pref("termh", "280") || 280), [ex, setEx] = useState({});
+  const add = () => setTabs((ts) => { if (ts.length >= 8) { toast("At most 8 terminals per chat"); return ts; } const t = mk(); t.no = Math.max(0, ...ts.map((x) => x.no)) + 1; setAct(t.k); return [...ts, t]; });
+  const kill = (k) => setTabs((ts) => { const i = ts.findIndex((x) => x.k === k), rest = ts.filter((x) => x.k !== k); if (!rest.length) { const t = mk(); t.no = 1; setAct(t.k); setTimeout(hide, 0); return [t]; } if (act === k) setAct(rest[Math.min(i, rest.length - 1)].k); return rest; });
+  const toggleFull = () => {
+    const el = root.current;
+    if (!full) { setFull(true); try { el.requestFullscreen && el.requestFullscreen().catch(() => {}); } catch (e) {} }
+    else { setFull(false); try { document.fullscreenElement && document.exitFullscreen(); } catch (e) {} }
+  };
+  useEffect(() => { const f = () => { if (!document.fullscreenElement && root.current && !root.current.classList.contains("ct-fixed")) setFull(false); }; document.addEventListener("fullscreenchange", f); return () => { document.removeEventListener("fullscreenchange", f); try { document.fullscreenElement && document.exitFullscreen(); } catch (e) {} }; }, []);
   useEffect(() => { setPref("termh", String(h)); }, [h]);
-  return html`<div class="chatterm" style=${"height:" + h + "px"}><div class="ct-grip" onPointerDown=${drag}></div><div class="ct-h">${Ic("terminal", 14)}<b>Terminal</b><span class="mute small grow">in this chat's working folder${ended != null ? " · exited (" + ended + ")" : ""}</span>${ended != null && html`<button class="btn" onClick=${() => setN(n + 1)}>Restart</button>`}<button class="ibtn" title="Close terminal" aria-label="Close terminal" onClick=${close}>${Ic("x", 14)}</button></div><div class="ct-b" ref=${host}></div></div>`;
+  const drag = (e) => { e.preventDefault(); const y0 = e.clientY, h0 = h; document.body.classList.add("dragging-y"); const mv = (m) => setH(Math.max(120, Math.min(innerHeight - 220, h0 + y0 - m.clientY))); const up = () => { document.body.classList.remove("dragging-y"); removeEventListener("pointermove", mv); removeEventListener("pointerup", up); removeEventListener("pointercancel", up); }; addEventListener("pointermove", mv); addEventListener("pointerup", up); addEventListener("pointercancel", up); };
+  return html`<div ref=${root} class=${"chatterm" + (full ? " ct-full" : "") + (show ? "" : " ct-off")} style=${full ? "" : "height:" + h + "px"}>
+    ${!full && html`<div class="ct-grip" onPointerDown=${drag}></div>`}
+    <div class="ct-h">${Ic("terminal", 14)}<div class="ct-tabs" role="tablist">${tabs.map((t) => html`<div key=${t.k} role="tab" aria-selected=${act === t.k} class=${"ct-tab" + (act === t.k ? " on" : "") + (ex[t.k] != null ? " dead" : "")} onClick=${() => setAct(t.k)} title=${ex[t.k] != null ? "Exited (" + ex[t.k] + ")" : "Terminal " + t.no}><span>Terminal ${t.no}</span><button class="ct-x" title="Kill this terminal" aria-label=${"Kill terminal " + t.no} onClick=${(e) => { e.stopPropagation(); kill(t.k); }}>${Ic("x", 11)}</button></div>`)}</div>
+      <button class="ibtn" title="New terminal" aria-label="New terminal" onClick=${add}>${Ic("plus", 14)}</button><span class="grow" style="flex:1"></span>
+      <button class="ibtn" title=${full ? "Exit full screen" : "Full screen"} aria-label=${full ? "Exit full screen" : "Full screen"} aria-pressed=${full} onClick=${toggleFull}>${Ic(full ? "shrink" : "expand", 14)}</button>
+      <button class="ibtn" title="Hide the panel (terminals keep running)" aria-label="Hide the panel" onClick=${() => { if (full) toggleFull(); hide(); }}>${Ic("x", 14)}</button></div>
+    <div class="ct-panes">${tabs.map((t) => html`<${TermPane} key=${t.k} id=${id} active=${act === t.k} onEnd=${(c) => setEx((x) => ({ ...x, [t.k]: c }))}/>`)}</div></div>`;
 }
 
 function ToolRow({ b, res, hint }) {
@@ -373,7 +438,7 @@ function pollGen(job, text, ui) {
   return j;
 }
 
-function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onBusy }) {
+function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onBusy, onImport }) {
   const [s, setS] = useState(null), [hist, setHist] = useState([]), [files, setFiles] = useState([]), [sig, setSig] = useState("");
   const [live, setLive] = useState({ text: "", think: "" }), [busy, setBusy] = useState(false), [text, setText] = useState("");
   const [model, setModel] = useState(pref("model", "")), [effort, setEffort] = useState(pref("effort", "")), [mode, setMode] = useState(pref("mode", "auto"));
@@ -383,7 +448,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   useEffect(() => setMent(null), [id]);
   const [att, setAtt] = useState([]), [tab, setTab] = useState("files"), [open, setOpen] = useState(false), [prev, setPrev] = useState(""), [els, setEls] = useState([]);
   const [engine, setEngine] = useState(pref("engine", "claude")), busyRef = useRef(false), engineNow = useRef("claude"), [mcpAll, setMcpAll] = useState(null), [freeIds, setFreeIds] = useState(null);
-  const [split, setSplit] = useState(pref("split", "0") === "1"), [dlg, setDlg] = useState(null), [hintOff, setHintOff] = useState(false), [term, setTerm] = useState(false), [cw, setCw] = useState(() => +pref("canvasw", "0") || 0), [rail, setRail] = useState(pref("edrail", "1") === "1"), [ew, setEw] = useState(() => +pref("edw", "200") || 200), dirtyRef = useRef(false), [dirInfo, setDirInfo] = useState({ dir: "", def: "" });
+  const [split, setSplit] = useState(pref("split", "0") === "1"), [dlg, setDlg] = useState(null), [hintOff, setHintOff] = useState(false), [term, setTerm] = useState(false), [termOn, setTermOn] = useState(false), [cw, setCw] = useState(() => +pref("canvasw", "0") || 0), [rail, setRail] = useState(pref("edrail", "1") === "1"), [ew, setEw] = useState(() => +pref("edw", "200") || 200), dirtyRef = useRef(false), [dirInfo, setDirInfo] = useState({ dir: "", def: "" });
   const [themes, setThemes] = useState([]), [since, setSince] = useState(0), [act, setAct] = useState(null), [wr, setWr] = useState([]), [works, setWorks] = useState([]);
   const end = useRef(), ctl = useRef(), ta = useRef(), sendRef = useRef(), sRef = useRef(null), pendingRef = useRef([]), stick = useRef(true), msgsRef = useRef(), actRef = useRef(null), alive = useRef(true), prevRef = useRef(""), fileIn = useRef(), [stuck, setStuck] = useState(true), [missing, setMissing] = useState(""), [dismissed, setDismissed] = useState(null);
   sRef.current = s;
@@ -397,7 +462,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     if (d.busy) follow((on, sig) => stream("chat/attach", { id }, on, sig), d.since);          // a turn is still running here: replay it, then go live
   };
   useEffect(() => { load(); api("works").then((d) => setWorks(d.works)).catch(() => {}); api("themes").then((d) => setThemes(d.themes)).catch(() => {}); return () => ctl.current && ctl.current.abort(); }, [id]);
-  useEffect(() => { setHintOff(false); }, [id]);
+  useEffect(() => { setHintOff(false); setTermOn(term); }, [id]);
   // stick to the bottom only while the reader is at the bottom; scrolling up lets go, "Jump to latest" or sending takes it back
   const toEnd = (smooth) => { const m = msgsRef.current; if (m) m.scrollTo({ top: m.scrollHeight, behavior: smooth ? "smooth" : "instant" }); };
   const onScroll = () => { const m = msgsRef.current; if (!m) return; const near = m.scrollHeight - m.scrollTop - m.clientHeight < 80; stick.current = near; setStuck(near); };
@@ -598,6 +663,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     : canPrev(prev) ? html`<iframe key=${prev + files.length + fver} sandbox=${/\.pdf$/i.test(prev) ? undefined : "allow-scripts allow-forms allow-modals allow-popups"} src=${src(prev)}></iframe>`
     : html`<div class="empty"><div>${Ic("file", 26)}<div>No preview for this kind of file.<br/>Use Edit to read it.</div></div></div>`)
     : html`<div class="empty"><div>${Ic("eye", 26)}<div>Select a file in Files,<br/>or let Claude write an .html one.</div></div></div>`;
+  const sendOut = guard(async () => { const m = await chatsMod(); await m.sendChat({ get: api, post, id, title: s.title, signedIn: boot.context.signed_in }); });
   const share = guard(async (path, bundle, content = null) => { const r = await shareToSpace(post, id, path, { bundle, content, signedIn: boot.context.signed_in }); if (r && r.url) { try { await navigator.clipboard.writeText(r.url); toast("Link copied: " + r.url); } catch (e) {} } if (r && content != null) refreshFiles(); });
   shareRef.current = share;
   const [proj, setProj] = useState([]), [pub, setPub] = useState(null);                 // aihub packages of the working folder: a Publish button shows only when there are some
@@ -625,7 +691,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
           : e.k === "error" ? html`<div class="msg"><span class="tag bad">${Ic("alert", 12)} error</span> ${linkify(e.text)} ${e.auth && html`<button class="btn" onClick=${() => setSignin(true)}>Sign in</button>`}</div>` : null), [hist, busy, edit, sig, boot]);
   if (!s) return missing ? html`<div class="empty"><div>${Ic("alert", 28)}<h1>Chat not found</h1><p class="mute">${missing}</p><div class="row" style="justify-content:center;gap:8px"><button class="btn acc" onClick=${newChat}>${Ic("plus", 14)} New chat</button><button class="btn" onClick=${load}>${Ic("refresh", 14)} Try again</button></div></div></div>` : html`<div class="empty"><div>${Ic("sparkles", 28)}<div>Loading…</div></div></div>`;
   return html`<div class="chatwrap">${signin && html`<${SignIn} close=${() => setSignin(false)}/>`}
-    <div class="chat">
+    <div class=${"chat" + (engine === "free" ? "" : " eng-claude")}>
       ${pickF && html`<${FilePicker} ext="" title=${pickF === "dir" ? "Choose a folder to mention" : "Choose a file to mention"} start=${dirInfo.dir || ""} dirs=${pickF === "dir"} onPick=${(p) => { const kind = pickF === "dir" ? "@folder:" : "@file:"; setPickF(false); const d = (dirInfo.dir || "").replace(/\\/g, "/").replace(/\/+$/, ""), q = p.replace(/\\/g, "/"); setText((t) => (t && !/\s$/.test(t) ? t + " " : t) + kind + (d && q.startsWith(d + "/") ? q.slice(d.length + 1) : q) + " "); ta.current && ta.current.focus(); }} close=${() => setPickF(false)}/>`}
       ${dlg === "mcp" && html`<${Modal} wide=${true} close=${() => setDlg(null)}><div class="row"><h1 class="grow" style="margin:0">MCP servers</h1><button class="ibtn" aria-label="Close" onClick=${() => setDlg(null)}>${Ic("x", 17)}</button></div>
         <p class="sub" style="margin-top:4px">Engine: <b>${engine === "free" ? "Free chat" : "Claude Code"}</b> · <button class="linkbtn" onClick=${() => setEng(engine === "free" ? "claude" : "free")}>switch to ${engine === "free" ? "Claude Code" : "Free chat"}</button></p>
@@ -633,12 +699,12 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
         <div class="row" style="margin-top:14px"><a class="btn" href="#/mcp">${Ic("sliders", 14)} Manage servers</a><span class="grow"></span><button class="btn acc" onClick=${() => setDlg(null)}>Done</button></div><//>`}
       ${dlg === "dir" && html`<${WorkDirDialog} s=${s} cur=${dirInfo.dir} busy=${busy} close=${() => setDlg(null)} saved=${(n) => { setDlg(null); setS(n); load(); refresh(); }}/>`}
       ${dlg === "soul" && html`<${SoulDialog} s=${s} busy=${busy} close=${() => setDlg(null)} saved=${(n) => { setDlg(null); setS(n); load(); }}/>`}
-      <div class="chat-top"><button class="ibtn burger" title="Chats and pages" aria-label="Chats and pages" onClick=${onMenu}>${Ic("menu", 18)}</button><b class="grow ctitle" title="Rename" onClick=${rename}>${s.title}</b><button class="ibtn" title="Rename chat" aria-label="Rename chat" onClick=${rename}>${Ic("edit", 16)}</button>
+      <div class="chat-top"><button class="ibtn burger" title="Chats and pages" aria-label="Chats and pages" onClick=${onMenu}>${Ic("menu", 18)}</button><b class="grow ctitle" title="Rename" onClick=${rename}>${s.title}</b><button class="ibtn" title="Rename chat" aria-label="Rename chat" onClick=${rename}>${Ic("edit", 16)}</button><button class="ibtn" title="Share or export this chat" aria-label="Share or export this chat" onClick=${sendOut}>${Ic("share", 16)}</button><button class="ibtn" title="Import a chat (link, text or file)" aria-label="Import a chat" onClick=${onImport}>${Ic("import", 16)}</button>
         <span class="dirwrap">${(() => { const fresh = !hist.length && !busy && !hintOff; return html`<button class=${"dirchip" + (s.cwd ? " set" : "") + (fresh ? " nudge" : "")} title=${"Working folder: " + dirInfo.dir + "\nClick to change"} onClick=${() => { setHintOff(true); setDlg("dir"); }}>${Ic("folder", fresh ? 17 : 14)}<span>${s.cwd ? baseName(s.cwd) : "Private folder"}</span></button>${fresh && !s.cwd && html`<div class="tip-hint" role="tooltip"><b>Choose a project</b><span>Pick your work project folder, or stay in the blank private one.</span><div class="row" style="gap:6px;margin-top:8px"><button class="btn acc" onClick=${() => { setHintOff(true); setDlg("dir"); }}>Choose project</button><button class="btn" onClick=${() => setHintOff(true)}>Blank</button></div></div>`}`; })()}</span>
         <button class=${"ibtn" + (s.soul != null ? " on" : "")} title=${s.soul != null ? "This chat has its own soul" : "Soul for this chat"} aria-label="Soul for this chat" onClick=${() => setDlg("soul")}>${Ic("user", 16)}</button>
         <button class="ibtn" title="Reload soul and notes (rewrites cache)" aria-label="Reload soul and notes (rewrites cache)" onClick=${refreshMem}>${Ic("refresh", 16)}</button>
         ${proj.length > 0 && html`<button class="btn acc" title="Publish this project to the hub (aihub dev publish -i)" onClick=${() => setPub({ name: proj.map((x) => x.name).join(", "), version: proj.length === 1 ? proj[0].version : "", path: dirInfo.dir, project: id, check: { ok: true } })}>${Ic("upload", 14)} Publish</button>`}
-        <button class=${"ibtn" + (term ? " on" : "")} title="Terminal in the working folder" aria-label="Terminal in the working folder" aria-pressed=${term} onClick=${() => setTerm(!term)}>${Ic("terminal", 17)}</button>
+        <button class=${"ibtn" + (term ? " on" : "")} title="Terminal in the working folder" aria-label="Terminal in the working folder" aria-pressed=${term} onClick=${() => { setTermOn(true); setTerm(!term); }}>${Ic("terminal", 17)}</button>
         <button class=${"ibtn cvb" + (!hist.length && !busy && !open && !hintOff ? " nudge" : "")} title=${files.length ? `Canvas - ${files.length} file${files.length > 1 ? "s" : ""}` : "Canvas"} aria-label="Canvas" aria-pressed=${open} onClick=${() => setOpen(!open)} style=${open ? "color:var(--accent2)" : ""}>${Ic("panel", 18)}${files.length > 0 && !open && html`<i class="cnt">${files.length}</i>`}</button></div>
       <div class="msgs" ref=${msgsRef} onScroll=${onScroll}><div class="col">
         ${!hist.length && !busy && html`<div class="hello"><div><span class="herologo">${Ic("logo", 44, "")}</span><h1>What shall we work on?</h1><p>Claude Code runs in this chat's own folder with every skill, agent and MCP server aihub installed.<br/>Type <span class="kbd">/</span> for commands.</p></div></div>`}
@@ -650,9 +716,8 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
         <div ref=${end}></div>
       </div>${!stuck && (hist.length > 0 || busy) && html`<div class="jumpw"><button class="jump" onClick=${jump}>${Ic("down", 14)} Jump to latest</button></div>`}</div>
       ${pub && html`<${PublishSteps} r=${pub} boot=${boot} close=${() => setPub(null)}/>`}
-      ${term && html`<${ChatTerm} key=${id} id=${id} close=${() => setTerm(false)}/>`}
       <div class="composer">
-        <div class="box" onDragOver=${(e) => e.preventDefault()} onDrop=${(e) => { e.preventDefault(); pick(e.dataTransfer.files); }}>
+        <div class=${"box" + (busy ? " busy" : "")} onDragOver=${(e) => e.preventDefault()} onDrop=${(e) => { e.preventDefault(); pick(e.dataTransfer.files); }}>
           ${(sm || mm) && html`<${SlashMenu} items=${menuItems} idx=${sidx} pick=${pickSlash}/>`}
           ${att.length ? html`<div>${att.map((a, i) => html`<span class="chip">${a.type.startsWith("image/") ? html`<img src=${a.url} height="16"/>` : Ic("file", 12)} ${a.name} <button type="button" class="chipx" aria-label=${"Remove " + a.name} onClick=${() => setAtt(att.filter((_, j) => j !== i))}>${Ic("x", 12)}</button></span>`)}</div>` : ""}
           <textarea ref=${ta} rows="1" placeholder=${engine === "free" ? "Ask the model directly…  (no tools, no files)" : "Message Claude…   / for commands"} value=${text} onInput=${(e) => { setText(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 240) + "px"; }}
@@ -661,9 +726,10 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
             <button class="ibtn" title="Attach files" aria-label="Attach files" onClick=${() => fileIn.current && fileIn.current.click()}>${Ic("clip", 17)}</button><input type="file" multiple hidden ref=${fileIn} onChange=${(e) => { pick(e.target.files); e.target.value = ""; }}/>
             <button class="ibtn" title="Choose a file from this project (adds @file:path)" aria-label="Choose a file from this project (adds @file:path)" onClick=${() => setPickF("file")}>${Ic("file", 17)}</button>
             <button class="ibtn" title="Choose a folder from this project (adds @folder:path)" aria-label="Choose a folder from this project (adds @folder:path)" onClick=${() => setPickF("dir")}>${Ic("folder", 17)}</button>
-            <${Pop} open=${pop === "engine"} setOpen=${(v) => setPop(v ? "engine" : null)} button=${html`<${Pill} icon=${engine === "free" ? "zap" : "terminal"} label=${engine === "free" ? "Free chat" + ((s.mcp || []).length ? " · " + s.mcp.length + " tool" + (s.mcp.length > 1 ? "s" : "") : "") : "Claude Code"} active=${pop === "engine" || engine === "free"} title="Engine" onClick=${() => { setPop(pop === "engine" ? null : "engine"); if (!mcpAll) api("mcp/free").then((d) => setMcpAll(d.servers)).catch(() => setMcpAll([])); }}/>`}><${EnginePick} mcpAll=${mcpAll} mcpOn=${s.mcp || []} onMcp=${saveMcp} value=${engine} onChange=${setEng} close=${() => setPop(null)}/><//>
-            ${engine !== "free" && html`<${Pop} open=${pop === "mode"} setOpen=${(v) => setPop(v ? "mode" : null)} button=${html`<${Pill} icon=${MODE_INFO[mode][0]} label=${MODE_INFO[mode][1]} active=${pop === "mode"} title="Permission mode" onClick=${() => setPop(pop === "mode" ? null : "mode")}/>`}><${ModePick} modes=${boot.modes} value=${mode} onChange=${setMode} close=${() => setPop(null)}/><//>`}
-            <${Pop} open=${pop === "effort"} setOpen=${(v) => setPop(v ? "effort" : null)} button=${html`<${Pill} icon="gauge" label=${effort ? effort[0].toUpperCase() + effort.slice(1) : "Effort"} active=${pop === "effort"} title="Thinking effort" onClick=${() => setPop(pop === "effort" ? null : "effort")}/>`}><${EffortPick} value=${effort} onChange=${setEffort}/><//>
+            <${Pop} open=${pop === "engine"} setOpen=${(v) => setPop(v ? "engine" : null)} button=${html`<${Pill} icon=${engine === "free" ? "zap" : "terminal"} label=${engine === "free" ? "Free chat" + ((s.mcp || []).length ? " · " + s.mcp.length + " tool" + (s.mcp.length > 1 ? "s" : "") : "") : "Claude Code"} tone=${engine === "free" ? "" : "claude"} active=${pop === "engine" || engine === "free"} title="Engine" onClick=${() => { setPop(pop === "engine" ? null : "engine"); if (!mcpAll) api("mcp/free").then((d) => setMcpAll(d.servers)).catch(() => setMcpAll([])); }}/>`}><${EnginePick} mcpAll=${mcpAll} mcpOn=${s.mcp || []} onMcp=${saveMcp} value=${engine} onChange=${setEng} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>
+            <i class="tsep" aria-hidden="true"></i>
+            ${engine !== "free" && html`<${Pop} open=${pop === "mode"} setOpen=${(v) => setPop(v ? "mode" : null)} button=${html`<${Pill} icon=${MODE_INFO[mode][0]} label=${MODE_INFO[mode][1]} tone=${MODE_TONE[mode]} active=${pop === "mode"} title=${"Permission mode: " + MODE_INFO[mode][1]} onClick=${() => setPop(pop === "mode" ? null : "mode")}/>`}><${ModePick} modes=${boot.modes} value=${mode} onChange=${setMode} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>`}
+            <${Pop} open=${pop === "effort"} setOpen=${(v) => setPop(v ? "effort" : null)} button=${html`<${Pill} lead=${EffMeter(effort)} label=${effort ? (effort === "xhigh" ? "XHigh" : effort[0].toUpperCase() + effort.slice(1)) : "Effort"} tone=${EFFORT_TONE[effort]} active=${pop === "effort"} title=${"Thinking effort: " + (effort || "default")} onClick=${() => setPop(pop === "effort" ? null : "effort")}/>`}><${EffortPick} value=${effort} onChange=${setEffort} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>
             <span class="grow" style="flex:1"></span>
             <${Pop} open=${pop === "ctx"} setOpen=${(v) => setPop(v ? "ctx" : null)} align="right" button=${html`<button class="ctxbtn" title="Context window" aria-label="Context window" onClick=${() => setPop(pop === "ctx" ? null : "ctx")}><${Ring} pct=${win ? ctx / win : 0}/><span>${ctx ? Math.round((ctx / win) * 100) + "%" : ""}</span></button>`}>
               <${CtxPick} used=${ctx} win=${win} prefs=${prefs} savePrefs=${savePrefs} busy=${busy} compact=${() => { setPop(null); send("/compact"); }} note=${lastCompact && `Last compact: ${num(lastCompact.pre)} → ${num(lastCompact.post)}`}/><//>
@@ -673,6 +739,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
         </div>
         <div class="foot">${u.turns ? `cache hit ${tot ? Math.round(100 * (u.cache_read || 0) / tot) : 0}% · read ${num(u.cache_read)} · written ${num(u.cache_write)} · ${u.turns} turns` + (u.cost ? ` · $${u.cost.toFixed(3)}` : "") : "Same chat, model and tools keep the prompt cache warm."}</div>
       </div>
+      ${termOn && html`<${ChatTerm} key=${id} id=${id} show=${term} hide=${() => setTerm(false)}/>`}
     </div>
     <div class=${"canvas" + (open ? " open" : "") + (split && (tab === "edit" || tab === "diff") ? " wide" : "")} style=${cw ? "--cw:" + cw + "px" : ""}>
       ${open && html`<${Grip} cls="cv-grip" value=${() => document.querySelector(".canvas").getBoundingClientRect().width} onChange=${setCw} onDone=${(v) => setPref("canvasw", String(Math.round(v)))} min=${360} max=${() => Math.max(420, innerWidth - 272 - 320)} sign=${-1} reset=${() => { setCw(0); setPref("canvasw", "0"); }}/>`}
@@ -715,8 +782,8 @@ function SignIn({ close }) {
 }
 
 // ---------- packages
-function Packages() {
-  const [tab, setTab] = useState("installed"), [list, setList] = useState([]), [q, setQ] = useState(""), [found, setFound] = useState([]), [busy, setBusy] = useState(""), [dlg, setDlg] = useState(null), [setup, setSetup] = useState(null);
+function Packages({ focus }) {
+  const [tab, setTab] = useState(focus ? "find" : "installed"), [list, setList] = useState([]), [q, setQ] = useState(focus || ""), [found, setFound] = useState([]), [busy, setBusy] = useState(""), [dlg, setDlg] = useState(null), [setup, setSetup] = useState(null);
   const load = guard(async () => setList((await api("packages")).packages));
   useEffect(() => { load(); }, []);
   useEffect(() => { if (tab === "find") { const t = setTimeout(guard(async () => setFound((await api("search?q=" + encodeURIComponent(q))).results)), 250); return () => clearTimeout(t); } }, [q, tab]);
@@ -849,11 +916,11 @@ function Vault({ embedded }) {
 }
 
 // ---------- knowledge (soul + memory notes)
-function Knowledge() {
+function Knowledge({ focus }) {
   const [notes, setNotes] = useState([]), [cur, setCur] = useState("soul"), [body, setBody] = useState(""), [dirty, setDirty] = useState(false), [nn, setNn] = useState("");
   const list = guard(async () => setNotes((await api("knowledge")).notes));
   const open = guard(async (n) => { setBody((await api("knowledge/note?name=" + n)).body); setCur(n); setDirty(false); });
-  useEffect(() => { list(); open("soul"); }, []);
+  useEffect(() => { list(); open(focus && /^[a-z0-9][a-z0-9._-]*$/.test(focus) ? focus : "soul"); }, []);
   const save = guard(async () => { const r = await put("knowledge/note", { name: cur, body }); setDirty(false); toast(r.synced === false ? "Saved locally (hub not reachable)" : "Saved"); list(); });
   const names = ["soul", ...notes.map((n) => n.name).filter((n) => n !== "soul")];
   return html`<div class="page" style="max-width:1100px"><h1>Knowledge</h1><p class="sub">Soul and notes are your assistant's memory. New chats read them once and freeze them so the prompt cache stays warm; use the refresh button in a chat to pick up changes.</p>
@@ -1284,16 +1351,26 @@ function FilePicker({ start, ext = ".json", title = "Choose a file", onPick, clo
     <div class="row" style="margin-top:14px"><span class="grow mono small" style="overflow:hidden;text-overflow:ellipsis">${sel ? full(sel) : d.path}</span><button class="btn" onClick=${close}>Cancel</button>${dirs ? html`<button class="btn acc" onClick=${() => onPick(d.path)}>Use this folder</button>` : html`<button class="btn acc" disabled=${!sel} onClick=${() => onPick(full(sel))}>Use this file</button>`}</div><//>`;
 }
 const WINDOWS = [[200000, "200K tokens"], [500000, "500K tokens"], [1000000, "1M tokens (default)"], [2000000, "2M tokens"]];
+const UPD_STEPS = [["checking", "Check"], ["waiting", "Wait until idle"], ["updating", "Update"], ["restarting", "Restart"]];
 function UpdateCard({ prefs, savePrefs }) {
-  const [u, setU] = useState(null), [busy, setBusy] = useState(false);
-  const load = () => api("update").then((r) => setU(r.update)).catch(() => {});
+  const [u, setU] = useState(null), [busy, setBusy] = useState(false), [down, setDown] = useState(false);
+  const load = () => api("update").then((r) => { if (down) location.reload(); setU(r.update); }).catch(() => { if (u && u.restarting) setDown(true); });
   useEffect(() => { load(); }, []);
-  useInterval(load, 20000);
+  const live = u && (u.restarting || ["updating", "restarting", "waiting"].includes(u.stage));
+  useInterval(load, live || down ? 1500 : 20000);
   const check = async () => { setBusy(true); try { setU((await post("update/check", {})).update); } catch (e) { toast(e.message); } finally { setBusy(false); } };
+  const act = async (what) => {
+    if (!confirm(what === "update" ? "Install the newest version and restart now? Running chats and works are cut off." : "Restart AI Hub UI now? Running chats and works are cut off.")) return;
+    try { setU((await post("update/apply", { what })).update); } catch (e) { toast(e.message); }
+  };
+  const st = u && (u.stage || (u.restarting ? "restarting" : "")), at = UPD_STEPS.findIndex((x) => x[0] === st);
   return html`<div class="card"><div class="row"><div class="grow"><b>Keep AI Hub UI up to date</b><div class="mute small">Checks for a newer aihub-ui every few hours. “Update and restart” waits until nothing is running (no chat answering, no work, no install), then updates and restarts this service; open pages reconnect.</div>
-      ${u && html`<div class="small" style="margin-top:6px">Installed ${u.installed || "?"}${u.latest ? " · newest " + u.latest : ""}${u.newer ? html` · <b>update available</b>` : ""}${u.waiting ? " · waiting: " + u.waiting : ""}${u.error ? html`<span style="color:var(--bad,#c0392b)"> · ${u.error}</span>` : ""}${u.restarting ? " · restarting…" : ""}</div>`}</div>
+      ${u && html`<div class="small" style="margin-top:6px">Installed ${u.installed || "?"}${u.latest ? " · newest " + u.latest : ""}${u.newer ? html` · <b>update available</b>` : ""}${u.waiting ? " · waiting: " + u.waiting : ""}${u.error ? html`<span style="color:var(--bad,#c0392b)"> · ${u.error}</span>` : ""}</div>`}</div>
       <select value=${prefs.auto_update || "on"} onChange=${(e) => savePrefs({ auto_update: e.target.value })}><option value="on">Update and restart</option><option value="notify">Only tell me</option><option value="off">Off</option></select>
-      <button class="btn" disabled=${busy} onClick=${check}>${busy ? "Checking…" : "Check now"}</button></div></div>`;
+      <button class="btn" disabled=${busy || live} onClick=${check}>${busy ? "Checking…" : "Check now"}</button>
+      ${u && u.newer && html`<button class="btn acc" disabled=${live} onClick=${() => act("update")}>Update now</button>`}
+      <button class="btn" disabled=${live || down} onClick=${() => act("restart")}>${Ic("refresh", 14)} Restart now</button></div>
+    ${(at >= 0 || down) && html`<div class="updprog" role="status"><ol>${UPD_STEPS.map(([k, l], i) => html`<li class=${down || i < at ? "done" : i === at ? "cur" : ""}><i></i>${l}</li>`)}</ol><div class="bar"><span class=${down ? "full" : "ind"}></span></div><div class="mute small">${down ? "Waiting for the service to come back…" : st === "waiting" ? "Waiting for running work to finish: " + (u.waiting || "") : st === "updating" ? "Installing aihub-ui " + (u.latest || "") + "…" : st === "restarting" ? "Restarting; this page reloads when it is back." : "Checking for a newer version…"}</div></div>`}</div>`;
 }
 
 function Settings({ boot, reload, prefs, savePrefs, focus }) {
@@ -1316,6 +1393,7 @@ function Settings({ boot, reload, prefs, savePrefs, focus }) {
     <div class="card"><div class="row"><div class="grow"><b>aihub policy guard in these chats</b><div class="mute small">${prefs.policy === "off" ? "Off for testing: the guard hook is skipped for chats started here. Your terminal and the global policy are untouched." : "On: tool calls in these chats are checked like in your terminal."}</div></div><${Switch} on=${prefs.policy === "on"} label="Policy guard" onChange=${(v) => savePrefs({ policy: v ? "on" : "off" })}/></div></div>
     <div class="card"><div class="row"><div class="grow"><b>Auto-compact</b><div class="mute small">Summarise older turns near the limit. Applies to chats and Claude nodes.</div></div><${Switch} on=${prefs.autocompact} label="Auto-compact" onChange=${(v) => savePrefs({ autocompact: v })}/></div>
       ${prefs.autocompact && html`<div class="row" style="margin-top:10px"><span class="small">Limit</span><input type="range" min="40" max="95" step="5" value=${prefs.compact_pct} class="grow" onChange=${(e) => savePrefs({ compact_pct: +e.target.value })}/><b>${prefs.compact_pct}%</b></div>`}</div>
+    <div class="card"><div class="row"><div class="grow"><b>Online search</b><div class="mute small">Search (<kbd>⌘K</kbd>) always answers from this machine first: chats, and a local copy of the hub's Spaces and packages. On: when the local answer is thin it asks the hub once (per query, every 2 min) and keeps the answer, and the local copy is refreshed in the background while you search. Off: the hub is never asked; <code>@hub:</code> and <code>@package:</code> show only what is already cached.</div></div><${Switch} on=${prefs.online_search !== false} label="Online search" onChange=${(v) => savePrefs({ online_search: v })}/></div></div>
     <div class="card"><div class="row"><div class="grow"><b>Model picker options</b><div class="mute small">List the <code>modelPicker.options</code> of your settings.json (chat, image and text-to-speech models) in the model menu. On by default. Off: only Opus, Sonnet and Haiku (the three tiers).</div></div><${Switch} on=${!!prefs.model_picker} label="Model picker options" onChange=${async (v) => { if (await savePrefs({ model_picker: v })) reload(); }}/></div></div>
     <div class="card"><div class="row"><div class="grow"><b>Free chat model</b><div class="mute small">The model id free chat sends when the chat's model is Default or an alias. Empty = built-in default; if your key does not have it, the first free message finds one that works and fills this in.</div></div>
       <input style="width:260px" placeholder="e.g. claude-sonnet-4-5" value=${fm} onInput=${(e) => setFm(e.target.value)} onKeyDown=${(e) => e.key === "Enter" && savePrefs({ free_model: fm.trim() })}/><button class="btn" disabled=${fm.trim() === (prefs.free_model || "")} onClick=${() => savePrefs({ free_model: fm.trim() })}>Save</button></div></div>
@@ -1343,22 +1421,120 @@ function Settings({ boot, reload, prefs, savePrefs, focus }) {
 
 // ---------- shell
 // ---------- Spotlight: centered search over pages and chats (Cmd/Ctrl+K)
-function Spotlight({ close, go, sessions, nav }) {
-  const [q, setQ] = useState(""), [hits, setHits] = useState(null), [idx, setIdx] = useState(0), box = useRef(), t = q.trim(), lc = t.toLowerCase();
+function ImportLazy(p) {
+  const [M, setM] = useState(null);
+  useEffect(() => { chatsMod().then((m) => setM(() => m.ImportDialog)); }, []);
+  return M ? html`<${M} ...${p}/>` : null;
+}
+// Plain words: chat titles match at once (client side), message hits follow from the server. `@alias:words` searches one source; an alias
+// is only suggested while it is being typed, and nothing runs until it is complete. Answers are cached (SPOT_TTL) and stale requests aborted.
+const ALIASES = [
+  { k: "hub", icon: "layers", ex: "author@name", d: "Spaces and chats shared on the hub" },
+  { k: "open", icon: "link", ex: "https://hub/#/s/author@name", d: "Import a chat from a hub link" },
+  { k: "folder", icon: "folder", ex: "my-app or ~/code/", d: "New chat working in a folder (your projects first)" },
+  { k: "workflow", icon: "flow", ex: "words", d: "Your workflows" },
+  { k: "knowledge", icon: "book", ex: "words", d: "Your knowledge notes" },
+  { k: "package", icon: "package", ex: "words", d: "Installed packages and the hub catalogue" }];
+const SPOT_TTL = 10000, spotCache = new Map();
+const spotTtl = (path) => (path.includes("deep=1") ? SPOT_TTL : 3000);      // local answers are cheap: re-read soon (the mirror grows); hub ones are kept
+const spotFresh = (path) => { const c = spotCache.get(path); return !!c && Date.now() - c.at < spotTtl(path); };
+const spotGet = (path) => {                                           // one request per path per TTL; a running one is shared (never aborted: others may wait on it)
+  if (spotFresh(path)) return spotCache.get(path).p;
+  const p = api(path).catch((e) => { spotCache.delete(path); throw e; });
+  spotCache.set(path, { at: Date.now(), p });
+  if (spotCache.size > 120) spotCache.delete(spotCache.keys().next().value);
+  return p;
+};
+const REF_RX = /^[A-Za-z0-9][\w.-]{0,63}@[A-Za-z0-9][\w.-]{0,63}$/;
+const hubRef = (t) => { t = (t || "").trim(); if (/^https?:/i.test(t)) { if (!t.includes("#/s/")) return null; try { t = decodeURIComponent(t.split("#/s/").pop().split("?")[0]); } catch (e) { return null; } } return REF_RX.test(t) ? t : null; };
+const parseSpot = (t) => {                                             // -> {alias, words} | {typing: prefix} | {words}
+  const m = /^@([a-z]*)(?:([:\s])([\s\S]*))?$/i.exec(t);
+  if (!m) return { words: t };
+  const k = m[1].toLowerCase(), hit = ALIASES.find((x) => x.k === k);
+  return hit && m[2] ? { alias: k, words: m[3].trim() } : { typing: k };
+};
+const fit = (q, ...xs) => { const w = q.toLowerCase().split(/\s+/).filter(Boolean), s = xs.join(" ").toLowerCase(); return w.every((x) => s.includes(x)); };
+function Spotlight({ close, go, sessions, nav, hub, importLink, projects = [], dirs = {}, newChat, newChatIn }) {
+  const [q, setQ] = useState(""), [idx, setIdx] = useState(0), [remote, setRemote] = useState({ key: "", rows: null }), [local, setLocal] = useState({}), [busy, setBusy] = useState(false), box = useRef(), inp = useRef();
+  const t = q.trim(), P = parseSpot(t), lc = (P.words || "").toLowerCase();
   useEffect(() => { const off = escPush(close); return off; }, []);
-  useEffect(() => { if (t.length < 2) { setHits(null); return; } let live = true; const h = setTimeout(() => api("sessions/search?q=" + encodeURIComponent(t)).then((d) => live && setHits(d.results)).catch(() => live && setHits([])), 180); return () => { live = false; clearTimeout(h); }; }, [t]);
-  const pages = nav.filter(([k, , l]) => !lc || (k + " " + l).toLowerCase().includes(lc)).map(([k, ic, l]) => ({ key: "p" + k, icon: ic, title: l, sub: "Page", to: k }));
-  const chats = (t.length >= 2 ? hits || [] : sessions.slice(0, 8)).map((c) => ({ key: "c" + c.id, icon: "chat", title: c.title, sub: c.snippet || (c.folder ? "Project " + c.folder : "Chat"), snip: !!c.snippet, to: "chat/" + c.id }));
-  const rows = [...(t.length >= 2 ? chats : pages.slice(0, t ? 6 : 0)), ...(t.length >= 2 ? pages.slice(0, 4) : chats)];
-  useEffect(() => setIdx(0), [t, hits]);
+  const need = P.alias === "workflow" ? "works" : P.alias === "knowledge" ? "knowledge" : P.alias === "package" ? "packages" : "";
+  useEffect(() => { if (need && !local[need]) spotGet(need).then((d) => setLocal((l) => ({ ...l, [need]: d }))).catch(() => setLocal((l) => ({ ...l, [need]: {} }))); }, [need]);
+  // remote half: message search (plain, 2+ letters), hub spaces, hub packages. Debounced; a newer query aborts the older one.
+  const kind = P.alias || (P.typing !== undefined ? "@" : "");
+  const rpath = P.typing !== undefined ? "" : P.alias === "folder" ? (P.words ? "spot/folders?q=" + encodeURIComponent(P.words) : "") : P.alias === "hub" ? "spot/hub?q=" + encodeURIComponent(P.words) : P.alias === "package" ? "spot/pkg?q=" + encodeURIComponent(P.words)
+    : !P.alias && t.length >= 2 ? "sessions/search?q=" + encodeURIComponent(t) : "";
+  useEffect(() => {
+    if (!rpath) { setBusy(false); return; }
+    let live = true, h2;                                               // a newer query makes this answer stale: it is dropped
+    const got = (path, d) => { if (!live) return; setRemote({ key: rpath, kind, rows: d.results || d.items || [], offline: !!d.offline, indexing: !!d.indexing });
+      if (d.more) { h2 = setTimeout(() => spotGet(path + "&deep=1").then((x) => got(path + "&deep=1", x)).catch(() => live && setBusy(false)), 120); } else setBusy(false); };   // the hub only when local is thin
+    const run = () => { setBusy(true); spotGet(rpath).then((d) => got(rpath, d)).catch((e) => { if (live) { setRemote({ key: rpath, kind, rows: [], err: e.message }); setBusy(false); } }); };
+    if (spotFresh(rpath)) { run(); return () => { live = false; clearTimeout(h2); }; }
+    const h = setTimeout(run, P.alias ? 60 : 80);                     // everything below is answered on this machine: a short debounce is enough
+    return () => { live = false; clearTimeout(h); clearTimeout(h2); };
+  }, [rpath]);
+  const rem = !rpath ? null : remote.key === rpath || remote.kind === kind ? remote.rows : null;     // the last answer of the same kind stays (dimmed) until the new one comes
+  const fill = (k) => { setQ("@" + k + ":"); if (inp.current) inp.current.focus(); };
+  let rows = [], hint = "";
+  const projRows = (w, n, group) => projects.filter((f) => fit(w, f, dirs[f] || "")).slice(0, n).map((f) => ({ key: "f" + f, group, icon: "folder", title: w ? hilite(f, w.split(/\s+/)[0]) : f,
+    sub: dirs[f] ? dirs[f].replace(/^\/(Users|home)\/[^/]+/, "~") : "Project", tag: "new chat", run: () => newChat(f) }));
+  if (P.typing !== undefined) {
+    rows = ALIASES.filter((a) => a.k.startsWith(P.typing)).map((a) => ({ key: "a" + a.k, group: "Search in", icon: a.icon, title: html`<span class="sp-alias">@${a.k}:</span>`, sub: a.d + " · e.g. @" + a.k + ":" + a.ex, keep: true, run: () => fill(a.k) }));
+    hint = "Tab or ↵ picks the alias";
+  } else if (P.alias === "open") {
+    const ref = hubRef(P.words);
+    rows = ref ? [{ key: "imp", group: "Hub link", icon: "import", title: "Import chat " + ref, sub: "A new chat that knows the shared conversation", run: () => importLink(ref) },
+      ...(hub ? [{ key: "web", group: "Hub link", icon: "link", title: "Open " + ref + " on the hub", sub: hub.replace(/^https?:\/\//, ""), run: () => open(hub + "/#/s/" + ref, "_blank", "noopener") }] : [])] : [];
+    hint = ref ? "↵ imports" : "Paste a hub link (…/#/s/author@name) or author@name";
+  } else if (P.alias === "hub") {
+    const ref = hubRef(P.words);
+    rows = [...(ref ? [{ key: "imp", group: "Hub", icon: "import", title: "Import chat " + ref, sub: "Exact reference", run: () => importLink(ref) }] : []),
+      ...(rem || []).filter((x) => x.ref !== ref || !x.chat).map((x) => ({ key: "h" + x.ref, group: P.words ? "Spaces on the hub" : "Chats shared on the hub", icon: x.chat ? "chat" : "layers", title: x.title || x.ref, sub: x.ref + (x.description ? " · " + x.description : ""), tag: x.chat ? "import" : x.kind,
+        run: () => x.chat ? importLink(x.ref) : hub && open(hub + "/#/s/" + x.ref, "_blank", "noopener") }))];
+    hint = remote.err && rem ? remote.err : remote.offline ? "Online search is off (Settings): cached spaces only" : busy && rem ? "Asking the hub…" : "Shared chats import; other spaces open on the hub";
+  } else if (P.alias === "folder") {
+    const linked = new Set(Object.values(dirs));                         // folders that already are a project are listed once, as the project
+    rows = [...projRows(lc, 12, "Your projects"),
+      ...(rem || []).filter((d) => !linked.has(d.path)).map((d) => ({ key: "d" + d.path, group: "Folders", icon: "folder", title: lc ? hilite(d.name, lc.split(/\s+/)[0]) : d.name, sub: d.short, tag: d.proj ? "project" : "", run: () => newChatIn(d.path) }))];
+    hint = remote.indexing ? "Indexing your folders… (results grow)" : "↵ starts a new chat working in that folder";
+  } else if (P.alias === "workflow") {
+    rows = ((local.works || {}).works || []).filter((w) => fit(lc, w.title, w.description || "")).slice(0, 30).map((w) => ({ key: "w" + w.id, group: "Workflows", icon: "flow", title: lc ? hilite(w.title, lc.split(/\s+/)[0]) : w.title, sub: w.description || (w.enabled ? "Enabled" : "Workflow"), run: () => go("works/" + w.id) }));
+  } else if (P.alias === "knowledge") {
+    rows = ((local.knowledge || {}).notes || []).filter((n) => fit(lc, n.name)).slice(0, 30).map((n) => ({ key: "k" + n.name, group: "Knowledge", icon: n.name === "soul" ? "sparkles" : "note", title: n.name, sub: Math.max(1, Math.round(n.size / 1024)) + " KB", run: () => go("knowledge/" + n.name) }));
+  } else if (P.alias === "package") {
+    const mine = ((local.packages || {}).packages || []).filter((p) => fit(lc, p.name, p.description || "")), have = new Set(mine.map((p) => p.name));
+    rows = [...mine.slice(0, 12).map((p) => ({ key: "i" + p.name, group: "Installed", icon: "package", title: p.name, sub: p.description || p.version || "", tag: p.type, run: () => go("packages") })),
+      ...(rem || []).filter((p) => !have.has(p.name)).slice(0, 20).map((p) => ({ key: "f" + p.name, group: "On the hub", icon: "download", title: p.name, sub: p.description || p.latest_version || "", tag: p.type, run: () => go("packages/find/" + encodeURIComponent(p.name)) }))];
+    hint = remote.offline ? "Online search is off (Settings): local copy only" : "Answered from the local catalogue";
+  } else {
+    const pages = nav.filter(([k, , l]) => !lc || (k + " " + l).toLowerCase().includes(lc)).map(([k, ic, l]) => ({ key: "p" + k, group: "Pages", icon: ic, title: l, sub: "Page", run: () => go(k) }));
+    const titles = t ? sessions.filter((c) => fit(lc, c.title)) : sessions.slice(0, 8), seen = new Set();
+    const chat = (c, snip) => ({ key: "c" + c.id, group: t ? "Chats" : "Recent chats", icon: "chat", title: t ? hilite(c.title, t) : c.title, sub: snip ? hilite(c.snippet, t) : c.folder ? "Project " + c.folder : "Chat", run: () => go("chat/" + c.id) });
+    const chats = [...(rem || []).map((c) => (seen.add(c.id), chat(c, !!c.snippet))), ...titles.filter((c) => !seen.has(c.id)).slice(0, 30).map((c) => chat(c, false))];
+    const viaLink = hubRef(t) ? [{ key: "lnk", group: "Hub link", icon: "import", title: html`Import with <span class="sp-alias">@open:</span>`, sub: t, keep: true, run: () => setQ("@open:" + t) }] : [];
+    rows = t ? [...viaLink, ...chats, ...projRows(lc, 4, "Projects"), ...pages.slice(0, 4)] : [...chats, ...pages];
+    hint = t.length >= 2 ? "Titles and what was said" : "Type @ to search folders, the hub, workflows, knowledge or packages";
+  }
+  const loading = busy || (need && !local[need]);
+  useEffect(() => setIdx(0), [t]);
+  useEffect(() => { if (idx >= rows.length && rows.length) setIdx(rows.length - 1); }, [rows.length]);
   useEffect(() => { const e = box.current && box.current.querySelector(".sp-row.hi"); if (e && e.scrollIntoView) e.scrollIntoView({ block: "nearest" }); }, [idx]);
-  const key = (e) => { if (e.key === "ArrowDown") { e.preventDefault(); setIdx((i) => Math.min(rows.length - 1, i + 1)); } else if (e.key === "ArrowUp") { e.preventDefault(); setIdx((i) => Math.max(0, i - 1)); } else if (e.key === "Enter" && rows[idx]) { e.preventDefault(); go(rows[idx].to); close(); } };
-  const head = (r, i) => (i === 0 || (rows[i - 1].to.startsWith("chat/") !== r.to.startsWith("chat/"))) && html`<div class="sp-h">${r.to.startsWith("chat/") ? (t.length >= 2 ? "Chats" : "Recent chats") : "Pages"}</div>`;
+  const pick = (r) => { if (!r) return; r.run(); if (!r.keep) close(); };
+  const key = (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); setIdx((i) => Math.min(rows.length - 1, i + 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setIdx((i) => Math.max(0, i - 1)); }
+    else if (e.key === "Tab" && P.typing !== undefined && rows[idx]) { e.preventDefault(); pick(rows[idx]); }
+    else if (e.key === "Backspace" && P.alias && !P.words && /^@\w+:$/.test(q)) { e.preventDefault(); setQ("@"); }       // one key drops the alias
+    else if (e.key === "Enter") { e.preventDefault(); pick(rows[idx]); }
+  };
+  const empty = loading ? "Searching…" : P.alias === "open" ? "Paste a hub link or author@name after @open:" : P.typing !== undefined ? "No such alias. Try @hub: @open: @workflow: @knowledge: @package:" : "Nothing matches.";
   return html`<div class="spot" onPointerDown=${(e) => e.target === e.currentTarget && close()}><div class="spot-box" role="dialog" aria-modal="true" aria-label="Search">
-    <div class="spot-in">${Ic("search", 20)}<input autofocus placeholder="Search chats and pages" aria-label="Search chats and pages" value=${q} onInput=${(e) => setQ(e.target.value)} onKeyDown=${key}/><kbd>esc</kbd></div>
-    <div class="spot-list" ref=${box}>${rows.map((r, i) => html`${head(r, i)}<button class=${"sp-row" + (i === idx ? " hi" : "")} key=${r.key} onMouseMove=${() => setIdx(i)} onClick=${() => { go(r.to); close(); }}><span class="oi">${Ic(r.icon, 16)}</span><span class="grow"><b>${t.length >= 2 ? hilite(r.title, t) : r.title}</b><span class=${"d"}>${r.snip && t.length >= 2 ? hilite(r.sub, t) : r.sub}</span></span><span class="sp-go">${Ic("right", 14)}</span></button>`)}
-      ${!rows.length && html`<p class="mute" style="padding:22px;text-align:center">${t.length >= 2 && !hits ? "Searching…" : "Nothing matches."}</p>`}</div>
-    <div class="spot-foot"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>↵</kbd> open</span><span class="grow"></span><span>${t.length >= 2 ? "Titles and what was said" : "Type 2+ letters to search messages"}</span></div></div></div>`;
+    <div class="spot-in">${Ic("search", 20)}${P.alias && html`<span class="sp-pill">@${P.alias}</span>`}<input ref=${inp} autofocus placeholder="Search chats and pages, or type @" aria-label="Search" value=${P.alias ? q.replace(/^@\w+[:\s]/, "") : q} onInput=${(e) => setQ(P.alias ? "@" + P.alias + ":" + e.target.value : e.target.value)} onKeyDown=${key}/><kbd>esc</kbd></div>
+    <div class="spot-bar" style=${loading ? "" : "visibility:hidden"}></div>
+    <div class="spot-list" ref=${box} style=${loading && rows.length ? "opacity:.75;transition:opacity .2s" : "transition:opacity .2s"}>${rows.map((r, i) => html`${(i === 0 || rows[i - 1].group !== r.group) && html`<div class="sp-h">${r.group}</div>`}<button class=${"sp-row" + (i === idx ? " hi" : "")} key=${r.key} onMouseMove=${() => i !== idx && setIdx(i)} onClick=${() => pick(r)}><span class="oi">${Ic(r.icon, 16)}</span><span class="grow"><b>${r.title}</b><span class="d">${r.sub}</span></span>${r.tag && html`<span class="tg">${r.tag}</span>`}<span class="sp-go">${Ic("right", 14)}</span></button>`)}
+      ${!rows.length && html`<p class="mute" style="padding:22px;text-align:center">${empty}</p>`}</div>
+    <div class="spot-foot"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>↵</kbd> open</span><span class="grow"></span><span>${hint}</span></div></div></div>`;
 }
 const SORTS = [["recent", "Recent activity"], ["created", "Newest first"], ["oldest", "Oldest first"], ["name", "Name A–Z"]];
 const sortChats = (list, how) => { const l = [...list]; if (how === "created") l.sort((a, b) => (b.created || 0) - (a.created || 0)); else if (how === "oldest") l.sort((a, b) => (a.created || 0) - (b.created || 0)); else if (how === "name") l.sort((a, b) => String(a.title).localeCompare(String(b.title), undefined, { sensitivity: "base", numeric: true })); else l.sort((a, b) => (b.updated || 0) - (a.updated || 0)); return l; };
@@ -1376,6 +1552,7 @@ function App() {
   const [brand, setBrand] = useState({});
   useEffect(() => { api("brand").then((b) => { setBrand(b || {}); applyBrand(b); }).catch(() => {}); }, []);
   const hubName = brand.name || "AI Hub", Logo = (n) => Ic("logo", n);
+  useEffect(() => { const k = route.split("/")[0] || "chat", l = (NAV.find((n) => n[0] === k) || [])[2] || k.charAt(0).toUpperCase() + k.slice(1); document.title = hubName + " \u00b7 " + l; }, [route, hubName]);       // tab title = hub name + open page
   const reloadBoot = () => api("boot").then(setBoot).catch((e) => setErr(e.message));
   const [running, setRunning] = useState({});
   const reloadSess = () => api("sessions").then((d) => { setSess(d); setRunning((r) => { const idle = Object.keys(r).filter((k) => r[k] && d.sessions.some((x) => x.id === k && !x.busy)); if (!idle.length) return r; const n = { ...r }; idle.forEach((k) => delete n[k]); return n; }); }).catch(() => {});                                     // chats this page is streaming right now (shown before the next sessions poll)
@@ -1387,6 +1564,10 @@ function App() {
   const go = (r) => { setDrawer(false); location.hash = "#/" + r; };
   useEffect(() => { setDrawer(false); }, [route]);
   useEffect(() => { if (!drawer) return; return escPush(() => setDrawer(false)); }, [drawer]);
+  const [imp, setImp] = useState(false), [impExtra, setImpExtra] = useState("");
+  useEffect(() => { if (imp) OUI.languagePrompt().then(setImpExtra).catch(() => {}); }, [imp]);
+  const importLink = guard(async (ref) => { toast("Importing " + ref + "…"); const extra = await OUI.languagePrompt().catch(() => ""); const r = await post("sessions/import", { link: ref, extra }); toast("Imported " + r.messages + " messages" + (r.files ? " and " + r.files + " files" : "")); await reloadSess(); go("chat/" + r.session.id); });
+  const newChatIn = guard(async (cwd) => { const extra = await OUI.languagePrompt(); const r = await post("sessions", { cwd, extra }); await reloadSess(); go("chat/" + r.session.id); });     // a folder on disk: it becomes a project
   const newChat = guard(async (folder = "") => { const extra = await OUI.languagePrompt(); const r = await post("sessions", { folder: typeof folder === "string" ? folder : "", extra }); await reloadSess(); go("chat/" + r.session.id); });
   if (err) return html`<div class="empty"><div>${Ic("alert", 28)}<h1>AI Hub UI</h1><p>${err}</p><p class="mute">Open the address from <code>~/.aihub/ui/url.txt</code>.</p></div></div>`;
   if (!boot) return html`<div class="empty"><div>${Ic("logo", 30)}<div>Starting…</div></div></div>`;
@@ -1411,20 +1592,19 @@ function App() {
   const c = boot.context;
   return html`<div class="shell" style=${"--sw:" + sw + "px"}>${drawer && html`<div class="sdback" onClick=${() => setDrawer(false)}></div>`}<aside class=${"side" + (drawer ? " open" : "")}><${Grip} cls="sd-grip" value=${() => sw} onChange=${setSw} onDone=${(v) => setPref("sidew", String(Math.round(v)))} min=${200} max=${460} sign=${1} reset=${() => { setSw(272); setPref("sidew", "272"); }}/>
       <div class="brand"><span class="logo">${Logo(16)}</span>${hubName}</div>
-      <button class="newchat" onClick=${() => newChat()}>${Ic("plus", 16)} New chat</button>
-      <div class="nav"><button class="srow" onClick=${() => { setDrawer(false); setSpotOpen(true); }} aria-label="Search chats and pages">${Ic("search", 17)}<span class="grow">Search</span><kbd>${/Mac|iP/.test(navigator.platform) ? "⌘K" : "Ctrl K"}</kbd></button></div>
+      <div class="nav"><button class="srow" onClick=${() => { setDrawer(false); newChat(); }}>${Ic("plus", 17)}<span class="grow">New chat</span></button><button class="srow" onClick=${() => { setDrawer(false); setSpotOpen(true); }} aria-label="Search chats and pages">${Ic("search", 17)}<span class="grow">Search</span><kbd>${/Mac|iP/.test(navigator.platform) ? "⌘K" : "Ctrl K"}</kbd></button></div>
       <div class="nav" onClick=${() => setDrawer(false)}>${NAV.map(([k, ic, l]) => html`<a class=${page === k ? "on" : ""} href=${"#/" + k}>${Ic(ic, 17)}${l}</a>`)}</div>
       <div class="hist">${groups.map(([f, items]) => !!(f || items.length) && html`<h6 class="gh"><button class="gtoggle" aria-expanded=${!folded.includes(f)} title=${folded.includes(f) ? "Expand" : "Collapse"} onClick=${() => fold(f)}><span class=${"chev" + (folded.includes(f) ? " shut" : "")}>${Ic("down", 12)}</span><span class="gname" title=${(sess.folder_dirs || {})[f] ? "Working folder: " + sess.folder_dirs[f] : ""}>${f || "Chats"}</span>${(sess.folder_dirs || {})[f] ? Ic("folder", 12) : ""}<span class="cnt">${items.length}</span></button>
-          <span class="hbtns">${!f && html`<${Pop} open=${sortPop} setOpen=${setSortPop} up=${false} align="right" width=${200} button=${html`<button class="ibtn" style="width:28px;height:28px" title=${"Sort: " + (SORTS.find((x) => x[0] === sortBy) || SORTS[0])[1]} aria-label="Sort chats" onClick=${() => setSortPop(!sortPop)}>${Ic("filter", 16)}</button>`}><h5>Sort by</h5>${SORTS.map(([k, l]) => html`<button class=${"opt" + (k === sortBy ? " on" : "")} style="padding:7px 10px" onClick=${() => chooseSort(k)}><span class="grow"><b style="font-weight:500">${l}</b></span><span class="ck">${Ic("check", 15)}</span></button>`)}<//>`}
+          <span class="hbtns">${!f && html`<button class="ibtn gnew" style="width:28px;height:28px" title="New chat" aria-label="New chat" onClick=${() => { setDrawer(false); newChat(); }}>${Ic("plus", 17)}</button><${Pop} open=${sortPop} setOpen=${setSortPop} up=${false} align="right" button=${html`<button class="ibtn" style="width:28px;height:28px" title=${"Sort: " + (SORTS.find((x) => x[0] === sortBy) || SORTS[0])[1]} aria-label="Sort chats" onClick=${() => setSortPop(!sortPop)}>${Ic("filter", 16)}</button>`}><h5>Sort by</h5>${SORTS.map(([k, l]) => html`<button class=${"opt" + (k === sortBy ? " on" : "")} onClick=${() => chooseSort(k)}><span class="grow"><b>${l}</b></span><span class="ck">${Ic("check", 15)}</span></button>`)}<//>`}
           ${f && html`<button class="ibtn" style="width:28px;height:28px" title="New chat in this project" aria-label=${"New chat in " + f} onClick=${() => newChat(f)}>${Ic("plus", 17)}</button><button class="ibtn" style="width:28px;height:28px" title="Delete project" aria-label=${"Delete project " + f} onClick=${() => delProject(f)}>${Ic("trash", 17)}</button>`}</span></h6>
         ${!folded.includes(f) && items.map((s) => html`<div class=${"item" + (arg === s.id ? " on" : "")}><button class="rowmain" onClick=${() => go("chat/" + s.id)} aria-current=${arg === s.id ? "page" : undefined}>${s.busy || running[s.id] ? html`<span class="runDot" role="img" title="Answering…" aria-label="Answering"></span>` : Ic("chat", 15)}<span class="t">${s.title}</span></button>
-          <button class="x" title="Rename" aria-label=${"Rename " + s.title} onClick=${() => rename(s)}>${Ic("edit", 18)}</button><button class="x" title="Move to project" aria-label=${"Move " + s.title + " to a project"} onClick=${() => move(s)}>${Ic("folder", 18)}</button><button class="x" title="Delete" aria-label=${"Delete " + s.title} onClick=${() => delChat(s)}>${Ic("trash", 18)}</button></div>`)}`)}
+          <span class="acts"><button class="x" title="Rename" aria-label=${"Rename " + s.title} onClick=${() => rename(s)}>${Ic("edit", 18)}</button><button class="x" title="Move to project" aria-label=${"Move " + s.title + " to a project"} onClick=${() => move(s)}>${Ic("folder", 18)}</button><button class="x" title="Delete" aria-label=${"Delete " + s.title} onClick=${() => delChat(s)}>${Ic("trash", 18)}</button></span></div>`)}`)}
         <h6><span></span><button class="linkbtn" onClick=${newFolder}>${Ic("folder", 14)} New project</button></h6></div>
       <div class="acct item" role="button" tabindex="0" aria-label="Account and settings" onClick=${() => go(c.signed_in ? "settings" : "settings/login")} onKeyDown=${(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(c.signed_in ? "settings" : "settings/login"); } }}><div class="av">${(c.username || "?")[0].toUpperCase()}</div><div class="grow"><b>${c.signed_in ? c.username : "Sign in"}</b><div class="mute small">${c.hub_configured ? c.hub.replace(/^https?:\/\//, "") : "local only"}</div></div>${Ic("sliders", 16)}</div>
-    </aside>${spotOpen && html`<${Spotlight} close=${() => setSpotOpen(false)} go=${go} sessions=${sortChats(sess.sessions, "recent")} nav=${NAV}/>`}
-    <main class="main">${!(page === "chat" && arg) && html`<button class="ibtn burger fab" title="Chats and pages" aria-label="Chats and pages" onClick=${() => setDrawer(true)}>${Ic("menu", 18)}</button>`}<${AlertBar} alerts=${alerts}/>${page === "chat" && arg ? html`<${Chat} key=${arg} id=${arg} onBusy=${markBusy} onMenu=${() => setDrawer(true)} boot=${boot} refresh=${reloadSess} newChat=${() => newChat()} prefs=${prefs} savePrefs=${savePrefs} slash=${slash}/>`
-      : page === "packages" ? html`<${Packages}/>` : page === "services" ? html`<${Services}/>` : page === "mcp" ? html`<${Mcp}/>`
-      : page === "works" ? html`<${Works} boot=${boot} openId=${arg}/>` : page === "knowledge" ? html`<${Knowledge}/>` : page === "usage" ? html`<${UsagePage} api=${api} prefs=${prefs} savePrefs=${savePrefs}/>` : page === "settings" || page === "vault" ? html`<${Settings} boot=${boot} reload=${reloadBoot} prefs=${prefs} savePrefs=${savePrefs} focus=${arg}/>`
+    </aside>${imp && html`<${ImportLazy} get=${api} post=${post} close=${() => setImp(false)} extra=${impExtra} done=${async (n) => { setImp(false); await reloadSess(); go("chat/" + n.id); }}/>`}${spotOpen && html`<${Spotlight} close=${() => setSpotOpen(false)} go=${go} sessions=${sortChats(sess.sessions, "recent")} nav=${NAV} hub=${boot.context.hub_configured ? boot.context.hub : ""} importLink=${importLink} projects=${sess.folders} dirs=${sess.folder_dirs || {}} newChat=${newChat} newChatIn=${newChatIn}/>`}
+    <main class="main">${!(page === "chat" && arg) && html`<button class="ibtn burger fab" title="Chats and pages" aria-label="Chats and pages" onClick=${() => setDrawer(true)}>${Ic("menu", 18)}</button>`}<${AlertBar} alerts=${alerts}/>${page === "chat" && arg ? html`<${Chat} key=${arg} id=${arg} onBusy=${markBusy} onImport=${() => setImp(true)} onMenu=${() => setDrawer(true)} boot=${boot} refresh=${reloadSess} newChat=${() => newChat()} prefs=${prefs} savePrefs=${savePrefs} slash=${slash}/>`
+      : page === "packages" ? html`<${Packages} key=${route} focus=${route.startsWith("packages/find/") ? decodeURIComponent(route.slice(14)) : ""}/>` : page === "services" ? html`<${Services}/>` : page === "mcp" ? html`<${Mcp}/>`
+      : page === "works" ? html`<${Works} boot=${boot} openId=${arg}/>` : page === "knowledge" ? html`<${Knowledge} key=${route} focus=${arg}/>` : page === "usage" ? html`<${UsagePage} api=${api} prefs=${prefs} savePrefs=${savePrefs}/>` : page === "settings" || page === "vault" ? html`<${Settings} boot=${boot} reload=${reloadBoot} prefs=${prefs} savePrefs=${savePrefs} focus=${arg}/>`
       : html`<div class="hello"><div><span class="herologo">${Logo(44)}</span><h1>${hubName}</h1><p>Chat with Claude Code, manage packages, services, MCP servers and logins.</p><button class="btn acc" onClick=${() => newChat()}>${Ic("plus", 14)} New chat</button></div></div>`}</main>
     ${html`<div class="toast-live" role="status" aria-live="polite">${msg && html`<div class="toast">${msg}</div>`}</div>`}<${AskHost}/></div>`;
 }

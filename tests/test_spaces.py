@@ -155,6 +155,17 @@ if __name__ == "__main__":
     unittest.main()
 
 
+    def test_since_lists_changes_oldest_first_and_a_write_is_seen_at_once(self):
+        for n in ("a1", "a2"):
+            self.assertEqual(self.pub(b"# hi", n + ".md").status_code, 200)
+        t0 = self.c.get(API + "/spaces", params={"since": 0}, headers=self.h).json()["items"]
+        self.assertEqual([x["ref"] for x in t0[-2:]], ["root@a1", "root@a2"])            # oldest change first
+        cur = t0[-1]["updated"]
+        self.assertEqual([x["ref"] for x in self.c.get(API + "/spaces", params={"since": cur}, headers=self.h).json()["items"]], ["root@a2"])
+        self.assertEqual(self.c.patch(API + "/spaces/root@a1", json={"title": "New"}, headers=self.h).status_code, 200)
+        got = self.c.get(API + "/spaces", params={"since": cur}, headers=self.h).json()["items"]   # same key, cached: the write dropped it
+        self.assertEqual([x["ref"] for x in got], ["root@a2", "root@a1"])
+
 class UpgradeFromBeforeSpaces(unittest.TestCase):
     """A database made before Spaces existed (schema without the spaces tables) opens with the new code, keeps its rows and gains the tables."""
 

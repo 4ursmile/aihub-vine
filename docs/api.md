@@ -75,6 +75,7 @@ Published with `aihub space publish` or the Spaces page. Visibility like package
 | `POST /spaces?name=&filename=&kind=&title=&description=&tags=&visibility=&view=&transition=&autoplay=&loop=` | body = the file (raw); creates or replaces the caller's space. `publish` permission |
 | `PUT /spaces/{ref}/content` | new content for a space you may edit |
 | `GET /spaces?q=&kind=&sort=top\|new\|name&mine=&owner=&limit=&offset=` | visible spaces; `GET /spaces/overview` = carousel, top, recent, counts per kind |
+| `GET /spaces?since=UNIX_TIME&limit=` | visible spaces changed at or after `since`, oldest change first (cursor: pass the last `updated` next; `total` = rows returned). Cached 5 s per viewer, dropped by any space write |
 | `GET /spaces/{ref}` / `PATCH` / `DELETE` | metadata (+ `level`, `can_edit`, `can_manage`); PATCH title, description, tags, view/transition/autoplay/loop (edit), visibility (owner/admin) |
 | `GET\|PUT /spaces/{ref}/access`, `DELETE /spaces/{ref}/access/{user\|group}/{name}` | sharing, `access` = view \| edit; PUT takes `{type, name, access}` or `{items: [{type, name}, ...], access}` (up to 500, all or none) |
 | `GET /spaces/{ref}/data` | slides deck JSON / sheet JSON / doc HTML (ETag per revision) |

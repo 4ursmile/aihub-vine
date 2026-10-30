@@ -131,7 +131,7 @@ aihub space publish new.pptx alice@q3-review                  # new version of a
 aihub space share alice@q3-review --group data-team [--edit]  # private spaces: view or edit, like a package
 aihub space set alice@q3-review --transition fade --autoplay 8 --loop --view full
 aihub space url alice@q3-review --view full                   # link that opens full screen (--bare: no hub header)
-aihub space list [--mine] [--kind slides] | top | search WORDS | info REF | get REF -o file | rm REF -y
+aihub space list [--mine] [--kind slides] [--since UNIX_TIME] | top | search WORDS | info REF | get REF -o file | rm REF -y   # --since: changed at/after, oldest first
 ```
 
 Accepted: `.pptx`, `.html` deck (`<section class="slide">` parts, optional `data-transition`, `<aside class="notes">`, `<meta name="aihub-slide-size" content="1280x720">`),

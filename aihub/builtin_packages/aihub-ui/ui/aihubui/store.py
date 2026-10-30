@@ -12,6 +12,7 @@ from collections import deque
 from itertools import islice
 
 from .aihub import HOME
+from . import searchidx
 from .secretbox import write_private
 
 _lock = threading.RLock()
@@ -258,6 +259,7 @@ def delete_session(sid):
         _save_index(d)
     _counts.pop(sid, None)
     _scache.pop(sid, None)
+    searchidx.touch(sid, rewrite=True)
     for p in [os.path.join(ui_dir("history"), sid + ".jsonl")] + [_side_path(sid, k) for k in SIDE]:
         try:
             os.remove(p)
@@ -290,6 +292,7 @@ def append(sid, ev):
         f.write(json.dumps(ev, ensure_ascii=False) + "\n")
         if sid in _counts:
             _counts[sid] += 1
+    searchidx.touch(sid)
 
 
 def history(sid, upto=None):
@@ -361,6 +364,7 @@ def write_rows(sid, rows):
     with _lock:
         write_private(p, ("\n".join(rows) + ("\n" if rows else "")).encode("utf-8"))
         _counts[sid] = len(rows)
+    searchidx.touch(sid, rewrite=True)
 
 
 def parse_rows(rows):
@@ -391,7 +395,8 @@ def delete_event(sid, index):
         del rows[index]
         write_private(p, ("\n".join(rows) + ("\n" if rows else "")).encode("utf-8"))
         _counts[sid] = len(rows)
-        return len(rows)
+    searchidx.touch(sid, rewrite=True)
+    return len(rows)
 
 
 # ---- files of a chat's working folder
@@ -624,29 +629,61 @@ def _texts(sid):
     return out
 
 
-def search(q, limit=40):
-    """Chats whose title or text contains Q -> Hits (a list; `.partial` when the 1.5 s budget ended early)."""
-    q = str(q or "").strip().lower()
-    out = Hits()
-    if len(q) < 2:
-        return out
+SCAN_SECONDS, THIN = 0.25, 5       # the substring tier: a short look at the newest chats, only when fewer than THIN hits
+
+
+def _scan(q, rows, out, have, limit, budget, only=None):
+    """Substring search through history files (newest chats first), for at most BUDGET seconds. ONLY = the chat ids to look at."""
     t0 = time.time()
-    for s in sessions()["sessions"]:
-        if time.time() - t0 > SEARCH_SECONDS:
+    for s in rows:
+        if len(out) >= limit:
+            return
+        if s["id"] in have or (only is not None and s["id"] not in only):
+            continue
+        if time.time() - t0 > budget:
             out.partial = True
-            break
-        hit, snippet = q in s.get("title", "").lower(), ""
+            return
         for txt in _texts(s["id"]):
             i = txt.lower().find(q)
             if i >= 0:
                 a = max(0, i - 40)
-                snippet = (("…" if a else "") + " ".join(txt[a:i + len(q) + 80].split()))[:160]
-                hit = True
+                have.add(s["id"])
+                out.append({"id": s["id"], "title": s.get("title", ""), "folder": s.get("folder", ""), "updated": s.get("updated", 0),
+                            "snippet": (("…" if a else "") + " ".join(txt[a:i + len(q) + 80].split()))[:160]})
                 break
-        if hit:
-            out.append({"id": s["id"], "title": s.get("title", ""), "folder": s.get("folder", ""), "updated": s.get("updated", 0), "snippet": snippet})
-            if len(out) >= limit:
-                break
+
+
+def search(q, limit=40):
+    """Chats matching Q -> Hits, in tiers: (1) every word in the title (memory), (2) the full-text index (`searchidx`, BM25, words
+    as prefixes), (3) a substring look through the newest chats when the first two left room, and through chats the warm pass has
+    not indexed yet. Without FTS5 the old full scan (1.5 s budget) runs. `.partial` = a budget ran out."""
+    q = str(q or "").strip().lower()
+    out = Hits()
+    if len(q) < 2:
+        return out
+    rows = sessions()["sessions"]
+    by, have, words = {s["id"]: s for s in rows}, set(), q.split()
+    for s in rows:
+        if len(out) >= limit:
+            return out
+        t = s.get("title", "").lower()
+        if all(w in t for w in words):
+            have.add(s["id"])
+            out.append({"id": s["id"], "title": s.get("title", ""), "folder": s.get("folder", ""), "updated": s.get("updated", 0), "snippet": ""})
+    if not searchidx.OK or searchidx._conn() is None:
+        _scan(q, rows, out, have, limit, SEARCH_SECONDS)
+        return out
+    for sid, snip in searchidx.chats(q, limit):
+        s = by.get(sid)
+        if s and sid not in have and len(out) < limit:
+            have.add(sid)
+            out.append({"id": sid, "title": s.get("title", ""), "folder": s.get("folder", ""), "updated": s.get("updated", 0), "snippet": snip})
+    if not searchidx.ready():                                            # still warming up: look at the chats it has not reached
+        left = set(by) - searchidx.indexed()
+        if left:
+            _scan(q, rows, out, have, limit, SEARCH_SECONDS, only=left)
+    if len(out) < THIN:                                                  # mid-word matches, only when the index found little
+        _scan(q, rows, out, have, limit, SCAN_SECONDS)
     return out
 
 
@@ -791,7 +828,7 @@ def save_ui_mcp(d):
 
 
 # ---- preferences (not secret): policy guard for UI chats, auto-compact
-PREF_DEFAULTS = {"policy": "off", "autocompact": True, "compact_pct": 80, "claude_settings": "", "window": 1_000_000, "free_model": "", "model_picker": True, "alerts": [], "auto_update": "on"}
+PREF_DEFAULTS = {"policy": "off", "autocompact": True, "compact_pct": 80, "claude_settings": "", "window": 1_000_000, "free_model": "", "model_picker": True, "online_search": True, "alerts": [], "auto_update": "on"}
 ALERT_PERIODS = ("today", "week", "month", "quarter", "last")
 
 
@@ -849,6 +886,8 @@ def save_prefs(new):
         d["auto_update"] = new["auto_update"]
     if isinstance(new.get("model_picker"), bool):
         d["model_picker"] = new["model_picker"]
+    if isinstance(new.get("online_search"), bool):                     # off: Search answers only from this machine, the hub is never asked
+        d["online_search"] = new["online_search"]
     try:
         d["compact_pct"] = min(95, max(40, int(new.get("compact_pct", d["compact_pct"]))))
     except (TypeError, ValueError):

@@ -12,7 +12,8 @@ from . import aihub as A, chat, freechat, store, term
 
 PKG = "aihub-ui"
 IDLE_FOR = 60
-state = {"checked": 0.0, "installed": "", "latest": "", "error": "", "updated": "", "waiting": "", "restarting": False, "checking": False}
+state = {"checked": 0.0, "installed": "", "latest": "", "error": "", "updated": "", "waiting": "", "restarting": False, "checking": False, "stage": "", "stage_at": 0.0}
+_ctl = {"engine": None, "restart": None}              # set by start(): what "Update now" / "Restart now" on the Settings card call
 _lock = threading.Lock()
 _now = threading.Event()
 _checking = threading.Lock()                # one version check at a time
@@ -44,14 +45,23 @@ def busy(engine):
     return ""
 
 
+def stage(name):
+    """Progress step shown on the Settings card: '' | checking | waiting | updating | restarting | error."""
+    state.update(stage=name, stage_at=time.time())
+
+
 def check():
     """Ask the CLI for the installed and the newest version. Sets state; -> True when a newer one exists."""
     with _checking:
         state["checking"] = True
+        if state["stage"] in ("", "error"):
+            stage("checking")
         try:
             return _check()
         finally:
             state["checking"] = False
+            if state["stage"] == "checking":
+                stage("")
 
 
 def _check():
@@ -65,23 +75,28 @@ def _check():
     return bool(have and latest and vkey(latest) > vkey(have))
 
 
-def apply(engine, restart):
-    """Update and restart. Only when idle; -> True when it restarted."""
-    why = busy(engine)
+def apply(engine, restart, force=False):
+    """Update and restart. Only when idle unless `force`; -> True when it restarted."""
+    why = "" if force else busy(engine)
     if why:
         state["waiting"] = why
+        stage("waiting")
         return False
     state["waiting"] = ""
+    stage("updating")
     try:
         A.run(["update", PKG], timeout=1800)
     except Exception as e:
         state["error"] = "update failed: %s" % str(e)[:200]
+        stage("error")
         return False
     state.update(updated=state["latest"], installed=state["latest"], restarting=True)
+    stage("restarting")
     time.sleep(1)
-    if busy(engine):                                    # something started while the files were replaced: the new version loads at the next restart
+    if not force and busy(engine):                                    # something started while the files were replaced: the new version loads at the next restart
         state["restarting"] = False
         state["waiting"] = "restart postponed: " + busy(engine)
+        stage("waiting")
         return False
     restart()
     return True
@@ -112,6 +127,7 @@ def loop(engine, restart):
 
 
 def start(engine, restart):
+    _ctl.update(engine=engine, restart=restart)
     threading.Thread(target=loop, args=(engine, restart), daemon=True, name="ui-selfupdate").start()
 
 
@@ -122,6 +138,26 @@ def check_now(wait=20.0):
     th.start()
     th.join(wait)
     return not th.is_alive()
+
+
+def act(what):
+    """Settings buttons, run in a thread so the HTTP reply goes out first. what = 'update' (install the newest, then restart) | 'restart'.
+    Both ignore running chats/works: the user asked for it. -> '' or why nothing was started."""
+    if not _ctl["restart"]:
+        return "not available"
+    if state["stage"] in ("updating", "restarting"):
+        return "already in progress"
+
+    def run():
+        if what == "update":
+            apply(_ctl["engine"], _ctl["restart"], force=True)
+            return
+        state.update(restarting=True)
+        stage("restarting")
+        time.sleep(1)
+        _ctl["restart"]()
+    threading.Thread(target=run, daemon=True, name="ui-update-act").start()
+    return ""
 
 
 def status():

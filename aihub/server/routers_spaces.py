@@ -13,15 +13,16 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from ..core import archive
-from . import basepath, spaceconv, spacepreview
+from . import basepath, spaceconv
 from .deps import current_user, require_perm, require_user, viewer_of
-from .routers import _avatar_url, _clean
+from .routers import C, _avatar_url, _cache_scope, _clean
 from .spaceconv import SLUG, SpaceError, TRANSITIONS
 from .spaces_repo import KINDS
 
@@ -245,7 +246,6 @@ def _publish(request, u, owner, slug, tmp, size, sha, q):
         shutil.rmtree(work, ignore_errors=True)
         raise HTTPException(400, str(e))
     settings = _settings(q)
-    spacepreview.write(res["kind"], built)
     try:
         deck = None
         if res["kind"] == "slides":
@@ -259,6 +259,7 @@ def _publish(request, u, owner, slug, tmp, size, sha, q):
                                         description=_clean(q.get("description"), 1000) if q.get("description") is not None else None,
                                         tags=_tags(q.get("tags")), visibility=vis, settings=settings)
         store.put(sid, built)
+        _changed(request)
     except HTTPException:
         shutil.rmtree(work, ignore_errors=True)
         raise
@@ -306,13 +307,27 @@ def _lists(request, u, **kw):
     return {"items": [_ser(x) for x in items], "total": total}
 
 
+CHANGES_TTL = 5                                       # `?since=` answers per viewer: clients that poll for new spaces share one query
+
+
+def _changed(request):
+    """Every space write drops the cached `?since=` answers, so a new or edited space is found by the very next poll."""
+    C(request).invalidate("sp:chg:")
+
+
 @r.get("/spaces")
 def space_list(request: Request, q: str = "", kind: str = "", sort: str = "top", owner: str = "", mine: bool = False, limit: int = 24, offset: int = 0,
-               u=Depends(current_user)):
+               since: Optional[float] = None, u=Depends(current_user)):
     if kind and kind not in KINDS:
         raise HTTPException(400, "kind must be one of: " + ", ".join(KINDS))
     if mine and not u:
         raise HTTPException(401, "authentication required")
+    if since is not None:                             # changes since a moment, oldest first: what a client mirror asks for
+        repos = R(request)
+        v, lim = viewer_of(repos, u), max(1, min(int(limit), 100))
+        key = "sp:chg:%s:%s:%s:%s:%s:%d:%d" % (_cache_scope(v), round(float(since), 3), kind, owner, int(bool(mine)), lim, max(0, int(offset)))
+        return C(request).get_or_set(key, CHANGES_TTL, lambda: _lists(request, u, kind=kind, owner=owner, mine_uid=u["id"] if mine else None,
+                                                                      limit=lim, offset=max(0, int(offset)), since=float(since)))
     return _lists(request, u, q=q[:200], kind=kind, sort=sort, owner=owner, mine_uid=u["id"] if mine else None,
                   limit=max(1, min(int(limit), 100)), offset=max(0, int(offset)))
 
@@ -358,6 +373,7 @@ def space_patch(ref: str, body: dict, request: Request, u=Depends(require_user))
     if s:
         f["settings"] = s
     R(request).space_update(sp["id"], **f)
+    _changed(request)
     R(request).audit(u["username"], "space.edit", sp["ref"], ",".join(sorted(list(f)))[:200])
     sp = R(request).space_by_id(sp["id"])
     return _ser(sp, level, full=True)
@@ -367,6 +383,7 @@ def space_patch(ref: str, body: dict, request: Request, u=Depends(require_user))
 def space_delete(ref: str, request: Request, u=Depends(require_user)):
     sp, _ = _load(request, ref, u, "admin")
     R(request).space_delete(sp["id"])
+    _changed(request)
     S(request).remove(sp["id"])
     R(request).audit(u["username"], "space.delete", sp["ref"], "")
     return {"ok": True}
@@ -401,6 +418,7 @@ def space_access_put(ref: str, body: dict, request: Request, u=Depends(require_u
             raise HTTPException(404, "%s %s not found" % (ptype, pname))
         grants.append((ptype, t["id"], pname))
     R(request).space_access_grant_many(sp["id"], [(a, b) for a, b, _ in grants], access)
+    _changed(request)
     R(request).audit(u["username"], "space.grant", sp["ref"], ", ".join("%s:%s=%s" % (a, n, access) for a, _, n in grants)[:500])
     return {"ok": True}
 
@@ -411,6 +429,7 @@ def space_access_delete(ref: str, ptype: str, pname: str, request: Request, u=De
     t = R(request).user_by_name(pname) if ptype == "user" else R(request).group_by_name(pname) if ptype == "group" else None
     if t:
         R(request).space_access_revoke(sp["id"], ptype, t["id"])
+        _changed(request)
         R(request).audit(u["username"], "space.revoke", sp["ref"], "%s:%s" % (ptype, pname))
     return {"ok": True}
 
@@ -432,23 +451,6 @@ def space_viewed(ref: str, request: Request, u=Depends(current_user)):
         _seen[k] = now
         R(request).space_view(sp["id"])
     return {"ok": True}
-
-
-@r.get("/spaces/{ref}/preview")
-def space_preview(ref: str, request: Request, u=Depends(current_user)):
-    """A few lines of text for the card (empty object when the kind has nothing to show). Cheap: one small file, ETag per revision."""
-    sp, _ = _load(request, ref, u)
-    etag = '"p%d-%d"' % (sp["id"], sp["rev"])
-    hd = {"ETag": etag, "Cache-Control": "private, max-age=300"}
-    if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers=hd)
-    st = S(request)
-    raw = st.read(sp["id"], "preview.json")
-    if raw is None:                                           # published before previews existed: make it once
-        d = st.dir(sp["id"])
-        spacepreview.write(sp["kind"], d)
-        raw = st.read(sp["id"], "preview.json") or b"{}"
-    return Response(raw, media_type="application/json", headers=hd)
 
 
 @r.get("/spaces/{ref}/data")

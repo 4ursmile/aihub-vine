@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from aihubui import aihub as A, auth, chat, freechat, hubusage, mcpclient, officeview, selfupdate, sources, spacebundle, store, term, usagereport, works as W    # noqa: E402
+from aihubui import aihub as A, auth, chat, chatshare, freechat, hubusage, mcpclient, officeview, searchidx, selfupdate, sources, spacebundle, store, term, usagereport, works as W    # noqa: E402
 from aihubui.secretbox import Box, write_private                  # noqa: E402
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -392,9 +392,86 @@ def packages(h, q, b):
     return {"packages": doc.get("data") or [], "context": _ctx(doc)}
 
 
+SPOT_TTL, SPOT_MAX = 10.0, 200                                # hub lookups of Search (@hub:, @package:): one CLI run per query per 30 s
+_spot, _spot_lock = {}, threading.Lock()
+
+
+def _spot_cached(key, fn):
+    """Answer of fn() for `key`, kept SPOT_TTL s; typing back and forth or reopening Search costs no new CLI run. Errors are not kept."""
+    now = time.time()
+    with _spot_lock:
+        c = _spot.get(key)
+        if c and now - c[0] < SPOT_TTL:
+            return c[1]
+    v = fn()
+    with _spot_lock:
+        _spot[key] = (time.time(), v)
+        if len(_spot) > SPOT_MAX:
+            for k in sorted(_spot, key=lambda k: _spot[k][0])[:len(_spot) - SPOT_MAX]:
+                _spot.pop(k, None)
+    return v
+
+
+def _spot_remote(kind, key, fn):
+    """Ask the hub only when the local mirror answered thinly (the page sends `deep=1` after a `more: true`), at most once per query per
+    searchidx.ASK_TTL; every answer is merged into the mirror. A hub that cannot be reached leaves the local answer as it is."""
+    try:
+        _spot_cached((kind, key), fn)
+    except Err:
+        pass
+    finally:
+        searchidx.asked(kind, key)                              # after the merge: a first merge for a new account empties the mirror
+
+
+def spot_hub(h, q, b):
+    """Search `@hub:words` on THIS machine first (searchidx Spaces mirror: exact author@name, author + name prefix, author, BM25, substring);
+    empty = chats shared on the hub. `more` = the local answer is thin and the hub was not asked for it lately; `deep=1` asks it."""
+    words = " ".join(str(q.get("q") or "").split())[:120]
+    if not store.prefs().get("online_search", True):                    # Settings > Search: local mirror only, no hub call at all
+        return {"items": searchidx.spaces(words, 30), "more": False, "offline": True}
+    searchidx.refresh()
+    if q.get("deep") and searchidx.OK:
+        def ask():
+            doc = cli(lambda: A.run(["space", "search", words.replace("@", " ") or chatshare.TAG, "--limit", "100"], timeout=30))
+            searchidx.merge_spaces((doc.get("data") or {}).get("items") or [], doc)
+        _spot_remote("hub", words or "aihub-chat", ask)
+    if not searchidx.OK:                                                   # no FTS5 in this Python: the hub answers every query
+        doc = _spot_cached(("hub", words), lambda: cli(lambda: A.run(["space", "search", words.replace("@", " ") or chatshare.TAG, "--limit", "30"], timeout=30)))
+        items = [{"ref": x["ref"], "title": x.get("title") or "", "kind": x.get("kind") or "", "visibility": x.get("visibility") or "",
+                  "chat": chatshare.TAG in (x.get("tags") or []), "description": str(x.get("description") or "")[:160]}
+                 for x in (doc.get("data") or {}).get("items") or [] if isinstance(x, dict) and x.get("ref")]
+        return {"items": items if words else [x for x in items if x["chat"]], "more": False}
+    items = searchidx.spaces(words, 30)
+    return {"items": items, "more": not q.get("deep") and searchidx.want_remote("hub", words or "aihub-chat", len(items), 1 if not words else 3)}
+
+
+def spot_pkg(h, q, b):
+    """Search `@package:words` locally (mirror of the whole catalogue: exact name, prefix, BM25, substring). `deep=1` re-reads the catalogue."""
+    words = " ".join(str(q.get("q") or "").split())[:120]
+    if not store.prefs().get("online_search", True):
+        return {"results": searchidx.pkgs(words, 30), "more": False, "offline": True}
+    searchidx.refresh()
+    if not searchidx.OK:
+        return {"results": search(h, {"q": words}, b)["results"][:30], "more": False}
+    if q.get("deep"):
+        def ask():
+            doc = cli(lambda: A.run(["search"], timeout=60))
+            searchidx.merge_pkgs(doc.get("data") or [], doc, full=True)
+        _spot_remote("pkg", "catalogue", ask)                             # one call = the whole catalogue, whatever was typed
+    items = searchidx.pkgs(words, 30)
+    return {"results": items, "more": not q.get("deep") and searchidx.want_remote("pkg", "catalogue", len(items) if words else 30)}
+
+
+def spot_folders(h, q, b):
+    """Search `@folder:`: folders under home from the local folder index (projects first), or a typed path listed live. Never the hub."""
+    words = str(q.get("q") or "").strip()[:300]
+    searchidx.dirs_refresh()
+    return {"items": searchidx.folders(words, 30), "indexing": searchidx.dirs_busy()}
+
+
 def search(h, q, b):
     args = ["search"] + ([q["q"]] if q.get("q") else [])
-    rows = cli(lambda: A.run(args)).get("data") or []
+    rows = _spot_cached(("pkg", q.get("q") or ""), lambda: cli(lambda: A.run(args)).get("data") or [])
     if q.get("type"):                                          # the CLI has no --type flag: filter here
         rows = [r for r in rows if r.get("type") == q["type"]]
     return {"results": rows[:200]}
@@ -959,6 +1036,113 @@ def session_branch(h, q, b):
     return {"session": n}
 
 
+# ---- export / share / import a chat (aihubui/chatshare.py)
+def _bundle(s, files):
+    root = store.session_dir(s["id"])
+    return chatshare.build(s, store.history(s["id"]), root if files else None, [t["path"] for t in store.tree(s["id"])] if files else None)
+
+
+def chat_export(h, q, b):
+    """The chat as a file the page saves: format json (the bundle) or html (readable page + the bundle). `files=1` adds small text files."""
+    s = _chat_of(q, b)
+    bun = _bundle(s, q.get("files") == "1")
+    fmt = "html" if q.get("format") == "html" else "json"
+    base = re.sub(r"[^A-Za-z0-9._-]+", "-", s["title"]).strip("-.")[:60] or "chat"
+    return {"filename": base + (".html" if fmt == "html" else ".aihubchat.json"), "text": chatshare.to_html(bun) if fmt == "html" else chatshare.to_json(bun),
+            "files": len(bun["files"]), "messages": len(bun["rows"])}
+
+
+def chat_share(h, q, b):
+    """Publish the chat as a Space (page kind `report` by default; kind / view / visibility are the hub's own settings and can be changed later)."""
+    s = _chat_of(q, b)
+    kind = str(b.get("kind") or "report")
+    if kind not in ("report", "dashboard", "html"):
+        raise Err("a shared chat is a report, dashboard or html page")
+    if b.get("view") not in (None, "", "canvas", "fit", "full"):
+        raise Err("view: canvas, fit or full")
+    page = chatshare.to_html(_bundle(s, bool(b.get("files"))))
+    name = str(b.get("name") or "").strip().lower()
+    if name and not re.match(r"^[a-z0-9][a-z0-9._-]{0,63}$", name):
+        raise Err("space name: lower-case letters, digits and . _ - (max 64)")
+    tmp = tempfile.mkdtemp(prefix="aihub-chat-")
+    try:
+        f = os.path.join(tmp, "chat.html")
+        with open(f, "w", encoding="utf-8") as fh:
+            fh.write(page)
+        args = ["space", "publish", f] + ([name] if name else []) + ["--kind", kind, "--tags", chatshare.TAG,
+                "--title", (" ".join(str(b.get("title") or s["title"]).split()) or "Chat")[:200],
+                "--public" if b.get("visibility") == "public" else "--private"]
+        if b.get("view"):
+            args += ["--view", b["view"]]
+        doc = cli(lambda: A.run(args, timeout=900))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    d = doc.get("data") or {}
+    return {"space": d.get("space") or {}, "url": d.get("url") or "", "created": bool(d.get("created"))}
+
+
+def chats_shared(h, q, b):
+    """Chats shared on the hub that this person can open (spaces tagged aihub-chat)."""
+    doc = cli(lambda: A.run(["space", "search", chatshare.TAG, "--limit", "50"], timeout=60))
+    items = [x for x in (doc.get("data") or {}).get("items") or [] if chatshare.TAG in (x.get("tags") or [])]
+    return {"items": items}
+
+
+def chat_import(h, q, b):
+    """New chat from pasted bundle text, an uploaded file's text (`text`), or a hub link / `author@space` (`link`). Nothing is run."""
+    text, link = b.get("text"), str(b.get("link") or "").strip()
+    if isinstance(text, str) and text.strip():
+        ref = chatshare.ref_of(text)                                   # a pasted link in the text box works too
+        raw = None if ref else text
+    elif link:
+        ref, raw = chatshare.ref_of(link), None
+        if not ref:
+            raise Err("a hub link looks like https://hub/#/s/author@name, or write author@name")
+    else:
+        raise Err("paste a link or the chat text, or choose a file")
+    if raw is None:
+        tmp = tempfile.mkdtemp(prefix="aihub-chat-")
+        try:
+            out = os.path.join(tmp, "chat.bin")
+            cli(lambda: A.run(["space", "get", ref, "--output", out], timeout=120))
+            if os.path.getsize(out) > chatshare.MAX_BYTES:
+                raise Err("that space is too big to be a chat")
+            with open(out, "rb") as fh:
+                raw = fh.read()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        bun = chatshare.parse(raw)
+    except ValueError as e:
+        raise Err(str(e))
+    extra = (b.get("extra") if isinstance(b.get("extra"), str) else "")[:80000]
+    soul = bun["soul"][:20000] if bun["soul"] is not None else None
+    n = store.create_session(bun["title"], "", chat.build_system(extra, soul), extra=extra)
+    rows = [json.dumps(r, ensure_ascii=False) for r in bun["rows"]]
+    store.write_rows(n["id"], rows)
+    root, wrote = store.work_dir(n["id"]), 0
+    for f in bun["files"]:
+        full = store.safe_join(root, f["path"])
+        if not full or ".git" in f["path"].split("/"):
+            continue
+        try:
+            data = base64.b64decode(f["b64"], validate=True)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "wb") as fh:
+                fh.write(data)
+            wrote += 1
+        except (ValueError, OSError):
+            pass
+    kw = {"seed": store.transcript(store.parse_rows(rows)), "imported_from": ref or "file"}
+    if bun["settings"].get("engine") in ("claude", "free"):
+        kw["engine"] = bun["settings"]["engine"]
+    if soul is not None:
+        kw["soul"] = soul
+    n = store.update_session(n["id"], **kw)
+    return {"session": n, "messages": len(bun["rows"]), "files": wrote, "from": ref or ""}
+
+
+
 def session_rewind(h, q, b):
     """Edit a message: drop it and everything after it (the page then sends the new text). Same trick as a branch: a fresh Claude session
     gets the rows that stay as text."""
@@ -1122,6 +1306,14 @@ def update_status(h, q, b):
 def update_check(h, q, b):
     done = selfupdate.check_now(20.0)                  # waits for the answer; not done in time = running, ask /update again
     return {"update": selfupdate.status(), "running": not done}
+
+
+def update_act(h, q, b):
+    what = "update" if b.get("what") == "update" else "restart"
+    why = selfupdate.act(what)
+    if why:
+        raise Err(why, 409)
+    return {"update": selfupdate.status()}
 
 
 def mcp_test(h, q, b):
@@ -2064,7 +2256,7 @@ def works_mentions(h, q, b):
 
 
 ROUTES = {
-    ("GET", "boot"): boot, ("GET", "models"): models_now, ("GET", "brand"): brand, ("GET", "packages"): packages, ("GET", "search"): search, ("GET", "info"): info,
+    ("GET", "boot"): boot, ("GET", "models"): models_now, ("GET", "brand"): brand, ("GET", "packages"): packages, ("GET", "search"): search, ("GET", "spot/hub"): spot_hub, ("GET", "spot/pkg"): spot_pkg, ("GET", "spot/folders"): spot_folders, ("GET", "info"): info,
     ("POST", "install"): install, ("POST", "term/start"): term_start, ("GET", "term/read"): term_read, ("GET", "fs/list"): fs_list, ("POST", "fs/pick"): fs_pick, ("POST", "term/write"): term_write, ("POST", "uninstall"): _simple("uninstall", flags=("--force",)), ("POST", "update"): update_all,
     ("POST", "enable"): _simple("enable", flags=("--yes",)), ("POST", "disable"): _simple("disable"),
     ("GET", "services"): services, ("POST", "services/action"): service_action, ("GET", "services/logs"): service_logs,
@@ -2076,7 +2268,7 @@ ROUTES = {
     ("POST", "knowledge/delete"): note_delete, ("POST", "knowledge/pull"): knowledge_pull,
     ("GET", "sessions"): sessions, ("POST", "sessions"): session_new, ("GET", "sessions/get"): session_get,
     ("POST", "sessions/update"): session_update, ("POST", "sessions/delete"): session_delete, ("POST", "sessions/delmsg"): session_delmsg, ("POST", "folders"): folders,
-    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("GET", "files/diff"): file_diff, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("POST", "sessions/rewind"): session_rewind,
+    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("GET", "files/diff"): file_diff, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "update/apply"): update_act, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("GET", "sessions/export"): chat_export, ("POST", "sessions/share"): chat_share, ("GET", "sessions/shared"): chats_shared, ("POST", "sessions/import"): chat_import, ("POST", "sessions/rewind"): session_rewind,
     ("GET", "themes"): themes_list, ("POST", "themes/save"): theme_save, ("POST", "themes/delete"): theme_delete, ("GET", "usage"): usage_get, ("POST", "spaces/publish"): space_publish, ("GET", "spaces"): spaces_mine, ("GET", "prefs"): prefs_get, ("PUT", "prefs"): prefs_put, ("GET", "slash"): slash,
     ("GET", "works"): works, ("GET", "works/get"): work_get, ("POST", "works/save"): work_save, ("POST", "works/delete"): work_delete,
     ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("POST", "nodes/run"): node_run, ("GET", "project/info"): project_info, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/generate/start"): work_generate_start, ("GET", "works/generate/status"): work_generate_status, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import,
@@ -2102,6 +2294,7 @@ def main():
         write_private(tokf, TOKEN.encode("utf-8"))
     BOX = Box(folder)
     ENGINE = W.Engine(BOX)
+    searchidx.warm()                                              # chat search index: brought up to date in the background
     want = int(os.environ.get("UI_PORT") or 8765)
     try:
         srv = ThreadingHTTPServer(("127.0.0.1", want), H)

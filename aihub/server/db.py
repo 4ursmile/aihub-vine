@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS spaces(id {pk}, owner_id INTEGER NOT NULL, slug TEXT 
   visibility TEXT NOT NULL DEFAULT 'public', filename TEXT DEFAULT '', size {bigint} DEFAULT 0, sha256 TEXT DEFAULT '', rev INTEGER DEFAULT 1,
   settings TEXT DEFAULT '', tags TEXT DEFAULT '', views {bigint} DEFAULT 0, created {real}, updated {real}, UNIQUE(owner_id,slug));
 CREATE INDEX IF NOT EXISTS spaces_views ON spaces(views);
+CREATE INDEX IF NOT EXISTS spaces_updated ON spaces(updated);
 CREATE TABLE IF NOT EXISTS space_access(space_id INTEGER, principal_type TEXT, principal_id INTEGER, access TEXT, PRIMARY KEY(space_id,principal_type,principal_id));
 """
 

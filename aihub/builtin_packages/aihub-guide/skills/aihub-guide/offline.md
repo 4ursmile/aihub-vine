@@ -115,7 +115,7 @@ aihub run list | logs N [-f] | listen N | stop N|--all | pause N | start N | res
 aihub onboard [BOT]                   # optional guided credential setup of a bot that has one ([bot] onboard); install offers it in a terminal
 aihub --json CMD ... | CMD --json | AIHUB_JSON=1   # ONE JSON document {schema, ok, command, exit, error, hint, data, output, messages, changes, context}; no prompts, no secrets; secrets in: login/register/password --password-stdin, vault add --token-stdin
 aihub space publish FILE|FOLDER [NAME|owner@name] [--kind K] [--title T] [--public|--private] [--view canvas|fit|full] [--transition fade|slide|zoom|flip|none] [--autoplay S] [--loop]   # publish a .pptx/.docx/.md/.xlsx/.csv/.pdf/.html (or folder with index.html) as a Space; opens at <hub>/#/s/author@name
-aihub space list|top|search WORDS|info REF|url REF [--view full] [--bare]|get REF|rm REF|set REF ...|share REF --user U|--group G [--edit]|unshare|shares   # manage Spaces
+aihub space list [--since T]|top|search WORDS|info REF|url REF [--view full] [--bare]|get REF|rm REF|set REF ...|share REF --user U|--group G [--edit]|unshare|shares   # manage Spaces
 aihub knowledge list|get NOTE|pull|push|edit NOTE|rm NOTE|path   # personal notes + bot soul (soul.md), also on the hub page Knowledge
 aihub knowledge share NOTE --user U|--group G [--write] | unshare | shares NOTE | shared | push-shared OWNER/NOTE   # shared notes land in ~/.aihub/knowledge/shared/<owner>/
 

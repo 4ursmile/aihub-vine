@@ -91,7 +91,17 @@ function tableBlock(t) {
     dir = -dir; arr.forEach((r) => body.append(r)); t.querySelectorAll("th").forEach((h) => h.removeAttribute("data-sort")); th.setAttribute("data-sort", dir === -1 ? "asc" : "desc"); }; });
 }
 
-const mdHtml = (t) => DOMPurify.sanitize(marked.parse(t || ""), { USE_PROFILES: { html: true } });
+// Raw HTML in an answer may never restyle or re-head the chat: <style>/<link>/<meta> are dropped, not just scripts.
+const SAFE = { USE_PROFILES: { html: true }, FORBID_TAGS: ["style", "link", "meta", "title", "base", "head", "noscript"] };
+const mdHtml = (t) => DOMPurify.sanitize(marked.parse(t || ""), SAFE);
+// A model sometimes writes tool-call markup as text (<invoke name=..>, <parameter>, <function_calls>). Markdown reads a lone tag line as an
+// HTML block that swallows the code fence under it, so those tag lines are removed outside fences.
+const FAKE_CALL = /^\s*<\/?(?:antml:)?(?:invoke|parameter|function_calls|function_results|tool_use|tool_call)\b[^>]*>\s*$/i;
+const noFakeCalls = (t) => {
+  if (!t || !/<\/?(?:antml:)?(?:invoke|parameter|function_calls|function_results|tool_use|tool_call)\b/i.test(t)) return t || "";
+  let fence = false;
+  return t.split("\n").filter((ln) => { if (/^\s*(```|~~~)/.test(ln)) fence = !fence; return fence || !FAKE_CALL.test(ln); }).join("\n");
+};
 const unclosed = (t) => ((t || "").match(/^\s*```/gm) || []).length % 2 === 1;
 
 export function Md({ text, live, onRender, onSend }) {
@@ -101,7 +111,7 @@ export function Md({ text, live, onRender, onSend }) {
   const build = (tok, links, isLast, t) => {
     const holder = el("div", "mdb"); holder.style.display = "contents"; const mounted = []; let rich = false;
     const part = [tok]; part.links = links;
-    holder.innerHTML = DOMPurify.sanitize(marked.parser(part), { USE_PROFILES: { html: true } });
+    holder.innerHTML = DOMPurify.sanitize(marked.parser(part), SAFE);
     holder.querySelectorAll("a").forEach((a) => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
     const open = live && isLast && unclosed(t); const pres = [...holder.querySelectorAll("pre")];
     pres.forEach((pre, idx) => {
@@ -160,7 +170,7 @@ export function Md({ text, live, onRender, onSend }) {
     return all;
   };
   const paint = () => {
-    raf.current = 0; lastP.current = performance.now(); const root = ref.current; if (!root) return; const t = pend.current || "";
+    raf.current = 0; lastP.current = performance.now(); const root = ref.current; if (!root) return; const t = noFakeCalls(pend.current);
     const all = lex(t), toks = all.filter((k) => k.type !== "space"), list = blocks.current;
     const liveChanged = prevLive.current !== live; prevLive.current = live;
     root.querySelectorAll(".caret").forEach((c) => c.remove());

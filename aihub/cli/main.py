@@ -1754,6 +1754,7 @@ def build_parser():
         arg("--edit", action="store_true", help="share: let them publish new versions and change settings (default view only)."),
         arg("--bare", action="store_true", help="url: a link without the hub header and footer (for embedding)."),
         arg("--mine", action="store_true", help="list: only my spaces."),
+        arg("--since", type=float, metavar="UNIX_TIME", help="list: only spaces changed at or after this time, oldest change first (for mirrors and sync)."),
         arg("--limit", type=int, default=30, help="list/top/search: how many (default 30)."),
         arg("-o", "--output", help="get: file to save."),
         arg("--open", action="store_true", help="publish: open the page in the browser."),

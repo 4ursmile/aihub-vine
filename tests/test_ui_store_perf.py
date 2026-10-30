@@ -84,7 +84,7 @@ class SlimStore(Base):
         self.assertEqual(len(r), 1)
         self.assertFalse(r.partial)
         self.assertIn("needle", r[0]["snippet"])
-        with mock.patch.object(store, "SEARCH_SECONDS", -1):
+        with mock.patch.object(store, "SEARCH_SECONDS", -1), mock.patch.object(store.searchidx, "_conn", lambda: None):    # the no-FTS5 scan keeps its budget
             self.assertTrue(store.search("needle").partial)
 
     def test_snapshot_incremental(self):
