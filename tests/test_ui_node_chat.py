@@ -73,5 +73,42 @@ class NodeChat(unittest.TestCase):
         self.assertEqual([(p["name"], p["version"], p["path"]) for p in got], [("top", "1.0.0", ""), ("sub-pkg", "0.2.0", "sub")])
 
 
+class ChatRunRecords(unittest.TestCase):
+    """A node or workflow run from a chat card leaves a record the Works page lists (secret values never in it)."""
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = os.environ.get("AIHUB_HOME")
+        os.environ["AIHUB_HOME"] = self.tmp
+
+    def tearDown(self):
+        if self.old is None:
+            os.environ.pop("AIHUB_HOME", None)
+        else:
+            os.environ["AIHUB_HOME"] = self.old
+
+    def test_node_record_drops_secrets_and_is_listed_per_chat(self):
+        s = {"type": "pkg:x/y", "title": "Y", "fields": [{"name": "url", "type": "text"}, {"name": "token", "type": "text", "secret": True}]}
+        rec = W.new_chat_run(s, "aaaa1111", "k1", {"url": "https://a", "token": "SECRET"}, "hi")
+        W.save_chat_run(rec)
+        other = W.new_chat_run(s, "bbbb2222", "k2", {}, "")
+        W.save_chat_run(other)
+        with open(os.path.join(W.runs_dir(W.CHAT_RUNS), rec["id"] + ".json")) as f:
+            self.assertNotIn("SECRET", f.read())
+        mine = W.chat_runs("aaaa1111")
+        self.assertEqual([(r["card"], r["kind"], r["status"]) for r in mine], [("k1", "node", "running")])
+        self.assertEqual(len(W.chat_runs()), 2)
+
+    def test_workflow_run_from_a_chat_keeps_its_origin(self):
+        from aihubui import store, secretbox
+        w = store.save_work(store.clean_work({"title": "Flow", "nodes": [{"id": "s1", "type": "start.manual", "config": {}}], "edges": []}))
+        eng = W.Engine(secretbox.Box(os.path.join(self.tmp, "ui")))
+        self.addCleanup(eng.shutdown)
+        rid = eng.fire(w, w["nodes"][0], {"text": "go"}, "chat", {"origin": "aaaa1111", "card": "c9", "status": "evil"})
+        got = [r for r in W.chat_runs("aaaa1111") if r["id"] == rid]
+        self.assertEqual((got[0]["kind"], got[0]["work"], got[0]["card"]), ("work", w["id"], "c9"))
+        self.assertEqual(W.get_run(w["id"], rid)["via"], "chat")
+        self.assertEqual(W.chat_runs("bbbb2222"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

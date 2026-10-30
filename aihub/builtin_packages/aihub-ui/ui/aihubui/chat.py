@@ -39,7 +39,7 @@ A side canvas shows the folder live: an .html file you write (relative assets ar
 so for a page, chart, diagram or small app write one index.html instead of pasting long code in the reply. Markdown, SVG and images render too.
 For a dashboard, form, table or cards you may instead answer with an OpenUI Lang block (a ```openui fenced block, language rules below): the canvas renders it with OpenUI components.
 Files the user attaches are saved under attachments/. Keep answers short; do not repeat file contents you just wrote.
-When the user asks you to build a workflow / work / automation (a flow of nodes that runs on a schedule, a message or a click), answer with a short explanation and ONE ```workflow block holding the JSON {"title","description","nodes":[{"id","type","label","x","y","config"}],"edges":[{"from","to"}]}; the page shows a button that saves it in Works (switched off) and opens it. Node types: start.manual, start.cron, git.pull, io.path, io.read_file, io.request, ai.claude, ai.free, flow.filter, flow.template, flow.loop, flow.endloop, flow.output, space.publish, send.teams, and package nodes written pkg:<package>/<id> (for example pkg:aihub-nodes-outlook/outlook-send for Outlook mail, when that package is installed). git.pull / io.path pass a PATH, not content: a later ai.claude reads the files itself and should end with `OUTPUT: /full/path` when it creates one."""
+When the user asks you to build a workflow / work / automation (a flow of nodes that runs on a schedule, a message or a click), answer with a short explanation and ONE ```workflow block holding the JSON {"title","description","nodes":[{"id","type","label","x","y","config"}],"edges":[{"from","to"}]}; the page shows a button that saves it in Works (switched off) and opens it. Node types: start.manual, start.cron, git.pull, io.path, io.read_file, io.request, ai.claude, ai.free, flow.filter, flow.template, flow.loop, flow.endloop, flow.output, space.publish, send.teams, send.smtp (mail through any SMTP server; action send | draft (IMAP Drafts) | eml (a .eml file)), and package nodes written pkg:<package>/<id> (for example pkg:aihub-nodes-outlook/outlook-send for Outlook mail, when that package is installed). git.pull / io.path pass a PATH, not content: a later ai.claude reads the files itself and should end with `OUTPUT: /full/path` when it creates one."""
 
 
 def knowledge_index():
@@ -312,6 +312,143 @@ def mcp_config():
     return path
 
 
+def _msg(text):
+    return json.dumps({"type": "user", "message": {"role": "user", "content": text}}, ensure_ascii=False) + "\n"
+
+
+class Feed:
+    """stdin of a running `claude -p --input-format stream-json`. A message written while it answers is read at its next step (after a
+    tool call) and changes the rest of THIS answer, like typing into Claude Code while it works. Claude echoes every message it read
+    (--replay-user-messages): that echo is when a hint really reached it. stdin closes once an answer ends with no hint waiting, and
+    claude then exits; a hint written after that is refused (the page sends it as the next message)."""
+
+    def __init__(self, p):
+        self.p, self.lock, self.open, self.seen, self.pending = p, threading.Lock(), True, False, []
+
+    def write(self, text, hint=False):
+        with self.lock:
+            if not self.open or self.p.poll() is not None:
+                return False
+            try:
+                self.p.stdin.write(_msg(text))
+                self.p.stdin.flush()
+            except (OSError, ValueError):
+                self.open = False
+                return False
+            if hint:
+                self.pending.append(text)
+            return True
+
+    def took(self, said):
+        """An echo arrived. -> True when it is a hint (False for the first prompt)."""
+        with self.lock:
+            if not self.seen:
+                self.seen = True
+                return False
+            if said in self.pending:
+                self.pending.remove(said)
+            elif self.pending:
+                self.pending.pop(0)
+            return True
+
+    def answered(self):
+        with self.lock:
+            if self.pending and self.seen:                           # a hint came too late for this answer: claude answers it next, keep reading
+                return
+            self._close()
+
+    def close(self):
+        with self.lock:
+            self._close()
+
+    def _close(self):
+        if self.open:
+            self.open = False
+            try:
+                self.p.stdin.close()
+            except (OSError, ValueError):
+                pass
+
+    def left(self):
+        with self.lock:
+            out, self.pending = self.pending, []
+            return out if self.seen else []                          # a claude without echoes: whatever was written was read
+
+
+feeds = {}
+
+
+def hint(sid, text):
+    """Give a running Claude Code answer one more message. -> True when claude has it (it reads it at its next step)."""
+    with plock:
+        f = feeds.get(sid)
+    return bool(f and f.write(text, hint=True))
+
+
+BTW_PROMPT = ("[Side question (/btw). Answer it briefly from what you already know in this conversation: no tools, no files, do not continue "
+              "the main task here (it goes on separately). This question and your answer are not kept in the conversation.]\n")
+
+
+def btw(sess, text, model="", effort=""):
+    """/btw: a quick side question that does not touch the conversation. A throwaway fork of the chat's Claude session
+    (--fork-session --no-session-persistence) answers it in one step, also while the main answer is still running. -> dict."""
+    sid = sess["id"]
+    cwd = store.session_dir(sid)
+    os.makedirs(cwd, exist_ok=True)
+    cmd = ["claude", "-p", "--output-format", "json", "--max-turns", "1", "--permission-mode", "dontAsk", "--no-session-persistence"]
+    sp, custom = settings_path()
+    if custom:
+        cmd += ["--settings", sp]
+    model = model or sess.get("model") or ""
+    if model:
+        cmd += ["--model", model]
+    effort = effort or sess.get("effort") or ""
+    if effort in EFFORT:
+        cmd += ["--effort", effort]
+    sysp = os.path.join(store.ui_dir("system"), sid + ".md")         # same frozen prompt as the turns: the cached prefix stays the same
+    if os.path.exists(sysp):
+        cmd += ["--append-system-prompt-file", sysp]
+    env = dict(os.environ)
+    env.update(store.prefs_env())
+    env["AIHUB_UI_SESSION"] = sid
+
+    def ask(resume):
+        prompt = BTW_PROMPT + text
+        if not resume:                                               # no Claude session on disk yet (a first answer just started): the chat as text
+            told = store.transcript([e for e in store.history(sid) if e.get("k") in ("user", "msg")], 40000)
+            if told:
+                prompt = BTW_PROMPT + "[The conversation so far]\n" + told + "\n[End of the conversation]\n\n" + text
+        r = subprocess.run(cmd + (["--resume", sess["claude"], "--fork-session"] if resume else []), input=prompt, cwd=cwd, env=env,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180, start_new_session=True)
+        try:
+            return json.loads(r.stdout.strip().splitlines()[-1]), r
+        except (ValueError, IndexError):
+            return None, r
+    try:
+        m, r = ask(bool(sess.get("started")))
+        said = (m.get("result") or "") if m else r.stderr + r.stdout
+        if sess.get("started") and "no conversation found" in said.lower():
+            m, r = ask(False)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "no answer within 3 minutes"}
+    except OSError as e:
+        return {"ok": False, "error": "cannot start claude: %s" % e}
+    if m is None:
+        return {"ok": False, "error": (r.stderr.strip() or "claude ended without an answer (exit %s)" % r.returncode)[-600:]}
+    u = _usage(m.get("usage"))
+    u["cost"] = m.get("total_cost_usd") or 0
+    used = next(iter(m.get("modelUsage") or {}), model)
+    try:
+        from . import hubusage
+        hubusage.note(sid, "free", used, u)                          # not in Claude's logs (no session file): counted like the UI's own turns
+    except Exception:
+        pass
+    answer = (m.get("result") or "").strip()
+    if m.get("is_error") or not answer:
+        return {"ok": False, "error": answer or "no answer (%s)" % m.get("subtype", "error"), "usage": u}
+    return {"ok": True, "answer": answer, "usage": u}
+
+
 def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None, add_dirs=None):
     """Generator of UI events for one user message. Stores them in the chat history as it goes."""
     sid = sess["id"]
@@ -350,6 +487,7 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
     snap_t = threading.Thread(target=snap, daemon=True)
     snap_t.start()
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+           "--input-format", "stream-json", "--replay-user-messages",          # stdin stays open: messages sent mid-answer reach it (hint())
            "--permission-mode", MODES.get(mode, "auto")]
     sp, custom = settings_path()
     if custom:
@@ -402,11 +540,10 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
     threading.Thread(target=lambda: errbuf.extend(p.stderr.readlines()[-20:]), daemon=True).start()
     snap_t.join()                                                    # the snapshot must hold the files as they were before claude sees the prompt
     before = prep["before"]
-    try:
-        p.stdin.write(text)
-        p.stdin.close()
-    except (OSError, ValueError):
-        pass
+    feed = Feed(p)
+    with plock:
+        feeds[sid] = feed
+    feed.write(text)
     store.update_session(sid, started=True, model=model, effort=effort, mode=mode)       # (no write when nothing changed)
     ctx = None                                                       # context size: kept here, written once when the turn ends
     got_result = False
@@ -449,6 +586,12 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
                     for b in blocks:
                         if b["type"] == "tool" and b["name"] in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
                             yield {"k": "file", "path": (b.get("input") or {}).get("file_path", "")}
+            elif t == "user" and m.get("isReplay"):                  # Claude read a message from stdin: the first prompt, or a hint now
+                said = _result_text((m.get("message") or {}).get("content"))
+                if feed.took(said):
+                    ev = {"k": "user", "text": said, "files": [], "hint": True}
+                    store.append(sid, ev)
+                    yield ev
             elif t == "user":
                 for b in (m.get("message") or {}).get("content") or []:
                     if isinstance(b, dict) and b.get("type") == "tool_result":
@@ -457,6 +600,7 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
                         yield ev
             elif t == "result":
                 got_result = True
+                feed.answered()                                           # no hint waiting: stdin closes and claude ends after this answer
                 made = [{"path": f["path"], "size": f["size"], "new": f["path"] not in before} for f in store.tree(sid) if before.get(f["path"]) != (f["mtime"], f["size"])]
                 if made:                                                  # whatever made them (Write, a shell command, a script)
                     ev = {"k": "files", "items": sorted(made, key=lambda x: (not x["new"], x["path"]))[:16]}
@@ -489,8 +633,13 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
     finally:
         with plock:
             procs.pop(sid, None)
+            if feeds.get(sid) is feed:
+                feeds.pop(sid, None)
+        feed.close()
         if ctx is not None:
             store.update_session(sid, ctx=ctx)                       # one write per turn (a crash loses only this number)
+    for lost in feed.left():                                         # sent but never read (stopped, crashed): the page offers it again
+        yield {"k": "hint_lost", "text": lost}
     if not got_result and sid in stopped:
         stopped.discard(sid)                                         # the user pressed Stop: not an error
     elif not got_result:

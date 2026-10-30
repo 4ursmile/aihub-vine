@@ -134,12 +134,12 @@ export function Md({ text, live, onRender, onSend }) {
       if (lang === "node") {                                                  // @node:<type> run from the chat: a card with the filled fields and a Run button
         let spec; try { spec = JSON.parse(code.textContent); } catch (e) { return; }
         if (!spec || typeof spec.type !== "string") return;
-        rich = true; const d = el("div", "bk rich"); pre.replaceWith(d); mounted.push(d); render(html`<${NodeCard} spec=${spec} onSend=${onSend} locked=${live}/>`, d); return;
+        rich = true; const d = el("div", "bk rich runbk"); pre.replaceWith(d); mounted.push(d); render(html`<${NodeCard} spec=${spec} onSend=${onSend} locked=${live}/>`, d); return;
       }
       if (lang === "work") {                                                  // @work:<id>: a card with the inputs and a Run button; the result goes back to the chat by itself
         let spec; try { spec = JSON.parse(code.textContent); } catch (e) { return; }
         if (!spec || typeof spec.id !== "string") return;
-        rich = true; const d = el("div", "bk rich"); pre.replaceWith(d); mounted.push(d); render(html`<${WorkRunCard} spec=${spec} onSend=${onSend} locked=${live}/>`, d); return;
+        rich = true; const d = el("div", "bk rich runbk"); pre.replaceWith(d); mounted.push(d); render(html`<${WorkRunCard} spec=${spec} onSend=${onSend} locked=${live}/>`, d); return;
       }
       if (lang === "chart" || lang === "form" || lang === "ask") {
         let spec; try { spec = JSON.parse(code.textContent); } catch (e) { return; }
@@ -278,82 +278,116 @@ export function WorkCard({ spec, locked }) {
 }
 
 
-// ---------- node: the answer filled a node's fields (asking the user for the missing ones first); Run executes it alone, the result can go back to the chat
+// ---------- node / work run cards: the answer filled a node's fields or a workflow's inputs. Nothing runs before the user approves it,
+// except in bypass permission mode (then it starts by itself once the values are there, and only when the card was seen streaming live).
+// Every run leaves a record on the Works page (runs/chat/ for nodes, the work's own runs for workflows); a reopened chat shows its last one.
 let nodeHost = null;
-// A card runs by itself once its required values are all there, but only when it was seen streaming live: reopening an old chat never re-runs anything.
 const seenLive = new Set(), autoRan = new Set();
 function useAutoRun(key, locked, ready, runRef) {
   useEffect(() => {
     if (locked) { seenLive.add(key); return; }
-    if (ready && seenLive.has(key) && !autoRan.has(key) && runRef.current) { autoRan.add(key); runRef.current(); }
+    if (ready && seenLive.has(key) && !autoRan.has(key) && runRef.current && nodeHost && nodeHost.bypass()) { autoRan.add(key); runRef.current(); }
   }, [locked, ready]);
 }
 export const setNodeHost = (h) => { nodeHost = h; };
+const cardKey = (spec) => { const t = JSON.stringify(spec); let h = 5381; for (let i = 0; i < t.length; i++) h = ((h << 5) + h + t.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
 const nodeResultText = (title, res) => "Result of the node “" + title + "”:\n```\n" + (res.text || "(no text)") + "\n```" + (res.data ? "\nData:\n```json\n" + JSON.stringify(res.data, null, 2).slice(0, 8000) + "\n```" : "");
+const NODE_IC = { "io.read_file": "file", "io.request": "link", "git.read": "code", "git.pull": "code", "io.path": "folder", "space.publish": "upload", "send.teams": "send", "send.smtp": "send", "code.python": "code" };
+const ST_LABEL = { wait: "Waiting for approval", need: "Needs values", busy: "Running", done: "Done", error: "Failed", skip: "Declined" };
+const ST_OF = { done: "done", failed: "error", interrupted: "error", running: "busy", queued: "busy" };
+function RunHead({ icon, kind, title, sub, st }) {
+  return html`<header class="rc-h"><span class=${"nico " + (kind || "")}>${Ic(icon, 16)}</span><div class="grow" style="min-width:0"><div class="nt">${title}</div><div class="ns">${sub}</div></div>
+    ${st && ST_LABEL[st] && html`<span class=${"rc-st " + st}><i></i>${ST_LABEL[st]}</span>`}</header>`;
+}
+function RunField({ f, val, set, dis, secretNote }) {
+  const v = val(f);
+  return html`<label class=${"rc-f" + (f.type === "textarea" || f.type === "code" ? " wide" : "") + (f.type === "checkbox" ? " chk" : "")}><span>${f.label || f.name}${f.required ? html`<em>*</em>` : ""}${f.secret && secretNote ? html`<small>secret, this run only</small>` : ""}</span>
+    ${f.type === "textarea" || f.type === "code" ? html`<textarea rows="3" class=${f.type === "code" ? "mono" : ""} value=${v} disabled=${dis} onInput=${(e) => set(f, e.target.value)}></textarea>`
+    : f.type === "select" ? html`<select value=${v} disabled=${dis} onChange=${(e) => set(f, e.target.value)}><option value="">Choose…</option>${(f.options || []).map((o) => html`<option>${String(o)}</option>`)}</select>`
+    : f.type === "checkbox" ? html`<input type="checkbox" checked=${!!v} disabled=${dis} onChange=${(e) => set(f, e.target.checked)}/>`
+    : html`<input type=${f.secret ? "password" : f.type === "number" ? "number" : "text"} autocomplete="off" value=${v} disabled=${dis} onInput=${(e) => set(f, e.target.value)}/>`}</label>`;
+}
+// The bottom bar: what is missing, the approval question, or the outcome; plus a link to the run record on the Works page.
+function RunFoot({ st, missing, locked, what, onRun, onDecline, works }) {
+  const bypass = !!(nodeHost && nodeHost.bypass());
+  const msg = locked ? "Writing…" : missing.length ? "Fill in: " + missing.join(", ")
+    : st === "wait" ? (bypass ? "Bypass mode: runs without asking." : "Runs " + what + " on this computer. Check the values, then approve.")
+    : st === "busy" ? "Running; the result goes back to the chat." : st === "skip" ? "Not run." : st === "done" ? "The result went back to the chat." : "";
+  return html`<div class=${"rc-foot" + (st === "wait" && !missing.length && !locked ? " ask" : "")}>${st === "wait" && !missing.length && !locked && html`<span class="rc-shield">${Ic(bypass ? "zap" : "shield", 14)}</span>`}
+    <span class="grow small">${msg}</span>${works && html`<a class="lnk small" href=${works}>${Ic("flow", 12)} In Works</a>`}
+    ${st === "wait" && !missing.length && !locked && html`<button class="btn" onClick=${onDecline}>Decline</button>`}
+    ${st === "skip" || st === "done" || st === "error" ? html`<button class="btn" disabled=${locked || missing.length > 0} onClick=${onRun}>${Ic("refresh", 13)} Run again</button>`
+      : html`<button class="btn acc" disabled=${locked || st === "busy" || missing.length > 0} onClick=${onRun}>${Ic("play", 13)} ${st === "busy" ? "Running…" : "Approve and run"}</button>`}</div>`;
+}
+function usePast(key, ok) {                       // the last record of this card (same chat, same block) from the Works run history
+  const [past, setPast] = useState(undefined);
+  useEffect(() => { let on = true; (nodeHost && ok ? nodeHost.past(key) : Promise.resolve(null)).then((r) => on && setPast(r || null)).catch(() => on && setPast(null)); return () => { on = false; }; }, [key, ok]);
+  return past;
+}
 export function NodeCard({ spec, onSend, locked }) {
+  const key = cardKey(spec);
   const [info, setInfo] = useState(undefined), [v, setV] = useState(() => ({ ...(spec.config && typeof spec.config === "object" ? spec.config : {}) })), [input, setInput] = useState(String(spec.input || ""));
-  const [st, setSt] = useState(""), [res, setRes] = useState(null), [err, setErr] = useState(""), runRef = useRef(null), key = "node:" + JSON.stringify(spec);
-  const reqOk = !!info && (info.fields || []).every((f) => !f.required || f.type === "checkbox" || String(v[f.name] !== undefined ? v[f.name] : f.default ?? "").trim() !== "");
-  useAutoRun(key, locked, reqOk, runRef);
+  const [st, setSt] = useState("wait"), [res, setRes] = useState(null), [err, setErr] = useState(""), runRef = useRef(null), started = useRef(false);
+  const past = usePast(key, !locked);
+  useEffect(() => { if (!past || started.current) return; autoRan.add(key); setSt(ST_OF[past.status] || "error"); if (past.result) setRes(past.result); if (past.error) setErr(past.error); }, [past]);
+  const fields = (info && info.fields) || [], val = (f) => (v[f.name] !== undefined ? v[f.name] : f.type === "checkbox" ? !!f.default : f.default ?? "");
+  const missing = fields.filter((f) => f.required && f.type !== "checkbox" && String(val(f) ?? "").trim() === "").map((f) => f.label || f.name);
+  useAutoRun(key, locked, !!info && past === null && !missing.length, runRef);
   useEffect(() => { let on = true; (nodeHost ? nodeHost.info(spec.type) : Promise.resolve(null)).then((i) => on && setInfo(i || null)).catch(() => on && setInfo(null)); return () => { on = false; }; }, [spec.type]);
-  if (info === undefined) return html`<div class="ask"><div class="bk-head"><span class="bk-title">${Ic("flow", 14)}<span>Node: ${spec.type}</span></span></div></div>`;
-  if (!info) return html`<div class="ask"><div class="bk-head"><span class="bk-title">${Ic("flow", 14)}<span>Node: ${spec.type}</span></span></div><p class="mute small">This node is not installed or cannot run on its own.</p></div>`;
-  const fields = info.fields || [], val = (f) => (v[f.name] !== undefined ? v[f.name] : f.type === "checkbox" ? !!f.default : f.default ?? "");
-  const missing = fields.filter((f) => f.required && f.type !== "checkbox" && String(val(f) ?? "").trim() === "");
+  const pkg = String(spec.type).startsWith("pkg:"), icon = NODE_IC[spec.type] || (pkg ? "package" : "flow");
+  if (!info) return html`<div class="rc k-pkg"><${RunHead} icon=${icon} kind="k-pkg" title=${spec.type} sub="Node"/>${info === null && html`<p class="rc-note mute small">This node is not installed or cannot run on its own.</p>`}</div>`;
   const dis = st === "busy" || locked, set = (f, x) => setV((c) => ({ ...c, [f.name]: x }));
   const run = async () => {
-    if (missing.length || dis) return; setSt("busy"); setErr(""); setRes(null);
-    try { const r = await nodeHost.run({ type: spec.type, config: Object.fromEntries(fields.map((f) => [f.name, val(f)])), input }); setRes(r); setSt("done"); if (onSend) onSend(nodeResultText(info.title, r)); }
+    if (missing.length || st === "busy" || locked) return; started.current = true; autoRan.add(key); setSt("busy"); setErr(""); setRes(null);
+    try { const r = await nodeHost.run({ type: spec.type, config: Object.fromEntries(fields.map((f) => [f.name, val(f)])), input, card: key }); setRes(r); setSt("done"); if (onSend) onSend(nodeResultText(info.title, r)); }
     catch (e) { setErr(e.message || String(e)); setSt("error"); }
   };
   runRef.current = () => { run(); };
-  return html`<div class="fb"><div class="bk-head"><span class="bk-title">${Ic("flow", 14)}<span>Node: ${info.title}</span></span>
-      ${st === "done" && html`<span class="tag good">${Ic("check", 12)} done</span>`}${st === "error" && html`<span class="tag bad">failed</span>`}</div>
-    ${info.desc && html`<p class="mute small fb-d">${info.desc}</p>`}
-    <div class="fb-grid">${fields.map((f) => html`<label class=${"fb-f" + (f.type === "textarea" || f.type === "code" ? " wide" : "")}><span>${f.label || f.name}${f.required ? " *" : ""}${f.secret ? " (secret, used for this run only)" : ""}</span>
-      ${f.type === "textarea" || f.type === "code" ? html`<textarea rows="3" value=${val(f)} disabled=${dis} onInput=${(e) => set(f, e.target.value)}></textarea>`
-      : f.type === "select" ? html`<select value=${val(f)} disabled=${dis} onChange=${(e) => set(f, e.target.value)}><option value="">Choose…</option>${(f.options || []).map((o) => html`<option>${String(o)}</option>`)}</select>`
-      : f.type === "checkbox" ? html`<input type="checkbox" checked=${!!val(f)} disabled=${dis} onChange=${(e) => set(f, e.target.checked)}/>`
-      : html`<input type=${f.secret ? "password" : f.type === "number" ? "number" : "text"} autocomplete="off" value=${f.secret && v[f.name] === undefined ? "" : val(f)} disabled=${dis} onInput=${(e) => set(f, e.target.value)}/>`}</label>`)}
-      ${(info.templated || []).length > 0 && html`<label class="fb-f wide"><span>Input text (for {{input}})</span><textarea rows="2" value=${input} disabled=${dis} onInput=${(e) => setInput(e.target.value)}></textarea></label>`}</div>
-    ${err && html`<p class="small" style="color:var(--bad,#c0392b);margin:6px 0">${err}</p>`}
-    ${res && html`<pre class="small" style="max-height:240px;overflow:auto;margin:8px 0;white-space:pre-wrap">${res.text || "(no text output)"}${res.data ? "\n\n" + JSON.stringify(res.data, null, 2).slice(0, 4000) : ""}</pre>`}
-    <div class="fb-foot"><span class="mute small grow">${missing.length ? "Fill in: " + missing.map((f) => f.label || f.name).join(", ") : "Runs by itself when the values are filled; the result returns to the chat."}</span>
-      <button class="btn pri" disabled=${dis || missing.length > 0} onClick=${run}>${st === "busy" ? "Running…" : st === "done" ? "Run again" : "Run"}</button></div></div>`;
+  return html`<div class=${"rc k-pkg " + st}><${RunHead} icon=${icon} kind="k-pkg" title=${info.title} sub=${"Node · " + (info.group || (pkg ? "package" : "built in"))} st=${missing.length && st === "wait" ? "need" : st}/>
+    ${info.desc && html`<p class="rc-d">${info.desc}</p>`}
+    ${(fields.length > 0 || (info.templated || []).length > 0) && html`<div class="rc-grid">${fields.map((f) => html`<${RunField} f=${f} val=${val} set=${set} dis=${dis} secretNote=${true}/>`)}
+      ${(info.templated || []).length > 0 && html`<label class="rc-f wide"><span>Input text <small>for {{input}}</small></span><textarea rows="2" value=${input} disabled=${dis} onInput=${(e) => setInput(e.target.value)}></textarea></label>`}</div>`}
+    ${st === "busy" && html`<div class="rc-bar"><span></span></div>`}
+    ${err && html`<div class="werr rc-pad">${Ic("alert", 14)}<span>${err}</span></div>`}
+    ${res && html`<div class="rc-out"><div class="io-k">Output</div><pre>${res.text || "(no text output)"}${res.data ? "\n\n" + JSON.stringify(res.data, null, 2).slice(0, 4000) : ""}</pre></div>`}
+    <${RunFoot} st=${st} missing=${missing} locked=${locked} what=${"this node"} onRun=${run} onDecline=${() => { autoRan.add(key); setSt("skip"); }} works=${st !== "wait" && st !== "skip" ? "#/works" : ""}/></div>`;
 }
 
-// ---------- work: a mentioned workflow. Inputs are checked here; Run starts it on the server, the card follows it and hands the result to the chat
+// ---------- work: a mentioned workflow. Inputs are checked here; approving starts it on the server, the card follows its nodes and hands the result to the chat
 export function WorkRunCard({ spec, onSend, locked }) {
-  const [info, setInfo] = useState(undefined), [v, setV] = useState(() => ({ ...(spec.data && typeof spec.data === "object" ? spec.data : {}) })), [st, setSt] = useState(""), [run, setRun] = useState(null), [err, setErr] = useState(""), runRef = useRef(null), key = "work:" + JSON.stringify(spec);
-  const reqOk = !!info && (info.inputs || []).every((f) => !f.required || f.type === "checkbox" || String(v[f.name] !== undefined ? v[f.name] : f.default ?? "").trim() !== "");
-  useAutoRun(key, locked, reqOk, runRef);
+  const key = cardKey(spec);
+  const [info, setInfo] = useState(undefined), [v, setV] = useState(() => ({ ...(spec.data && typeof spec.data === "object" ? spec.data : {}) })), [st, setSt] = useState("wait"), [run, setRun] = useState(null), [err, setErr] = useState(""), runRef = useRef(null), started = useRef(false);
+  const past = usePast(key, !locked);
+  const ins = (info && info.inputs) || [], val = (f) => (v[f.name] !== undefined ? v[f.name] : f.default ?? (f.type === "checkbox" ? false : ""));
+  const missing = ins.filter((f) => f.required && f.type !== "checkbox" && String(val(f) ?? "").trim() === "").map((f) => f.label || f.name);
+  useAutoRun(key, locked, !!info && past === null && !missing.length, runRef);
   useEffect(() => { let on = true; (nodeHost ? nodeHost.workInfo(spec.id) : Promise.resolve(null)).then((i) => on && setInfo(i || null)).catch(() => on && setInfo(null)); return () => { on = false; }; }, [spec.id]);
-  const head = (t, tag) => html`<div class="bk-head"><span class="bk-title">${Ic("flow", 14)}<span>Workflow: ${t}</span></span>${tag}</div>`;
-  if (info === undefined) return html`<div class="ask">${head(spec.id)}</div>`;
-  if (!info) return html`<div class="ask">${head(spec.id)}<p class="mute small">This workflow no longer exists.</p></div>`;
-  const ins = info.inputs || [], val = (f) => (v[f.name] !== undefined ? v[f.name] : f.default ?? (f.type === "checkbox" ? false : ""));
-  const bad = ins.find((f) => f.required && f.type !== "checkbox" && String(val(f) ?? "").trim() === "");
+  const finish = (r, title) => {
+    setRun(r); setSt(r.status === "done" ? "done" : "error"); if (r.status !== "done") setErr(r.err || "The workflow failed.");
+    if (onSend) onSend(r.status === "done" ? "Result of the workflow “" + title + "”:\n\n" + ((r.result && r.result.text) || "(it finished without text output)") : "The workflow “" + title + "” failed: " + (r.err || "unknown error"));
+  };
+  useEffect(() => {                                     // reopened chat: show the last run; one still going is followed (its result is not sent again)
+    if (!past || !info || started.current) return; autoRan.add(key); setSt(ST_OF[past.status] || "error");
+    let on = true;
+    nodeHost.workGet(info.id, past.id).then((r) => { if (!on || !r) return; setRun(r); if (r.err && r.status !== "done") setErr(r.err);
+      if (r.status === "queued" || r.status === "running") nodeHost.workFollow(info.id, past.id, (x) => on && setRun(x)).then((x) => { if (on) { setRun(x); setSt(x.status === "done" ? "done" : "error"); if (x.status !== "done") setErr(x.err || "The workflow failed."); } }).catch(() => {}); }).catch(() => {});
+    return () => { on = false; };
+  }, [past, info]);
+  if (!info) return html`<div class="rc k-trigger"><${RunHead} icon="flow" kind="k-trigger" title=${spec.id} sub="Workflow"/>${info === null && html`<p class="rc-note mute small">This workflow no longer exists.</p>`}</div>`;
   const dis = st === "busy" || locked, set = (f, x) => setV((c) => ({ ...c, [f.name]: x }));
   const go = async () => {
-    if (bad || dis) return; setSt("busy"); setErr(""); setRun(null);
-    try {
-      const r = await nodeHost.workRun(info.id, Object.fromEntries(ins.map((f) => [f.name, val(f)])), String(spec.text || ""), setRun);
-      setRun(r); setSt(r.status === "done" ? "done" : "error"); if (r.status !== "done") setErr(r.err || "The workflow failed.");
-      if (onSend) onSend(r.status === "done" ? "Result of the workflow “" + info.title + "”:\n\n" + ((r.result && r.result.text) || "(it finished without text output)") : "The workflow “" + info.title + "” failed: " + (r.err || "unknown error"));
-    } catch (e) { setErr(e.message || String(e)); setSt("error"); }
+    if (missing.length || st === "busy" || locked) return; started.current = true; autoRan.add(key); setSt("busy"); setErr(""); setRun(null);
+    try { finish(await nodeHost.workRun(info.id, Object.fromEntries(ins.map((f) => [f.name, val(f)])), String(spec.text || ""), setRun, key), info.title); }
+    catch (e) { setErr(e.message || String(e)); setSt("error"); }
   };
   runRef.current = () => { go(); };
-  const steps = Object.entries((run && run.nodes) || {});
-  return html`<div class="fb">${head(info.title, st === "done" ? html`<span class="tag good">${Ic("check", 12)} done</span>` : st === "error" ? html`<span class="tag bad">failed</span>` : null)}
-    ${info.description && html`<p class="mute small fb-d">${info.description}</p>`}
-    ${ins.length > 0 && html`<div class="fb-grid">${ins.map((f) => html`<label class=${"fb-f" + (f.type === "textarea" ? " wide" : "")}><span>${f.label}${f.required ? " *" : ""}</span>
-      ${f.type === "textarea" ? html`<textarea rows="3" value=${val(f)} disabled=${dis} onInput=${(e) => set(f, e.target.value)}></textarea>`
-      : f.type === "select" ? html`<select value=${val(f)} disabled=${dis} onChange=${(e) => set(f, e.target.value)}>${(f.options || []).map((o) => html`<option>${o}</option>`)}</select>`
-      : f.type === "checkbox" ? html`<input type="checkbox" checked=${!!val(f)} disabled=${dis} onChange=${(e) => set(f, e.target.checked)}/>`
-      : html`<input type=${f.type === "number" ? "number" : "text"} value=${val(f)} disabled=${dis} onInput=${(e) => set(f, e.target.value)}/>`}</label>`)}</div>`}
-    ${steps.length > 0 && html`<p class="mute small">${steps.filter(([, n]) => n.status === "ok").length} of ${steps.length} steps done${st === "busy" ? "…" : ""}</p>`}
-    ${err && html`<p class="small" style="color:var(--bad,#c0392b);margin:6px 0">${err}</p>`}
-    ${run && run.result && html`<div class="wres"><${Md} text=${run.result.text}/></div>`}
-    <div class="fb-foot"><span class="mute small grow">${bad ? "Fill in: " + bad.label : "Runs by itself when the inputs are filled; the result returns to the chat."}</span>
-      <button class="btn pri" disabled=${dis || !!bad} onClick=${go}>${st === "busy" ? "Running…" : st === "done" ? "Run again" : "Run"}</button></div></div>`;
+  const steps = (info.steps || []), rn = (run && run.nodes) || {}, okN = steps.filter((n) => rn[n.id] && rn[n.id].status === "ok").length;
+  return html`<div class=${"rc k-trigger " + st}><${RunHead} icon="flow" kind="k-trigger" title=${info.title} sub=${"Workflow · " + steps.length + " step" + (steps.length === 1 ? "" : "s") + (run && steps.length ? " · " + okN + " done" : "")} st=${missing.length && st === "wait" ? "need" : st}/>
+    ${info.description && html`<p class="rc-d">${info.description}</p>`}
+    ${steps.length > 0 && html`<div class="rc-flow">${steps.map((n, i) => html`${i > 0 && html`<span class="rc-arrow">${Ic("right", 11)}</span>`}<span class=${"rc-chip " + (rn[n.id] ? rn[n.id].status : "")} title=${(rn[n.id] && rn[n.id].error) || n.title}><i></i>${n.title}</span>`)}</div>`}
+    ${ins.length > 0 && html`<div class="rc-grid">${ins.map((f) => html`<${RunField} f=${f} val=${val} set=${set} dis=${dis}/>`)}</div>`}
+    ${st === "busy" && html`<div class="rc-bar"><span style=${steps.length ? "width:" + Math.max(6, Math.round((okN / steps.length) * 100)) + "%;animation:none" : ""}></span></div>`}
+    ${err && html`<div class="werr rc-pad">${Ic("alert", 14)}<span>${err}</span></div>`}
+    ${run && run.result && run.result.text && html`<div class="rc-out"><div class="io-k">Output</div><div class="wres"><${Md} text=${run.result.text}/></div></div>`}
+    <${RunFoot} st=${st} missing=${missing} locked=${locked} what=${"this workflow"} onRun=${go} onDecline=${() => { autoRan.add(key); setSt("skip"); }} works=${"#/works/" + info.id}/></div>`;
 }

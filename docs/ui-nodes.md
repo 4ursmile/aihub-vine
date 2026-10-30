@@ -261,7 +261,7 @@ How it works: the file is opened with `?view=deck` / `?view=doc`; the server inj
 
 ## Slash commands from packages
 
-Typing `/` in the chat composer opens a menu with three sources: the UI's own commands (`/compact`, `/clear`, `/model`, `/effort`, `/mode`, `/context`, `/canvas`), everything Claude Code knows (`~/.claude/commands`, skills and plugin skills, which Claude runs itself), and commands from installed aihub packages. A package adds one with a file `slash/<name>.slash.json`:
+Typing `/` in the chat composer opens a menu with three sources: the UI's own commands (`/compact`, `/btw`, `/clear`, `/model`, `/effort`, `/mode`, `/context`, `/canvas`), everything Claude Code knows (`~/.claude/commands`, skills and plugin skills, which Claude runs itself), and commands from installed aihub packages. A package adds one with a file `slash/<name>.slash.json`:
 
 ```json
 {"name": "standup", "description": "Summarise yesterday's work", "prompt": "Summarise what I did yesterday from git log. Focus: $ARGUMENTS"}
@@ -310,12 +310,23 @@ Data moves between nodes as **pointers**: a path, never the content, so parquet,
 | `ai.claude` | Gets pointers in `{{input}}` and `{{data.path}}`; the folders are added with `--add-dir`, so Claude opens the files itself. End a node that creates a file with `OUTPUT: /full/path`. |
 | `ai.free` Free chat | Direct API call (no Claude Code). Optional MCP servers (tool loop); "paste the text of small files" is opt-in (30 KB). |
 | `space.publish` Publish to Space | `aihub space publish` of a file or folder (index.html) as doc / slides / report / pdf / sheet / dashboard / html. Same name = new revision. Private unless set. Path empty = the last existing path of the input. |
+| `send.smtp` Send email (SMTP) | Any mail server, any system, stdlib only (`ui/nodes/smtp_send.py`); not Outlook. Fields: SMTP server, security `starttls` (587) / `ssl` (465) / `none` (25), port (0 = by security), username, password (secret, stored encrypted), From (empty = username), To / Cc / Bcc / Reply-To (`;` or `,`, `Name <a@b>` works), subject, body (text or html), attachments (one path per line, `_fsread.blocked` refuses key/secret files, 25 MB total). **Action** (default `draft`): `send`; `draft` = IMAP `APPEND` with `\Draft` into the account's Drafts folder (IMAP server empty = `imap.` + the SMTP domain, port 993 SSL or 143 STARTTLS, folder `Drafts`, Gmail `[Gmail]/Drafts`), Bcc kept in the draft; `eml` = a `.eml` file (`X-Unsent: 1`, opens as a new mail) in `<run folder>/drafts/`, no server, output ends with `OUTPUT: <path>`. `takes` the standard mail keys. Data: `to`, `subject`, `attachments`, `action`, `path` (eml), `folder` (draft), `refused` (send). Errors never contain the password. |
 | `send.email` (legacy) | Moved to the package `aihub-nodes-outlook` (see below). Old works keep working once it is installed; without it the node fails with the install command. |
 
 `data` of upstream nodes is merged into `{{data.x}}` of the next node (later inputs win). Example: `ui/samples/git-data-dashboard.work.json` (git data -> Claude builds `dashboard/` -> Space).
 
 **Generate a work**: Works page "Generate a workflow" box, `/workflow <description>` in a chat (both `POST /api/works/generate`), or an answer with a ```` ```workflow ```` JSON block (button -> `POST /api/works/make`). Generated works only use known node types, have secrets emptied and are saved switched off (`works.checked_work`).
 
+
+## Saved nodes (aihub-ui 1.33)
+
+Works > **Saved nodes** is where you set a node up once (a mail server with its login, an HTTP API with its token, a Teams webhook, a Claude task with a fixed prompt) and give it a name. The tab lists every saved node with its type, how many fields and logins it holds, and which works use it; **New saved node** (pick any node type), **Edit**, **Duplicate** (same settings and logins) and **Delete**. In a work's Inspector, **Save as saved node** keeps the current node's settings (stored logins included).
+
+- **Use it as it is**: Add node > *Saved nodes* puts a node `{"type": <type>, "preset": <id>, "config": {}}` on the canvas. Each field it leaves empty takes the saved node's value at run time (`works.with_secrets`: saved config with its secrets, then the node's own non-empty values on top), so editing the saved node changes every work that uses it (running triggers restart).
+- **Change it for one work**: type in a field of that node (marked *saved* while it inherits; *reset* goes back). **Detach** copies the settings into the node and drops the link (logins must be typed again).
+- **Storage**: `~/.aihub/ui/presets.json` (secret fields hold the stored marker), the values in the encrypted secret box under `preset:<id>:<field>`. Routes `GET works/presets`, `POST works/presets/save` (`{preset, copy?}`; `copy` = `{preset}` or `{work, node}` copies the stored logins into a NEW saved node), `POST works/presets/delete`.
+- **Deleted** saved node: the node fails with "was deleted" until you pick another one or remove the link. **Sharing** a work writes the saved node's settings into the package and drops the link; logins never leave the machine.
+- **Generate** (`/workflow`, Works > Generate) lists your saved nodes to the model, which uses one when it fits; `checked_work` keeps only links to saved nodes that exist with the same type.
 
 ## Node contract: inputs and outputs (standard keys)
 
@@ -350,7 +361,7 @@ The Outlook nodes are not built in. `aihub install aihub-nodes-outlook` refuses 
 | Node | What it does |
 | --- | --- |
 | **Start: Outlook mail received** (`outlook-receive`, trigger) | Polls a folder (default every 20 s) and starts a run per NEW mail (only mail that arrives while the work is On) that matches ALL filled conditions, each a case-insensitive regex: *Sender* (tested on `Name <address>`), *Subject*, *Headers* (raw internet headers, e.g. `^List-Id:.*alerts`), *Content* (the body). Options: unread only, mark as read, save attachments. Event text = subject, sender and body; data = `from`, `from_name`, `subject`, `to`, `cc`, `body`, `received`, `attachments`, `message_id`. The generic *Only start when the text matches* filter still applies. |
-| **Send email (Outlook)** (`outlook-send`) | Send, save as draft or display. Empty `to` / `cc` / `bcc` / `subject` / `body` / `attachments` take the standard keys from the node before (`takes`); a blank body uses the incoming text. |
+| **Send email (Outlook)** (`outlook-send`) | Send, save as draft (Outlook's Drafts folder) or display. For any other mail server on any system use the builtin `send.smtp`. Empty `to` / `cc` / `bcc` / `subject` / `body` / `attachments` take the standard keys from the node before (`takes`); a blank body uses the incoming text. |
 
 Example: *Start: mail received* (Sender `@customer\.com`, Subject `^\[urgent\]`) -> *Claude* ("draft a reply to `{{data.body}}`") -> *Send email* (To `{{data.from}}`, Subject `Re: {{data.subject}}`, Action draft).
 
@@ -366,6 +377,6 @@ A thread (`aihubui/selfupdate.py`) asks the hub for the newest `aihub-ui` every 
 
 ## Running a node from a chat
 
-Type `@node:<type>` in a chat (the `@` menu lists every action node that has a program). The assistant is told the node's fields: it fills them from your message, asks for only the missing required ones with a form, and then answers with a ```node block. The card shows the values (editable), secret fields as password boxes (used for that run only, never sent to the model), and a **Run** button; the output appears in the card and the result goes back to the chat by itself, so the assistant can continue. `@work:<id>` works the same for a workflow: the assistant asks for missing Start inputs, then a card runs it and returns the result. Trigger, Claude and flow nodes are not runnable on their own.
+Type `@node:<type>` in a chat (the `@` menu lists every action node that has a program). The assistant is told the node's fields: it fills them from your message, asks for only the missing required ones with a form, and then answers with a ```node block. The card shows the values (editable), secret fields as password boxes (used for that run only, never sent to the model), and an **Approve and run** button (or Decline): nothing runs until you approve it, except when the chat is in **bypass** permission mode, where the card starts by itself once its required values are filled (only for a card that was written live, never when an old chat is reopened). The output appears in the card and the result goes back to the chat by itself, so the assistant can continue. `@work:<id>` works the same for a workflow: the assistant asks for missing Start inputs, then the card (with the workflow's steps and their live status) runs it after approval and returns the result. Every run leaves a record: node runs in `~/.aihub/ui/runs/chat/` (secret values left out, last 200 kept), workflow runs in the work's own history (`via` = `chat`, with the chat id as `origin`). The Works page lists them under **Runs from chats** (`GET works/chatruns[?chat=<id>]`), and a reopened chat shows each card's last run instead of a fresh approval. Trigger, Claude and flow nodes are not runnable on their own.
 
 Cards run by themselves once every required value is filled (only when they appear live, never when an old chat is reopened). A chat whose working folder holds an `aihub.toml` (or sub folders that do) shows a **Publish** button that uploads it straight to the hub (`aihub dev publish -i`) in a terminal dialog.

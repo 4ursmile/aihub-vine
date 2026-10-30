@@ -1329,6 +1329,38 @@ def chat_stop(h, q, b):
     return {"stopped": chat.stop(need(b, "id"))}
 
 
+def chat_hint(h, q, b):
+    """A message typed while Claude Code answers: it joins THAT answer at its next step. 409 when no answer can take it any more
+    (finished, Free chat): the page then sends it as the next message."""
+    s = store.get_session(need(b, "id"))
+    if not s:
+        raise Err("no such chat", 404)
+    text = str(need(b, "text")).strip()[:20000]
+    if not text:
+        raise Err("empty message")
+    if not chat.hint(s["id"], text):
+        raise Err("no running answer to add this to", 409)
+    return {"sent": True}
+
+
+def chat_btw(h, q, b):
+    """/btw <question>: a side answer from the chat's context; not added to the conversation, the running answer is not disturbed."""
+    s = store.get_session(need(b, "id"))
+    if not s:
+        raise Err("no such chat", 404)
+    text = str(need(b, "text")).strip()[:20000]
+    if not text:
+        raise Err("ask something after /btw")
+    if s.get("engine") == "free":
+        raise Err("/btw works in Claude Code mode")
+    model = str(b.get("model") or "")
+    if model and not all(c.isalnum() or c in "._-:/[]" for c in model):
+        raise Err("bad model")
+    effort = b.get("effort") if b.get("effort") in chat.EFFORT else ""
+    hubusage.use("btw", session=s["id"], detail={"model": model or s.get("model") or ""})
+    return chat.btw(s, text, model, effort)
+
+
 MENTION_CHAT = re.compile(r"@chat:([0-9a-f]{8})(?::(\d{1,3}))?\b")
 MENTION_TOOL = re.compile(r"@tool:([A-Za-z0-9][\w.:-]{0,79})")
 MENTION_WORK = re.compile(r"@work:([0-9a-f]{8})\b")
@@ -1785,25 +1817,69 @@ def work_make(h, q, b):
     return {"work": w}
 
 
+def presets_list(h, q, b):
+    return {"presets": W.presets_view()}
+
+
+def presets_save(h, q, b):
+    copy = b.get("copy") if isinstance(b.get("copy"), dict) else None
+    try:
+        p = W.save_preset(need(b, "preset", dict), BOX, copy)
+    except ValueError as e:
+        raise Err(str(e))
+    if ENGINE:
+        ENGINE.sync()                                           # triggers that use it restart with the new settings
+    return {"preset": p}
+
+
+def presets_delete(h, q, b):
+    if not W.delete_preset(need(b, "id"), BOX):
+        raise Err("no such saved node", 404)
+    if ENGINE:
+        ENGINE.sync()
+    return {"ok": True}
+
+
 def work_nodes(h, q, b):
     return {"nodes": [W.public(s) for s in W.catalogue(force=True).values()]}
 
 
 def node_run(h, q, b):
-    """Run ONE node from a chat card: {type, config, input, id (chat)} -> {text, data, log}. Secrets arrive in config for this run only."""
+    """Run ONE node from a chat card: {type, config, input, id (chat), card} -> {text, data, log, run}. Secrets arrive in config for this run only.
+    Each run leaves a record in runs/chat/ (shown on the Works page) without the secret values."""
     spec = W.catalogue().get(str(b.get("type") or ""))
     if not W.runnable(spec):
         raise Err("this node cannot run on its own", 400)
     sid = str(b.get("id") or "")
-    wd = store.session_dir(sid) if sid and store.get_session(sid) else os.path.expanduser("~")
+    known = bool(sid and store.get_session(sid))
+    wd = store.session_dir(sid) if known else os.path.expanduser("~")
     text = str(b.get("input") or "")[:50000]
-    hubusage.use("node:" + spec["type"], package=spec.get("package") or "aihub-ui", session=sid)
+    rec = W.new_chat_run(spec, sid if known else "", b.get("card"), b.get("config"), text)
     try:
-        return W.run_single(spec, b.get("config"), text, wd)
+        W.clean_node_config(spec, b.get("config"))
     except ValueError as e:
         raise Err(str(e), 400)
-    except RuntimeError as e:
-        raise Err("%s failed: %s" % (spec["title"], e), 422)
+    W.save_chat_run(rec)
+    hubusage.use("node:" + spec["type"], package=spec.get("package") or "aihub-ui", session=sid)
+    try:
+        r = W.run_single(spec, b.get("config"), text, wd)
+    except (ValueError, RuntimeError) as e:
+        rec.update(status="failed", ended=time.time(), error=str(e)[:600])
+        W.save_chat_run(rec)
+        raise Err(str(e) if isinstance(e, ValueError) else "%s failed: %s" % (spec["title"], e), 400 if isinstance(e, ValueError) else 422)
+    except Exception as e:
+        rec.update(status="failed", ended=time.time(), error=str(e)[:600])
+        W.save_chat_run(rec)
+        raise
+    rec.update(status="done", ended=time.time(), result={"text": r["text"][:4000], "data": r.get("data")}, log=r.get("log", ""))
+    W.save_chat_run(rec)
+    return dict(r, run=rec["id"])
+
+
+def work_chat_runs(h, q, b):
+    """Runs started from chats (nodes and workflows); `chat` narrows it to one chat."""
+    c = q.get("chat") or None
+    return {"runs": W.chat_runs(c if c and store.get_session(c) else None if not c else "-")}
 
 
 def work_run(h, q, b):
@@ -1839,7 +1915,9 @@ def work_run(h, q, b):
         if not text and data:
             text = "\n".join("%s: %s" % (k, v) for k, v in data.items())
     node = dict(node, config=dict(node.get("config") or {}, filter=""))               # a manual run is never filtered out
-    return {"run": ENGINE.fire(w, node, {"text": text or "manual run", "data": data}, "manual")}
+    origin = str(b.get("origin") or "")
+    extra = {"origin": origin, "card": str(b.get("card") or "")[:40]} if origin and store.get_session(origin) else None
+    return {"run": ENGINE.fire(w, node, {"text": text or "manual run", "data": data}, "chat" if extra else "manual", extra)}
 
 
 def _slug(t):
@@ -1847,7 +1925,8 @@ def _slug(t):
 
 
 RISKS = {"io.read_file": "reads files on this computer", "io.request": "makes web requests", "code.python": "runs Python code written in the workflow on the installer's machine", "git.read": "reads git repositories with your Vault logins",
-         "start.webhook": "listens for local webhook calls", "start.teams": "listens for messages from outside (tunnel + secret)", "send.teams": "posts to Teams"}
+         "start.webhook": "listens for local webhook calls", "start.teams": "listens for messages from outside (tunnel + secret)", "send.teams": "posts to Teams",
+         "send.smtp": "sends mail (or saves drafts) through a mail server"}
 
 
 def _risks(w):
@@ -1918,6 +1997,9 @@ def work_export(h, q, b):
     out.pop("id", None)
     out.update(enabled=False)
     for n in out["nodes"]:
+        p = W.preset(n.pop("preset", None))
+        if p and p["type"] == n["type"]:                         # saved nodes exist only here: the package gets their settings written in
+            n["config"] = dict({k: v for k, v in p["config"].items() if v != W.MARK}, **{k: v for k, v in n["config"].items() if v not in (None, "")})
         for f in (cat.get(n["type"]) or {}).get("fields", []):
             if f.get("secret"):
                 n["config"][f["name"]] = ""                      # never leaves the machine; the person who installs it types their own
@@ -2268,10 +2350,10 @@ ROUTES = {
     ("POST", "knowledge/delete"): note_delete, ("POST", "knowledge/pull"): knowledge_pull,
     ("GET", "sessions"): sessions, ("POST", "sessions"): session_new, ("GET", "sessions/get"): session_get,
     ("POST", "sessions/update"): session_update, ("POST", "sessions/delete"): session_delete, ("POST", "sessions/delmsg"): session_delmsg, ("POST", "folders"): folders,
-    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("GET", "files/diff"): file_diff, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "update/apply"): update_act, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("GET", "sessions/export"): chat_export, ("POST", "sessions/share"): chat_share, ("GET", "sessions/shared"): chats_shared, ("POST", "sessions/import"): chat_import, ("POST", "sessions/rewind"): session_rewind,
+    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("GET", "files/diff"): file_diff, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "update/apply"): update_act, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/hint"): chat_hint, ("POST", "chat/btw"): chat_btw, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("GET", "sessions/export"): chat_export, ("POST", "sessions/share"): chat_share, ("GET", "sessions/shared"): chats_shared, ("POST", "sessions/import"): chat_import, ("POST", "sessions/rewind"): session_rewind,
     ("GET", "themes"): themes_list, ("POST", "themes/save"): theme_save, ("POST", "themes/delete"): theme_delete, ("GET", "usage"): usage_get, ("POST", "spaces/publish"): space_publish, ("GET", "spaces"): spaces_mine, ("GET", "prefs"): prefs_get, ("PUT", "prefs"): prefs_put, ("GET", "slash"): slash,
     ("GET", "works"): works, ("GET", "works/get"): work_get, ("POST", "works/save"): work_save, ("POST", "works/delete"): work_delete,
-    ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("POST", "nodes/run"): node_run, ("GET", "project/info"): project_info, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/generate/start"): work_generate_start, ("GET", "works/generate/status"): work_generate_status, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import,
+    ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("GET", "works/presets"): presets_list, ("POST", "works/presets/save"): presets_save, ("POST", "works/presets/delete"): presets_delete, ("POST", "nodes/run"): node_run, ("GET", "works/chatruns"): work_chat_runs, ("GET", "project/info"): project_info, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/generate/start"): work_generate_start, ("GET", "works/generate/status"): work_generate_status, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import,
     ("GET", "works/run"): work_run_get, ("GET", "nodes/local"): nodes_local, ("GET", "nodes/starter"): nodes_starter, ("POST", "nodes/save"): nodes_save, ("POST", "nodes/delete"): nodes_delete,
     ("GET", "nodes/export-info"): nodes_export_info, ("POST", "nodes/export"): nodes_export, ("GET", "nodes/packages"): nodes_packages, ("POST", "works/layout"): works_layout, ("GET", "works/mentions"): works_mentions, ("GET", "works/sources"): works_sources, ("GET", "works/hook"): work_hook,
     ("GET", "auth"): auth_status, ("POST", "auth/check"): auth_check, ("POST", "auth/login"): auth_login,

@@ -99,6 +99,13 @@ SPACE_GUIDE = """Publishes a file or folder to the hub as a Space (document, sli
 - Private by default; choose public to let anyone with the link read it. Needs `aihub login` to the hub.
 Output: the space reference and its link."""
 
+SMTP_GUIDE = """Sends mail through any mail server (SMTP), on any system; no Outlook needed (for the Outlook desktop app use the aihub-nodes-outlook package).
+1. Server: smtp.gmail.com / smtp.office365.com / your company's server. Security starttls = port 587, ssl = 465.
+2. Username + Password: the password is stored encrypted. An account with 2-step sign-in needs an app password.
+3. Action: send; draft = saved into the account's Drafts folder over IMAP (imap.<same domain>:993 unless you set it; Gmail's folder is [Gmail]/Drafts), so you check and send it from your mail app; eml = only writes a .eml file into the run's folder (drafts/), no server at all.
+4. Leave To / Subject / Body empty to take {{data.to}}, {{data.subject}} ... from the node before (a Loop over [{to, subject, body}] sends one mail per item). A blank body uses the text coming in.
+5. Attachments: one file path per line ({{input}} or an earlier node's OUTPUT path). Key and secret files are refused."""
+
 MAIL_PKG_NODE = "pkg:aihub-nodes-outlook/outlook-send"
 MAIL_KEYS = ("to", "cc", "bcc", "subject", "body", "attachments")      # the standard data keys of a mail node (docs/ui-nodes.md, Node contract)
 LOOP_GUIDE = """Repeats the nodes after it for every item of a list, for example one mail per sender.
@@ -210,6 +217,29 @@ BUILTIN = {
                               {"name": "format", "label": "Body format", "type": "select", "options": ["text", "html"], "default": "text"},
                               {"name": "attachments", "label": "Attachments (one path per line)", "type": "textarea", "default": ""},
                               {"name": "action", "label": "Action", "type": "select", "options": ["send", "draft", "display"], "default": "send"}]},
+    "send.smtp": {"title": "Send email (SMTP)", "kind": "action", "group": "Mail", "desc": "Sends mail through any SMTP server (Gmail, Microsoft 365, your company's), or saves it as a draft (IMAP Drafts folder, or a .eml file). Not Outlook: that is the aihub-nodes-outlook package.",
+                  "run": ["{python}", "{pkg}/nodes/smtp_send.py"], "timeout": 180, "templated": ["from", "to", "cc", "bcc", "reply_to", "subject", "body", "attachments"], "takes": list(MAIL_KEYS),
+                  "guide": SMTP_GUIDE,
+                  "fields": [{"name": "action", "label": "Action", "type": "select", "options": ["send", "draft", "eml"], "default": "draft",
+                              "help": "draft = saved in the account's Drafts folder (IMAP), you send it yourself; eml = a .eml file in the run's folder, no server."},
+                             {"name": "host", "label": "SMTP server", "type": "text", "default": "", "help": "smtp.gmail.com, smtp.office365.com ... Not needed for eml."},
+                             {"name": "security", "label": "Security", "type": "select", "options": ["starttls", "ssl", "none"], "default": "starttls"},
+                             {"name": "port", "label": "Port (0 = 587 / 465 / 25 by security)", "type": "number", "default": 0},
+                             {"name": "username", "label": "Username", "type": "text", "default": ""},
+                             {"name": "password", "label": "Password / app password", "type": "password", "help": "Stored encrypted. Empty = no login."},
+                             {"name": "from", "label": "From (empty = the username)", "type": "text", "default": ""},
+                             {"name": "to", "label": "To (; or , between)", "type": "text", "default": "", "help": "Empty = {{data.to}} from the node before."},
+                             {"name": "cc", "label": "Cc", "type": "text", "default": ""},
+                             {"name": "bcc", "label": "Bcc", "type": "text", "default": ""},
+                             {"name": "reply_to", "label": "Reply-To", "type": "text", "default": ""},
+                             {"name": "subject", "label": "Subject", "type": "text", "default": "", "help": "Empty = {{data.subject}} from the node before."},
+                             {"name": "body", "label": "Body", "type": "textarea", "default": "", "help": "Empty = {{data.body}}, else the text coming in."},
+                             {"name": "format", "label": "Body format", "type": "select", "options": ["text", "html"], "default": "text"},
+                             {"name": "attachments", "label": "Attachments (one path per line)", "type": "textarea", "default": ""},
+                             {"name": "imap_host", "label": "IMAP server for drafts (empty = imap.<same domain>)", "type": "text", "default": ""},
+                             {"name": "imap_port", "label": "IMAP port (993 SSL, 143 STARTTLS)", "type": "number", "default": 993},
+                             {"name": "drafts_folder", "label": "Drafts folder", "type": "text", "default": "Drafts", "help": "Gmail: [Gmail]/Drafts"},
+                             {"name": "insecure", "label": "Do not check the server's TLS certificate", "type": "checkbox", "default": False}]},
     "flow.loop": {"title": "Loop (for each)", "kind": "action", "group": "Flow", "guide": LOOP_GUIDE,
                   "desc": "Runs everything after it ONCE PER ITEM of a list (senders, files, rows ...), one item after the other, until an End loop node. Each pass sees {{input}} / {{data.item}} = the item, {{data.index}}, {{data.total}}; a JSON object item also puts its keys in {{data.<key>}}.",
                   "fields": [{"name": "items", "label": "The list", "type": "textarea", "default": "{{input}}", "help": "Usually the text of the node before. Lines, a comma list, a regex split or a JSON list (strings or objects)."},
@@ -231,7 +261,7 @@ BUILTIN = {
 
 _cat = {"t": 0.0, "v": {}}
 ASSIST = ("input", "data", "file", "skill")                   # what a field may suggest + highlight: {{input}}/{{trigger}}, {{data.key}}, @file, /skill
-BUILTIN_OUTPUTS = {"git.pull": ["path"], "io.path": ["path"], "space.publish": ["url"]}
+BUILTIN_OUTPUTS = {"send.smtp": ["to", "subject", "attachments", "action", "path"], "git.pull": ["path"], "io.path": ["path"], "space.publish": ["url"]}
 CLAUDE_OUT = "the reply text. To hand a file or folder on, make Claude end the reply with `OUTPUT: /full/path`"
 # what a node hands on (`out`: text|path|json|url, `out_note`) and what it needs from the nodes before it (`needs`, `needs_note`); shown in the editor
 BUILTIN_IO = {
@@ -254,6 +284,7 @@ BUILTIN_IO = {
     "io.path": ("path", "the path(s), not the content", "", ""),
     "space.publish": ("url", "the space reference and link", "path", "a file or folder path: a path node before it, or a Claude task that ends with OUTPUT: /full/path"),
     "send.email": ("text", "what was sent", "", ""),
+    "send.smtp": ("text", "what was sent or saved; {{data.path}} for an eml draft", "", ""),
     "flow.loop": ("text", "the current item, once per pass", "", ""),
     "flow.endloop": ("text", "the results of all passes", "", ""),
     "send.teams": ("text", "what was sent", "", ""),
@@ -488,13 +519,122 @@ def strip_secrets(work, box):
 
 
 def with_secrets(work_id, node, spec, box):
+    """The config a node runs with: its own fields (stored secrets filled in) over the saved node it uses (`preset`), if any."""
     cfg = dict(node.get("config") or {})
     allv = None
     for f in spec["fields"]:
         if f.get("secret") and cfg.get(f["name"]) == MARK:
             allv = allv if allv is not None else box.get_all()
             cfg[f["name"]] = allv.get(_skey(work_id, node["id"], f["name"]), "")
+    p = preset(node.get("preset"))
+    if p and p["type"] == node.get("type"):
+        base = dict(p["config"])
+        for f in spec["fields"]:
+            if f.get("secret") and base.get(f["name"]) == MARK:
+                allv = allv if allv is not None else box.get_all()
+                base[f["name"]] = allv.get(_pkey(p["id"], f["name"]), "")
+        base.update({k: v for k, v in cfg.items() if v not in (None, "")})   # what this work typed wins; an empty field inherits
+        cfg = base
     return cfg
+
+
+# ---------- saved nodes: a node set up once (credentials too) that any work uses as it is, or with some fields changed
+
+PRESET_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+
+
+def _presets_file():
+    return os.path.join(store.ui_dir(), "presets.json")
+
+
+def _pkey(pid, field):
+    return "preset:%s:%s" % (pid, field)
+
+
+def presets():
+    """-> {id: {id, name, type, description, config, updated}}. Secret fields hold MARK; the values are in the box."""
+    d = store._read(_presets_file(), {})
+    return {k: v for k, v in d.items() if PRESET_ID.match(k) and isinstance(v, dict) and isinstance(v.get("config"), dict)} if isinstance(d, dict) else {}
+
+
+def preset(pid):
+    return presets().get(pid) if isinstance(pid, str) and PRESET_ID.match(pid) else None
+
+
+def preset_usage():
+    """-> {preset id: [{id, title}] of the works that use it}."""
+    out = {}
+    for row in store.works():
+        w = store.get_work(row["id"]) or {}
+        for n in w.get("nodes", []):
+            if n.get("preset"):
+                lst = out.setdefault(n["preset"], [])
+                if not any(x["id"] == w["id"] for x in lst):
+                    lst.append({"id": w["id"], "title": w.get("title") or "Untitled"})
+    return out
+
+
+def presets_view():
+    use, cat = preset_usage(), catalogue()
+    return sorted(({**p, "used_in": use.get(p["id"], []), "missing": p["type"] not in cat} for p in presets().values()), key=lambda p: p["name"].lower())
+
+
+def save_preset(p, box, copy=None):
+    """Create or update a saved node. Secret fields: a typed value is moved into the box, MARK keeps the stored one, empty removes it.
+    COPY = {"preset": id} or {"work": id, "node": id}: a new saved node takes the stored secrets of that one (Duplicate, Save as saved node)."""
+    spec = catalogue().get(str(p.get("type") or ""))
+    if not spec:
+        raise ValueError("unknown node type %r" % p.get("type"))
+    name = " ".join(str(p.get("name") or "").split())[:60]
+    if not name:
+        raise ValueError("give the saved node a name")
+    have = presets()
+    pid = str(p.get("id") or "")
+    if pid and (not PRESET_ID.match(pid) or pid not in have):
+        raise ValueError("no such saved node")
+    if not pid:
+        base = slug(name).replace("_", "-")[:32] or "node"
+        pid, i = base, 1
+        while pid in have:
+            i += 1
+            pid = "%s-%d" % (base, i)
+    src = dict(p.get("config") or {})
+    cfg, allv = {}, None
+    for f in spec["fields"]:
+        k, v = f["name"], src.get(f["name"])
+        if not f.get("secret"):
+            if v not in (None, ""):
+                cfg[k] = v
+            continue
+        if isinstance(v, str) and v and v != MARK:
+            box.put(_pkey(pid, k), v)
+            cfg[k] = MARK
+        elif v == MARK:
+            old = None
+            if copy and pid not in have:
+                allv = allv if allv is not None else box.get_all()
+                old = allv.get(_pkey(copy["preset"], k)) if copy.get("preset") else allv.get(_skey(copy.get("work"), copy.get("node"), k))
+                if old:
+                    box.put(_pkey(pid, k), old)
+            if old or (pid in have and have[pid]["config"].get(k) == MARK):
+                cfg[k] = MARK
+        else:
+            box.remove(_pkey(pid, k))
+    rec = {"id": pid, "name": name, "type": spec["type"], "description": " ".join(str(p.get("description") or "").split())[:200], "config": cfg, "updated": time.time()}
+    have[pid] = rec
+    store._write(_presets_file(), have)
+    return rec
+
+
+def delete_preset(pid, box):
+    have = presets()
+    rec = have.pop(pid, None)
+    if rec:
+        for k, v in rec["config"].items():
+            if v == MARK:
+                box.remove(_pkey(pid, k))
+        store._write(_presets_file(), have)
+    return bool(rec)
 
 
 # ---------- templating
@@ -604,10 +744,54 @@ def list_runs(wid):
         try:
             with open(os.path.join(d, f), encoding="utf-8") as fh:
                 r = json.load(fh)
-            out.append({k: r.get(k) for k in ("id", "status", "started", "ended", "via", "text", "chat", "result")})
+            out.append({k: r.get(k) for k in ("id", "status", "started", "ended", "via", "text", "chat", "result", "origin", "card")})
         except (OSError, ValueError):
             pass
     return out
+
+
+CHAT_RUNS = "chat"                                                     # runs/chat/: nodes run alone from a chat card (workflow runs stay with their work)
+CHAT_KEEP = 200
+
+
+def save_chat_run(rec):
+    """Write the record of a node run started from a chat (secret fields never in it)."""
+    d = runs_dir(CHAT_RUNS)
+    os.makedirs(d, exist_ok=True)
+    write_private(os.path.join(d, rec["id"] + ".json"), json.dumps(rec, ensure_ascii=False).encode("utf-8"))
+    files = sorted(f for f in os.listdir(d) if f.endswith(".json"))
+    for f in files[:-CHAT_KEEP]:
+        try:
+            os.remove(os.path.join(d, f))
+        except OSError:
+            pass
+
+
+def new_chat_run(spec, origin, card, cfg, text):
+    """A run record for one node started from a chat card. Secret field values are left out."""
+    secret = {f["name"] for f in spec.get("fields", []) if f.get("secret")}
+    return {"id": time.strftime("%Y%m%d%H%M%S-") + uuid.uuid4().hex[:6], "kind": "node", "type": spec["type"], "title": spec.get("title") or spec["type"],
+            "status": "running", "started": time.time(), "ended": None, "via": "chat", "origin": origin, "card": str(card or "")[:40],
+            "config": {k: v for k, v in (cfg if isinstance(cfg, dict) else {}).items() if k not in secret and isinstance(k, str)}, "text": (text or "")[:300], "result": None}
+
+
+def chat_runs(origin=None, limit=60):
+    """Runs started from chats, newest first: node runs (runs/chat/) and workflow runs whose `origin` is a chat."""
+    out, d = [], runs_dir(CHAT_RUNS)
+    for f in sorted(os.listdir(d), reverse=True)[:CHAT_KEEP] if os.path.isdir(d) else ():
+        try:
+            with open(os.path.join(d, f), encoding="utf-8") as fh:
+                r = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(r, dict) and (not origin or r.get("origin") == origin):
+            out.append({k: r.get(k) for k in ("id", "kind", "type", "title", "status", "started", "ended", "origin", "card", "text", "result", "error")})
+    for w in store.works():
+        for r in list_runs(w["id"]):
+            if r.get("origin") and (not origin or r["origin"] == origin):
+                out.append(dict(r, kind="work", work=w["id"], title=w.get("title") or "Workflow"))
+    out.sort(key=lambda r: -(r.get("started") or 0))
+    return out[:limit]
 
 
 def get_run(wid, rid):
@@ -951,12 +1135,13 @@ class Engine:
             pass
 
     # -- starting runs
-    def fire(self, work, node, event, via):
-        """Queue a run for NODE with EVENT (after the trigger's own filter). -> run id or None when filtered out."""
+    def fire(self, work, node, event, via, extra=None):
+        """Queue a run for NODE with EVENT (after the trigger's own filter). -> run id or None when filtered out. EXTRA: more record fields (origin chat, card)."""
         if not accepts(node, event):
             return None
         run = {"id": time.strftime("%Y%m%d%H%M%S-") + uuid.uuid4().hex[:6], "work": work["id"], "status": "queued", "started": time.time(), "ended": None,
                "via": via, "trigger": node["id"], "text": text_of(event)[:300], "nodes": {}, "chat": None, "result": None}
+        run.update({k: v for k, v in (extra or {}).items() if k in ("origin", "card")})
         _save_run(run, trim=False)
         with self.lock:
             q = self.queues.get(work["id"])
@@ -1139,6 +1324,8 @@ class Engine:
             cfg = with_secrets(work["id"], n, spec, self.box)
             mine = []                                                      # shared chats this node holds (released when it ends)
             try:
+                if n.get("preset") and not preset(n["preset"]):
+                    raise RuntimeError("the saved node '%s' this node uses was deleted: pick another one or fill in the fields, then remove the link" % n["preset"])
                 if n["type"] == LOOP:
                     out = do_loop(nid, cfg, cdata, rec, outs)
                 elif n["type"] == ENDLOOP:
@@ -1482,7 +1669,7 @@ DATA: every node hands on text, plus a small data dict. In any text field (promp
 SHAPES
 - ai.claude (list the recipients, one per line) -> flow.loop -> ai.claude (write the mail for {{data.item}}) -> a mail node -> flow.endloop -> flow.output.
 - git.pull -> ai.claude (analyse, build dashboard/index.html, end with OUTPUT:) -> space.publish.
-- start.cron -> io.request / git.read -> ai.claude -> send.teams (or the mail node pkg:aihub-nodes-outlook/outlook-send when it is in the list).
+- start.cron -> io.request / git.read -> ai.claude -> send.teams or send.smtp (mail through any server; action draft saves it for review), or pkg:aihub-nodes-outlook/outlook-send for the Outlook app when it is in the list.
 - start.manual -> [git.read, io.request] in parallel -> ai.claude (prompt names {{in.<a>}} and {{in.<b>}}) -> flow.output.
 - Keep it as small as the request allows: 3 to 7 nodes.
 
@@ -1503,6 +1690,11 @@ def _gen_catalogue():
         fl = ", ".join("%s%s%s" % (f["name"], "*" if f.get("required") else "", "=" + "/".join(f["options"]) if f.get("options") else "") for f in sp["fields"])
         io = " | out: %s%s%s" % (sp.get("out", "text"), " (%s)" % sp["out_note"] if sp.get("out_note") else "", " | needs: " + sp["needs"] if sp.get("needs") else "")
         lines.append("- %s (%s, %s): %s%s | fields: %s" % (t, sp["kind"], sp["group"], sp["desc"][:160], io, fl or "-"))
+    saved = [p for p in presets().values() if p["type"] in catalogue()]
+    if saved:
+        lines.append("\nSaved nodes (set up by the user, logins included). When one fits, use it: {\"id\",\"type\": <its type>, \"preset\": <its id>, \"config\": {}} and put in config only the fields this work changes (never logins):")
+        for p in saved[:40]:
+            lines.append("- preset %s (type %s): %s%s | set: %s" % (p["id"], p["type"], p["name"], " - " + p["description"] if p["description"] else "", ", ".join(sorted(p["config"])) or "-"))
     return "\n".join(lines)
 
 
@@ -1635,6 +1827,9 @@ def checked_work(w, strip_secrets_with=None):
         for f in cat[n["type"]]["fields"]:
             if f.get("secret"):
                 cfg[f["name"]] = ""
+        p = preset(n.get("preset"))
+        if not p or p["type"] != n["type"]:
+            n.pop("preset", None)                                            # only a saved node of this type that really exists
     if not any(cat[n["type"]]["kind"] == "trigger" for n in w["nodes"]):
         raise ValueError("a work needs a Start node")
     repair(w, cat)

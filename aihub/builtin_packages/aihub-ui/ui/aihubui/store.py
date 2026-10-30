@@ -766,7 +766,8 @@ def clean_work(w):
     nodes = []
     for n in list(w.get("nodes", []))[:200]:
         if isinstance(n, dict) and re.match(r"^[A-Za-z0-9_-]{1,20}$", str(n.get("id", ""))) and isinstance(n.get("config", {}), dict):
-            nodes.append({"id": n["id"], "type": str(n.get("type", "flow.note"))[:80], "x": int(n.get("x", 0) or 0), "y": int(n.get("y", 0) or 0), "label": str(n.get("label", ""))[:60], "config": n.get("config", {})})
+            nodes.append({"id": n["id"], "type": str(n.get("type", "flow.note"))[:80], "x": int(n.get("x", 0) or 0), "y": int(n.get("y", 0) or 0), "label": str(n.get("label", ""))[:60], "config": n.get("config", {}),
+                          **({"preset": n["preset"]} if re.match(r"^[a-z0-9][a-z0-9_-]{0,39}$", str(n.get("preset") or "")) else {})})
     ids = {n["id"] for n in nodes}
     edges = [{"from": e["from"], "to": e["to"]} for e in list(w.get("edges", []))[:400] if isinstance(e, dict) and e.get("from") in ids and e.get("to") in ids and e["from"] != e["to"]]
     w = {"id": wid, "title": str(w.get("title") or "Untitled")[:80], "enabled": bool(w.get("enabled")), "nodes": nodes, "edges": edges, "updated": time.time(),

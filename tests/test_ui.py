@@ -406,7 +406,7 @@ class FreeChat(unittest.TestCase):
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, sys
 open(os.environ["FAKE_OUT"], "w").write(json.dumps({k: os.environ.get(k) for k in ("AIHUB_NO_GUARD", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "DISABLE_AUTO_COMPACT")}) + "\n" + " ".join(sys.argv[1:]))
-sys.stdin.read()
+sys.stdin.readline()
 def out(o): print(json.dumps(o), flush=True)
 out({"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}], "usage": {"input_tokens": 3, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 200}}})
 out({"type": "system", "subtype": "compact_boundary", "compact_metadata": {"trigger": "auto", "pre_tokens": 1203, "post_tokens": 300}})
@@ -416,7 +416,7 @@ out({"type": "result", "is_error": False, "usage": {"input_tokens": 3, "output_t
 
 FAKE_WRITER = r'''#!/usr/bin/env python3
 import json, os, sys
-sys.stdin.read()
+sys.stdin.readline()
 os.makedirs("out", exist_ok=True)
 open("out/report.txt", "w").write("made by a shell command")
 print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}], "usage": {"input_tokens": 1}}}), flush=True)

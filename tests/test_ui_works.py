@@ -75,6 +75,71 @@ class Catalogue(Base):
         self.assertIn("pkg:aihub-nodes-teams/teams-send", c)
 
 
+class SavedNodes(Base):
+    def test_a_saved_node_fills_empty_fields_keeps_its_login_and_follows_edits(self):
+        p = W.save_preset({"type": "send.smtp", "name": "Company mail", "config": {"host": "smtp.x.com", "username": "me@x.com", "password": "pw1", "to": ""}}, self.box)
+        self.assertEqual((p["id"], p["config"]["password"], "to" in p["config"]), ("company-mail", W.MARK, False))
+        self.assertNotIn("pw1", open(W._presets_file()).read())                     # the login is in the encrypted box only
+        w = self.save([{"id": "s", "type": "start.manual"}, {"id": "m", "type": "send.smtp", "preset": p["id"], "config": {"to": "a@y.com", "host": ""}}], [{"from": "s", "to": "m"}])
+        n = w["nodes"][1]
+        self.assertEqual(n["preset"], "company-mail")                               # clean_work keeps the link
+        spec = W.catalogue()["send.smtp"]
+        cfg = W.with_secrets(w["id"], n, spec, self.box)
+        self.assertEqual((cfg["host"], cfg["password"], cfg["to"]), ("smtp.x.com", "pw1", "a@y.com"))
+        W.save_preset({"id": p["id"], "type": "send.smtp", "name": "Company mail", "config": {"host": "smtp2.x.com", "username": "me@x.com", "password": W.MARK}}, self.box)
+        cfg = W.with_secrets(w["id"], n, spec, self.box)
+        self.assertEqual((cfg["host"], cfg["password"]), ("smtp2.x.com", "pw1"))   # an edit reaches the work; MARK keeps the stored login
+        self.assertEqual(W.presets_view()[0]["used_in"], [{"id": w["id"], "title": "t"}])
+        dup = W.save_preset({"type": "send.smtp", "name": "Company mail", "config": {"password": W.MARK}}, self.box, copy={"preset": p["id"]})
+        self.assertEqual(dup["id"], "company-mail-2")
+        self.assertEqual(self.box.get_all()[W._pkey(dup["id"], "password")], "pw1")
+        self.assertEqual(store.clean_work({"nodes": [{"id": "a", "type": "x", "preset": "../evil"}]})["nodes"][0].get("preset"), None)
+
+    def test_save_as_saved_node_copies_a_works_stored_login_and_delete_fails_the_node(self):
+        w = self.save([{"id": "s", "type": "start.manual"}, {"id": "t", "type": "send.teams", "config": {"webhook_url": "https://hook/1", "text": "hi"}}], [{"from": "s", "to": "t"}])
+        p = W.save_preset({"type": "send.teams", "name": "Team chat", "config": dict(w["nodes"][1]["config"])}, self.box, copy={"work": w["id"], "node": "t"})
+        self.assertEqual(self.box.get_all()[W._pkey(p["id"], "webhook_url")], "https://hook/1")
+        w2 = self.save([{"id": "s", "type": "start.manual"}, {"id": "t", "type": "send.teams", "preset": p["id"], "config": {}}], [{"from": "s", "to": "t"}])
+        self.assertTrue(W.delete_preset(p["id"], self.box))
+        self.assertNotIn(W._pkey(p["id"], "webhook_url"), self.box.get_all())
+        rid = self.engine.fire(w2, w2["nodes"][0], {"text": "go"}, "manual")
+        self.final(w2["id"])
+        r = W.get_run(w2["id"], rid)
+        self.assertEqual(r["status"], "failed")
+        self.assertIn("was deleted", r["nodes"]["t"]["error"])
+        with self.assertRaises(ValueError):
+            W.save_preset({"type": "nope", "name": "x"}, self.box)
+        with self.assertRaises(ValueError):
+            W.save_preset({"type": "send.teams", "name": " "}, self.box)
+
+    def test_routes_and_a_shared_work_gets_the_settings_but_never_the_login(self):
+        import server
+        server.BOX = self.box
+        r = server.presets_save(None, {}, {"preset": {"type": "send.smtp", "name": "Mail", "config": {"host": "smtp.x.com", "password": "pw9"}}})
+        self.assertEqual(server.presets_list(None, {}, {})["presets"][0]["id"], r["preset"]["id"])
+        w = self.save([{"id": "s", "type": "start.manual"}, {"id": "m", "type": "send.smtp", "preset": "mail", "config": {"to": "a@y.com"}}], [{"from": "s", "to": "m"}])
+        server.A.run = lambda args, **k: {"data": [], "messages": []}
+        out = server.work_export(None, {}, {"id": w["id"], "name": "wf-mail", "version": "1.0.0"})
+        files = [os.path.join(dp, f) for dp, _, fs in os.walk(out["path"]) for f in fs if f.endswith(".work.json")]
+        node = next(n for n in json.load(open(files[0]))["nodes"] if n["id"] == "m")
+        self.assertNotIn("preset", node)                                           # saved nodes exist only on this machine
+        self.assertEqual((node["config"]["host"], node["config"]["to"], node["config"]["password"]), ("smtp.x.com", "a@y.com", ""))
+        self.assertNotIn("pw9", open(files[0]).read())
+        server.presets_delete(None, {}, {"id": "mail"})
+        with self.assertRaises(server.Err):
+            server.presets_delete(None, {}, {"id": "mail"})
+
+    def test_generate_lists_saved_nodes_and_keeps_only_real_links(self):
+        W.save_preset({"type": "send.smtp", "name": "Company mail", "description": "our server", "config": {"host": "smtp.x.com", "password": "pw"}}, self.box)
+        text = W._gen_catalogue()
+        self.assertIn("preset company-mail (type send.smtp): Company mail - our server | set: host, password", text)
+        self.assertNotIn("pw\n", text)
+        w = W.checked_work({"title": "g", "nodes": [{"id": "s", "type": "start.manual", "config": {}}, {"id": "m", "type": "send.smtp", "preset": "company-mail", "config": {}},
+                                                     {"id": "k", "type": "send.smtp", "preset": "ghost", "config": {}}], "edges": [{"from": "s", "to": "m"}, {"from": "m", "to": "k"}]})
+        by = {n["id"]: n for n in w["nodes"]}
+        self.assertEqual((by["m"].get("preset"), by["k"].get("preset")), ("company-mail", None))
+
+
 class Cron(unittest.TestCase):
     def test_schedules(self):
         k, s = W.parse_schedule("30 8 * * 1-5")
@@ -539,6 +604,62 @@ class DataNodes(Base):
         self.assertTrue(run_node("http_request.py", {"url": base + "/bad", "fail_on_error": False})["ok"])
         self.assertFalse(run_node("http_request.py", {"url": "file:///etc/passwd"})["ok"])
         self.assertFalse(run_node("http_request.py", {"url": "ftp://x/y"})["ok"])
+
+    def test_smtp_node_sends_writes_eml_drafts_and_never_leaks_the_password(self):
+        got = {"rcpt": [], "data": b""}
+
+        def serve(srv):
+            c, _ = srv.accept()
+            f = c.makefile("rwb")
+            f.write(b"220 fake\r\n"); f.flush()
+            for line in iter(f.readline, b""):
+                cmd = line[:4].upper()
+                if cmd == b"RCPT":
+                    got["rcpt"].append(line.decode().strip())
+                if cmd == b"DATA":
+                    f.write(b"354 go\r\n"); f.flush()
+                    for dl in iter(f.readline, b""):
+                        if dl == b".\r\n":
+                            break
+                        got["data"] += dl
+                if cmd == b"QUIT":
+                    f.write(b"221 bye\r\n"); f.flush()
+                    break
+                f.write(b"250 ok\r\n"); f.flush()
+            c.close()
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        self.addCleanup(srv.close)
+        threading.Thread(target=serve, args=(srv,), daemon=True).start()
+        d = tempfile.mkdtemp()
+        open(os.path.join(d, "r.txt"), "w").write("report")
+        base = {"host": "127.0.0.1", "port": srv.getsockname()[1], "security": "none", "from": "Bot <bot@x.com>", "to": "a@x.com; B <b@y.com>",
+                "bcc": "hidden@z.com", "subject": "Hi", "body": "hello", "attachments": "r.txt", "action": "send"}
+        r = run_node("smtp_send.py", base, workdir=d)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(len(got["rcpt"]), 3)                                 # bcc is delivered ...
+        self.assertNotIn(b"hidden@z.com", got["data"])                        # ... but not shown in the headers
+        self.assertIn(b'filename="r.txt"', got["data"])
+        e = run_node("smtp_send.py", dict(base, action="eml", host=""), workdir=d)
+        self.assertTrue(e["ok"], e)
+        path = e["data"]["path"]
+        self.assertTrue(path.startswith(os.path.join(d, "drafts")) and path.endswith(".eml"))
+        self.assertIn("OUTPUT: " + path, e["output"])
+        raw = open(path).read()
+        self.assertIn("X-Unsent: 1", raw)
+        self.assertIn("Bcc: hidden@z.com", raw)                              # a draft keeps Bcc for the mail app
+        bad = run_node("smtp_send.py", dict(base, action="draft", imap_host="127.0.0.1", imap_port=1, username="u", password="s3cr3t-pw"), workdir=d)
+        self.assertFalse(bad["ok"])
+        self.assertNotIn("s3cr3t-pw", json.dumps(bad))
+        self.assertIn("SMTP server", run_node("smtp_send.py", dict(base, host=""))["error"])
+        self.assertIn("recipient", run_node("smtp_send.py", dict(base, to="", bcc=""))["error"])
+        open(os.path.join(d, ".env"), "w").write("KEY=1")
+        self.assertIn("refused", run_node("smtp_send.py", dict(base, attachments=".env", action="eml"), workdir=d)["error"])
+        c = W.catalogue(force=True)["send.smtp"]
+        self.assertEqual(c["takes"], list(W.MAIL_KEYS))
+        self.assertTrue(next(f for f in c["fields"] if f["name"] == "password")["secret"])
+        self.assertIn("draft", next(f for f in c["fields"] if f["name"] == "action")["options"])
 
     def test_git_read_validates_before_touching_the_network(self):
         for bad in ("http://example.com/r.git", "https://user:pw@example.com/r.git", "file:///tmp/x", "https://example.com/r.git#x"):
