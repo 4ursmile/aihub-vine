@@ -242,7 +242,7 @@ export function FormBlock({ spec, onSend, disabled }) {
     <div class="fb-grid">${fields.map((f) => { const set = (x) => setV((c) => ({ ...c, [f.name]: x })); const dis = done || disabled;
       return html`<label class=${"fb-f" + (f.type === "textarea" ? " wide" : "")}><span>${f.label || f.name}${f.required ? " *" : ""}</span>
         ${f.type === "textarea" ? html`<textarea rows="3" value=${v[f.name]} disabled=${dis} onInput=${(e) => set(e.target.value)}></textarea>`
-        : f.type === "select" ? html`<select value=${v[f.name]} disabled=${dis} onChange=${(e) => set(e.target.value)}><option value="">Choose…</option>${(f.options || []).map((o) => html`<option>${String(o)}</option>`)}</select>`
+        : f.type === "select" ? html`<select value=${v[f.name]} disabled=${dis} onChange=${(e) => set(e.target.value)}><option value="">Choose…</option>${(f.options || []).map((o) => html`<option value=${String(o)}>${String(o)}</option>`)}</select>`
         : f.type === "checkbox" ? html`<input type="checkbox" checked=${!!v[f.name]} disabled=${dis} onChange=${(e) => set(e.target.checked)}/>`
         : html`<input type=${f.type === "number" ? "number" : "text"} value=${v[f.name]} disabled=${dis} onInput=${(e) => set(e.target.value)}/>`}</label>`; })}</div></div>
     <div class="fb-foot"><span class="mute small grow">${done ? "" : disabled ? "Writing…" : missing.length ? "Still needed: " + missing.map((f) => f.label || f.name).join(", ") : "Ready to send"}</span>
@@ -311,7 +311,7 @@ function useAutoRun(key, locked, ready, runRef) {
 export const setNodeHost = (h) => { nodeHost = h; };
 const cardKey = (spec) => { const t = JSON.stringify(spec); let h = 5381; for (let i = 0; i < t.length; i++) h = ((h << 5) + h + t.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
 const nodeResultText = (title, res) => "Result of the node “" + title + "”:\n```\n" + (res.text || "(no text)") + "\n```" + (res.data ? "\nData:\n```json\n" + JSON.stringify(res.data, null, 2).slice(0, 8000) + "\n```" : "");
-const NODE_IC = { "io.read_file": "file", "io.request": "link", "git.read": "code", "git.pull": "code", "io.path": "folder", "space.publish": "upload", "send.teams": "send", "send.slack": "send", "start.slack": "inbox", "start.telegram": "inbox", "send.telegram": "send", "send.discord": "send", "send.webhook": "send", "send.smtp": "send", "code.python": "code" };
+const NODE_IC = { "io.read_file": "file", "io.request": "link", "git.read": "code", "git.pull": "code", "io.path": "folder", "space.publish": "upload", "send.teams": "send", "send.slack": "send", "start.slack": "inbox", "start.telegram": "inbox", "send.telegram": "send", "send.discord": "send", "send.webhook": "send", "send.smtp": "send", "code.python": "code", "db.trino": "table", "db.sql": "table", "etl.spark": "bolt" };
 const ST_LABEL = { wait: "Waiting for approval", need: "Needs values", busy: "Running", done: "Done", error: "Failed", skip: "Declined / stopped" };
 const ST_OF = { done: "done", failed: "error", interrupted: "error", running: "busy", queued: "busy", stopped: "skip" };
 export const fmtDur = (s) => { if (s == null || !isFinite(s) || s < 0) return ""; if (s < 10) return s.toFixed(1) + "s"; if (s < 60) return Math.round(s) + "s"; const m = Math.floor(s / 60); return m + "m " + String(Math.round(s % 60)).padStart(2, "0") + "s"; };
@@ -350,7 +350,7 @@ function RunField({ f, val, set, dis, secretNote }) {
   const v = val(f);
   return html`<label class=${"rc-f" + (f.type === "textarea" || f.type === "code" ? " wide" : "") + (f.type === "checkbox" ? " chk" : "")}><span>${f.label || f.name}${f.required ? html`<em>*</em>` : ""}${f.secret && secretNote ? html`<small>secret, this run only</small>` : ""}</span>
     ${f.type === "textarea" || f.type === "code" ? html`<textarea rows="3" class=${f.type === "code" ? "mono" : ""} value=${v} disabled=${dis} onInput=${(e) => set(f, e.target.value)}></textarea>`
-    : f.type === "select" ? html`<select value=${v} disabled=${dis} onChange=${(e) => set(f, e.target.value)}><option value="">Choose…</option>${(f.options || []).map((o) => html`<option>${String(o)}</option>`)}</select>`
+    : f.type === "select" ? html`<select value=${v} disabled=${dis} onChange=${(e) => set(f, e.target.value)}><option value="">Choose…</option>${(f.options || []).map((o) => html`<option value=${String(o)}>${String(o)}</option>`)}</select>`
     : f.type === "checkbox" ? html`<input type="checkbox" checked=${!!v} disabled=${dis} onChange=${(e) => set(f, e.target.checked)}/>`
     : html`<input type=${f.secret ? "password" : f.type === "number" ? "number" : "text"} autocomplete="off" value=${v} disabled=${dis} onInput=${(e) => set(f, e.target.value)}/>`}</label>`;
 }

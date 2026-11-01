@@ -67,20 +67,44 @@ The server stores no package files and has no upload or download routes (`/uploa
 
 ## Spaces (`author@space-name`)
 
-Published with `aihub space publish` or the Spaces page. Visibility like packages: `public` or `private` + `view`/`edit` for users and groups; owner and admins manage.
+Published with `aihub space publish` or the Spaces page. Visibility like packages: `public` or `private` + `view`/`comment`/`edit` for users and groups; owner and admins manage (`admin`).
+Levels: view < comment < edit < admin; the highest that applies wins. A public space gives everybody `view`; its `public_access` = `comment` gives signed-in
+visitors `comment` (anonymous visitors only ever view). No visible access = `404` everywhere, not `403`.
 `ref` below is `owner@slug` (URL-encode the `@` if your client needs it).
 
 | Route | |
 | --- | --- |
-| `POST /spaces?name=&filename=&kind=&title=&description=&tags=&visibility=&view=&transition=&autoplay=&loop=` | body = the file (raw); creates or replaces the caller's space. `publish` permission |
-| `PUT /spaces/{ref}/content` | new content for a space you may edit |
-| `GET /spaces?q=&kind=&sort=top\|new\|name&mine=&owner=&limit=&offset=` | visible spaces; `GET /spaces/overview` = carousel, top, recent, counts per kind |
+| `POST /spaces?name=&filename=&kind=&title=&description=&tags=&visibility=&view=&transition=&autoplay=&loop=&note=` | body = the file (raw); creates the caller's space or adds a revision (`note` goes to the version history). `publish` permission |
+| `PUT /spaces/{ref}/content?...&note=` | new revision of a space you may edit |
+| `GET /spaces?q=&kind=&tag=&owner=&mine=&shared=&sort=new\|old\|top\|name&group=kind\|owner&limit=&offset=` | visible spaces (`total` = all matches, page with `offset`). `tag` is one exact tag, `shared` = other people's spaces shared with me or my groups (public ones do not count), `group` keeps the rows of one type/author together (`sort` orders inside it; the id is the last key so pages never overlap). `GET /spaces/overview` = carousel, top, recent, counts per kind |
+| `GET /spaces/facets?q=&kind=&tag=&owner=&mine=&shared=` | counts for the Spaces filter rail: `total`, `kinds`, `owners` (top 300), `tags` (top 300), `scopes` {all, mine, shared} (signed in only). Each facet is counted under the OTHER filters, not its own. Cached 15 s per viewer, dropped by every space write |
 | `GET /spaces?since=UNIX_TIME&limit=` | visible spaces changed at or after `since`, oldest change first (cursor: pass the last `updated` next; `total` = rows returned). Cached 5 s per viewer, dropped by any space write |
-| `GET /spaces/{ref}` / `PATCH` / `DELETE` | metadata (+ `level`, `can_edit`, `can_manage`); PATCH title, description, tags, view/transition/autoplay/loop (edit), visibility (owner/admin) |
-| `GET\|PUT /spaces/{ref}/access`, `DELETE /spaces/{ref}/access/{user\|group}/{name}` | sharing, `access` = view \| edit; PUT takes `{type, name, access}` or `{items: [{type, name}, ...], access}` (up to 500, all or none) |
-| `GET /spaces/{ref}/data` | slides deck JSON / sheet JSON / doc HTML (ETag per revision) |
-| `GET /spaces/{ref}/viewurl` | signed 6 h link for the sandboxed frame (html kinds, PDF): `/spaces/{ref}/v/{token}/{path}` |
-| `GET /spaces/{ref}/file`, `GET /spaces/{ref}/open`, `POST /spaces/{ref}/view` | original file; paste-able link for public spaces; view counter |
+| `GET /spaces/{ref}` / `PATCH` / `DELETE` | metadata (+ `level`, `can_comment`, `can_edit`, `can_manage`, `public_access`, `comments` = live comment count; lists carry `public_access` and `comments` too); PATCH title, description, tags, view/transition/autoplay/loop (edit), visibility and `public_access` view \| comment (owner/admin). DELETE also removes comments and every revision |
+| `GET\|PUT /spaces/{ref}/access`, `DELETE /spaces/{ref}/access/{user\|group}/{name}` | sharing, `access` = view \| comment \| edit; PUT takes `{type, name, access}` or `{items: [{type, name}, ...], access}` (up to 500, all or none) |
+| `GET /spaces/{ref}/data?rev=N` | slides deck JSON / sheet JSON / doc HTML (ETag per revision); `rev` = an older kept revision |
+| `GET /spaces/{ref}/viewurl?rev=N` | signed 6 h link for the sandboxed frame (html kinds, PDF): `/spaces/{ref}/v/{token}/{path}`; for an older revision the token is pinned to it (`exp.sig.rev`) and keeps working after a republish. Reply adds `rev` |
+| `GET /spaces/{ref}/file?rev=N`, `GET /spaces/{ref}/open`, `POST /spaces/{ref}/view` | original file (`X-Space-Rev`); paste-able link for public spaces; view counter |
+| `GET /spaces/{ref}/comments` | view. `{items, total, open, level, can_comment, signed_in, public_access}`; `items` = top-level comments, each `{id, parent_id, body, anchor, rev, resolved, created, updated, edited, deleted, mentions [{type user|group, name, display_name?}], author {username, display_name, avatar_url}, can_edit, can_resolve, can_delete, replies: [...]}`. A deleted comment shows (body "", author null) only while it has live replies |
+| `POST /spaces/{ref}/comments` | comment level. `{body (1..5000 chars), parent_id?, anchor? (object, e.g. {"slide": 3}, {"page": 2}, {"sheet": "Q3", "cell": "B4"}), rev?}`. Signed out: `401`; view only: `403` |
+| `PATCH /spaces/{ref}/comments/{id}` | `{body}`: the author (still with comment access; only NEW names are alerted); `{resolved: bool}`: anyone with comment access (resolving tells the author) |
+| `DELETE /spaces/{ref}/comments/{id}` | the author or the space admin. Soft delete (text removed, row kept for its replies) |
+| `GET /spaces/{ref}/versions` | view. `{items: [{rev, kind, filename, size, sha256, note, created, author, author_name, author_avatar, current, available, comments (live comments about that revision)}], current, keep, level, can_restore, can_delete}`, newest first; `available` = the files of that revision are still on the hub |
+| `POST /spaces/{ref}/versions/{rev}/restore` | edit + `publish` permission. `{note?}`: publishes that revision again as a NEW revision; reply like a publish plus `restored`, `rev` |
+| `DELETE /spaces/{ref}/versions/{rev}` | owner/admin: forget one OLD revision and its files (`400` for the current one) |
+| `GET /spaces/{ref}/mentionable?q=` | comment level. `{users: [{username, display_name, avatar_url, access}], groups: [{name, members, access}]}` for the `@` picker; no `q` = owner, people in the conversation and groups the space is shared with. `access` false = they cannot open the space, so a mention would not be delivered |
+| `GET /spaces/{ref}/mention-card/{user\|group}/{name}` | view level, signed in. Hover card of an `@mention`: user `{type, name, display_name, title, role, avatar_url, since, groups, access}`, group `{type, name, description, members, people, access}`; `access` = can open this space. Unknown / inactive name: 404 |
+
+Notifications (alerts on the account; signed in; a space that went private or was unshared hides its alerts; kinds `mention`, `reply`, `comment` (on a space you own), `resolved`, `share`, `version` (new revision of a space you own or commented on; never for the publisher)):
+
+| Route | |
+| --- | --- |
+| `GET /notifications?unread=&kind=&limit=&before=` | `{items, more, unread}`, newest first; `kind` is a comma list; item `{id, kind, ref, title, path, rev (the revision the alert is about), current_rev, comment_id, body (snippet / access / note), via (group name when reached through a group), created, seen, actor}`. The SPA opens `#<path>?rev=<rev>&comment=<id>&side=cm` (or `side=hist`) |
+| `GET /notifications/count` | `{unread}`: what the bell polls (30 s) |
+| `POST /notifications/read` | `{ids: [..]}` or `{all: true}`; `{seen: false}` marks unread again. Reply `{ok, unread}` |
+| `DELETE /notifications/{id}` | remove one of your alerts |
+
+Revisions: every publish and restore adds a `space_versions` row; the replaced files move to `<data>/spaces/<id>.v/<rev>/` (the live folder is still swapped atomically).
+The hub keeps the newest `space_versions_keep` (admin number, default 20, 1 = no history); the current revision is never pruned.
 
 Untrusted HTML is served only from the signed `v/` URL with a `sandbox` CSP and shown in a sandboxed iframe: it never runs on the hub origin and cannot read the sign-in token.
 

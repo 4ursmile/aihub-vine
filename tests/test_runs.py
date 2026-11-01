@@ -301,6 +301,9 @@ class ServiceType(unittest.TestCase):
         os.makedirs(os.path.join(self.home, "ui"))
         with open(os.path.join(self.home, "ui", "url.txt"), "w") as f:
             f.write("http://127.0.0.1:8765/?t=KEY\n")
+        jp = mock.patch.object(ui, "JSON", False)                                     # an earlier `--json` command leaves the flag on in this process
+        jp.start()
+        self.addCleanup(jp.stop)
         with mock.patch.object(ui, "INTERACTIVE", True), mock.patch.object(runs, "open_url", return_value=True) as op:
             self.assertTrue(runs.show_link(m))
             op.assert_called_once_with("http://127.0.0.1:8765/?t=KEY")

@@ -6,6 +6,7 @@ import { Md, AskCard, WorkRunCard, setWorkMaker, setBlockSharer, setNodeHost, Ru
 import * as OUI from "./openui.js";
 import { CodeEditor, useHl, langOf, colorize, splitHl, esc, isMac as isMacUI } from "./code.js";
 import { UsagePage, AlertBar, useAlerts } from "./usage.js";
+import { EnvBox, MagicBar, CodeField, CodeLab, defaultsOf } from "./nodelab.js";
 
 // term.js, slides.js (+ export.js) and space.js load when first needed, not at start
 const runInstall = (...a) => import("./term.js").then((m) => m.runInstall(...a));
@@ -215,12 +216,12 @@ function CtxPick({ used, win, prefs, savePrefs, compact, note, busy }) {
       <input type="range" min="40" max="95" step="5" value=${prefs.compact_pct} style="width:100%" onChange=${(e) => savePrefs({ compact_pct: +e.target.value })}/></div>`}
     <div class="row" style="margin-top:12px"><button class="btn" disabled=${busy || !used} onClick=${compact}>${Ic("compact", 14)} Compact now</button></div><div class="eff-keys"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>←</kbd><kbd>→</kbd> limit · <kbd>Space</kbd> switch</div></div>`;
 }
-function SlashMenu({ items, idx, pick }) {
+function SlashMenu({ items, idx, pick, at }) {
   const ref = useRef();
   useEffect(() => { const e = ref.current && ref.current.children[idx]; if (e && e.scrollIntoView) e.scrollIntoView({ block: "nearest" }); }, [idx]);
   if (!items.length) return null;
   return html`<div class="slash" ref=${ref}>${items.map((c, i) => html`<button class=${"opt" + (i === idx ? " hi" : "")} onMouseDown=${(e) => { e.preventDefault(); pick(c); }}><span class="oi">${Ic(SLASH_ICON[c.source] || "slash", 14)}</span>
-    <span class="grow"><b>${["theme", "chat", "tool", "file", "folder"].includes(c.source) ? "@" : "/"}${c.name}</b><span class="d">${(c.description || "").slice(0, 110)}</span></span><span class="src">${c.sw ? html`<span class="swatch sm">${["bg", "accent", "fg"].map((k) => html`<i style=${`background:${c.sw[k]}`}></i>`)}</span>` : c.source === "ui" ? "" : c.source}</span></button>`)}</div>`;
+    <span class="grow"><b>${at || ["theme", "chat", "tool", "file", "folder"].includes(c.source) ? "@" : "/"}${c.name}</b><span class="d">${(c.description || "").slice(0, 110)}</span></span><span class="src">${c.sw ? html`<span class="swatch sm">${["bg", "accent", "fg"].map((k) => html`<i style=${`background:${c.sw[k]}`}></i>`)}</span>` : c.source === "ui" ? "" : c.source}</span></button>`)}</div>`;
 }
 
 // ---------- working folder: file tree, editor, diff, dialogs
@@ -519,7 +520,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const fileItems = mm && pfiles ? pfiles.filter((p) => p.toLowerCase().includes(mq.replace(/^file:/, ""))).sort((a, b) => (b.split("/").pop().toLowerCase().startsWith(mq.replace(/^file:/, "")) ? 1 : 0) - (a.split("/").pop().toLowerCase().startsWith(mq.replace(/^file:/, "")) ? 1 : 0)).slice(0, 8).map((p) => ({ name: "file:" + p, description: "file in the working folder", source: "file", key: "" })) : [];
   const fq = mq.replace(/^folder:/, ""), dirItems = mm && pfiles ? [...new Set(pfiles.flatMap((p) => { const a = p.split("/").slice(0, -1); return a.map((_, i) => a.slice(0, i + 1).join("/")); }))].filter((d) => d.toLowerCase().includes(fq)).sort((a, b) => (b.split("/").pop().toLowerCase().startsWith(fq) ? 1 : 0) - (a.split("/").pop().toLowerCase().startsWith(fq) ? 1 : 0) || a.length - b.length).slice(0, 5).map((d) => ({ name: "folder:" + d, description: "folder in the working folder (its file list is shared)", source: "folder", key: "" })) : [];
   const mitems = mm ? [...fileItems, ...dirItems, ...srcs, ...themes.map((t) => ({ name: "theme:" + t.id, description: t.name + " - colors " + t.colors.accent + ", fonts " + t.fonts.head.split(",")[0], source: "theme", sw: t.colors, key: t.name.toLowerCase() })),
-    ...(ment ? [...ment.chats, ...ment.tools] : [])].filter((c) => (c.name + " " + c.key).toLowerCase().includes(mq)).slice(0, 30) : [];
+    ...(ment ? [...ment.chats, ...ment.tools] : [])].filter((c) => c.pre || (c.name + " " + c.key).toLowerCase().includes(mq)).slice(0, 30) : [];
   const menuItems = dismissed === text ? [] : sm ? items : mitems;
   useEffect(() => setSidx(0), [sm && sm[1], mm && mm[1]]);
 
@@ -725,7 +726,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     : html`<div class="empty"><div>${Ic("file", 26)}<div>No preview for this kind of file.<br/>Use Edit to read it.</div></div></div>`)
     : html`<div class="empty"><div>${Ic("eye", 26)}<div>Select a file in Files,<br/>or let Claude write an .html one.</div></div></div>`;
   const sendOut = guard(async () => { const m = await chatsMod(); await m.sendChat({ get: api, post, id, title: s.title, signedIn: boot.context.signed_in }); });
-  const share = guard(async (path, bundle, content = null) => { const r = await shareToSpace(post, id, path, { bundle, content, signedIn: boot.context.signed_in }); if (r && r.url) { try { await navigator.clipboard.writeText(r.url); toast("Link copied: " + r.url); } catch (e) {} } if (r && content != null) refreshFiles(); });
+  const share = guard(async (path, bundle, content = null) => { const r = await shareToSpace(post, id, path, { bundle, content, signedIn: boot.context.signed_in, get: api }); if (r && r.url) { try { await navigator.clipboard.writeText(r.url); toast("Link copied: " + r.url); } catch (e) {} } if (r && content != null) refreshFiles(); });
   shareRef.current = share;
   const [proj, setProj] = useState([]), [pub, setPub] = useState(null);                 // aihub packages of the working folder: a Publish button shows only when there are some
   useEffect(() => { setProj([]); api("project/info?id=" + id).then((d) => setProj(d.packages || [])).catch(() => {}); }, [id, s && s.cwd, busy]);
@@ -783,9 +784,9 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
           <div class="btwa">${b.busy ? html`<span class="shine">Thinking aside…</span>` : b.err ? html`<span class="err">${b.err}</span>` : html`<${Md} text=${b.a}/>`}</div></div>`)}
         ${hints.length > 0 && html`<div class="hints">${hints.map((t) => html`<div class="hintq" title="Claude reads it at its next step"><span class="hintl">${Ic("clock", 11)} waiting for Claude's next step</span><span class="hintt">${t}</span></div>`)}</div>`}
         <div class=${"box" + (busy ? " busy" : "")} onDragOver=${(e) => e.preventDefault()} onDrop=${(e) => { e.preventDefault(); pick(e.dataTransfer.files); }}>
-          ${(sm || mm) && html`<${SlashMenu} items=${menuItems} idx=${sidx} pick=${pickSlash}/>`}
+          ${(sm || mm) && html`<${SlashMenu} items=${menuItems} idx=${sidx} pick=${pickSlash} at=${!!mm}/>`}
           ${att.length ? html`<div>${att.map((a, i) => html`<span class="chip">${a.type.startsWith("image/") ? html`<img src=${a.url} height="16"/>` : Ic("file", 12)} ${a.name} <button type="button" class="chipx" aria-label=${"Remove " + a.name} onClick=${() => setAtt(att.filter((_, j) => j !== i))}>${Ic("x", 12)}</button></span>`)}</div>` : ""}
-          <textarea ref=${ta} rows="1" placeholder=${engine === "free" ? (busy ? "Queue a message for when the answer ends…" : "Ask the model directly…  (no tools, no files)") : busy ? tipOf(BUSY_TIPS, tipN) : hist.length ? "Message Claude…   Tip: " + tipOf(TIPS, tipN) : "Message Claude…   / for commands, @ for files, chats and notes"} value=${text} onInput=${(e) => { setText(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 240) + "px"; }}
+          <textarea ref=${ta} rows="1" placeholder=${engine === "free" ? (busy ? "Queue a message for when the answer ends…" : "Ask the model directly…  (no tools, no files)") : busy ? tipOf(BUSY_TIPS, tipN) : hist.length ? "Message Claude…   @ for files, chats, notes, Spaces · Tip: " + tipOf(TIPS, tipN) : "Message Claude…   / for commands, @ for files, chats, notes and Spaces"} value=${text} onInput=${(e) => { setText(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 240) + "px"; }}
             onPaste=${(e) => { const f = [...e.clipboardData.files]; if (f.length) { e.preventDefault(); pick(f); } }} onKeyDown=${onKey}></textarea>
           <div class="tools">
             <button class="ibtn" title="Attach files" aria-label="Attach files" onClick=${() => fileIn.current && fileIn.current.click()}>${Ic("clip", 17)}</button><input type="file" multiple hidden ref=${fileIn} onChange=${(e) => { pick(e.target.files); e.target.value = ""; }}/>
@@ -1000,7 +1001,7 @@ function Knowledge({ focus }) {
 const NW = 230;
 // first grid slot (300 x 140 apart, 4 rows per column) where a new 230 x 100 card touches no other card
 const freeSpot = (nodes) => { for (let col = 0; col < 12; col++) for (let row = 0; row < 4; row++) { const x = 40 + col * 300, y = 40 + row * 140; if (!nodes.some((n) => Math.abs(n.x - x) < NW + 16 && Math.abs(n.y - y) < 112)) return { x, y }; } return { x: 40, y: 40 + nodes.length * 140 }; };
-const nodeIcon = (type, sp) => ({ "start.manual": "play", "start.cron": "clock", "start.webhook": "inbox", "ai.claude": "sparkles", "flow.filter": "filter", "flow.template": "template", "flow.note": "note", "flow.memory": "layers", "start.teams": "chat", "send.teams": "send", "send.slack": "send", "start.slack": "inbox", "start.telegram": "inbox", "send.telegram": "send", "send.discord": "send", "send.webhook": "send", "send.smtp": "send", "io.read_file": "file", "io.request": "link", "git.read": "code", "flow.output": "check" }[type] || (sp && sp.kind === "trigger" ? "zap" : "package"));
+const nodeIcon = (type, sp) => ({ "start.manual": "play", "start.cron": "clock", "start.webhook": "inbox", "ai.claude": "sparkles", "flow.filter": "filter", "flow.template": "template", "flow.note": "note", "flow.memory": "layers", "start.teams": "chat", "send.teams": "send", "send.slack": "send", "start.slack": "inbox", "start.telegram": "inbox", "send.telegram": "send", "send.discord": "send", "send.webhook": "send", "send.smtp": "send", "io.read_file": "file", "io.request": "link", "git.read": "code", "flow.output": "check", "db.trino": "table", "db.sql": "table", "etl.spark": "bolt", "code.python": "code" }[type] || (sp && sp.kind === "trigger" ? "zap" : "package"));
 const nodeKind = (type, sp) => (sp && sp.kind === "trigger" ? "k-trigger" : type === "ai.claude" ? "k-ai" : type.startsWith("pkg:") ? "k-pkg" : "");
 const summary = (n) => { const c = n.config || {}; return String(c.prompt || c.url || c.path || c.schedule || (c.source ? "memory: " + c.source : "") || c.title || c.regex || c.template || c.text || c.filter || "").slice(0, 90); };
 function Palette({ cat, onPick, close, more, presets = [] }) {
@@ -1143,7 +1144,7 @@ function PromptBox({ f, val, set, ctx, one }) {
       : ai && !hasOut ? html`<div class="pbx-chips"><button type="button" class="chip" onMouseDown=${(e) => e.preventDefault()} onClick=${() => set(val.replace(/\s+$/, "") + OUTPUT_HINT)} title="Only needed when a later node must open a file Claude makes">+ Make Claude hand on a file (OUTPUT: path)</button></div>` : ""}
     <div class="pbx-tip mute small">${[assist.includes("file") && html`<span><mark class="t-file">@file</mark> a path</span>`, assist.includes("skill") && html`<span><mark class="t-skill">/skill</mark> a skill</span>`, assist.some((a) => a === "input" || a === "data") && html`<span>Ctrl+Space: all variables</span>`]}</div></div>`;
 }
-function Field({ f, v, set, boot, stored, ctx, inherit, via }) {
+function Field({ f, v, set, boot, stored, ctx, inherit, via, onExpand, docKey, runnable }) {
   const from = inherit !== undefined && (v === undefined || v === "");                 // empty here: the saved node's value is used
   const val = from && !f.secret ? inherit : v === undefined ? f.default ?? "" : v;
   stored = stored || (from && f.secret && inherit === "__stored__");
@@ -1151,13 +1152,14 @@ function Field({ f, v, set, boot, stored, ctx, inherit, via }) {
   return html`<div class=${"field" + (from ? " inh" : "")}><label>${f.label}${f.required ? " *" : ""}${from ? html` <span class="tag" title=${"Comes from the " + (via ? via : "saved node") + ". Type here to override it for this node only."}>${Ic("key", 10)} ${via || "saved"}</span>` : v !== undefined && v !== "" && inherit !== undefined ? html` <button type="button" class="lnk small" title="Use the inherited value again" onClick=${() => set("")}>reset</button>` : ""}</label>
     ${(f.type === "textarea" || (f.type === "text" && !f.secret)) && f.assist && f.assist.length && ctx ? html`<${PromptBox} f=${f} val=${String(val)} set=${set} ctx=${ctx} one=${f.type === "text"}/>`
     : f.type === "folder" ? html`<div class="row" style="gap:6px">${f.assist && f.assist.length && ctx ? html`<div class="grow"><${PromptBox} f=${f} val=${String(val)} set=${set} ctx=${ctx} one=${true}/></div>` : html`<input class="grow" type="text" ...${common}/>`}<button class="btn" type="button" onClick=${async () => { const p = await nativePick({ dirs: true, start: String(val).replace(/^@/, ""), title: "Choose a working folder" }); if (p) set(p); }}>${Ic("folder", 14)} Browse…</button></div>`
-    : f.type === "code" ? html`<textarea class="codebox" rows="16" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" ...${common} onKeyDown=${(e) => { if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.metaKey) { e.preventDefault(); const t = e.target, a = t.selectionStart; set(t.value.slice(0, a) + "    " + t.value.slice(t.selectionEnd)); requestAnimationFrame(() => { t.selectionStart = t.selectionEnd = a + 4; }); } }}></textarea>`
-    : f.type === "textarea" ? html`<textarea rows="5" ...${common}></textarea>`
+    : f.type === "code" ? (onExpand ? html`<${CodeField} f=${f} val=${String(val)} set=${set} docKey=${docKey || f.name} onExpand=${onExpand} runnable=${runnable}/>`
+      : html`<textarea class="codebox" rows="16" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" ...${common}></textarea>`)
+    : f.type === "textarea" ? html`<textarea rows="5" ...${common}></textarea>${onExpand ? html`<div class="row" style="justify-content:flex-end"><button type="button" class="lnk small" title="Edit it in a large editor" onClick=${onExpand}>${Ic("expand", 11)} Expand</button></div>` : ""}`
     : f.type === "checkbox" ? html`<${Switch} on=${!!val} onChange=${set} label=${f.label}/>`
     : f.type === "model" ? html`<select value=${val} onChange=${(e) => set(e.target.value)}>${boot.models.models.map((m) => html`<option value=${m.id}>${m.label}${m.real ? " · " + m.real : ""}</option>`)}</select>`
     : f.type === "effort" ? html`<select value=${val} onChange=${(e) => set(e.target.value)}>${LEVELS.map((x) => html`<option value=${x}>${x || "default"}</option>`)}</select>`
     : f.type === "mode" ? html`<select value=${val} onChange=${(e) => set(e.target.value)}>${boot.modes.map((m) => html`<option value=${m}>${(MODE_INFO[m] || [0, m])[1]}</option>`)}</select>`
-    : f.type === "select" ? html`<select value=${val} onChange=${(e) => set(e.target.value)}>${f.options.map((o) => html`<option>${o}</option>`)}</select>`
+    : f.type === "select" ? html`<select value=${val} onChange=${(e) => set(e.target.value)}>${f.options.map((o) => html`<option value=${o}>${o}</option>`)}</select>`
     : f.secret ? html`<input type="password" autocomplete="off" placeholder=${stored ? (from ? "•••••• from the " + (via || "saved node") + " (type to use another)" : "•••••• stored (type to replace)") : ""} value=${stored ? "" : val} onInput=${(e) => set(e.target.value)}/>`
     : html`<input type=${f.type === "number" ? "number" : "text"} ...${common}/>`}
     ${f.help && html`<span class="mute small">${f.help}</span>`}</div>`;
@@ -1178,11 +1180,11 @@ function IoStrip({ node, spec, ctx }) {
 }
 function Inspector({ warn = [], w, node, spec, cat, run, boot, hook, trig, upd, close, remove, presets = [], editPreset }) {
   const pre = node.preset ? presets.find((p) => p.id === node.preset) : null;
-  const cs = spec && spec.credential, [cd, loadCreds] = useCreds(!!cs), [ce, setCe] = useState(null);
+  const cs = spec && spec.credential, vlt = !!(spec && spec.vault), [cd, loadCreds] = useCreds(!!cs || vlt), [ce, setCe] = useState(null), [ve, setVe] = useState(null);
   const ckd = cs ? cd.kinds.find((k) => k.kind === cs.kind) : null, cmap = cs ? credMap(cs, ckd, spec) : {};
   const csets = cs ? cd.credentials.filter((c) => c.kind === cs.kind) : [], cset = cs && node.credential ? cd.credentials.find((c) => c.id === node.credential) : null;
   const credInh = (f) => { if (!cset) return undefined; const sf = Object.keys(cmap).find((k) => cmap[k] === f.name); return sf && cset.fields[sf] !== undefined ? cset.fields[sf] : undefined; };
-  const [tab, setTab] = useState("settings"), rn = run && run.nodes && run.nodes[node.id];
+  const [tab, setTab] = useState("settings"), rn = run && run.nodes && run.nodes[node.id], [lab, setLab] = useState(null);
   const incoming = w.edges.filter((e) => e.to === node.id), nameOf = (n) => n.label || (cat[n.type] && cat[n.type].title) || n.type;
   const slugs = nodeSlugs(w, cat);
   const fctx = (() => {                                  // what the fields may suggest: each direct parent (in edge order), the data keys of every ancestor, what comes after
@@ -1208,13 +1210,22 @@ function Inspector({ warn = [], w, node, spec, cat, run, boot, hook, trig, upd, 
       ${cset ? html`<div class="mute small" style="margin-top:6px">${Object.keys(cmap).length ? Object.entries(cmap).map(([sf, nf]) => { const f = spec.fields.find((x) => x.name === nf), ov = node.config[nf] !== undefined && node.config[nf] !== "";
         return cset.fields[sf] === undefined && !ov ? null : html`<span class=${"tag " + (ov ? "" : "good")} style="margin:2px 4px 2px 0">${f ? f.label : nf}: ${ov ? "overridden here" : "from the set"}</span>`; }) : "Takes the fields named like its own."}</div>` : ""}
       ${ce && html`<${CredEditor} initial=${ce} kinds=${cd.kinds} close=${() => setCe(null)} saved=${(c) => { setCe(null); loadCreds().then(() => pickSet(c.id)); }}/>`}</div>` : "";
+  const grant = (id) => set((n) => { if (!id) return; const c = cd.credentials.find((x) => x.id === id); n.vault = [...(n.vault || []).filter((v) => v !== id), id];
+    if (c && n.vault_kinds) { n.vault_kinds = n.vault_kinds.filter((k, i, a) => !(k.kind === c.kind && a.findIndex((x) => x.kind === c.kind) === i)); if (!n.vault_kinds.length) delete n.vault_kinds; } });
+  const vaultBox = vlt ? html`<div class="card pre-b"><div class="row">${Ic("key", 14)}<div class="grow small"><b>Code may read</b> (aihub_vault): the credential sets this node's code sees${cs ? ", besides its own set above" : ""}. Nothing else of your vault is readable from the run; a shared work carries only their kinds.</div></div>
+      ${(node.vault_kinds || []).map((k) => html`<div style="margin-top:6px"><span class="tag bad">${Ic("alert", 12)} Shared without logins: grant a “${k.kind}” set${k.name ? " (it was " + k.name + ")" : ""}.</span></div>`)}
+      <div class="row" style="margin-top:8px;gap:6px;flex-wrap:wrap">${(node.vault || []).map((id) => { const c = cd.credentials.find((x) => x.id === id);
+        return html`<span class=${"tag " + (c ? "good" : "bad")}>${c ? c.name + " · " + c.kind : id + " (deleted)"} <button type="button" class="lnk" title="Stop granting it" onClick=${() => set((n) => { n.vault = (n.vault || []).filter((v) => v !== id); if (!n.vault.length) delete n.vault; })}>${Ic("x", 11)}</button></span>`; })}
+        <select class="grow" value="" onChange=${(e) => { if (e.target.value === "__new") setVe({}); else grant(e.target.value); e.target.value = ""; }}><option value="">Grant a set…</option>${cd.credentials.filter((c) => !(node.vault || []).includes(c.id) && c.id !== node.credential).map((c) => html`<option value=${c.id}>${c.name} (${c.kind})</option>`)}<option value="__new">New set…</option></select></div>
+      ${ve && html`<${CredEditor} initial=${ve} kinds=${cd.kinds} close=${() => setVe(null)} saved=${(c) => { setVe(null); loadCreds().then(() => grant(c.id)); }}/>`}</div>` : "";
+  const folderHint = node.folder_hint && !String((node.config || {}).cwd || "").trim() ? html`<div class="card pre-b"><span class="tag">${Ic("folder", 12)} Shared without its working folder</span> <span class="small">It worked in “${node.folder_hint}” on the machine it came from. Set Working folder below (or <code>aihub work set</code>), or leave it empty for a fresh folder per run.</span></div>` : "";
   return html`<aside class="insp" key=${node.id}><div class="insp-h"><span class="nico">${Ic(nodeIcon(node.type, spec), 17)}</span><input class="grow" placeholder=${spec ? spec.title : node.type} value=${node.label || ""} onInput=${(e) => set((n) => (n.label = e.target.value))}/><button class="ibtn" onClick=${close}>${Ic("x", 16)}</button></div>
     <div class="insp-t"><${Seg} small value=${tab} onChange=${setTab} items=${[{ id: "settings", label: "Settings" }, { id: "data", label: "Data" }, { id: "log", label: "Log" }, { id: "about", label: "About" }]}/></div>
-    <div class="insp-b">${tab === "settings" ? html`${spec && html`<${IoStrip} node=${node} spec=${spec} ctx=${fctx}/>`}${credBox}${spec && node.preset ? (pre ? html`<div class="card pre-b"><div class="row">${Ic("key", 14)}<div class="grow small">Uses the saved node <b>${pre.name}</b>. Empty fields take its values (logins too); what you type here changes this work only.</div></div>
+    <div class="insp-b">${tab === "settings" ? html`${spec && spec.fields.some((f) => !f.secret && f.type !== "env" && f.name !== "filter") && html`<${MagicBar} node=${node} spec=${spec} ctx=${fctx} rn=${rn} onApply=${(c) => set((n) => Object.assign(n.config, c))}/>`}${spec && html`<${IoStrip} node=${node} spec=${spec} ctx=${fctx}/>`}${folderHint}${credBox}${vaultBox}${spec && spec.env && html`<${EnvBox} w=${w} node=${node} spec=${spec} set=${(v) => set((n) => { if (v) n.config[spec.env] = v; else delete n.config[spec.env]; })}/>`}${spec && node.preset ? (pre ? html`<div class="card pre-b"><div class="row">${Ic("key", 14)}<div class="grow small">Uses the saved node <b>${pre.name}</b>. Empty fields take its values (logins too); what you type here changes this work only.</div></div>
           <div class="row" style="margin-top:8px;gap:6px"><button type="button" class="btn" onClick=${() => editPreset({ ...pre })}>Edit saved node</button><button type="button" class="btn" title="Copy its settings into this node and stop following it (logins must be typed again)" onClick=${() => set((n) => { n.config = Object.fromEntries(Object.entries({ ...pre.config, ...Object.fromEntries(Object.entries(n.config).filter(([, v]) => v !== "" && v != null)) }).filter(([, v]) => v !== "__stored__")); delete n.preset; })}>Detach</button></div></div>`
           : html`<div class="card pre-b"><span class="tag bad">${Ic("alert", 12)} The saved node “${node.preset}” was deleted.</span> <button type="button" class="lnk" onClick=${() => set((n) => { delete n.preset; })}>Remove the link</button></div>`) : ""}
         ${spec && !node.preset && spec.fields.length ? html`<div class="row" style="justify-content:flex-end;margin:-4px 0 6px"><button type="button" class="lnk small" title="Keep these settings (logins too) to reuse in other works" onClick=${() => editPreset({ type: node.type, name: node.label || spec.title, description: "", config: { ...node.config }, copy: w.id ? { work: w.id, node: node.id } : null })}>${Ic("key", 11)} Save as saved node</button></div>` : ""}
-        ${spec && spec.guide && html`<details class="guide" open=${!Object.keys(node.config).length}><summary>${Ic("book", 14)} How to set this up</summary><div class="guide-b">${linkify(spec.guide)}</div></details>`}${spec ? spec.fields.map((f) => html`<${Field} key=${node.id + f.name} ctx=${fctx} f=${f} v=${node.config[f.name]} inherit=${credInh(f) !== undefined ? credInh(f) : pre ? pre.config[f.name] : undefined} via=${credInh(f) !== undefined ? "credential set" : undefined} stored=${node.config[f.name] === "__stored__"} boot=${boot} set=${(v) => set((n) => (n.config[f.name] = v))}/>`) : html`<p class="tag bad">${Ic("alert", 12)} This node's package is not installed.</p>`}
+        ${spec && spec.guide && html`<details class="guide" open=${!Object.keys(node.config).length}><summary>${Ic("book", 14)} How to set this up</summary><div class="guide-b">${linkify(spec.guide)}</div></details>`}${spec ? spec.fields.filter((f) => !(f.type === "env" && spec.env)).map((f) => html`<${Field} key=${node.id + f.name} ctx=${fctx} f=${f} v=${node.config[f.name]} docKey=${node.id + ":" + f.name} runnable=${!!spec.runnable} onExpand=${f.type === "code" || (f.type === "textarea" && !(f.assist && f.assist.length)) ? () => setLab(f.name) : null} inherit=${credInh(f) !== undefined ? credInh(f) : pre ? pre.config[f.name] : undefined} via=${credInh(f) !== undefined ? "credential set" : undefined} stored=${node.config[f.name] === "__stored__"} boot=${boot} set=${(v) => set((n) => (n.config[f.name] = v))}/>`) : html`<p class="tag bad">${Ic("alert", 12)} This node's package is not installed.</p>`}
         ${trig && trig[node.id] && (() => { const t = trig[node.id]; return html`<div class="field"><label>Trigger process</label><span class=${"tag " + (t.running ? "good" : "bad")}>${t.running ? "Running" : "Stopped" + (t.exit != null ? " (exit " + t.exit + ")" : "")}</span>${t.fails ? html` <span class="mute small">${t.fails} restart${t.fails > 1 ? "s" : ""}</span>` : ""}${t.stderr && t.stderr.length ? html`<pre class="small" style="max-height:160px;overflow:auto;white-space:pre-wrap">${t.stderr.join("\n")}</pre>` : ""}</div>`; })()}
         ${node.type === "start.webhook" && html`<div class="field"><label>Webhook URL (local only)</label><input readonly value=${hook || "Save the work first"} onClick=${(e) => e.target.select()}/><span class="mute small">POST text or {"text":…,"data":{…}} here. The work must be On.</span></div>`}
         ${incoming.length ? html`<h2>Inputs</h2>${incoming.map((e) => html`<div class="row small" style="margin:4px 0"><span class="grow">${Ic("link", 12)} from ${(w.nodes.find((q) => q.id === e.from) || {}).label || ((w.nodes.find((q) => q.id === e.from) || {}).type)}</span><button type="button" class="lnk" onClick=${() => upd((c) => ((c.edges = c.edges.filter((x) => !(x.from === e.from && x.to === e.to))), c))}>disconnect</button></div>`)}` : ""}
@@ -1224,7 +1235,9 @@ function Inspector({ warn = [], w, node, spec, cat, run, boot, hook, trig, upd, 
           ${rn.error && html`<h2>Error</h2><div class="io" style="color:var(--bad)">${rn.error}</div>`}${rn.inputs && rn.inputs.length > 1 ? html`<h2>Inputs (${rn.inputs.length})</h2>${rn.inputs.map((x, k) => html`<div class="io-in"><div class="io-h"><span class="tag">${k + 1}</span><b>${x.label}</b><span class="tag">${OUT_TAG[x.kind] || "text"}</span><code class="mute small">{{in.${(fctx.parents.find((p) => p.id === x.from) || {}).slug || k + 1}}}</code></div><div class="io">${x.text}</div></div>`)}`
             : rn.input && html`<h2>Input</h2><div class="io">${rn.input}</div>`}${rn.paths && rn.paths.length ? html`<h2>Paths passed on</h2><div class="io">${rn.paths.join("\n")}</div><span class="mute small">Claude may read these folders; a Publish node can send them.</span>` : ""}${rn.output && html`<h2>Output</h2><div class="io">${rn.output}</div>`}${rn.log && html`<h2>Log</h2><div class="io">${rn.log}</div>`}`
         : html`<div class="empty" style="height:200px"><div>${Ic("layers", 24)}<div>Run the work, then pick a run<br/>to see this node's data.</div></div></div>`)
-      : html`<dl class="kv"><dt>Type</dt><dd class="mono">${node.type}</dd><dt>Kind</dt><dd>${spec ? (spec.kind === "trigger" ? "Start (produces events)" : "Step") : "unknown"}</dd>${spec && spec.package ? html`<dt>Package</dt><dd>${spec.package}</dd>` : ""}<dt>Id</dt><dd class="mono">${node.id}</dd></dl><p class="mute">${spec && spec.desc}</p>${spec && spec.guide && html`<div class="guide-b">${linkify(spec.guide)}</div>`}`}</div></aside>`;
+      : html`<dl class="kv"><dt>Type</dt><dd class="mono">${node.type}</dd><dt>Kind</dt><dd>${spec ? (spec.kind === "trigger" ? "Start (produces events)" : "Step") : "unknown"}</dd>${spec && spec.package ? html`<dt>Package</dt><dd>${spec.package}</dd>` : ""}<dt>Id</dt><dd class="mono">${node.id}</dd></dl><p class="mute">${spec && spec.desc}</p>${spec && spec.guide && html`<div class="guide-b">${linkify(spec.guide)}</div>`}`}</div></aside>
+    ${lab && spec && (() => { const f = spec.fields.find((x) => x.name === lab); return f ? html`<${CodeLab} w=${w} node=${node} spec=${spec} f=${f} ctx=${fctx} rn=${rn} close=${() => setLab(null)}
+      set=${(v) => set((n) => (n.config[f.name] = v))} setField=${(k, v) => set((n) => (n.config[k] = v))}/>` : null; })()}`;
 }
 const Step = ({ n, state, title, children }) => html`<div class=${"step " + state}><span class="sn">${state === "ok" ? Ic("check", 13) : state === "bad" ? Ic("x", 13) : n}</span><div class="sb"><b>${title}</b>${children}</div></div>`;
 function PublishSteps({ r, boot, close }) {
@@ -1278,7 +1291,7 @@ function ShareForm({ id, info, close, done, node }) {
     <div class="row" style="margin-top:14px"><span class="grow"></span><button class="btn" onClick=${close}>Cancel</button><button class="btn acc" disabled=${busy || !v.name.trim() || !v.version.trim()} onClick=${go}>${busy ? "Building…" : "Build package"}</button></div><//>`;
 }
 // ---------- nodes: create, share, install
-const FIELD_TYPES = ["text", "textarea", "number", "checkbox", "select", "password"];
+const FIELD_TYPES = ["text", "textarea", "number", "checkbox", "select", "password", "code", "env"];
 function NodeEditor({ initial, close, saved }) {
   const blank = { id: "", title: "", kind: "action", group: "My nodes", description: "", timeout: 120, fields: [{ name: "text", label: "Text", type: "textarea", default: "{{input}}", assist: ["input", "data"] }], outputs: [] };
   const [n, setN] = useState(initial ? initial.node : blank), [code, setCode] = useState(initial ? initial.code : null), [busy, setBusy] = useState(false);
@@ -1298,7 +1311,7 @@ function NodeEditor({ initial, close, saved }) {
       <h2>Settings fields</h2>
       ${n.fields.map((f, i) => html`<div class="card" style="padding:10px 12px;margin-bottom:8px"><div class="row" style="gap:8px;flex-wrap:wrap">
         <input style="width:120px" placeholder="name" value=${f.name} onInput=${(e) => setF(i, { name: e.target.value })}/><input class="grow" style="min-width:120px" placeholder="label" value=${f.label || ""} onInput=${(e) => setF(i, { label: e.target.value })}/>
-        <select value=${f.type || "text"} onChange=${(e) => setF(i, { type: e.target.value })}>${FIELD_TYPES.map((t) => html`<option>${t}</option>`)}</select>
+        <select value=${f.type || "text"} onChange=${(e) => setF(i, { type: e.target.value })}>${FIELD_TYPES.map((t) => html`<option value=${t}>${t}</option>`)}</select>
         <input style="width:140px" placeholder="default" value=${f.default || ""} onInput=${(e) => setF(i, { default: e.target.value })}/>
         <button class="ibtn" title="Remove field" aria-label="Remove field" onClick=${() => set({ fields: n.fields.filter((_, j) => j !== i) })}>${Ic("trash", 14)}</button></div>
         ${(f.type === "text" || f.type === "textarea") && html`<div class="row small" style="gap:14px;margin-top:8px;flex-wrap:wrap"><span class="mute">Suggest and highlight:</span>${[["input", "{{input}}"], ["data", "{{data.key}}"], ["file", "@file"], ["skill", "/skill"]].map(([a, l]) => html`<label class="row" style="gap:5px"><input type="checkbox" checked=${(f.assist || []).includes(a)} onChange=${() => togA(i, a)}/>${l}</label>`)}</div>`}</div>`)}
@@ -1403,12 +1416,41 @@ function credMap(cs, kd, spec) {                       // {set field: node field
   const names = new Set(spec.fields.map((f) => f.name));
   return Object.fromEntries((kd && !kd.free ? kd.fields.map((f) => f.name) : []).filter((n) => names.has(n)).map((n) => [n, n]));
 }
+function credAlias(defs, src) {                       // JSON written with other names (public, secret, endpoint ...) -> the kind's own names; the real name wins
+  const out = {};
+  defs.forEach((d) => [d.name].concat(d.aliases || []).forEach((a) => { if (out[d.name] === undefined && src[a] !== undefined && src[a] !== "") out[d.name] = src[a]; }));
+  Object.keys(src).forEach((k) => { if (!defs.some((d) => d.name === k || (d.aliases || []).includes(k)) && out[k] === undefined) out[k] = src[k]; });
+  return out;
+}
+function credFromJson(kd, doc) {                       // a pasted JSON document -> fields of the set (same rules as `aihub work cred add --file`)
+  if (doc && typeof doc === "object" && !Array.isArray(doc) && doc.fields && typeof doc.fields === "object") doc = doc.fields;
+  const lists = kd.fields.filter((f) => f.type === "list");
+  if (Array.isArray(doc) && lists.length === 1) doc = { [lists[0].name]: doc };
+  else if (doc && typeof doc === "object" && lists.length === 1 && !(lists[0].name in doc) && Object.values(doc).length && Object.values(doc).every((v) => v && typeof v === "object" && !Array.isArray(v))) doc = { [lists[0].name]: doc };
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) throw new Error("the JSON must be an object of fields");
+  const out = credAlias(kd.fields.filter((f) => f.type !== "list"), doc);
+  Object.entries(doc).forEach(([k, v]) => { const lf = kd.fields.find((f) => f.name === k && f.type === "list") || (kd.free && v && typeof v === "object" ? { name: k, key: "name", items: [] } : null); if (!lf) return;
+    const rows = Array.isArray(v) ? v : Object.entries(v).map(([n, e]) => ({ [lf.key || "name"]: n, ...e }));
+    out[k] = rows.filter((e) => e && typeof e === "object").map((e) => lf.items.length ? credAlias(lf.items, e) : { ...e }); });
+  return out;
+}
+function CredList({ f, rows, set }) {                  // a list field of a credential set: one card per entry (a bucket, a database ...)
+  const items = f.items && f.items.length ? f.items : [...new Set(rows.flatMap((e) => Object.keys(e)).filter((k) => k !== "id"))].map((k) => ({ name: k, label: k, secret: CRED_SECRET.test(k) && !/^(name|access_key|key_id|public)$/.test(k) }));
+  const one = (f.label || f.name).replace(/s$/, "").toLowerCase();
+  const put = (i, k, v) => set(rows.map((e, j) => (j === i ? { ...e, [k]: v } : e)));
+  return html`<div class="field"><label>${f.label || f.name}</label>${f.help ? html`<span class="mute small">${f.help}</span>` : ""}
+    ${rows.map((e, i) => html`<div class="card" style="padding:8px 10px;margin:6px 0"><div class="row small"><b class="grow">${e[f.key || "name"] || one + " " + (i + 1)}</b><button type="button" class="ibtn" title=${"Remove this " + one} onClick=${() => set(rows.filter((_, j) => j !== i))}>${Ic("trash", 13)}</button></div>
+      <div class="cl-grid">${items.map((it) => html`<${Field} key=${(e.id || i) + it.name} f=${{ name: it.name, label: it.label, help: it.help, type: it.secret ? "password" : "text", secret: !!it.secret }} v=${e[it.name]} stored=${e[it.name] === "__stored__"} boot=${{}} set=${(v) => put(i, it.name, v)}/>`)}</div></div>`)}
+    <button type="button" class="btn" onClick=${() => set([...rows, {}])}>${Ic("plus", 13)} Add ${rows.length ? "another " : "a "}${one}</button></div>`;
+}
 function CredEditor({ initial, kinds, close, saved }) {
-  const [c, setC] = useState({ name: "", fields: {}, ...initial }), [busy, setBusy] = useState(false), [nk, setNk] = useState("");
+  const [c, setC] = useState({ name: "", fields: {}, ...initial }), [busy, setBusy] = useState(false), [nk, setNk] = useState(""), [js, setJs] = useState(null);
   const kd = kinds.find((k) => k.kind === c.kind);
-  const fl = kd ? kd.fields.map((f) => ({ name: f.name, label: f.label, help: f.help, type: f.secret ? "password" : "text", secret: !!f.secret })) : [];
-  const extra = kd && kd.free ? Object.keys(c.fields).filter((k) => !fl.some((f) => f.name === k)).map((k) => ({ name: k, label: k, type: CRED_SECRET.test(k) ? "password" : "text", secret: CRED_SECRET.test(k) })) : [];
+  const lists = kd ? kd.fields.filter((f) => f.type === "list").concat(kd.free ? Object.keys(c.fields).filter((k) => Array.isArray(c.fields[k]) && !kd.fields.some((f) => f.name === k)).map((k) => ({ name: k, label: k, key: "name", items: [] })) : []) : [];
+  const fl = kd ? kd.fields.filter((f) => f.type !== "list").map((f) => ({ name: f.name, label: f.label, help: f.help, type: f.secret ? "password" : "text", secret: !!f.secret })) : [];
+  const extra = kd && kd.free ? Object.keys(c.fields).filter((k) => !fl.some((f) => f.name === k) && !Array.isArray(c.fields[k])).map((k) => ({ name: k, label: k, type: CRED_SECRET.test(k) ? "password" : "text", secret: CRED_SECRET.test(k) })) : [];
   const setF = (k, v) => setC({ ...c, fields: { ...c.fields, [k]: v } });
+  const applyJs = () => { try { const got = credFromJson(kd, JSON.parse(js)); setC({ ...c, fields: { ...c.fields, ...got } }); setJs(null); toast("Filled in from the JSON (not saved yet)"); } catch (e) { toast(String(e.message || e), "bad"); } };
   const save = guard(async () => { setBusy(true); try { const r = await post("works/credentials/save", { credential: { id: c.id, kind: c.kind, name: c.name, fields: c.fields } }); toast("Credential set " + r.credential.name); saved(r.credential); } finally { setBusy(false); } });
   return html`<${Modal} wide=${true} close=${close}><h1>${c.id ? "Edit credential set" : "New credential set"}</h1>
     <p class="sub">Fill it in once; every node that uses the set takes these values (a value typed on a node still wins). Secrets are stored encrypted and never shown again.</p>
@@ -1418,6 +1460,10 @@ function CredEditor({ initial, kinds, close, saved }) {
         <label class="fb-f"><span>Name</span><input value=${c.name} placeholder="Company Teams" onInput=${(e) => setC({ ...c, name: e.target.value })}/></label></div>
       ${c.id && c.used_in && c.used_in.length ? html`<p class="mute small">Used by ${c.used_in.map((x) => x.title).join(", ")}: a change reaches all of them (triggers restart).</p>` : ""}
       ${fl.concat(extra).map((f) => html`<${Field} key=${f.name} f=${f} v=${c.fields[f.name]} stored=${c.fields[f.name] === "__stored__"} boot=${{}} set=${(v) => setF(f.name, v)}/>`)}
+      ${lists.map((f) => html`<${CredList} key=${f.name} f=${f} rows=${Array.isArray(c.fields[f.name]) ? c.fields[f.name] : []} set=${(v) => setF(f.name, v)}/>`)}
+      ${kd ? (js === null ? html`<div class="row" style="justify-content:flex-end"><button type="button" class="lnk small" title="Paste the values as JSON (for example a list of buckets); stored values you do not repeat stay" onClick=${() => setJs("")}>${Ic("code", 11)} Fill in from JSON</button></div>`
+        : html`<div class="field"><label>JSON</label><textarea rows="7" class="mono" placeholder=${JSON.stringify(Object.fromEntries(kd.fields.map((f) => [f.name, f.type === "list" ? [Object.fromEntries(f.items.map((i) => [i.name, ""]))] : ""])), null, 1)} value=${js} onInput=${(e) => setJs(e.target.value)}/><span class="mute small">Other names are understood too (public / secret / endpoint for a bucket). Nothing is saved until you press Save.</span>
+          <div class="row" style="gap:6px;margin-top:6px"><span class="grow"></span><button type="button" class="btn" onClick=${() => setJs(null)}>Cancel</button><button type="button" class="btn acc" disabled=${!js.trim()} onClick=${applyJs}>Fill in</button></div></div>`) : ""}
       ${kd && kd.free ? html`<div class="row" style="gap:6px"><input class="grow" placeholder="New field name (for example api_key)" value=${nk} onInput=${(e) => setNk(e.target.value)}/><button type="button" class="btn" disabled=${!/^[A-Za-z_][A-Za-z0-9_]*$/.test(nk)} onClick=${() => { setF(nk, ""); setNk(""); }}>Add field</button></div>` : ""}</div>
     <div class="row" style="margin-top:14px"><span class="grow"></span><button class="btn" onClick=${close}>Cancel</button><button class="btn acc" disabled=${busy || !c.name.trim() || !kd} onClick=${save}>${busy ? "Saving…" : "Save"}</button></div><//>`;
 }
@@ -1509,7 +1555,8 @@ function Works({ boot, openId }) {
   const [gen, setGen] = useState(""), [genBusy, setGenBusy] = useState(false), [wf, setWf] = useState(false), [nd, setNd] = useState(false), [shared, setShared] = useState(null), [share, setShare] = useState(null), [runs, setRuns] = useState([]), [run, setRun] = useState(null), [hook, setHook] = useState(""), [dirty, setDirty] = useState(false), [pal, setPal] = useState(null), graph = useRef();
   const [presets, setPresets] = useState([]), [pe, setPe] = useState(null), [tab, setTab] = useState(() => { try { return localStorage.getItem("aihub_works_tab") || "works"; } catch { return "works"; } });
   const pickTab = (t) => { setTab(t); try { localStorage.setItem("aihub_works_tab", t); } catch {} };
-  const load = guard(async () => setList((await api("works")).works));
+  const [sched, setSched] = useState(null);
+  const load = guard(async () => { const d = await api("works"); setList(d.works); setSched(d.scheduler || null); });
   const loadPresets = () => api("works/presets").then((d) => setPresets(d.presets || [])).catch(() => {});
   const loadCat = () => { loadPresets(); return api("works/nodes").then((d) => setCat(Object.fromEntries(d.nodes.map((n) => [n.type, n])))).catch(() => {}); };
   const presetDlg = pe && html`<${PresetEditor} initial=${pe} cat=${cat} boot=${boot} close=${() => setPe(null)} saved=${() => { setPe(null); loadPresets(); }}/>`;
@@ -1563,6 +1610,7 @@ function Works({ boot, openId }) {
   const save = guard(async () => { const r = await post("works/save", { work: w }); setW(r.work); setWarns(r.warning_nodes || {}); setDirty(false); load(); toast("Saved"); return r.work; });
 
   if (!w) return html`<div class="page wkpage"><h1>Works</h1><p class="sub">Flows that start on a schedule, a webhook, a message or a click, then run Claude tasks, filters and package nodes.</p>
+    ${sched && !sched.mine ? html`<div class="card row small" style="margin-bottom:10px">${Ic("clock", 14)}<span class="grow">Schedules and triggers of the works that are On are fired by <b>${sched.who === "serve" ? "aihub work serve" : sched.who}</b> (pid ${sched.pid}) on this machine, not by this page; runs show here as usual.</span></div>` : ""}
     <${RunningBar} openRun=${openRun}/>
     <${Seg} value=${tab} onChange=${pickTab} items=${[{ id: "works", label: `Works (${list.length})`, icon: "flow" }, { id: "saved", label: `Saved nodes (${presets.length})`, icon: "key" }]}/>
     ${tab === "saved" ? html`<${SavedNodes} cat=${cat} presets=${presets} reload=${loadPresets} boot=${boot} edit=${setPe}/>${presetDlg}` : html`<div style="margin-top:14px"></div>

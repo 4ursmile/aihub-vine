@@ -675,10 +675,17 @@ def venv_of(r):
     return installer.run_python(r["bot"], rec, rec.get("bot_home") or installer.bot_home(r["bot"], installer.runnable_kind(r["bot"], rec) or "bot"))
 
 
+def variant(args):
+    """A run of a package in another role: `--works ...` = the aihub-ui Works engine without its page (`aihub work serve --bg`).
+    `unique` and the page address (url_file) apply per variant, so the UI and its headless scheduler can both run."""
+    return "works" if list(args or [])[:1] == ["--works"] else ""
+
+
 def start(target, args, a, resume=False):
     found = installer.bots()
     rid = rid_of(a.name or target)
     old = load(rid)
+    var = variant(args if args else (old or {}).get("args"))
     if target in found:
         bot = target
     elif old and old.get("bot") in found:
@@ -687,14 +694,14 @@ def start(target, args, a, resume=False):
         installer.bot_command(target)      # the usual "not an installed bot" error
         return 1
     if M.runnable(found[bot][1]).get("unique"):
-        other = next((x for x in all_runs() if x.get("bot") == bot and x["id"] != rid and alive(x)), None)
+        other = next((x for x in all_runs() if x.get("bot") == bot and x["id"] != rid and alive(x) and variant(x.get("args")) == var), None)
         if other:
-            if show_link(found[bot][1]):                  # a page service that is already up: show its address and open it
+            if not var and show_link(found[bot][1]):                  # a page service that is already up: show its address and open it
                 ui.note("%s is already running (%s); it allows one run at a time. Restart: aihub run restart %s" % (bot, other["id"], other["id"]))
                 return 0
             raise api.ApiError("%s allows only one run at a time (unique = true) and %s is it. Use: aihub run restart %s | stop %s"
                                % (bot, other["id"], other["id"], other["id"]))
-    if old and alive(old) and not a.fg and show_link(found[bot][1]):
+    if old and alive(old) and not a.fg and not var and show_link(found[bot][1]):
         ui.note("%s is already running (pid %s). Restart: aihub run restart %s" % (rid, old.get("pid") or old.get("sup_pid"), rid))
         return 0
     if old and alive(old):
@@ -723,7 +730,7 @@ def start(target, args, a, resume=False):
     installer.bot_command(bot, r["args"])   # missing settings: say so here, in the terminal, not in a log
     t0 = time.time()
     code = launch(r, fg=a.fg)
-    if code == 0 and not a.fg:
+    if code == 0 and not a.fg and not var:
         show_link(found[bot][1], open_it=False, since=t0)       # the service opens the browser itself on its first start
     return code
 

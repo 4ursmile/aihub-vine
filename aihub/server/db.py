@@ -60,7 +60,15 @@ CREATE TABLE IF NOT EXISTS spaces(id {pk}, owner_id INTEGER NOT NULL, slug TEXT 
   settings TEXT DEFAULT '', tags TEXT DEFAULT '', views {bigint} DEFAULT 0, created {real}, updated {real}, UNIQUE(owner_id,slug));
 CREATE INDEX IF NOT EXISTS spaces_views ON spaces(views);
 CREATE INDEX IF NOT EXISTS spaces_updated ON spaces(updated);
+CREATE TABLE IF NOT EXISTS space_comments(id {pk}, space_id INTEGER NOT NULL, user_id INTEGER, parent_id INTEGER, body TEXT DEFAULT '', anchor TEXT DEFAULT '',
+  rev INTEGER DEFAULT 1, resolved INTEGER DEFAULT 0, created {real}, updated {real}, deleted INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS space_comments_sp ON space_comments(space_id);
+CREATE TABLE IF NOT EXISTS space_versions(space_id INTEGER, rev INTEGER, kind TEXT, filename TEXT DEFAULT '', size {bigint} DEFAULT 0, sha256 TEXT DEFAULT '',
+  author_id INTEGER, note TEXT DEFAULT '', created {real}, PRIMARY KEY(space_id,rev));
 CREATE TABLE IF NOT EXISTS space_access(space_id INTEGER, principal_type TEXT, principal_id INTEGER, access TEXT, PRIMARY KEY(space_id,principal_type,principal_id));
+CREATE TABLE IF NOT EXISTS notifications(id {pk}, user_id INTEGER NOT NULL, kind TEXT NOT NULL, actor_id INTEGER, item_id INTEGER DEFAULT 0, comment_id INTEGER DEFAULT 0,
+  rev INTEGER DEFAULT 0, body TEXT DEFAULT '', via TEXT DEFAULT '', created {real}, seen INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS notifications_user ON notifications(user_id,seen,id);
 """
 
 # Every permission the app checks. Admins grant these to roles in the UI.
@@ -94,6 +102,7 @@ LATE_COLUMNS = [
     ("events", "source", "TEXT"),
     ("events", "local_user", "TEXT"), ("events", "host", "TEXT"), ("events", "os", "TEXT"), ("events", "detail", "TEXT"), ("events", "cwd", "TEXT"), ("events", "ip", "TEXT"),
     ("events", "ext_id", "TEXT"), ("events", "actor", "TEXT"), ("reviews", "reviewer", "TEXT"),
+    ("spaces", "public_access", "TEXT DEFAULT 'view'"), ("space_comments", "mentions", "TEXT DEFAULT ''"),
 ]
 
 # a quoted string literal | a positional ? | a named :param (not the :: cast operator)
@@ -183,7 +192,7 @@ class Conn:
 
 
 class DB:
-    ID_TABLES = {"users", "groups", "packages", "versions", "events", "audit_log", "run_commands", "spaces"}
+    ID_TABLES = {"users", "groups", "packages", "versions", "events", "audit_log", "run_commands", "spaces", "space_comments", "notifications"}
 
     def __init__(self, settings=None, path=None):
         from .config import Settings

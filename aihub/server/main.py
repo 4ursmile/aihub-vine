@@ -246,6 +246,10 @@ def create_app(settings: Settings = None) -> FastAPI:
             logging.getLogger("aihub").info("usage: folded duplicate clients (reinstalled CLIs) into one per machine")
     except Exception as ex:
         logging.getLogger("aihub").warning("usage: duplicate client repair failed: %s", ex)
+    try:
+        app.state.repos.space_versions_backfill()           # once: spaces from before version history get a row for their current revision
+    except Exception as ex:
+        logging.getLogger("aihub").warning("spaces: version history backfill failed: %s", ex)
     app.state.cache = init_cache(s)
     app.state.events = EventBuffer(app.state.repos, s.event_flush_rows, s.event_flush_secs)
     app.state.sync = Sync(app.state.repos, s, app.state.cache)

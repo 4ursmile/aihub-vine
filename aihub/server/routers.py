@@ -170,7 +170,7 @@ def logout(request: Request, u=Depends(require_user)):
 
 @r.get("/auth/me")
 def me(request: Request, u=Depends(require_user)):
-    return dict(_public(u), role=u["role"], permissions=sorted(R(request).perms(u["role"])))
+    return dict(_public(u), role=u["role"], permissions=sorted(R(request).perms(u["role"])), groups=R(request).groups_of(u["id"]))
 
 
 @r.patch("/auth/me")

@@ -3,8 +3,10 @@ Used by chat messages (server.mentions) and by Claude / Free chat nodes of a wor
 import os
 import re
 import tempfile
+import threading
 
 from . import aihub as A
+from . import searchidx
 
 SPACE = re.compile(r"@space:([A-Za-z0-9][\w.-]{0,63}@[A-Za-z0-9][\w.-]{0,63})")
 NOTE = re.compile(r"@knowledge:((?:[A-Za-z0-9][\w.-]{0,63}/)?[a-z0-9][a-z0-9._-]{0,63})")
@@ -30,29 +32,72 @@ def notes():
     return out
 
 
-def spaces(q=""):
+_asking = set()
+CAP = 6                                              # entries of each kind in the plain `@` menu (an explicit `@space:` / `@knowledge:` lists up to 30)
+
+
+def _row(s):
+    return {"ref": s.get("ref"), "title": s.get("title") or "", "kind": s.get("kind") or ""}
+
+
+def _ask_hub(q):
+    """One hub lookup (`space search` / my spaces), merged into the local mirror so the next keystroke is answered locally."""
     try:
-        doc = A.run(["space", "search", q] if q else ["space", "list", "--mine", "--limit", "30"], timeout=30)
+        doc = A.run(["space", "search", q, "--limit", "30"] if q else ["space", "list", "--mine", "--limit", "30"], timeout=20)
+        items = (doc.get("data") or {}).get("items") or []
+        if searchidx.OK:
+            searchidx.merge_spaces(items, doc)
+        return items
     except A.CliError:
         return []
-    return [{"ref": s.get("ref"), "title": s.get("title") or "", "kind": s.get("kind") or ""} for s in ((doc.get("data") or {}).get("items") or []) if s.get("ref")][:30]
+    finally:
+        searchidx.asked("hub", q or "mine")
 
 
-def suggest(q=""):
-    """Menu items for what is typed after @ (`space:words`, `knowledge:words`, or plain words)."""
+def spaces(q="", limit=30, online=True):
+    """Spaces for the @ menu. LOCAL FIRST: the searchidx mirror answers in milliseconds (ref, author, title, description). The hub is asked only when the mirror is empty for this query (the menu waits once) or thin (in the background, so the
+    next keystroke finds it), at most once per query per searchidx.ASK_TTL. Without FTS5: the CLI, as before."""
+    q = " ".join((q or "").split())
+    if not searchidx.OK:
+        if not online:
+            return []
+        return [_row(s) for s in _ask_hub(q)[:limit] if s.get("ref")]
+    if online:
+        searchidx.refresh()
+    rows = searchidx.spaces(q, limit, chats=False)
+    if online and (len(q) >= 2 or not rows) and searchidx.want_remote("hub", q or "mine", len(rows)):
+        if rows:                                                                  # thin: ask in the background, keep typing
+            if q not in _asking:
+                _asking.add(q)
+                threading.Thread(target=lambda: (_ask_hub(q), _asking.discard(q)), name="space-suggest", daemon=True).start()
+        else:                                                                     # nothing local yet (first use, new account): wait for the hub once
+            _ask_hub(q)
+            rows = searchidx.spaces(q, limit, chats=False)
+    return [_row(s) for s in rows]
+
+
+def _words(text, haystack):
+    return all(w in haystack for w in text.split())
+
+
+def suggest(q="", online=True):
+    """Menu items for what is typed after @ (`space:words`, `knowledge:words`, or plain words). Items are already filtered and ranked here
+    (`pre`: true), so the page shows them as they come. The plain menu shows a few of each kind, an explicit `space:` / `knowledge:` many."""
     q = (q or "").strip().lower()
     kind, _, words = q.partition(":")
     if kind not in ("space", "knowledge"):
         kind, words = "", q
     if not kind and q and ("knowledge".startswith(q) or "space".startswith(q)):      # typed "know" / "spa": the keyword itself, list that kind
         kind, words = ("knowledge" if "knowledge".startswith(q) else "space"), ""
+    cap = 30 if kind else CAP
     out = []
     if kind != "space":
-        out += [{"name": "knowledge:" + ref, "description": "Knowledge note · %d bytes" % size, "source": "knowledge", "key": ref.lower()}
-                for ref, size in notes() if words in ref.lower()]
+        out += [{"name": "knowledge:" + ref, "description": "Knowledge note · %d bytes" % size, "source": "knowledge", "key": ref.lower(), "pre": True}
+                for ref, size in sorted(notes(), key=lambda n: (not n[0].lower().startswith(words), n[0])) if _words(words, ref.lower())][:cap]
     if kind == "space" or (not kind and len(words) >= 2) or not q:
-        out += [{"name": "space:" + s["ref"], "description": "Space · %s%s" % (s["kind"], " · " + s["title"] if s["title"] else ""), "source": "space", "key": (s["ref"] + " " + s["title"]).lower()}
-                for s in spaces(words if len(words) >= 2 else "")]
+        out += [{"name": "space:" + s["ref"], "key": (s["ref"] + " " + s["title"]).lower(), "source": "space", "pre": True,
+                 "description": "Space · %s%s" % (s["kind"], " · " + s["title"] if s["title"] else "")}
+                for s in spaces(words if len(words) >= 2 else "", cap, online)]
     return out[:40]
 
 

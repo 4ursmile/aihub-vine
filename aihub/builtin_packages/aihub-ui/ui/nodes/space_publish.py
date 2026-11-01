@@ -81,6 +81,11 @@ try:
     desc = " ".join(str(cfg.get("description") or "").split())[:500]
     if desc:
         args += ["--description", desc]
+    raw = cfg.get("tags")
+    raw = raw if isinstance(raw, list) else str(raw or "").replace("#", " ").replace(";", ",").split(",")
+    tags = list(dict.fromkeys(t for t in (re.sub(r"[^a-z0-9._-]+", "-", str(x).strip().lower()).strip("-")[:30] for x in raw) if t))[:12]      # the hub's tag rule
+    if tags:
+        args += ["--tags", ",".join(tags)]
     args.append("--public" if cfg.get("visibility") == "public" else "--private")          # private unless asked
     # stdin is /dev/null (a CLI waiting for input can never hang), stdout/stderr go to FILES (no pipe that a background helper
     # started by the CLI could keep open), no auto-update tail, and the whole process group is killed on timeout.

@@ -795,6 +795,10 @@ def get_work(wid):
     return _read(os.path.join(ui_dir("works"), wid + ".json"), None) if ID.match(str(wid)) else None
 
 
+# a pip package spec a shared node says it needs (`requires`, written by workpkg.strip_for_share; same rule as nodeenv.PIP_SPEC)
+REQ_SPEC = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}(\[[A-Za-z0-9._,-]{1,80}\])?(\s*(===|==|>=|<=|~=|!=|>|<)\s*[A-Za-z0-9.*+!_-]{1,40}(\s*,\s*(==|>=|<=|~=|!=|>|<)\s*[A-Za-z0-9.*+!_-]{1,40})*)?$")
+
+
 def clean_work(w):
     """Validated copy of a work (new id when missing). Writes nothing."""
     src = w
@@ -808,7 +812,14 @@ def clean_work(w):
                           **({"preset": n["preset"]} if re.match(r"^[a-z0-9][a-z0-9_-]{0,39}$", str(n.get("preset") or "")) else {}),
                           **({"credential": n["credential"]} if re.match(r"^[a-z0-9][a-z0-9_-]{0,39}$", str(n.get("credential") or "")) else {}),
                           **({"credential_kind": n["credential_kind"]} if re.match(r"^[a-z][a-z0-9_-]{0,30}$", str(n.get("credential_kind") or "")) else {}),
-                          **({"credential_name": str(n["credential_name"])[:60]} if n.get("credential_name") else {})})
+                          **({"credential_name": str(n["credential_name"])[:60]} if n.get("credential_name") else {}),
+                          **({"folder_hint": str(n["folder_hint"])[:80]} if n.get("folder_hint") else {}),
+                          **({"env_hint": str(n["env_hint"])[:80]} if n.get("env_hint") else {}),
+                          **({"requires": v} if (v := [str(x).strip() for x in (n.get("requires") if isinstance(n.get("requires"), list) else []) if REQ_SPEC.match(str(x).strip())][:30]) else {}),
+                          **({"vault": v} if (v := [x for x in (n.get("vault") if isinstance(n.get("vault"), list) else []) if re.match(r"^[a-z0-9][a-z0-9_-]{0,39}$", str(x))][:10]) else {}),
+                          **({"vault_kinds": v} if (v := [{"kind": str(x["kind"]), **({"name": str(x["name"])[:60]} if x.get("name") else {})}
+                                                          for x in (n.get("vault_kinds") if isinstance(n.get("vault_kinds"), list) else [])
+                                                          if isinstance(x, dict) and re.match(r"^[a-z][a-z0-9_-]{0,30}$", str(x.get("kind") or ""))][:10]) else {})})
     ids = {n["id"] for n in nodes}
     edges = [{"from": e["from"], "to": e["to"]} for e in list(w.get("edges", []))[:400] if isinstance(e, dict) and e.get("from") in ids and e.get("to") in ids and e["from"] != e["to"]]
     w = {"id": wid, "title": str(w.get("title") or "Untitled")[:80], "enabled": bool(w.get("enabled")), "nodes": nodes, "edges": edges, "updated": time.time(),

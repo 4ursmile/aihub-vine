@@ -1536,71 +1536,172 @@ const sendFile = (method, path, file, onProg) => new Promise((ok, no) => {      
   x.onerror = () => no(new Error("Network error")); x.send(file);
 });
 const slugOf = (n) => String(n || "").replace(/\.(tar\.gz|[^.]+)$/i, "").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "").slice(0, 64);
-const SpCard = ({ s, i = 0 }) => html`<a class="card sp-card" style=${"--i:" + Math.min(i, 12) + ";--h:" + hue(s.slug)} href=${"#/s/" + s.ref}>
-  <div class="sp-tile"><b>${SKIND[s.kind] || s.kind}</b>${s.visibility === "private" && html`<span class="badge orange">private</span>`}</div>
-  <div class="sp-body"><h3>${s.title}</h3><p class="sp-ref">${s.ref}</p><p>${s.description || ""}</p>
-    <div class="meta"><span>${fmt(s.views)} views</span><span>${ago(s.updated)}</span></div></div></a>`;
-function SpCarousel({ items }) {
-  const [i, setI] = useState(0), [hold, setHold] = useState(false), n = items.length;
-  useEffect(() => { if (reduced || hold || n < 2) return; const t = setInterval(() => setI((x) => (x + 1) % n), 6500); return () => clearInterval(t); }, [hold, n]);
-  useEffect(() => { const f = () => setHold(document.hidden); document.addEventListener("visibilitychange", f); return () => document.removeEventListener("visibilitychange", f); }, []);
-  if (!n) return null;
-  return html`<section class="sp-car" aria-roledescription="carousel" aria-label="Top spaces" onMouseEnter=${() => setHold(true)} onMouseLeave=${() => setHold(false)} onFocusIn=${() => setHold(true)} onFocusOut=${() => setHold(false)}>
-    <div class="sp-car-track" style=${"transform:translateX(-" + i * 100 + "%)"}>${items.map((s, k) => html`<a key=${s.ref} class="sp-slide" style=${"--h:" + hue(s.slug)} href=${"#/s/" + s.ref} aria-hidden=${k !== i} tabindex=${k === i ? 0 : -1}>
-      <div class="sp-slide-in"><span class="badge">${SKIND[s.kind]}</span><h2>${s.title}</h2><p>${s.description || s.ref}</p><div class="meta"><span>${s.ref}</span><span>${fmt(s.views)} views</span></div></div></a>`)}</div>
-    ${n > 1 && html`<div class="sp-car-ctl"><button class="btn sec sm" aria-label="Previous" onClick=${() => setI((i + n - 1) % n)}>‹</button>${items.map((s, k) => html`<button key=${s.ref} class=${"sp-dot" + (k === i ? " on" : "")} aria-label=${"Show " + s.title} onClick=${() => setI(k)}></button>`)}<button class="btn sec sm" aria-label="Next" onClick=${() => setI((i + 1) % n)}>›</button></div>`}</section>`;
+const SK_SHORT = { doc: "DOC", slides: "PPT", report: "RPT", pdf: "PDF", sheet: "XLS", dashboard: "DSH", html: "WEB" };
+const SpCard = ({ s, i = 0, onTag }) => html`<div class="card sp-card" style=${"--i:" + Math.min(i, 12) + ";--h:" + hue(s.slug)}>
+  <a class="sp-tile" href=${"#/s/" + s.ref}><b>${SKIND[s.kind] || s.kind}</b>${s.visibility === "private" && html`<span class="badge orange">private</span>`}</a>
+  <div class="sp-body"><h3><a href=${"#/s/" + s.ref}>${s.title || s.slug}</a></h3><p class="sp-ref">${s.ref}</p><p class="sp-desc">${s.description || ""}</p>
+    ${(s.tags || []).length > 0 && html`<p class="sp-tags">${s.tags.slice(0, 4).map((t) => html`<button type="button" key=${t} onClick=${() => onTag && onTag(t)}>#${t}</button>`)}</p>`}
+    <div class="meta"><span>${fmt(s.views)} views</span><span>${ago(s.updated)}</span></div></div></div>`;
+// One dense row: the whole row opens the space (the title link stretches over it), tag and author are buttons above that layer.
+const SpRow = ({ s, onTag, onOwner }) => html`<div class="sp-row" style=${"--h:" + hue(s.slug)}>
+  <span class="sp-ico" aria-hidden="true">${SK_SHORT[s.kind] || "SP"}</span>
+  <div class="sp-rm"><a class="sp-rt" href=${"#/s/" + s.ref}>${s.title || s.slug}</a>${s.visibility === "private" && html`<span class="badge orange">private</span>`}${s.comments > 0 && html`<span class="sp-cm-n" title="Comments">${s.comments} ${s.comments === 1 ? "comment" : "comments"}</span>`}
+    <div class="sp-rs"><button type="button" class="sp-by" onClick=${() => onOwner(s.owner)}>${s.owner_name || s.owner}</button><span>${SKIND[s.kind] || s.kind}</span>${s.description && html`<span class="sp-rd">${s.description}</span>`}</div></div>
+  <div class="sp-rtags">${(s.tags || []).filter((t) => t !== "aihub-chat").slice(0, 3).map((t) => html`<button type="button" key=${t} onClick=${() => onTag(t)}>#${t}</button>`)}</div>
+  <span class="sp-rn" title="Views">${fmt(s.views)}</span><span class="sp-rt2" title=${new Date(s.updated * 1000).toLocaleString()}>${ago(s.updated)}</span></div>`;
+const cleanTag = (t) => String(t || "").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+const useTagHints = () => { const x = useLoad(() => api("/spaces/facets").catch(() => null), []); return ((x.d && x.d.tags) || []).filter((h) => h.tag !== "aihub-chat"); };
+function TagInput({ value, onChange, hints = [], max = 12 }) {          // chips + a text box; the tags already used on this hub are offered below as you type
+  const [t, setT] = useState("");
+  const add = (x) => { const v = cleanTag(x); if (v && !value.includes(v) && value.length < max) onChange([...value, v]); setT(""); };
+  const q = cleanTag(t), sug = hints.filter((h) => !value.includes(h.tag) && (!q || h.tag.includes(q))).slice(0, 8);
+  return html`<div class="tg"><div class="tg-box">${value.map((x) => html`<span class="tg-c" key=${x}>#${x}<button type="button" aria-label=${"Remove tag " + x} onClick=${() => onChange(value.filter((y) => y !== x))}>×</button></span>`)}
+      <input class="tg-in" value=${t} aria-label="Add a tag" placeholder=${value.length ? "" : "Type a tag, press Enter"} disabled=${value.length >= max}
+        onInput=${(e) => { const v = e.target.value; if (/[,\s]$/.test(v) && cleanTag(v)) add(v); else setT(v); }}
+        onKeyDown=${(e) => { if ((e.key === "Enter" || e.key === ",") && t.trim()) { e.preventDefault(); add(t); } else if (e.key === "Backspace" && !t && value.length) onChange(value.slice(0, -1)); }}
+        onBlur=${() => t.trim() && add(t)} /></div>
+    ${sug.length > 0 && html`<div class="tg-s" role="group" aria-label="Suggested tags"><span>${q ? "Matching" : "Suggested"}</span>${sug.map((h) => html`<button type="button" class="chip sm" key=${h.tag} onClick=${() => add(h.tag)}>#${h.tag}<i>${h.n}</i></button>`)}</div>`}</div>`;
 }
-function SpaceForm({ onDone, space }) {         // create a space (or, with `space`, send a new version of it) from the browser
+function SpaceForm({ onDone, space, bare }) {         // create a space (or, with `space`, send a new version of it) from the browser
   const [file, setFile] = useState(null), [name, setName] = useState(""), [title, setTitle] = useState(""), [kind, setKind] = useState("auto"), [vis, setVis] = useState("public");
-  const [view, setView] = useState("fit"), [pct, setPct] = useState(null), [drag, setDrag] = useState(false), [desc, setDesc] = useState("");
+  const [view, setView] = useState("fit"), [pct, setPct] = useState(null), [drag, setDrag] = useState(false), [desc, setDesc] = useState(""), [note, setNote] = useState(""), [tags, setTags] = useState([]), hints = useTagHints();
   const pick = (f) => { if (!f) return; setFile(f); if (!space && !name) setName(slugOf(f.name)); if (!space && !title) setTitle(f.name.replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ")); };
   const go = async (e) => {
     e.preventDefault(); if (!file) return toast("Choose a file first", 1);
     const q = new URLSearchParams({ filename: encodeURIComponent(file.name) });
     if (kind !== "auto") q.set("kind", kind);
-    if (!space) { if (name) q.set("name", name); if (title) q.set("title", title); if (desc) q.set("description", desc); q.set("visibility", vis); q.set("view", view); }
+    if (note.trim()) q.set("note", note.trim());
+    if (!space) { if (name) q.set("name", name); if (title) q.set("title", title); if (desc) q.set("description", desc); if (tags.length) q.set("tags", tags.join(",")); q.set("visibility", vis); q.set("view", view); }
     setPct(0);
     try { const r = space ? await sendFile("PUT", "/spaces/" + space + "/content?" + q, file, setPct) : await sendFile("POST", "/spaces?" + q, file, setPct); toast(r.created ? "Space published" : "Space updated"); onDone(r.space); }
     catch (er) { toast(er.message, 1); setPct(null); }
   };
-  return html`<form class="card sp-form" onSubmit=${go}>
+  return html`<form class=${"sp-form" + (bare ? "" : " card")} onSubmit=${go}>
     <label class=${"sp-drop" + (drag ? " on" : "")} onDragOver=${(e) => { e.preventDefault(); setDrag(true); }} onDragLeave=${() => setDrag(false)} onDrop=${(e) => { e.preventDefault(); setDrag(false); pick(e.dataTransfer.files[0]); }}>
       <input type="file" onChange=${(e) => pick(e.target.files[0])} />
       <b>${file ? file.name : "Drop a file here or click to choose"}</b><span>${file ? (file.size / 1048576).toFixed(1) + " MB" : SK_HELP}</span></label>
     ${!space && html`<div class="sp-grid2">
       <label>Name<input class="field" value=${name} placeholder="q3-review" onInput=${(e) => setName(slugOf(e.target.value))} /><small>Your link will be <code>${(store.me && store.me.username) || "you"}@${name || "name"}</code></small></label>
       <label>Title<input class="field" value=${title} onInput=${(e) => setTitle(e.target.value)} /></label></div>
-      <label>Description<input class="field" value=${desc} placeholder="One line shown on cards" onInput=${(e) => setDesc(e.target.value)} /></label>`}
+      <label>Description<input class="field" value=${desc} placeholder="One line shown on cards" onInput=${(e) => setDesc(e.target.value)} /></label>
+      <div class="sp-f"><span>Tags</span><${TagInput} value=${tags} onChange=${setTags} hints=${hints} /></div>`}
     <div class="sp-grid2"><label>Kind<select class="field" value=${kind} onChange=${(e) => setKind(e.target.value)}><option value="auto">Detect from the file</option>${SK_ORDER.map((k) => html`<option value=${k}>${SKIND[k]}</option>`)}</select></label>
       ${!space && html`<label>Opens as<select class="field" value=${view} onChange=${(e) => setView(e.target.value)}><option value="fit">Fit the screen</option><option value="canvas">Canvas (inside the page)</option><option value="full">Full screen</option></select></label>`}</div>
     ${!space && html`<div class="row"><div class="seg" role="group" aria-label="Who can see it">${["public", "private"].map((v) => html`<button type="button" class=${vis === v ? "on" : ""} onClick=${() => setVis(v)}>${v === "public" ? "Public link" : "Private"}</button>`)}</div>
       <span class="sp-hint">${vis === "public" ? "Anyone with the link, signed in or not." : "Only you, plus people and groups you share it with."}</span></div>`}
+    ${space && html`<label>Note for the version history<input class="field" value=${note} maxlength="500" placeholder="What changed (optional)" onInput=${(e) => setNote(e.target.value)} /></label>`}
     ${pct != null && html`<div class="ubar" style="position:static"><i style=${"width:" + Math.round(pct * 100) + "%"}></i></div>`}
     <div class="row"><button class="btn" disabled=${pct != null}>${pct != null ? "Uploading…" : space ? "Upload new version" : "Publish space"}</button><span class="sp-hint">or from a terminal: <code>aihub space publish ${file ? file.name : "FILE"}</code></span></div></form>`;
 }
+// A facet list in the filter rail: counts, an inline filter box once it is long, "Show all" past `cap` rows. `items` = [{id, label, n}].
+function Facet({ title, items, sel, onPick, cap = 8, find }) {
+  const [more, setMore] = useState(false), [f, setF] = useState("");
+  if (!items.length && !sel) return null;
+  const q = f.trim().toLowerCase(), list = q ? items.filter((x) => (x.label + " " + x.id).toLowerCase().includes(q)) : items;
+  const shown = more || q ? list : list.slice(0, cap);
+  const cur = sel && !shown.some((x) => x.id === sel) ? items.find((x) => x.id === sel) || { id: sel, label: sel, n: 0 } : null;
+  return html`<section class="spf"><h3>${title}</h3>
+    ${find && items.length > cap && html`<input class="field sm" type="search" placeholder=${"Filter " + title.toLowerCase() + "…"} value=${f} onInput=${(e) => setF(e.target.value)} aria-label=${"Filter " + title.toLowerCase()} />`}
+    <ul class=${more || q ? "spf-l open" : "spf-l"}>${(cur ? [cur, ...shown] : shown).map((x) => html`<li key=${x.id}><button type="button" class=${sel === x.id ? "on" : ""} aria-pressed=${sel === x.id} onClick=${() => onPick(sel === x.id ? "" : x.id)}><span>${x.label}</span><i>${x.n}</i></button></li>`)}
+      ${!list.length && html`<li class="spf-none">No match</li>`}</ul>
+    ${!q && list.length > cap && html`<button type="button" class="spf-more" onClick=${() => setMore(!more)}>${more ? "Show less" : "Show all " + list.length}</button>`}</section>`;
+}
+const SP_DEF = { sort: "new", group: "date", view: "list", scope: "all" };
+const SP_GROUPS = { date: "Date updated", kind: "Type", owner: "Author", none: "No grouping" };
+const SP_SORTS = { new: "Recently updated", top: "Most viewed", name: "Name A–Z", old: "Oldest first" };
+const DAY_BUCKETS = [["Today", 86400], ["Last 7 days", 7 * 86400], ["Last 30 days", 30 * 86400], ["Last 90 days", 90 * 86400]];
+function dateGroup(t) {                              // bucket by age; older than a quarter = the year
+  const age = Date.now() / 1000 - t;
+  for (const [n, sec] of DAY_BUCKETS) if (age < sec) return n;
+  return String(new Date(t * 1000).getFullYear());
+}
+function SpShowcase({ items }) {          // a row of suggested spaces (most viewed) that scrolls sideways
+  const r = useRef(), by = (d) => { const el = r.current; if (el) el.scrollBy({ left: d * Math.max(240, el.clientWidth * 0.8), behavior: reduced ? "auto" : "smooth" }); };
+  return html`<section class="sp-show" aria-label="Suggested spaces"><div class="sp-show-h"><h2>Suggested for you</h2><span class="sp"></span>
+      <button type="button" class="ft-arw" aria-label="Scroll left" onClick=${() => by(-1)}><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 2 4 7l5 5"/></svg></button>
+      <button type="button" class="ft-arw" aria-label="Scroll right" onClick=${() => by(1)}><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m5 2 5 5-5 5"/></svg></button></div>
+    <div class="sp-show-t" ref=${r} tabindex="0" role="list">${items.map((s) => html`<a key=${s.ref} role="listitem" class="sp-sc" href=${"#/s/" + s.ref} style=${"--h:" + hue(s.slug)}>
+        <span class="sp-sc-t"><b>${SKIND[s.kind] || s.kind}</b>${s.visibility === "private" && html`<span class="badge orange">private</span>`}</span>
+        <span class="sp-sc-b"><strong>${s.title || s.slug}</strong><small>${s.owner_name || s.owner}</small><span class="sp-sc-m">${fmt(s.views)} views · ${ago(s.updated)}</span></span></a>`)}</div></section>`;
+}
 function Spaces() {
-  const { me } = useStore(); const qs = hashQ();
-  const [q, setQ] = useState(qs.get("q") || ""), [kind, setKind] = useState(qs.get("kind") || ""), [tab, setTab] = useState(qs.get("tab") || "all"), [mk, setMk] = useState(qs.get("new") === "1");
-  const dq = debounced(q), find = !!(dq || kind || tab === "mine");
-  const ov = useLoad(() => api("/spaces/overview"), []);
-  const res = useLoad(() => find ? api("/spaces?" + new URLSearchParams({ q: dq, kind, sort: dq ? "top" : "new", limit: 60, ...(tab === "mine" ? { mine: "true" } : {}) })) : Promise.resolve(null), [dq, kind, tab, me && me.username]);
+  const { me } = useStore(); const qs = hashQ(), pref = (k) => { try { return localStorage.getItem("aihub_sp_" + k); } catch { return null; } };
+  const init = { q: qs.get("q") || "", kind: qs.get("kind") || "", tag: qs.get("tag") || "", owner: qs.get("owner") || "", scope: qs.get("tab") || SP_DEF.scope,
+    sort: qs.get("sort") || SP_DEF.sort, group: qs.get("group") || pref("group") || SP_DEF.group, view: qs.get("view") || pref("view") || SP_DEF.view };
+  const [f, setF] = useState(init), [mk, setMk] = useState(qs.get("new") === "1"), [rail, setRail] = useState(false);
+  const [items, setItems] = useState([]), [total, setTotal] = useState(null), [busy, setBusy] = useState(true), [err, setErr] = useState(null);
+  const set = (o) => setF((x) => ({ ...x, ...o }));
+  const dq = debounced(f.q), scope = me ? f.scope : "all", group = f.group === "none" ? "" : f.group;
+  const sort = group === "date" ? "new" : f.sort;                                  // grouping by date is the date order
+  const pg = (extra = {}) => new URLSearchParams({ q: dq, kind: f.kind, tag: f.tag, owner: f.owner, sort, limit: 50, ...(group === "kind" || group === "owner" ? { group } : {}),
+    ...(scope === "mine" ? { mine: "true" } : scope === "shared" ? { shared: "true" } : {}), ...extra });
+  const key = pg().toString(), who = me && me.username;
+  useEffect(() => {                                                                // filters changed: reload from the top, keep the old rows (dimmed) meanwhile
+    let dead = false; setBusy(true); setErr(null);
+    api("/spaces?" + key).then((r) => { if (!dead) { setItems(r.items); setTotal(r.total); } }).catch((e) => { if (!dead) setErr(e); }).finally(() => { if (!dead) setBusy(false); });
+    return () => { dead = true; };
+  }, [key, who]);
+  const [more, setMore] = useState(false);
+  const keyRef = useRef(key); keyRef.current = key;
+  const loadMore = async () => {
+    if (busy || more || items.length >= total) return; setMore(true);
+    try { const r = await api("/spaces?" + key + "&offset=" + items.length); if (keyRef.current !== key) return; setItems((x) => { const seen = new Set(x.map((y) => y.ref)); return [...x, ...r.items.filter((y) => !seen.has(y.ref))]; }); setTotal(r.total); }
+    catch (e) { toast(e.message, 1); } finally { setMore(false); }
+  };
+  const sentinel = useRef(); const lm = useRef(); lm.current = loadMore;
+  useEffect(() => {                                                                // reaching the end of the list loads the next page
+    const el = sentinel.current; if (!el || !("IntersectionObserver" in window)) return;
+    const io = new IntersectionObserver((e) => e[0].isIntersecting && lm.current(), { rootMargin: "400px" }); io.observe(el); return () => io.disconnect();
+  }, [items.length, total]);
+  useEffect(() => {                                                                // the address always says what you see, so a link can be shared
+    const h = location.hash.split("?")[0], p = new URLSearchParams();
+    for (const [k, v, d] of [["q", dq, ""], ["kind", f.kind, ""], ["tag", f.tag, ""], ["owner", f.owner, ""], ["tab", scope, "all"], ["sort", f.sort, SP_DEF.sort], ["group", f.group, SP_DEF.group], ["view", f.view, SP_DEF.view]]) if (v && v !== d) p.set(k, v);
+    history.replaceState(null, "", h + (p.toString() ? "?" + p : ""));
+    try { localStorage.setItem("aihub_sp_group", f.group); localStorage.setItem("aihub_sp_view", f.view); } catch {}
+  }, [dq, f.kind, f.tag, f.owner, scope, f.sort, f.group, f.view]);
+  const fx = useLoad(() => api("/spaces/facets?" + new URLSearchParams({ q: dq, kind: f.kind, tag: f.tag, owner: f.owner, ...(scope === "mine" ? { mine: "true" } : scope === "shared" ? { shared: "true" } : {}) })).catch(() => null), [dq, f.kind, f.tag, f.owner, scope, who]);
+  const X = fx.d || { kinds: {}, owners: [], tags: [], scopes: {} }, nameOf = Object.fromEntries(X.owners.map((o) => [o.username, o.name || o.username]));
   useReveal();
-  const kinds = (ov.d && ov.d.kinds) || {};
+  const active = [f.kind && ["Type", SKIND[f.kind] || f.kind, () => set({ kind: "" })], f.tag && ["Tag", "#" + f.tag, () => set({ tag: "" })], f.owner && ["Author", nameOf[f.owner] || f.owner, () => set({ owner: "" })], dq && ["Search", dq, () => set({ q: "" })]].filter(Boolean);
+  const clear = () => set({ q: "", kind: "", tag: "", owner: "", scope: "all" });
+  const filtered = active.length > 0 || scope !== "all";
+  const ov = useLoad(() => api("/spaces/overview").catch(() => null), [who]), showcase = ((ov.d && ov.d.top) || []).slice(0, 10);
+  const kinds = SK_ORDER.filter((k) => X.kinds[k] || f.kind === k).map((k) => ({ id: k, label: SKIND[k], n: X.kinds[k] || 0 }));
+  const gkey = (s) => group === "date" ? dateGroup(s.updated) : group === "kind" ? SKIND[s.kind] || s.kind : group === "owner" ? s.owner_name || s.owner : "";
+  const gcount = (s) => group === "kind" ? X.kinds[s.kind] : group === "owner" ? (X.owners.find((o) => o.username === s.owner) || {}).n : null;
+  const groups = [];                                                               // consecutive rows with the same key share a header
+  for (const s of items) { const k = gkey(s), g = groups[groups.length - 1]; if (g && g.k === k) g.items.push(s); else groups.push({ k, s, items: [s] }); }
+  const onTag = (t) => set({ tag: t }), onOwner = (o) => set({ owner: o });
+  const body = err ? html`<${Err} e=${err} />` : total == null ? html`<${Skels} n=${6} />`
+    : !items.length ? html`<${Empty} t=${filtered ? "No spaces match" : "No spaces yet"} d=${filtered ? "Try other words or remove a filter." : me ? "Publish the first one with New space, or: aihub space publish deck.pptx" : "Sign in to publish the first one."} />`
+    : html`<div class=${"sp-res" + (busy ? " busy" : "")}>${groups.map((g, gi) => html`<section class="sp-grp" key=${gi + g.k}>
+        ${g.k && html`<h2 class="sp-gh"><span>${g.k}</span>${gcount(g.s) != null && html`<i>${gcount(g.s)}</i>`}</h2>`}
+        ${f.view === "grid" ? html`<div class="grid">${g.items.map((s, i) => html`<${SpCard} key=${s.ref} s=${s} i=${i} onTag=${onTag} />`)}</div>`
+          : html`<div class="sp-list">${g.items.map((s) => html`<${SpRow} key=${s.ref} s=${s} onTag=${onTag} onOwner=${onOwner} />`)}</div>`}</section>`)}
+      <div ref=${sentinel} class="sp-end">${items.length < total ? html`<button class="btn sec" disabled=${more} onClick=${loadMore}>${more ? "Loading…" : "Show " + Math.min(50, total - items.length) + " more"}</button>` : total > 50 ? html`<span class="sp-hint">That is all ${total.toLocaleString()} spaces.</span>` : null}</div></div>`;
   return html`<div class="stack"><div class="kn-head"><div><h1>Spaces</h1><p class="lead">Slides, docs, reports, sheets and dashboards your team can open straight from a link.</p></div>
-      ${me && can("publish") && html`<button class="btn" aria-expanded=${mk} onClick=${() => setMk(!mk)}>${mk ? "Close" : "New space"}</button>`}</div>
-    ${mk && html`<${SpaceForm} onDone=${(s) => nav("/s/" + s.ref)} />`}
-    <div class="sp-find"><${Search} value=${q} onInput=${setQ} ph="Find a space: title, author, tag…" />
-      <div class="sp-chips">${me && html`<button class=${"chip" + (tab === "mine" ? " on" : "")} onClick=${() => setTab(tab === "mine" ? "all" : "mine")}>Mine</button>`}
-        <button class=${"chip" + (!kind ? " on" : "")} onClick=${() => setKind("")}>All</button>${SK_ORDER.filter((k) => kinds[k] || kind === k).map((k) => html`<button key=${k} class=${"chip" + (kind === k ? " on" : "")} onClick=${() => setKind(kind === k ? "" : k)}>${SKIND[k]} <i>${kinds[k] || 0}</i></button>`)}</div></div>
-    ${find ? (res.d ? (res.d.items.length ? html`<div class="grid">${res.d.items.map((s, i) => html`<${SpCard} key=${s.ref} s=${s} i=${i} />`)}</div>` : html`<${Empty} t="No spaces found" d=${tab === "mine" ? "You have not published any yet. Use New space or aihub space publish." : "Try other words, or clear the filters."} />`) : res.e ? html`<${Err} e=${res.e} />` : html`<${Skels} n=${6} />`)
-      : ov.d ? (!ov.d.top.length ? html`<${Empty} t="No spaces yet" d=${me ? "Publish the first one with New space, or: aihub space publish deck.pptx" : "Sign in to publish the first one."} />` : html`
-        <${SpCarousel} items=${ov.d.carousel} />
-        <section><h2 class="sp-h">Top spaces</h2><div class="grid">${ov.d.top.slice(0, 6).map((s, i) => html`<${SpCard} key=${s.ref} s=${s} i=${i} />`)}</div></section>
-        <section><h2 class="sp-h">Recently updated</h2><div class="grid">${ov.d.recent.slice(0, 6).map((s, i) => html`<${SpCard} key=${s.ref} s=${s} i=${i} />`)}</div></section>`)
-      : ov.e ? html`<${Err} e=${ov.e} />` : html`<${Skels} n=${6} />`}</div>`;
+      ${me && can("publish") && html`<button class="btn" aria-haspopup="dialog" onClick=${() => setMk(true)}>New space</button>`}</div>
+    ${mk && html`<${Dlg} title="New space" cls="sp-new" onClose=${() => setMk(false)}><${SpaceForm} bare onDone=${(s) => nav("/s/" + s.ref)} /><//>`}
+    ${!filtered && showcase.length > 0 && html`<${SpShowcase} items=${showcase} />`}
+    <div class="spx"><aside class=${"spx-rail" + (rail ? " open" : "")} aria-label="Filters">
+        ${me && html`<section class="spf"><h3>Show</h3><div class="seg spf-seg" role="group" aria-label="Scope">${[["all", "All"], ["mine", "Mine"], ["shared", "Shared"]].map(([v, l]) => html`<button type="button" key=${v} class=${scope === v ? "on" : ""} onClick=${() => set({ scope: v })}>${l}${X.scopes[v] != null && html` <i>${X.scopes[v]}</i>`}</button>`)}</div></section>`}
+        <${Facet} title="Type" items=${kinds} sel=${f.kind} onPick=${(v) => set({ kind: v })} cap=${8} />
+        <${Facet} title="Tags" items=${X.tags.filter((t) => t.tag !== "aihub-chat").map((t) => ({ id: t.tag, label: "#" + t.tag, n: t.n }))} sel=${f.tag} onPick=${(v) => set({ tag: v })} cap=${10} find=${true} />
+        <${Facet} title="Authors" items=${X.owners.map((o) => ({ id: o.username, label: o.name || o.username, n: o.n }))} sel=${f.owner} onPick=${(v) => set({ owner: v })} cap=${8} find=${true} /></aside>
+      <div class="spx-main">
+        <div class="spx-bar"><${Search} value=${f.q} onInput=${(v) => set({ q: v })} ph="Search title, author, tag, description…" />
+          <button type="button" class="btn sec spx-ft" aria-expanded=${rail} onClick=${() => setRail(!rail)}>Filters${filtered ? " ·" + (active.length + (scope !== "all" ? 1 : 0)) : ""}</button></div>
+        <div class="spx-tools"><span class="spx-n" aria-live="polite">${total == null ? "Loading…" : total.toLocaleString() + (total === 1 ? " space" : " spaces") + (items.length < total ? " · showing " + items.length : "")}</span>
+          <label>Group<select class="field sm" value=${f.group} onChange=${(e) => set({ group: e.target.value })}>${Object.entries(SP_GROUPS).map(([k, l]) => html`<option value=${k}>${l}</option>`)}</select></label>
+          <label>Sort<select class="field sm" value=${group === "date" ? "new" : f.sort} disabled=${group === "date"} title=${group === "date" ? "Grouped by date, so newest first" : ""} onChange=${(e) => set({ sort: e.target.value })}>${Object.entries(SP_SORTS).map(([k, l]) => html`<option value=${k}>${l}</option>`)}</select></label>
+          <div class="seg spx-view" role="group" aria-label="Layout">${[["list", "List"], ["grid", "Cards"]].map(([v, l]) => html`<button type="button" key=${v} class=${f.view === v ? "on" : ""} aria-pressed=${f.view === v} onClick=${() => set({ view: v })}>${l}</button>`)}</div></div>
+        ${filtered && html`<div class="spx-act">${active.map(([k, v, rm]) => html`<button type="button" class="chip on" key=${k} onClick=${rm} title=${"Remove " + k.toLowerCase() + " filter"}>${k}: ${v} <span aria-hidden="true">×</span></button>`)}
+          ${scope !== "all" && html`<button type="button" class="chip on" onClick=${() => set({ scope: "all" })}>${scope === "mine" ? "Mine" : "Shared with me"} <span aria-hidden="true">×</span></button>`}
+          <button type="button" class="spx-clear" onClick=${clear}>Clear all</button></div>`}
+        ${body}</div></div></div>`;
 }
 // ---- viewers
-const SI = { canvas: "M3 5h14v10H3zM6 17.5h8", fit: "M3 10h14M6 7l-3 3 3 3M14 7l3 3-3 3", full: "M4 8V4h4M16 8V4h-4M4 12v4h4M16 12v4h-4", link: "M8.5 11.5l3-3M7.5 9L6 10.5a2.8 2.8 0 004 4L11.5 13M12.5 11L14 9.5a2.8 2.8 0 00-4-4L8.5 7", expand: "M11 4h5v5M16 4l-6 6M8 5H4v11h11v-4", down: "M10 3v9M6 9l4 4 4-4M4 16h12", gear: "M10 7a3 3 0 100 6 3 3 0 000-6zM10 2v2M10 16v2M2 10h2M16 10h2M4.6 4.6l1.4 1.4M14 14l1.4 1.4M4.6 15.4L6 14M14 6l1.4-1.4", share: "M15 5.5a2 2 0 100-.01M5 10a2 2 0 100-.01M15 14.5a2 2 0 100-.01M6.8 9l6.4-3M6.8 11l6.4 3", trash: "M4 6h12M8 6V4h4v2M6 6l1 10h8l1-10" };
+const SI = { canvas: "M3 5h14v10H3zM6 17.5h8", fit: "M3 10h14M6 7l-3 3 3 3M14 7l3 3-3 3", full: "M4 8V4h4M16 8V4h-4M4 12v4h4M16 12v4h-4", link: "M8.5 11.5l3-3M7.5 9L6 10.5a2.8 2.8 0 004 4L11.5 13M12.5 11L14 9.5a2.8 2.8 0 00-4-4L8.5 7", expand: "M11 4h5v5M16 4l-6 6M8 5H4v11h11v-4", down: "M10 3v9M6 9l4 4 4-4M4 16h12", gear: "M10 7a3 3 0 100 6 3 3 0 000-6zM10 2v2M10 16v2M2 10h2M16 10h2M4.6 4.6l1.4 1.4M14 14l1.4 1.4M4.6 15.4L6 14M14 6l1.4-1.4", share: "M15 5.5a2 2 0 100-.01M5 10a2 2 0 100-.01M15 14.5a2 2 0 100-.01M6.8 9l6.4-3M6.8 11l6.4 3", trash: "M4 6h12M8 6V4h4v2M6 6l1 10h8l1-10", chat: "M4 5h12v8H9l-4 3v-3H4z", clock: "M10 3a7 7 0 100 14 7 7 0 000-14zM10 6v4l3 2", cal: "M4 5h12v11H4zM4 8.5h12M7.5 3v3M12.5 3v3" };
 const SIc = ({ d }) => html`<svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d=${d} /></svg>`;
 const TRN = ["fade", "slide", "zoom", "flip"];
 // One slide = one sandboxed iframe on a fixed-size stage, keyed by slide number so a frame is never remounted; the neighbours load in the background.
@@ -1610,7 +1711,7 @@ function SpFrame({ d, idx, k, on }) {
   return html`<div class=${"sp-fr " + (on ? "cur" : "off")}><div class="sp-fr-in" style=${`width:${d.w}px;height:${d.h}px;transform:translate(-50%,-50%) scale(${k})`}>
     <iframe sandbox="" scrolling="no" tabindex="-1" title=${"Slide " + (idx + 1)} width=${d.w} height=${d.h} srcdoc=${`<!doctype html><meta charset="utf-8"><base target="_blank"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;position:relative;font-family:sans-serif}${d.css}</style><body>${body}</body>`}></iframe></div></div>`;
 }
-function SlidePlayer({ d, st, mode }) {
+function SlidePlayer({ d, st, mode, onSlide, jump }) {
   const n = d.slides.length, wrap = useRef(), [k, setK] = useState(1), [i, setI] = useState(() => Math.min(n - 1, Math.max(0, (+hashQ().get("slide") || 1) - 1)));
   const [play, setPlay] = useState(+st.autoplay > 0), down = useRef(null), last = useRef(0), swiped = useRef(false);
   useEffect(() => { const el = wrap.current; if (!el) return; let raf = 0; const f = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { const r = el.getBoundingClientRect(); if (r.width) setK(mode === "canvas" ? 1 : Math.min(r.width / d.w, r.height / d.h)); }); };
@@ -1623,6 +1724,8 @@ function SlidePlayer({ d, st, mode }) {
     const t = st.loop ? (to + n) % n : Math.max(0, Math.min(n - 1, to)); if (t === i) return;
     last.current = now; setI(t); setHashQ("slide", t ? t + 1 : null);
   }, [i, n, st.loop]);
+  useEffect(() => { onSlide && onSlide(i + 1); }, [i]);                       // the comments panel anchors a new comment to the slide on screen
+  useEffect(() => { if (jump && jump.n >= 1 && jump.n <= n) { setPlay(false); setI(jump.n - 1); setHashQ("slide", jump.n > 1 ? jump.n : null); } }, [jump]);
   useEffect(() => { if (!play || hid || !(+st.autoplay > 0)) return; const t = setTimeout(() => { if (i >= n - 1 && !st.loop) setPlay(false); else go(i + 1, true); }, st.autoplay * 1000); return () => clearTimeout(t); }, [play, hid, i, st.autoplay, go]);
   useEffect(() => {
     const key = (e) => { if (e.repeat || /^(INPUT|TEXTAREA|SELECT)$/.test((e.target || {}).tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -1651,8 +1754,8 @@ function SheetView({ d }) {
       <tbody>${body.slice(0, lim).map((r, ri) => html`<tr key=${ri}><td class="n">${ri + 2}</td>${Array.from({ length: w }, (_, c) => html`<td key=${c}>${r[c] || ""}</td>`)}</tr>`)}</tbody></table>
       ${body.length > lim && html`<button class="btn sec sm" onClick=${() => setLim(lim + 500)}>Show more</button>`}</div></div>`;
 }
-function FrameView({ s }) {
-  const u = useLoad(() => api("/spaces/" + s.ref + "/viewurl"), [s.ref, s.rev]);
+function FrameView({ s, rev }) {
+  const u = useLoad(() => api("/spaces/" + s.ref + "/viewurl" + (rev ? "?rev=" + rev : "")), [s.ref, s.rev, rev]);
   if (!u.d) return u.e ? html`<${Err} e=${u.e} />` : html`<div class="skel" style="height:60vh"></div>`;
   return html`<iframe class="sp-frame" title=${s.title} src=${u.d.url} allow="fullscreen" allowfullscreen sandbox=${s.kind === "pdf" ? null : "allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-downloads allow-modals"}></iframe>`;
 }
@@ -1663,7 +1766,9 @@ function Dlg({ title, onClose, cls = "", children }) {
   return html`<dialog class=${"dlg " + cls} ref=${r} aria-label=${title} onCancel=${(e) => { e.preventDefault(); onClose(); }} onClick=${(e) => { if (e.target === r.current) onClose(); }}>
     <div class="dlg-h"><h3>${title}</h3><button type="button" class="btn sec sm" onClick=${onClose} aria-label="Close">Close</button></div><div class="dlg-b">${children}</div></dialog>`;
 }
-function SpaceShare({ s, onClose }) {
+const ACCESS = [["view", "can view"], ["comment", "can comment"], ["edit", "can edit"]];
+const AccessOpts = () => ACCESS.map(([v, l]) => html`<option key=${v} value=${v}>${l}</option>`);
+function SpaceShare({ s, onClose, onSaved }) {
   const [tick, setTick] = useState(0), [pick, setPick] = useState({}), [flt, setFlt] = useState(""), [type, setType] = useState(""), [acc, setAcc] = useState("view"), [busy, setBusy] = useState(false);
   const a = useLoad(() => api("/spaces/" + s.ref + "/access"), [s.ref, tick]);
   const all = useLoad(() => api("/groups/lookup?limit=500"), [s.ref]);
@@ -1682,41 +1787,310 @@ function SpaceShare({ s, onClose }) {
   const rm = async (x) => { try { await api("/spaces/" + s.ref + "/access/" + x.type + "/" + encodeURIComponent(x.name), { method: "DELETE" }); setTick(tick + 1); } catch (er) { toast(er.message, 1); } };
   const setLevel = async (x, access) => { try { await api("/spaces/" + s.ref + "/access", { method: "PUT", body: { type: x.type, name: x.name, access } }); setTick(tick + 1); } catch (er) { toast(er.message, 1); } };
   const shown = type ? cand.filter((c) => c.type === type) : cand, mine = (a.d && a.d.access) || [];
-  return html`<${Dlg} title="Who can open it" cls="sp-share" onClose=${onClose}><p class="sp-hint">${s.visibility === "public" ? "Public: anyone with the link. Sharing below only matters if you make it private." : "Private: you, plus these people and groups."}</p>
+  const setPublic = async (v) => { try { onSaved && onSaved(await api("/spaces/" + s.ref, { method: "PATCH", body: { public_access: v } })); toast(v === "comment" ? "Signed-in people can comment now" : "The public can only view now"); } catch (er) { toast(er.message, 1); } };
+  return html`<${Dlg} title="Who can open it" cls="sp-share" onClose=${onClose}><p class="sp-hint">${s.visibility === "public" ? "Public: anyone with the link can view it. Sharing below gives people more than that (comment or edit), and matters for viewing only if you make it private." : "Private: you, plus these people and groups."}</p>
+    ${s.visibility === "public" && html`<div class="sp-prow sp-pubacc"><${Av} n="everyone" t="group" /><span class="sp-pn"><b>Signed-in visitors</b><small>Visitors who are not signed in can only view</small></span>
+      <select class="field sm" value=${s.public_access || "view"} onChange=${(e) => setPublic(e.target.value)} aria-label="What signed-in visitors may do"><option value="view">can view</option><option value="comment">can comment</option></select></div>`}
     <div class="sp-tools"><input class="field" type="search" placeholder="Filter people and groups" value=${flt} onInput=${(e) => setFlt(e.target.value)} />
       <div class="sp-chips">${[["", "All"], ["user", "People"], ["group", "Groups"]].map(([k, l]) => html`<button type="button" key=${k} class=${"chip" + (type === k ? " on" : "")} onClick=${() => setType(k)}>${l}</button>`)}
         <button class="chip" type="button" onClick=${() => { const n = { ...pick }; shown.forEach((c) => { n[key(c)] = !shown.every((x) => pick[key(x)]); }); setPick(n); }} disabled=${!shown.length}>${shown.length && shown.every((c) => pick[key(c)]) ? "Clear" : "Select all"}</button></div></div>
     <ul class="sp-pick">${all.d ? shown.map((c) => html`<li key=${key(c)}><label class=${"sp-prow" + (pick[key(c)] ? " on" : "")}><input type="checkbox" checked=${!!pick[key(c)]} onChange=${() => toggle(c)} /><${Av} n=${c.name} t=${c.type} /><span class="sp-pn"><b>${c.label}</b></span><span class="badge">${c.type === "group" ? "group" : "person"}</span></label></li>`) : html`<li class="sp-hint">Loading…</li>`}${all.d && !shown.length && html`<li class="sp-hint">Nobody left to pick.</li>`}</ul>
-    <div class="sp-bar"><select class="field sm" value=${acc} onChange=${(e) => setAcc(e.target.value)} aria-label="Access level"><option value="view">can view</option><option value="edit">can edit</option></select>
+    <div class="sp-bar"><select class="field sm" value=${acc} onChange=${(e) => setAcc(e.target.value)} aria-label="Access level"><${AccessOpts} /></select>
       <button class="btn sm" onClick=${share} disabled=${!chosen.length || busy}>${busy ? "Sharing…" : chosen.length ? "Share with " + chosen.length : "Share"}</button></div>
     <h3 style="margin-top:12px">Already shared <span class="mute">${mine.length || ""}</span></h3>
     <ul class="sp-pick">${mine.map((x) => html`<li key=${x.type + x.name}><div class="sp-prow"><${Av} n=${x.name} t=${x.type} /><span class="sp-pn"><b>${x.name}</b><small>${x.type === "group" ? "group" : "person"}</small></span>
-      <select class="field sm" value=${x.access} onChange=${(e) => setLevel(x, e.target.value)} aria-label=${"Access for " + x.name}><option value="view">can view</option><option value="edit">can edit</option></select>
+      <select class="field sm" value=${x.access} onChange=${(e) => setLevel(x, e.target.value)} aria-label=${"Access for " + x.name}><${AccessOpts} /></select>
       <button class="btn sec sm" onClick=${() => rm(x)} aria-label=${"Remove " + x.name}>Remove</button></div></li>`)}${a.d && !mine.length && html`<li class="sp-hint">Not shared with anyone yet.</li>`}</ul><//>`;
 }
-function SpaceSettings({ s, onSaved }) {
-  const st = s.settings || {}, [f, setF] = useState({ title: s.title, description: s.description, tags: s.tags.join(", "), view: st.view || "fit", transition: st.transition || "auto", autoplay: st.autoplay || 0, loop: !!st.loop, visibility: s.visibility });
-  const [nv, setNv] = useState(false); const up = (k) => (e) => setF({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
-  const save = async (e) => { e.preventDefault(); try { const b = { ...f, autoplay: +f.autoplay || 0 }; if (!s.can_manage) delete b.visibility; onSaved(await api("/spaces/" + s.ref, { method: "PATCH", body: b })); toast("Saved"); } catch (er) { toast(er.message, 1); } };
-  return html`<div class="sp-panel"><form class="stack" onSubmit=${save}><h3>Settings</h3>
-    <div class="sp-grid2"><label>Title<input class="field" value=${f.title} onInput=${up("title")} /></label><label>Tags<input class="field" value=${f.tags} placeholder="finance, q3" onInput=${up("tags")} /></label></div>
+function SpaceSettings({ s, onSaved, onClose }) {
+  const st = s.settings || {}, [f, setF] = useState({ title: s.title, description: s.description, tags: s.tags.slice(), view: st.view || "fit", transition: st.transition || "auto", autoplay: st.autoplay || 0, loop: !!st.loop, visibility: s.visibility });
+  const [nv, setNv] = useState(false), hints = useTagHints(); const up = (k) => (e) => setF({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
+  const save = async (e) => { e.preventDefault(); try { const b = { ...f, tags: f.tags.join(","), autoplay: +f.autoplay || 0 }; if (!s.can_manage) delete b.visibility; onSaved(await api("/spaces/" + s.ref, { method: "PATCH", body: b })); toast("Saved"); } catch (er) { toast(er.message, 1); } };
+  return html`<${Dlg} title="Space settings" cls="sp-set" onClose=${onClose}><div class="sp-panel"><form class="stack" onSubmit=${save}>
+    <label>Title<input class="field" value=${f.title} onInput=${up("title")} /></label>
     <label>Description<input class="field" value=${f.description} onInput=${up("description")} /></label>
+    <div class="sp-f"><span>Tags</span><${TagInput} value=${f.tags} onChange=${(t) => setF({ ...f, tags: t })} hints=${hints} /></div>
     <div class="sp-grid2"><label>Default size when opened<select class="field" value=${f.view} onChange=${up("view")}><option value="fit">Fit the screen</option><option value="canvas">Canvas (inside the page)</option><option value="full">Full screen</option></select></label>
       ${s.can_manage && html`<label>Visibility<select class="field" value=${f.visibility} onChange=${up("visibility")}><option value="public">Public link</option><option value="private">Private</option></select></label>`}</div>
     ${s.kind === "slides" && html`<div class="sp-grid2"><label>Transition<select class="field" value=${f.transition} onChange=${up("transition")}><option value="auto">As in the file</option><option value="none">None</option><option value="fade">Fade</option><option value="slide">Slide</option><option value="zoom">Zoom</option><option value="flip">Flip</option></select></label>
       <label>Auto-advance (seconds, 0 = off)<input class="field" type="number" min="0" max="3600" value=${f.autoplay} onInput=${up("autoplay")} /></label></div>
       <label class="sp-check"><input type="checkbox" checked=${f.loop} onChange=${up("loop")} /> Start over after the last slide</label>`}
     <div class="row"><button class="btn">Save</button><button type="button" class="btn sec" onClick=${() => setNv(!nv)}>${nv ? "Cancel" : "Upload a new version"}</button></div></form>
-    ${nv && html`<${SpaceForm} space=${s.ref} onDone=${(x) => { setNv(false); onSaved(x); }} />`}</div>`;
+    ${nv && html`<${SpaceForm} bare space=${s.ref} onDone=${(x) => { setNv(false); onSaved(x); }} />`}</div><//>`;
+}
+// ---- comments, @mentions and version history share ONE side panel next to the space (tabs Comments | History). The revision being previewed
+// is always shown at the top of the panel, comments are written about it, and every alert links to the revision it is about.
+const anchorLabel = (a) => !a ? "" : a.slide ? "Slide " + a.slide : a.page ? "Page " + a.page : a.cell ? (a.sheet ? a.sheet + " · " : "") + a.cell : Object.entries(a).map(([k, v]) => k + " " + v).join(", ");
+const MENTION_RE = /(^|[^\w@.+\/-])@([A-Za-z0-9][A-Za-z0-9._-]{0,63})/g;     // the server's rule (routers_spaces.MENTION) without a lookbehind, which old Safari cannot parse
+const meMentioned = (me, ms) => !!me && (ms || []).some((m) => m.type === "user" ? m.name === me.username : (me.groups || []).includes(m.name));
+// Date and space chips: the @ picker writes `[date:2026-11-05]` and `[space:author@name|Title]` into the comment text, CmText draws them.
+// Plain text on purpose (older hubs just show the brackets); the server turns them into readable words for alerts (`_snippet`).
+const TOKEN_RE = /\[(date|space):([^\]\n]{1,160})\]/g;
+const SPACE_REF = /^[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const isoDay = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+const parseDay = (s) => { const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s); if (!m) return null; const d = new Date(+m[1], +m[2] - 1, +m[3]); return d.getFullYear() === +m[1] && d.getMonth() === +m[2] - 1 && d.getDate() === +m[3] ? d : null; };
+const dayLabel = (d) => {
+  const t = new Date(); t.setHours(0, 0, 0, 0); const diff = Math.round((d - t) / 864e5), rel = diff === 0 ? "Today" : diff === 1 ? "Tomorrow" : diff === -1 ? "Yesterday" : "";
+  const txt = d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", ...(d.getFullYear() !== t.getFullYear() ? { year: "numeric" } : {}) });
+  return rel ? rel + " · " + txt : txt;
+};
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+function dateOptions(q) {                                                        // what `@<q>` can mean as a date (no spaces in q: `next-week`, `nov5`, `5nov`, `2026-11-05`)
+  const t = new Date(); t.setHours(0, 0, 0, 0); const at = (n) => { const d = new Date(t); d.setDate(d.getDate() + n); return d; };
+  const k = q.toLowerCase().replace(/[-._]/g, ""), out = [], seen = new Set(), put = (d) => { const n = isoDay(d); if (d && !seen.has(n)) { seen.add(n); out.push({ type: "date", name: n, label: dayLabel(d) }); } };
+  for (const [w, n] of [["today", 0], ["tomorrow", 1], ["yesterday", -1], ["nextweek", 7]]) if (w.startsWith(k) && (k || n >= 0 && n < 2)) put(at(n));
+  if (k.length >= 2) WEEKDAYS.forEach((w, i) => { if (w.startsWith(k)) put(at(((i - t.getDay() + 6) % 7) + 1)); });          // the next one, never today
+  const raw = q.toLowerCase();
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(raw);
+  if (m) { const d = parseDay(m[1] + "-" + m[2].padStart(2, "0") + "-" + m[3].padStart(2, "0")); if (d) put(d); }
+  m = /^([a-z]{3,9})-?(\d{1,2})$/.exec(raw) || (m = /^(\d{1,2})-?([a-z]{3,9})$/.exec(raw)) && [m[0], m[2], m[1]];
+  if (m && MONTHS.includes(m[1].slice(0, 3))) { const d = new Date(t.getFullYear(), MONTHS.indexOf(m[1].slice(0, 3)), +m[2]); if (d.getDate() === +m[2]) put(d); }
+  if (!k || "date".startsWith(k) || "pick".startsWith(k)) out.push({ type: "pick", name: "pick", label: "Pick a date…" });
+  return out.slice(0, 5);
+}
+function chipOf(kind, val) {
+  if (kind === "date") { const d = parseDay(val); return d && html`<span class="mn date" title=${d.toLocaleDateString(undefined, { dateStyle: "full" })}>${dayLabel(d)}</span>`; }
+  const [ref, ...rest] = val.split("|"), title = rest.join("|").trim();
+  return SPACE_REF.test(ref) && html`<a class="mn space" href=${"#/s/" + ref} title=${ref}>${title || ref}</a>`;
+}
+// Hover card of an @mention: the chip shows the display name; a mini card (top-layer popover, so neither the scrolling panel nor the `.page`
+// transform clips or traps it) tells who they are and whether they can open this space. Fetched once a minute per name, only for signed-in viewers.
+const mnCards = new Map();
+const mnLoad = (sref, type, name) => {
+  const k = sref + "|" + type + "|" + name.toLowerCase(), c = mnCards.get(k); if (c && Date.now() - c.t < 6e4) return c.p;
+  const p = api("/spaces/" + sref + "/mention-card/" + type + "/" + encodeURIComponent(name)); mnCards.set(k, { t: Date.now(), p }); p.catch(() => mnCards.delete(k)); return p;
+};
+function MnCard({ c }) {
+  if (!c) return html`<p class="mut sm mn-load">Loading…</p>`;
+  const access = c.access ? html`<p class="mn-ok">Can open this space</p>` : html`<p class="mn-no">Cannot open this space yet, so they get no alert. Share it with them first.</p>`;
+  if (c.type === "group") return html`<div class="mn-card-h"><${Av} n=${c.name} t="group" /><div class="mn-card-w"><b>${c.name}</b><small>Group · ${c.members} ${c.members === 1 ? "person" : "people"}</small></div></div>
+    ${c.description && html`<p class="mn-desc">${c.description}</p>`}
+    ${c.people.length > 0 && html`<dl><dt>Members</dt><dd>${c.people.map(shown).join(", ")}${c.members > c.people.length ? " +" + (c.members - c.people.length) : ""}</dd></dl>`}${access}`;
+  return html`<div class="mn-card-h"><${Avatar} p=${c} size=${44} /><div class="mn-card-w"><b>${c.display_name || c.name}</b><small>@${c.name}</small></div></div>
+    ${c.title && html`<p class="mn-desc">${c.title}</p>`}
+    <dl>${c.role && html`<dt>Role</dt><dd><span class="badge">${c.role}</span></dd>`}
+      ${c.groups.length > 0 && html`<dt>Groups</dt><dd>${c.groups.join(", ")}</dd>`}
+      ${c.since && html`<dt>Joined</dt><dd>${new Date(c.since * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short" })}</dd>`}</dl>${access}`;
+}
+function MnChip({ ent, name, sref, mine }) {
+  const { me } = useStore(), [open, setOpen] = useState(false), [c, setC] = useState(null), chip = useRef(), pop = useRef(), tm = useRef();
+  const can = !!me && !!sref && typeof HTMLElement !== "undefined" && "showPopover" in HTMLElement.prototype;
+  const dn = c ? c.display_name : ent.display_name, label = ent.type === "user" && dn && dn !== ent.name ? dn : name;
+  const show = (now) => { clearTimeout(tm.current); tm.current = setTimeout(() => setOpen(true), now ? 0 : 280); };
+  const hide = () => { clearTimeout(tm.current); tm.current = setTimeout(() => setOpen(false), 160); };
+  useEffect(() => () => clearTimeout(tm.current), []);
+  useEffect(() => {
+    if (!open || !can) return;
+    let dead = false;
+    mnLoad(sref, ent.type, ent.name).then((x) => { if (!dead) setC(x); }, () => { if (!dead) setOpen(false); });
+    const off = () => setOpen(false), esc = (e) => e.key === "Escape" && off();
+    window.addEventListener("scroll", off, true); window.addEventListener("keydown", esc);
+    return () => { dead = true; window.removeEventListener("scroll", off, true); window.removeEventListener("keydown", esc); };
+  }, [open]);
+  useEffect(() => {                                                           // into the top layer, then next to the chip (below, or above when the bottom is cramped)
+    const el = pop.current; if (!open || !el) return;
+    try { if (!el.matches(":popover-open")) el.showPopover(); } catch { return; }
+    const b = chip.current.getBoundingClientRect(), w = el.offsetWidth, h = el.offsetHeight;
+    const top = b.bottom + 6 + h > innerHeight - 8 ? Math.max(8, b.top - h - 6) : b.bottom + 6;
+    el.style.left = Math.max(8, Math.min(b.left, innerWidth - w - 8)) + "px"; el.style.top = top + "px";
+  }, [open, c]);
+  const cls = "mn " + ent.type + (mine ? " me" : "");
+  if (!can) return html`<span class=${cls} title=${ent.type === "group" ? "Group " + ent.name : ent.display_name ? ent.display_name + " (@" + ent.name + ")" : ent.name}>@${label}</span>`;
+  return html`<span class="mn-hc" onMouseEnter=${() => show()} onMouseLeave=${hide}>
+    <span class=${cls} ref=${chip} tabindex="0" role="button" aria-haspopup="true" aria-expanded=${open} onFocus=${() => show(true)} onBlur=${hide} onClick=${() => open ? setOpen(false) : show(true)}>@${label}</span>
+    ${open && html`<div class="mn-card" popover="manual" ref=${pop} role="group" aria-label=${"About " + label}><${MnCard} c=${c} /></div>`}</span>`;
+}
+function CmText({ text, mentions, sref }) {                                   // the comment text with the names the server resolved shown as chips
+  const { me } = useStore(), known = new Map((mentions || []).map((m) => [m.name.toLowerCase(), m])), out = [];
+  const plain = (seg) => {
+    let last = 0, m; MENTION_RE.lastIndex = 0;
+    while ((m = MENTION_RE.exec(seg))) {
+      const name = m[2].replace(/[._-]+$/, ""), ent = known.get(name.toLowerCase()), at = m.index + m[1].length;
+      if (!ent) continue;
+      out.push(seg.slice(last, at), html`<${MnChip} ent=${ent} name=${name} sref=${sref} mine=${meMentioned(me, [ent])} />`);
+      last = at + 1 + name.length;
+    }
+    out.push(seg.slice(last));
+  };
+  let last = 0, t; TOKEN_RE.lastIndex = 0;
+  while ((t = TOKEN_RE.exec(text))) { const c = chipOf(t[1], t[2]); if (!c) continue; plain(text.slice(last, t.index)); out.push(c); last = t.index + t[0].length; }
+  plain(text.slice(last));
+  return out;
+}
+function SpCmBox({ onSend, sref, ph = "Add a comment…", label = "Comment", init = "", focus, onCancel, head }) {
+  const [t, setT] = useState(init), [busy, setBusy] = useState(false), [pk, setPk] = useState(null), [dp, setDp] = useState(null), box = useRef(), pop = useRef(), seq = useRef(0), tm = useRef();
+  useEffect(() => { const el = pop.current && pop.current.querySelector("li.on"); if (el) el.scrollIntoView({ block: "nearest" }); }, [pk && pk.sel]);
+  useEffect(() => { if (focus && box.current) box.current.focus(); return () => clearTimeout(tm.current); }, []);
+  const close = () => { seq.current++; clearTimeout(tm.current); setPk(null); };
+  const look = (val, caret) => {                                              // an `@word` right before the caret opens the people / groups picker
+    const m = sref && /(^|[^\w@.+\/-])@([A-Za-z0-9._-]{0,40})$/.exec(val.slice(0, caret));
+    if (!m) return close();
+    const q = m[2], at = caret - q.length - 1, id = ++seq.current;
+    clearTimeout(tm.current);
+    tm.current = setTimeout(async () => {
+      try {
+        const [r, sp] = await Promise.all([api("/spaces/" + sref + "/mentionable?q=" + encodeURIComponent(q)).catch(() => ({ users: [], groups: [] })),
+          q.length >= 2 ? api("/spaces?" + new URLSearchParams({ q, limit: 6 })).catch(() => ({ items: [] })) : { items: [] }]);
+        if (id !== seq.current) return;
+        const items = [...r.users.map((x) => ({ type: "user", name: x.username, p: x })), ...r.groups.map((g) => ({ type: "group", name: g.name, p: g })),
+          ...dateOptions(q), ...sp.items.filter((x) => x.ref !== sref).slice(0, 5).map((x) => ({ type: "space", name: x.ref, p: x }))];
+        setPk(items.length ? { at, items, sel: 0 } : null);
+      } catch { if (id === seq.current) setPk(null); }
+    }, q ? 120 : 0);
+  };
+  const put = (at, end, ins) => { const el = box.current, v = t.slice(0, at) + ins + t.slice(end), pos = at + ins.length; setT(v); close(); setDp(null); requestAnimationFrame(() => { el.focus(); el.setSelectionRange(pos, pos); }); };
+  const choose = (it) => {
+    const end = box.current.selectionStart;
+    if (it.type === "pick") { setDp({ at: pk.at, end }); close(); return; }
+    if (it.type === "date") return put(pk.at, end, "[date:" + it.name + "] ");
+    if (it.type === "space") { const ti = String(it.p.title || "").replace(/[\[\]|\n]+/g, " ").trim().slice(0, 80); return put(pk.at, end, "[space:" + it.name + (ti ? "|" + ti : "") + "] "); }
+    put(pk.at, end, "@" + it.name + " ");
+  };
+  const secOf = (it) => it.type === "user" || it.type === "group" ? "People and groups" : it.type === "space" ? "Spaces" : "Dates";
+  const go = async (e) => { e && e.preventDefault(); if (!t.trim() || busy) return; setBusy(true); try { await onSend(t.trim()); setT(""); close(); } catch (er) { toast(er.message, 1); } setBusy(false); };
+  const key = (e) => {
+    if (pk) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); const n = pk.items.length; setPk({ ...pk, sel: (pk.sel + (e.key === "ArrowDown" ? 1 : n - 1)) % n }); return; }
+      if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); choose(pk.items[pk.sel]); return; }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); return; }
+    }
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) go(e); else if (e.key === "Escape" && onCancel) onCancel();
+  };
+  return html`<form class="sp-cbox" onSubmit=${go}>${head}
+    <div class="mn-wrap"><textarea class="field" ref=${box} rows="3" maxlength="5000" placeholder=${sref ? ph.replace(/…$/, "") + " (use @ to mention people, groups, dates or spaces)…" : ph} aria-label=${label} role=${sref ? "combobox" : null} aria-expanded=${sref ? !!pk : null} aria-autocomplete=${sref ? "list" : null} value=${t}
+        onInput=${(e) => { setT(e.target.value); setDp(null); look(e.target.value, e.target.selectionStart); }} onKeyDown=${key} onBlur=${close}></textarea>
+      ${pk && html`<ul class="mn-pop" ref=${pop} role="listbox" aria-label="People, groups, dates and spaces">${pk.items.map((it, i) => html`${(i === 0 || secOf(pk.items[i - 1]) !== secOf(it)) && new Set(pk.items.map(secOf)).size > 1 && html`<li class="mn-sec" role="presentation" key=${"s" + secOf(it)}>${secOf(it)}</li>`}<li key=${it.type + it.name} role="option" aria-selected=${i === pk.sel} class=${i === pk.sel ? "on" : ""}
+          onMouseDown=${(e) => { e.preventDefault(); choose(it); }} onMouseMove=${() => i !== pk.sel && setPk({ ...pk, sel: i })}>
+          ${it.type === "group" ? html`<${Av} n=${it.name} t="group" />` : it.type === "user" ? html`<${Avatar} p=${{ username: it.name, display_name: it.p.display_name, avatar_url: it.p.avatar_url }} size=${28} />`
+            : html`<span class=${"mn-ic " + it.type}><${SIc} d=${it.type === "space" ? SI.canvas : SI.cal} /></span>`}
+          ${it.type === "date" || it.type === "pick" ? html`<span class="mn-n"><b>${it.label}</b><small>${it.type === "pick" ? "Choose from a calendar" : "Date · " + it.name}</small></span>`
+            : it.type === "space" ? html`<span class="mn-n"><b>${it.p.title || it.name}</b><small>${it.name} · ${SKIND[it.p.kind] || it.p.kind}</small></span>`
+            : html`<span class="mn-n"><b>${it.type === "user" && it.p.display_name ? it.p.display_name : "@" + it.name}</b><small>${it.type === "group" ? "@" + it.name + " · Group · " + it.p.members + (it.p.members === 1 ? " person" : " people") : it.p.display_name ? "@" + it.name : "Person"}</small></span>`}
+          ${(it.type === "user" || it.type === "group") && !it.p.access && html`<span class="badge orange" title="They cannot open this space yet, so they would not get an alert. Share it with them first.">No access</span>`}</li>`)}</ul>`}</div>
+    ${dp && html`<div class="mn-dp"><label for="mn-d">Date</label><input id="mn-d" class="field sm" type="date" ref=${(el) => { if (el && !el.dataset.o) { el.dataset.o = 1; el.focus(); try { el.showPicker && el.showPicker(); } catch {} } }} onChange=${(e) => e.target.value && put(dp.at, dp.end, "[date:" + e.target.value + "] ")} />
+      <button type="button" class="btn sec sm" onClick=${() => { setDp(null); box.current && box.current.focus(); }}>Cancel</button></div>`}
+    <div class="row"><span class="sp"></span>
+      ${onCancel && html`<button type="button" class="btn sec sm" onClick=${onCancel}>Cancel</button>`}<button class="btn sm" disabled=${busy || !t.trim()}>${busy ? "Sending…" : label}</button></div></form>`;
+}
+function SpCm({ c, ctx, depth = 0 }) {
+  const [mode, setMode] = useState(null), who = c.author || {}, url = "/spaces/" + ctx.s.ref + "/comments/" + c.id;      // mode: null | reply | edit | del
+  const act = async (fn, msg) => { try { const r = await fn(); setMode(null); ctx.reload(); if (r && r.mention_report) ctx.report(r.mention_report); else if (msg) toast(msg); } catch (er) { toast(er.message, 1); } };
+  const here = c.rev === ctx.cur;
+  return html`<li id=${"cm-" + c.id} class=${"sp-cm" + (c.resolved ? " res" : "") + (c.deleted ? " gone" : "") + (ctx.focus === c.id ? " flash" : "") + (meMentioned(ctx.me, c.mentions) ? " tome" : "")}>
+    ${c.deleted ? html`<p class="sp-cm-gone">Comment deleted</p>` : html`<div class="sp-cm-h"><${Avatar} p=${{ username: who.username || "?", display_name: who.display_name, avatar_url: who.avatar_url }} size=${28} />
+        <span class="sp-cm-who"><b>${shown(who) || "Former member"}</b><small>${ago(c.created)}${c.edited ? " · edited" : ""}</small></span>
+        <button type="button" class=${"sp-rv" + (here ? " on" : "")} title=${here ? "You are looking at this revision" : "Preview revision " + c.rev} onClick=${() => ctx.setRev(c.rev)}>Rev ${c.rev}</button>
+        ${c.anchor && (c.anchor.slide ? html`<button type="button" class="badge blue sp-cm-at" title="Show this slide" onClick=${() => ctx.jump(c.anchor.slide, c.rev)}>${anchorLabel(c.anchor)}</button>` : html`<span class="badge blue">${anchorLabel(c.anchor)}</span>`)}
+        ${c.resolved && html`<span class="badge green">Resolved</span>`}</div>
+      ${mode === "edit" ? html`<${SpCmBox} sref=${ctx.s.ref} init=${c.body} label="Save" focus onCancel=${() => setMode(null)} onSend=${(t) => act(() => api(url, { method: "PATCH", body: { body: t } }))} />` : html`<p class="sp-cm-b"><${CmText} text=${c.body} mentions=${c.mentions} sref=${ctx.s.ref} /></p>`}
+      <div class="sp-cm-a">${ctx.canReply && depth < 5 && html`<button type="button" aria-expanded=${mode === "reply"} onClick=${() => setMode(mode === "reply" ? null : "reply")}>Reply</button>`}
+        ${c.can_resolve && !c.parent_id && html`<button type="button" onClick=${() => act(() => api(url, { method: "PATCH", body: { resolved: !c.resolved } }), c.resolved ? "Reopened" : "Resolved")}>${c.resolved ? "Reopen" : "Resolve"}</button>`}
+        ${c.can_edit && mode !== "edit" && html`<button type="button" onClick=${() => setMode("edit")}>Edit</button>`}
+        ${c.can_delete && (mode === "del" ? html`<span class="sp-ask">Delete this comment?<button type="button" class="btn sec sm" onClick=${() => setMode(null)}>Cancel</button><button type="button" class="btn danger sm" onClick=${() => act(() => api(url, { method: "DELETE" }), "Comment deleted")}>Delete</button></span>`
+          : html`<button type="button" class="warn" onClick=${() => setMode("del")}>Delete</button>`)}</div>`}
+    ${mode === "reply" && html`<${SpCmBox} sref=${ctx.s.ref} ph=${"Reply to " + (shown(who) || "this comment") + "…"} label="Reply" focus onCancel=${() => setMode(null)} onSend=${async (t) => { await ctx.post(t, c.id, c.rev); setMode(null); }} />`}
+    ${c.replies.length > 0 && html`<ul class="sp-cms sp-cm-r">${c.replies.map((x) => html`<${SpCm} key=${x.id} c=${x} ctx=${ctx} depth=${depth + 1} />`)}</ul>`}</li>`;
+}
+const deep = (x, f) => f(x) || x.replies.some((y) => deep(y, f));
+function SpaceComments({ s, slide, rev, vers, onJump, onRev, onCount, focus }) {
+  const { me } = useStore(); const [tick, setTick] = useState(0), [flt, setFlt] = useState("all"), [pin, setPin] = useState(true);
+  const c = useLoad(() => api("/spaces/" + s.ref + "/comments"), [s.ref, tick, me && me.username]);
+  useEffect(() => { if (c.d && onCount) onCount(c.d.total); }, [c.d]);
+  useEffect(() => {                                                          // an alert opened this comment: show it and flash it
+    if (!focus || !c.d) return; const el = document.getElementById("cm-" + focus);
+    if (el) { setFlt("all"); setTimeout(() => el.scrollIntoView({ block: "center", behavior: reduced ? "auto" : "smooth" }), 60); }
+  }, [focus, c.d && c.d.total]);
+  const slides = s.kind === "slides", d = c.d, cur = rev || s.rev, reload = () => setTick((t) => t + 1);
+  const report = (rep) => {
+    if (!rep || !rep.length) return;
+    const told = rep.reduce((a, x) => a + x.notified, 0), miss = rep.flatMap((x) => x.no_access);
+    if (miss.length) toast(miss.map((n) => "@" + n).join(", ") + " cannot open this space, so no alert was sent. Share it with them first.", 1);
+    else if (told) toast(told === 1 ? "1 person was alerted" : told + " people were alerted");
+  };
+  const post = async (t, parent, prev) => {
+    const r = await api("/spaces/" + s.ref + "/comments", { method: "POST", body: { body: t, rev: parent ? prev || cur : cur, ...(parent ? { parent_id: parent } : slides && pin ? { anchor: { slide } } : {}) } });
+    reload(); report(r.mention_report); return r;
+  };
+  const F = { all: () => true, open: (x) => !x.resolved, rev: (x) => x.rev === cur, me: (x) => meMentioned(me, x.mentions), here: (x) => x.anchor && x.anchor.slide === slide };
+  const items = d ? d.items.filter((x) => deep(x, F[flt] || F.all)) : [];
+  const chips = [["all", "All"], ["open", "Open"], ["rev", "Revision " + cur], ...(me ? [["me", "Mentions me"]] : []), ...(slides ? [["here", "Slide " + slide]] : [])];
+  const ctx = { s, me, reload, post, report, cur, focus, jump: onJump, setRev: onRev, canReply: !!(d && d.can_comment) };
+  const opts = ((vers.d && vers.d.items) || [{ rev: s.rev, current: true, available: true }]);
+  return html`<div class="sp-cmp" aria-label="Comments">
+    ${d && d.items.length > 0 && html`<div class="sp-chips" role="group" aria-label="Show">${chips.map(([k, l]) => html`<button type="button" key=${k} class=${"chip" + (flt === k ? " on" : "")} aria-pressed=${flt === k} onClick=${() => setFlt(k)}>${l}</button>`)}</div>`}
+    <div class="sp-list">${!d ? (c.e ? html`<p class="sp-hint">${c.e}</p>` : html`<div class="skel" style="height:80px"></div>`)
+      : items.length ? html`<ul class="sp-cms">${items.map((x) => html`<${SpCm} key=${x.id} c=${x} ctx=${ctx} />`)}</ul>`
+      : html`<div class="sp-none"><p><b>${d.items.length ? "Nothing matches this filter" : "No comments yet"}</b></p><p class="sp-hint">${d.items.length ? "Try another filter above." : d.can_comment ? "Start the conversation below." : "Be the first when the owner lets you write."}</p></div>`}</div>
+    ${d && (d.can_comment ? html`<div class="sp-compose"><${SpCmBox} sref=${s.ref} ph=${(slides && pin ? "Comment on slide " + slide : "Add a comment") + " (revision " + cur + ")…"} onSend=${(t) => post(t)}
+        head=${html`<div class="sp-cctx"><span>About</span><select class="field sp-vsel" aria-label="Revision this comment is about" value=${cur} onChange=${(e) => onRev(+e.target.value)}>${opts.map((x) => html`<option key=${x.rev} value=${x.rev} disabled=${!x.available && !x.current}>Revision ${x.rev}${x.current ? " (current)" : ""}</option>`)}</select>
+          ${slides && html`<label class="sp-check sp-hint"><input type="checkbox" checked=${pin} onChange=${(e) => setPin(e.target.checked)} /> Slide ${slide}</label>`}</div>`} /></div>`
+      : html`<p class="sp-hint sp-compose">${!me ? html`<a href="#/login">Sign in</a> to join the conversation.` : "You can read the comments. The owner decides who may write."}</p>`)}</div>`;
+}
+const kb = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round((n || 0) / 1024)) + " KB");
+function useVerOps(s, rev, d, { onView, onRestored, reload, preview = true }) {            // download / restore / delete of one revision, shared by the side list and the history page
+  const [ask, setAsk] = useState(null), [busy, setBusy] = useState(null);
+  const dl = async (x) => { try { const r = await fetch(U("/api/v1/spaces/" + s.ref + "/file?rev=" + x.rev), { headers: tok() ? { Authorization: "Bearer " + tok() } : {} }); if (!r.ok) throw new Error("Download failed"); saveBlob(await r.blob(), x.filename || s.slug); } catch (e) { toast(e.message, 1); } };
+  const run = async (x, fn) => { setBusy(x.rev); try { await fn(); } catch (e) { toast(e.message, 1); } setBusy(null); setAsk(null); };
+  const restore = (x) => run(x, async () => { const r = await api("/spaces/" + s.ref + "/versions/" + x.rev + "/restore", { method: "POST", body: {} }); toast("Revision " + x.rev + " is back, as revision " + r.rev); onRestored(r.space); });
+  const del = (x) => run(x, async () => { await api("/spaces/" + s.ref + "/versions/" + x.rev, { method: "DELETE" }); toast("Revision " + x.rev + " deleted"); if (rev === x.rev) onView(null); reload(); });
+  const Ask = ({ k, q, ok, cls, go }) => ask === k ? html`<span class="sp-ask">${q}<button type="button" class="btn sec sm" onClick=${() => setAsk(null)}>Cancel</button><button type="button" class=${"btn sm " + (cls || "")} disabled=${busy != null} onClick=${go}>${ok}</button></span>` : null;
+  const buttons = (x) => html`${preview && x.available && !x.current && html`<button type="button" class="btn sec sm" aria-pressed=${rev === x.rev} onClick=${() => onView(rev === x.rev ? null : x)}>${rev === x.rev ? "Previewing" : "Preview"}</button>`}
+    ${x.available && html`<button type="button" class="btn sec sm" onClick=${() => dl(x)}>Download</button>`}
+    ${!x.current && x.available && d.can_restore && (ask === "r" + x.rev ? html`<${Ask} k=${"r" + x.rev} q="Publish it again as a new revision?" ok="Restore" go=${() => restore(x)} />` : html`<button type="button" class="btn sec sm" onClick=${() => setAsk("r" + x.rev)}>Restore</button>`)}
+    ${!x.current && d.can_delete && (ask === "d" + x.rev ? html`<${Ask} k=${"d" + x.rev} q=${"Delete revision " + x.rev + "?"} ok="Delete" cls="danger" go=${() => del(x)} />` : html`<button type="button" class="btn danger sm" aria-label=${"Delete revision " + x.rev} onClick=${() => setAsk("d" + x.rev)}>Delete</button>`)}`;
+  return { buttons };
+}
+const VerBadges = ({ x }) => html`${x.current ? html`<span class="badge green">Current</span>` : !x.available && html`<span class="badge" title="The files of this revision are no longer on this hub">Files gone</span>`}`;
+function SpaceVersions({ s, rev, vers, onView, onComment, onRestored, onExpand }) {
+  const d = vers.d, ops = useVerOps(s, rev, d || {}, { onView, onRestored, reload: vers.reload });
+  return html`<div class="sp-vers" aria-label="Version history"><div class="sp-hr"><span class="sp-hint">${d ? "The last " + d.keep + " revisions are kept." : ""}</span><span class="sp"></span>
+      <button type="button" class="btn sec sm" onClick=${onExpand} title="Open the history as a page, with a preview of each revision">Open as page</button></div>
+    ${!d ? (vers.e ? html`<p class="sp-hint">${vers.e}</p>` : html`<div class="skel" style="height:80px"></div>`) : html`<ul class="sp-vl">${d.items.map((x) => html`<li key=${x.rev} class=${(x.current ? "cur" : "") + ((rev || s.rev) === x.rev ? " on" : "")}>
+      <div class="sp-vtop"><span class="sp-vr" aria-label=${"Revision " + x.rev}>${x.rev}</span>
+        <span class="sp-vm"><b>${x.note || (x.current ? "Current version" : "Revision " + x.rev)}</b><small>${new Date(x.created * 1000).toLocaleString()} · ${x.author_name || x.author || "unknown"} · ${kb(x.size)}${x.filename ? " · " + x.filename : ""}</small></span><${VerBadges} x=${x} /></div>
+      <div class="sp-va"><button type="button" class="chip sm" title="Comments about this revision" onClick=${() => onComment(x)}>${x.comments ? x.comments + (x.comments === 1 ? " comment" : " comments") : "Comment"}</button>${ops.buttons(x)}</div></li>`)}</ul>`}</div>`;
+}
+function SpaceBody({ s, rev, v, mode, onSlide, jump }) {                                 // the viewer for one revision: the page uses it, and so does the history page
+  const vk = rev && v ? v.kind : s.kind, needData = ["slides", "doc", "sheet"].includes(vk);
+  const data = useLoad(() => needData ? api("/spaces/" + s.ref + "/data" + (rev ? "?rev=" + rev : "")) : Promise.resolve(null), [s.ref, s.rev, needData, rev]);
+  if (!needData) return html`<${FrameView} s=${{ ...s, kind: vk }} rev=${rev} />`;
+  return data.d ? (vk === "slides" ? html`<${SlidePlayer} key=${s.rev + ":" + (rev || 0)} d=${data.d} st=${s.settings || {}} mode=${mode} onSlide=${onSlide || (() => {})} jump=${jump} />` : vk === "sheet" ? html`<${SheetView} d=${data.d} />` : html`<article class="sp-doc" dangerouslySetInnerHTML=${{ __html: data.d.html }}></article>`)
+    : data.e ? html`<${Err} e=${data.e} />` : html`<div class="skel" style="height:50vh"></div>`;
+}
+function HistoryDialog({ s, rev, vers, onClose, onView, onComment, onRestored }) {
+  const d = vers.d, items = d ? d.items : [], [sel, setSel] = useState(rev || s.rev), x = items.find((v) => v.rev === sel) || items[0];
+  const ops = useVerOps(s, rev, d || {}, { onView: (v) => { if (v && v.rev !== sel) setSel(v.rev); onView(v); }, onRestored: (sp) => { onClose(); onRestored(sp); }, reload: vers.reload, preview: false });
+  return html`<${Dlg} title=${"Version history · " + (s.title || s.slug)} cls="dlg-wide" onClose=${onClose}>
+    ${!d ? (vers.e ? html`<${Err} e=${vers.e} />` : html`<div class="skel" style="height:50vh"></div>`) : html`<div class="hd">
+      <ul class="hd-l" aria-label="Revisions">${items.map((v) => html`<li key=${v.rev}><button type="button" class=${"hd-i" + (v.rev === (x && x.rev) ? " on" : "")} aria-current=${v.rev === (x && x.rev) ? "true" : null} onClick=${() => setSel(v.rev)}>
+          <span class="sp-vr">${v.rev}</span><span class="sp-vm"><b>${v.note || (v.current ? "Current version" : "Revision " + v.rev)}</b><small>${ago(v.created)} · ${v.author_name || v.author || "unknown"}${v.comments ? " · " + v.comments + (v.comments === 1 ? " comment" : " comments") : ""}</small></span>
+          ${v.current && html`<span class="badge green">Current</span>`}</button></li>`)}</ul>
+      ${x && html`<section class="hd-r" aria-label=${"Revision " + x.rev}>
+        <div class="hd-h"><span class="sp-vr">${x.rev}</span><div class="sp-vm"><b>${x.note || (x.current ? "Current version" : "Revision " + x.rev)}</b><small>${new Date(x.created * 1000).toLocaleString()} · ${x.author_name || x.author || "unknown"} · ${kb(x.size)}${x.filename ? " · " + x.filename : ""}</small></div><${VerBadges} x=${x} /></div>
+        <div class="sp-va"><button type="button" class="btn sm" onClick=${() => { onClose(); onView(x.current ? null : x); }}>Open in the page</button>
+          <button type="button" class="btn sec sm" onClick=${() => { onClose(); onComment(x); }}>${x.comments ? "Comments (" + x.comments + ")" : "Comment on it"}</button>${ops.buttons(x)}</div>
+        <div class=${"sp-stage hd-stage sp-s-canvas sp-k-" + x.kind}>${x.available ? html`<${SpaceBody} key=${x.rev} s=${s} rev=${x.current ? null : x.rev} v=${x.current ? null : x} mode="canvas" />` : html`<${Empty} t="Files are gone" d="This revision's files are no longer on this hub, only its record is kept." />`}</div></section>`}</div>`}</${Dlg}>`;
 }
 function SpacePage({ sref: rf }) {
-  const { me } = useStore(); const [tick, setTick] = useState(0), [panel, setPanel] = useState(null), [local, setLocal] = useState(null), [ask, setAsk] = useState(false);
+  const st = useStore(), { me } = st, route = st.route; const [tick, setTick] = useState(0), [panel, setPanel] = useState(null), [local, setLocal] = useState(null), [ask, setAsk] = useState(false);
   const m = useLoad(() => api("/spaces/" + rf), [rf, tick, me && me.username]);
   const s = local && m.d && local.rev >= m.d.rev ? { ...m.d, ...local } : m.d;
   const [mode, setMode] = useState(null), stage = useRef(), [pre, setPre] = useState(null);
+  const sideQ = () => { const v = hashQ().get("side"); return v === "cm" || v === "hist" ? v : null; };
+  const [rev, setRev] = useState(() => +hashQ().get("rev") || null), [slide, setSlide] = useState(1), [jump, setJump] = useState(null), [ncm, setNcm] = useState(null);
+  const [side, setSide] = useState(sideQ), [focus, setFocus] = useState(() => +hashQ().get("comment") || null), [big, setBig] = useState(false);
+  const [vtick, setVtick] = useState(0);
+  const vers = { ...useLoad(() => api("/spaces/" + rf + "/versions"), [rf, m.d && m.d.rev, vtick]), reload: () => setVtick((t) => t + 1) };
+  const old = rev && vers.d ? vers.d.items.find((x) => x.rev === rev) : null, vk = rev ? old && old.kind : s && s.kind;
+  const viewRev = (x) => { const r = x && x.rev !== (s && s.rev) ? x.rev : null; setRev(r); setJump(null); setHashQ("rev", r); setHashQ("slide", null); };
+  const openSide = (v) => {
+    setSide(v); setHashQ("side", v); if (!v) { setFocus(null); setHashQ("comment", null); }
+    if (v && matchMedia("(max-width:900px)").matches) setTimeout(() => { const el = document.querySelector(".sp-side"); if (el) el.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" }); }, 60);      // on a phone the panel sits under the stage
+  };
+  useEffect(() => {                                                        // an alert for this same space was opened: follow its revision, panel and comment
+    const q = hashQ(); setRev(+q.get("rev") || null); setSide(sideQ()); setFocus(+q.get("comment") || null);
+  }, [route]);
   const eff = mode || hashQ().get("mode") || (s && s.settings.view) || "fit";
-  const needData = s && ["slides", "doc", "sheet"].includes(s.kind);
-  const data = useLoad(() => needData ? api("/spaces/" + rf + "/data") : Promise.resolve(null), [rf, s && s.rev, needData]);
   useEffect(() => { api("/spaces/" + rf + "/view", { method: "POST" }).catch(() => {}); }, [rf]);
   useEffect(() => { document.body.classList.toggle("sp-full", eff === "full"); return () => document.body.classList.remove("sp-full"); }, [eff]);
   useEffect(() => {          // Fit = wide focus mode: the page column opens up to almost the full width and the hub bar hides (move to the top edge, or tap the handle, to bring it back)
@@ -1737,9 +2111,12 @@ function SpacePage({ sref: rf }) {
     setMode(v);
   };
   const link = (extra) => location.origin + location.pathname.replace(/\/$/, "/") + "#/s/" + s.ref + (extra ? "?" + extra : "");
-  const download = async () => { try { const r = await fetch(U("/api/v1/spaces/" + s.ref + "/file"), { headers: tok() ? { Authorization: "Bearer " + tok() } : {} }); if (!r.ok) throw new Error("Download failed"); saveBlob(await r.blob(), s.filename || s.slug); } catch (e) { toast(e.message, 1); } };
+  const download = async () => { try { const r = await fetch(U("/api/v1/spaces/" + s.ref + "/file" + (rev ? "?rev=" + rev : "")), { headers: tok() ? { Authorization: "Bearer " + tok() } : {} }); if (!r.ok) throw new Error("Download failed"); saveBlob(await r.blob(), (old && old.filename) || s.filename || s.slug); } catch (e) { toast(e.message, 1); } };
   const del = async () => { try { await api("/spaces/" + s.ref, { method: "DELETE" }); toast("Space deleted"); nav("/spaces"); } catch (e) { toast(e.message, 1); setAsk(false); } };
-  const body = !needData ? html`<${FrameView} s=${s} />` : data.d ? (s.kind === "slides" ? html`<${SlidePlayer} key=${s.rev} d=${data.d} st=${s.settings || {}} mode=${eff} />` : s.kind === "sheet" ? html`<${SheetView} d=${data.d} />` : html`<article class="sp-doc" dangerouslySetInnerHTML=${{ __html: data.d.html }}></article>`) : data.e ? html`<${Err} e=${data.e} />` : html`<div class="skel" style="height:50vh"></div>`;
+  const restored = (x) => { viewRev(null); setLocal(x); setTick(tick + 1); vers.reload(); };
+  const body = rev && !old ? (vers.e || (vers.d && !old) ? html`<${Err} e=${vers.e || "Revision " + rev + " is not kept any more."} />` : html`<div class="skel" style="height:50vh"></div>`)
+    : html`<${SpaceBody} s=${s} rev=${rev} v=${old} mode=${eff} onSlide=${setSlide} jump=${jump} />`;
+  const showSide = side && eff !== "full", nver = vers.d ? vers.d.items.length : s.rev;
   const Ib = ({ d, label, on, onClick, cls = "" }) => html`<button class=${"sp-ib " + cls + (on ? " on" : "")} title=${label} aria-label=${label} aria-pressed=${on == null ? null : !!on} onClick=${onClick}><${SIc} d=${d} /><span class="lb">${label}</span></button>`;
   return html`<div class=${"stack sp-page sp-m-" + eff}>
     ${eff === "fit" && html`<button class="sp-peek" aria-label="Show the hub menu" onClick=${() => document.body.classList.toggle("nav-peek")}><svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 8l5 5 5-5"/></svg></button>`}
@@ -1749,14 +2126,110 @@ function SpacePage({ sref: rf }) {
     <div class="sp-tools" role="toolbar" aria-label="Space tools">
       <div class="sp-modes" role="group" aria-label="Size">${[["canvas", "Canvas", SI.canvas], ["fit", "Fit width", SI.fit], ["full", "Full screen", SI.full]].map(([v, l, d]) => html`<button key=${v} class=${eff === v ? "on" : ""} aria-pressed=${eff === v} onClick=${() => pick(v)}><${SIc} d=${d} /><span class="lb">${l}</span></button>`)}</div>
       <span class="sp-sep"></span>
-      <${Ib} d=${SI.link} label="Copy link" onClick=${() => copy(link())} /><${Ib} d=${SI.expand} label="Full screen link" onClick=${() => copy(link("mode=full"))} /><${Ib} d=${SI.down} label="Download" onClick=${download} />
+      <${Ib} d=${SI.link} label="Copy link" onClick=${() => copy(link(rev ? "rev=" + rev : ""))} /><${Ib} d=${SI.expand} label="Full screen link" onClick=${() => copy(link("mode=full"))} /><${Ib} d=${SI.down} label="Download" onClick=${download} />
+      <span class="sp-sep"></span>
+      <${Ib} d=${SI.chat} label=${"Comments" + ((ncm ?? s.comments) ? " " + (ncm ?? s.comments) : "")} on=${side === "cm"} onClick=${() => openSide(side === "cm" ? null : "cm")} />
+      <${Ib} d=${SI.clock} label="History" on=${side === "hist"} onClick=${() => openSide(side === "hist" ? null : "hist")} />
       ${(s.can_edit || s.can_manage) && html`<span class="sp-sep"></span>`}
       ${s.can_edit && html`<${Ib} d=${SI.gear} label="Settings" on=${panel === "set"} onClick=${() => setPanel(panel === "set" ? null : "set")} />`}
       ${s.can_manage && html`<${Ib} d=${SI.share} label="Share" on=${panel === "share"} onClick=${() => setPanel(panel === "share" ? null : "share")} />`}
       ${s.can_manage && (ask ? html`<span class="sp-ask">Delete <b>${s.ref}</b> for everyone?<button class="btn sec sm" onClick=${() => setAsk(false)}>Cancel</button><button class="btn danger sm" onClick=${del}>Delete</button></span>` : html`<${Ib} d=${SI.trash} label="Delete" cls="warn" onClick=${() => setAsk(true)} />`)}</div>
-    ${panel === "set" && s.can_edit && html`<${SpaceSettings} s=${s} onSaved=${(x) => { setLocal(x); setTick(tick + 1); setPanel(null); }} />`}
-    ${panel === "share" && s.can_manage && html`<${SpaceShare} s=${s} onClose=${() => setPanel(null)} />`}
-    <div class=${"sp-stage sp-k-" + s.kind + " sp-s-" + eff} ref=${stage}>${eff === "full" && html`<div class="sp-fl"><button class="btn sec sm" onClick=${() => pick(pre || "fit")}>Exit full screen</button></div>`}${body}</div></div>`;
+    ${panel === "set" && s.can_edit && html`<${SpaceSettings} s=${s} onClose=${() => setPanel(null)} onSaved=${(x) => { setLocal(x); setTick(tick + 1); setPanel(null); }} />`}
+    ${panel === "share" && s.can_manage && html`<${SpaceShare} s=${s} onClose=${() => setPanel(null)} onSaved=${(x) => { setLocal(x); setTick(tick + 1); }} />`}
+    <div class=${"sp-work" + (showSide ? " has-side" : "")}>
+      <div class="sp-main">
+        ${rev && html`<div class="sp-oldrev" role="status"><span>You are looking at <b>revision ${rev}</b>${old ? " from " + new Date(old.created * 1000).toLocaleDateString() : ""}, not the current one (revision ${s.rev}).</span><span class="sp"></span>
+          ${side !== "hist" && html`<button type="button" class="btn sec sm" onClick=${() => openSide("hist")}>Version history</button>`}<button type="button" class="btn sm" onClick=${() => viewRev(null)}>Back to current</button></div>`}
+        <div class=${"sp-stage sp-k-" + (vk || s.kind) + " sp-s-" + eff} ref=${stage}>${eff === "full" && html`<div class="sp-fl"><button class="btn sec sm" onClick=${() => pick(pre || "fit")}>Exit full screen</button></div>`}${body}</div></div>
+      ${showSide && html`<aside class="sp-side" aria-label="Comments and history">
+          <div class="sp-sh"><div class="seg" role="tablist" aria-label="Panel">${[["cm", "Comments", ncm ?? s.comments], ["hist", "History", nver]].map(([k, l, n]) => html`<button key=${k} role="tab" aria-selected=${side === k} class=${side === k ? "on" : ""} onClick=${() => openSide(k)}>${l}${n ? html`<i>${n}</i>` : ""}</button>`)}</div><span class="sp"></span>
+            <button type="button" class="sp-x" aria-label="Close the panel" title="Close" onClick=${() => openSide(null)}><svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15"/></svg></button></div>
+          <div class="sp-vstrip"><label><span>Revision</span><select class="field sp-vsel" aria-label="Revision to preview" value=${rev || s.rev} onChange=${(e) => viewRev({ rev: +e.target.value })}>${((vers.d && vers.d.items) || [{ rev: s.rev, current: true, available: true }]).map((x) => html`<option key=${x.rev} value=${x.rev} disabled=${!x.available && !x.current}>${x.rev}${x.current ? " · current" : ""}${x.note ? " · " + x.note.slice(0, 28) : ""}</option>`)}</select></label>
+            ${rev ? html`<button type="button" class="btn sec sm" onClick=${() => viewRev(null)}>Back to current</button>` : html`<span class="badge green">Current</span>`}</div>
+          ${side === "cm" ? html`<${SpaceComments} s=${s} slide=${slide} rev=${rev} vers=${vers} focus=${focus} onCount=${setNcm} onRev=${(n) => viewRev({ rev: n })}
+              onJump=${(n, r) => { if (r && r !== (rev || s.rev)) viewRev(r === s.rev ? null : { rev: r }); setJump({ n, t: Date.now() }); scrollTo({ top: 0, behavior: reduced ? "auto" : "smooth" }); }} />`
+            : html`<${SpaceVersions} s=${s} rev=${rev} vers=${vers} onView=${viewRev} onRestored=${restored} onExpand=${() => setBig(true)} onComment=${(x) => { viewRev(x); openSide("cm"); }} />`}</aside>`}</div>
+    ${big && html`<${HistoryDialog} s=${s} rev=${rev} vers=${vers} onClose=${() => setBig(false)} onView=${viewRev} onRestored=${restored} onComment=${(x) => { viewRev(x); openSide("cm"); }} />`}</div>`;
+}
+// ---- notifications: alerts on the account (mentions, replies, comments on your spaces, shares, new revisions). The bell polls a cheap count.
+const NI = { bell: "M5 14V9a5 5 0 0110 0v5l1.5 2h-13zM8.5 17.5a1.7 1.7 0 003 0", mention: "M10 13.2a3.2 3.2 0 100-6.4 3.2 3.2 0 000 6.4zM13.2 7v4.4a1.9 1.9 0 003.8 0V10a7 7 0 10-2.7 5.5", reply: "M8 5L3 9.5 8 14M3 9.5h8a5 5 0 015 5V16", comment: SI.chat, resolved: "M4 10.5l4 4 8-9", share: SI.share, version: SI.clock };
+const NACC = { view: "view", comment: "comment on", edit: "edit" };
+const notifHref = (n) => {                                                    // opens the revision the alert is about, with the right panel and comment
+  if (!n.path) return "#/notifications";
+  const q = new URLSearchParams(), old = n.rev && n.rev !== n.current_rev;
+  if (["mention", "reply", "comment", "resolved"].includes(n.kind)) { if (old) q.set("rev", n.rev); if (n.comment_id) q.set("comment", n.comment_id); q.set("side", "cm"); }
+  else if (n.kind === "version") { if (old) q.set("rev", n.rev); q.set("side", "hist"); }
+  return "#" + n.path + (q.toString() ? "?" + q : "");
+};
+function NotifText({ n }) {
+  const who = html`<b>${n.actor ? shown(n.actor) : "Someone"}</b>`, sp = html`<b>${n.title || n.ref}</b>`;
+  return n.kind === "mention" ? html`${who} mentioned ${n.via ? html`your group <b>@${n.via}</b>` : "you"} in ${sp}`
+    : n.kind === "reply" ? html`${who} replied to your comment in ${sp}` : n.kind === "comment" ? html`${who} commented on ${sp}`
+    : n.kind === "resolved" ? html`${who} resolved your comment in ${sp}` : n.kind === "share" ? html`${who} shared ${sp} with you, you can ${NACC[n.body] || "open"} it`
+    : n.kind === "version" ? html`${who} published a new revision of ${sp}` : html`${who} ${n.kind} ${sp}`;
+}
+function NotifRow({ n, onOpen, onToggle, onDelete }) {
+  return html`<li class=${"nt-i" + (n.seen ? "" : " new")}><a class="nt-a" href=${notifHref(n)} onClick=${() => onOpen(n)}>
+      <span class="nt-av"><${Avatar} p=${n.actor || { username: "?" }} size=${34} /><span class=${"nt-k " + n.kind} aria-hidden="true"><${SIc} d=${NI[n.kind] || NI.bell} /></span></span>
+      <span class="nt-t"><span class="nt-l"><${NotifText} n=${n} /></span>
+        ${n.body && n.kind !== "share" && html`<span class="nt-q">${n.body}</span>`}
+        <small>${ago(n.created)}${n.rev && n.kind !== "share" ? " · revision " + n.rev : ""}${n.rev && n.rev !== n.current_rev && n.kind !== "share" ? " (older)" : ""}</small></span>${!n.seen && html`<i class="nt-dot" aria-label="Unread"></i>`}</a>
+    ${(onToggle || onDelete) && html`<span class="nt-x">${onToggle && html`<button type="button" class="nt-b" onClick=${() => onToggle(n)}>${n.seen ? "Mark unread" : "Mark read"}</button>`}${onDelete && html`<button type="button" class="nt-b" onClick=${() => onDelete(n)}>Remove</button>`}</span>`}</li>`;
+}
+const setUnread = (n) => { if (typeof n === "number" && n !== store.unread) set({ unread: n }); };
+function useNotifs(q, deps, on = true) {
+  const [tick, setTick] = useState(0), r = useLoad(() => on ? api("/notifications?" + q) : Promise.resolve(null), [q, tick, on, ...deps]);
+  useEffect(() => { if (r.d) setUnread(r.d.unread); }, [r.d]);
+  const mark = async (body) => { try { const x = await api("/notifications/read", { method: "POST", body }); setUnread(x.unread); setTick((t) => t + 1); } catch (e) { toast(e.message, 1); } };
+  const del = async (n) => { try { const x = await api("/notifications/" + n.id, { method: "DELETE" }); setUnread(x.unread); setTick((t) => t + 1); } catch (e) { toast(e.message, 1); } };
+  return { r, mark, del, reload: () => setTick((t) => t + 1) };
+}
+function Bell() {
+  const s = useStore(), [open, setOpen] = useState(false), [tab, setTab] = useState("all"), ref = useRef(), n = s.unread || 0, prev = useRef(null);
+  useEffect(() => {
+    let on = 1;
+    const poll = async () => {
+      if (document.visibilityState === "hidden") return;
+      try {
+        const r = await api("/notifications/count"); if (!on) return;
+        if (prev.current != null && r.unread > prev.current) toast(r.unread - prev.current === 1 ? "You have a new notification" : (r.unread - prev.current) + " new notifications");
+        else if (prev.current == null && r.unread > 0) { let seen = false; try { seen = sessionStorage.getItem("aihub_nt") === "1"; sessionStorage.setItem("aihub_nt", "1"); } catch {} if (!seen) toast("You have " + r.unread + " unread notification" + (r.unread > 1 ? "s" : "")); }
+        prev.current = r.unread; setUnread(r.unread);
+      } catch {}
+    };
+    poll(); const t = setInterval(poll, 30000), vis = () => poll();
+    document.addEventListener("visibilitychange", vis); addEventListener("focus", vis);
+    return () => { on = 0; clearInterval(t); document.removeEventListener("visibilitychange", vis); removeEventListener("focus", vis); };
+  }, [s.me && s.me.username]);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const key = (e) => { if (e.key === "Escape") { setOpen(false); const b = ref.current && ref.current.querySelector("button"); if (b) b.focus(); } };
+    addEventListener("pointerdown", away); addEventListener("keydown", key); return () => { removeEventListener("pointerdown", away); removeEventListener("keydown", key); };
+  }, [open]);
+  const q = "limit=10" + (tab === "mention" ? "&kind=mention" : tab === "unread" ? "&unread=true" : ""), nf = useNotifs(q, [], open);
+  const items = open && nf.r.d ? nf.r.d.items : [];
+  const toggle = () => { if (matchMedia("(max-width:700px)").matches) return nav("/notifications"); setOpen(!open); };
+  return html`<div class=${"nt" + (open ? " open" : "")} ref=${ref}>
+    <button type="button" class=${"nt-bell" + (n ? " has" : "")} aria-haspopup="true" aria-expanded=${open} aria-label=${n ? "Notifications, " + n + " unread" : "Notifications"} onClick=${toggle}><${SIc} d=${NI.bell} /><span class="nt-lb">Notifications</span>${n > 0 && html`<b class="nt-n">${n > 99 ? "99+" : n}</b>`}</button>
+    ${open && html`<div class="nt-p" role="dialog" aria-label="Notifications"><div class="nt-h"><b>Notifications</b><span class="sp"></span>${n > 0 && html`<button type="button" class="nt-b" onClick=${() => nf.mark({ all: true })}>Mark all read</button>`}</div>
+      <div class="seg nt-tabs" role="tablist">${[["all", "All"], ["mention", "Mentions"], ["unread", "Unread" + (n ? " " + n : "")]].map(([k, l]) => html`<button key=${k} role="tab" aria-selected=${tab === k} class=${tab === k ? "on" : ""} onClick=${() => setTab(k)}>${l}</button>`)}</div>
+      ${!nf.r.d ? (nf.r.e ? html`<p class="sp-hint nt-e">${nf.r.e}</p>` : html`<div class="skel" style="height:120px;margin:10px"></div>`)
+        : items.length ? html`<ul class="nt-l2">${items.map((x) => html`<${NotifRow} key=${x.id} n=${x} onOpen=${(y) => { setOpen(false); if (!y.seen) nf.mark({ ids: [y.id] }); }} />`)}</ul>`
+        : html`<p class="sp-hint nt-e">${tab === "mention" ? "Nobody has mentioned you yet." : tab === "unread" ? "You are all caught up." : "Nothing yet. People will show up here when they mention you, reply, or share a space."}</p>`}
+      <a class="nt-f" href="#/notifications" onClick=${() => setOpen(false)}>See all notifications</a></div>`}</div>`;
+}
+const NFILT = [["all", "All", ""], ["mention", "Mentions", "&kind=mention"], ["reply", "Replies", "&kind=reply,comment,resolved"], ["version", "Revisions and shares", "&kind=version,share"], ["unread", "Unread", "&unread=true"]];
+function Notifications() {
+  const { me } = useStore(), [f, setF] = useState("all"), [lim, setLim] = useState(30);
+  const nf = useNotifs("limit=" + lim + (NFILT.find((x) => x[0] === f) || NFILT[0])[2], [me && me.username], !!me), d = nf.r.d;
+  if (!me) return html`<${Empty} t="Sign in to see your notifications" d="Mentions, replies and shares for your account show up here." />`;
+  return html`<div class="stack nt-page"><div class="row"><h1>Notifications</h1><span class="sp"></span>${d && d.unread > 0 && html`<button type="button" class="btn sec sm" onClick=${() => nf.mark({ all: true })}>Mark all read</button>`}</div>
+    <p class="sp-hint">Alerts for this account: someone mentions you or a group you are in, replies to your comment, comments on your space, shares a space with you, or publishes a new revision.</p>
+    <div class="sp-chips" role="group" aria-label="Show">${NFILT.map(([k, l]) => html`<button type="button" key=${k} class=${"chip" + (f === k ? " on" : "")} aria-pressed=${f === k} onClick=${() => { setF(k); setLim(30); }}>${l}</button>`)}</div>
+    ${!d ? (nf.r.e ? html`<${Err} e=${nf.r.e} />` : html`<${Skels} n=${4} />`) : d.items.length ? html`<ul class="nt-l2 nt-big">${d.items.map((x) => html`<${NotifRow} key=${x.id} n=${x} onOpen=${(y) => { if (!y.seen) nf.mark({ ids: [y.id] }); }} onToggle=${(y) => nf.mark({ ids: [y.id], seen: !y.seen })} onDelete=${nf.del} />`)}</ul>
+      ${d.more && html`<button type="button" class="btn sec" onClick=${() => setLim(lim + 30)}>Show more</button>`}`
+      : html`<${Empty} t=${f === "unread" ? "You are all caught up" : "Nothing here yet"} d="New alerts appear here and on the bell in the top bar." />`}</div>`;
 }
 function NavMenu({ label, lead, items }) {
   const [open, setOpen] = useState(false); const ref = useRef();
@@ -1799,11 +2272,12 @@ function App() {
   }, []);
   useEffect(() => {
     const moved = !first.current; first.current = false;
-    const t = requestAnimationFrame(() => { const h1 = document.querySelector("main h1"); document.title = (h1 && h1.textContent ? h1.textContent.trim() + " · " : "") + ((s.brand && s.brand.name) || "AI Hub"); const h = h1 || document.getElementById("main"); if (h && moved) { if (!h.hasAttribute("tabindex")) h.setAttribute("tabindex", "-1"); h.focus({ preventScroll: true }); } });
+    const t = requestAnimationFrame(() => { const h1 = document.querySelector("main h1"); document.title = (store.unread ? "(" + store.unread + ") " : "") + (h1 && h1.textContent ? h1.textContent.trim() + " · " : "") + ((s.brand && s.brand.name) || "AI Hub"); const h = h1 || document.getElementById("main"); if (h && moved) { if (!h.hasAttribute("tabindex")) h.setAttribute("tabindex", "-1"); h.focus({ preventScroll: true }); } });
     return () => cancelAnimationFrame(t);
   }, [path]);
   useEffect(() => { addEventListener("resize", place); return () => removeEventListener("resize", place); }, []);
-  const logout = async () => { try { await api("/auth/logout", { method: "POST" }); } catch {} try { localStorage.removeItem("aihub_token"); sessionStorage.removeItem("aihub_token"); } catch {} set({ me: null }); nav("/"); };
+  useEffect(() => { document.title = (s.unread ? "(" + s.unread + ") " : "") + document.title.replace(/^\(\d+\) /, ""); }, [s.unread]);          // unread alerts show in the tab title
+  const logout = async () => { try { await api("/auth/logout", { method: "POST" }); } catch {} try { localStorage.removeItem("aihub_token"); sessionStorage.removeItem("aihub_token"); } catch {} set({ me: null, unread: 0 }); nav("/"); };
   const on = (k) => (seg[0] === k ? "on" : "");
   const nl = (k, label) => ({ k, label, href: "#/" + k, on: seg[0] === k });
   const ws = s.me ? [nl("knowledge", "Knowledge"), nl("running", "Running"), can("view_usage") && nl("usage", "Usage"), s.showGroups && nl("groups", "Groups")].filter(Boolean) : [];
@@ -1811,11 +2285,11 @@ function App() {
   const navGroup = (label, items) => items.length > 1 ? html`<${NavMenu} label=${label} items=${items} />` : items.length ? html`<a class=${items[0].on ? "on" : ""} href=${items[0].href}>${items[0].label}</a>` : "";
   const br = s.brand || {}, ct = br.contact || {};
   const page = { "": html`<${Home} />`, browse: html`<${Browse} key=${s.route} />`, package: html`<${Package} name=${seg[1]} key=${seg[1]} />`, rankings: html`<${Rankings} />`, docs: html`<${Docs} slug=${seg[1]} key=${seg[1]} />`, start: html`<${Start} />`,
-    login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, knowledge: html`<${Knowledge} />`, dashboard: html`<${Dashboard} />`, usage: html`<${UsageHub} />`, running: html`<${Running} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />`, spaces: html`<${Spaces} key=${s.route.split("?")[0]} />`, s: html`<${SpacePage} sref=${decodeURIComponent(seg[1] || "")} key=${seg[1]} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
+    login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, knowledge: html`<${Knowledge} />`, dashboard: html`<${Dashboard} />`, usage: html`<${UsageHub} />`, running: html`<${Running} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />`, notifications: html`<${Notifications} />`, spaces: html`<${Spaces} key=${s.route.split("?")[0]} />`, s: html`<${SpacePage} sref=${decodeURIComponent(seg[1] || "")} key=${seg[1]} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
   return html`<div><a class="skip" href="#/" onClick=${(e) => { e.preventDefault(); const m = document.getElementById("main"); if (m) m.focus(); }}>Skip to content</a>${br.announcement && html`<div class="announce" role="status" dangerouslySetInnerHTML=${{ __html: br.announcement }}></div>`}<header class="nav"><div class="nav-in"><a class="brand glow" href="#/">${br.logo_url ? html`<img decoding="async" class="logo" src=${br.logo_url} alt="" />` : MARK}<span>${br.name || "AI Hub"}</span></a>
     <button type="button" class="burger" aria-label="Menu" aria-expanded=${menu} aria-controls="menu" onClick=${() => setMenu(!menu)}><i></i><i></i><i></i></button>
     <div id="menu" class=${"menu" + (menu ? " open" : "")} onClick=${(e) => { if (e.target.closest && e.target.closest("a")) setMenu(false); }}><nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("spaces") || on("s")} href="#/spaces">Spaces</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
-    <div class="r">${s.me ? html`${navGroup("Workspace", ws)}${navGroup("Manage", mg)}<${NavMenu} label=${shown(s.me)} lead=${html`<${Avatar} p=${s.me} size=${22} />`} items=${[{ k: "account", label: "Account", href: "#/account", on: seg[0] === "account" }, { k: "out", label: "Sign out", href: "#/", onClick: logout }]} />` :
+    <div class="r">${s.me ? html`${navGroup("Workspace", ws)}${navGroup("Manage", mg)}<${Bell} /><${NavMenu} label=${shown(s.me)} lead=${html`<${Avatar} p=${s.me} size=${22} />`} items=${[{ k: "account", label: "Account", href: "#/account", on: seg[0] === "account" }, { k: "out", label: "Sign out", href: "#/", onClick: logout }]} />` :
       html`${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}<a href="#/login">Sign in</a>`}</div></div></div></header>
     <main id="main" tabindex="-1">${seg[0] === "login" || seg[0] === "register" ? html`<div class="page au-page" key="auth">${page}</div>` : html`<div class="page" key=${path}>${page}</div>`}</main>
     <footer class="foot"><b class="glow">${br.logo_url && html`<img decoding="async" class="logo sm" src=${br.logo_url} alt="" />`}${br.name || "AI Hub"}</b><span>Skills, agents and MCP servers for your team.</span>

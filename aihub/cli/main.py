@@ -467,6 +467,11 @@ def cmd_space(a):
     spaces.cli(a)
 
 
+def cmd_work(a):
+    from . import workcmd
+    return workcmd.cli(a)
+
+
 def cmd_soul(a):
     """Shortcut for `aihub knowledge get soul`: print the persona note."""
     from . import knowledge
@@ -1531,7 +1536,7 @@ def build_parser():
         ("Manage", ["enable", "disable", "tree", "lock", "sync"]),
         ("Account", ["config", "login", "logout", "password", "register", "vault", "admin"]),
         ("Publish", ["dev", "space"]),
-        ("Setup and maintenance", ["run", "onboard", "knowledge", "soul", "policy", "welcome", "doctor", "version", "upgrade", "auto-update", "hook", "flush", "usage-sync", "hooks", "skill", "self-uninstall"]),
+        ("Setup and maintenance", ["run", "work", "onboard", "knowledge", "soul", "policy", "welcome", "doctor", "version", "upgrade", "auto-update", "hook", "flush", "usage-sync", "hooks", "skill", "self-uninstall"]),
     ]
 
     def add(name, fn, help, description, epilog, *args):
@@ -1729,6 +1734,17 @@ def build_parser():
         arg("--clear-args", action="store_true", help="set: remove the saved bot arguments."),
         arg("--force", action="store_true", help="rm: stop it first if it runs."),
         arg("--json", action="store_true", help="list/status: JSON output."))
+    add("work", cmd_work, "Works (aihub-ui workflows) without the UI: pull, set up credentials, run, serve in the background.",
+        "Runs the Works engine of the installed aihub-ui package from this terminal, on the same files as the UI (works, runs, credential sets, encrypted secrets). "
+        "A workflow package (type workflow) is pulled and added off; `setup` finds what it needs on this machine (credential sets, which are never shared, the working folder of a Claude node, secret fields) and asks for it or reads a JSON file; "
+        "`run` runs it once with a live step log; `serve --bg` fires the cron and package triggers of the enabled works in the background (the run aihub-works under `aihub run`). "
+        "Only one process fires triggers: the UI or the serve run, never both. Credential sets: `cred` (kinds, template, add/set from JSON or stdin, so secrets never sit on the command line). "
+        "Code nodes (Python, Spark, Trino) read the sets granted to them with the Python module aihub_vault (`aihub work lib` prints its folder for your own scripts).\n\n"
+        "Subcommands: list | show W | pull PKG | import FILE | export W [-o DIR] | setup W [--creds FILE] [--folder NODE=PATH] | set W NODE key=value [--folder P] [--credential SET] [--grant SET] [--revoke SET] [--secret FIELD] | "
+        "enable W | disable W | run W [--input k=v] [--text T] | runs W | logs W [RUN] [--node N] | serve [--bg] [--hooks PORT] | cred list|kinds|template KIND|show S|add|set S|rm S | lib | rm W",
+        "Examples:\n  aihub work pull workflow-sales-etl\n  aihub work setup sales-etl --creds creds.json\n  aihub work cred add --kind s3 --name lake --file buckets.json\n  aihub work set sales-etl claude --folder ~/projects/sales\n"
+        "  aihub work run sales-etl --input day=2026-10-31\n  aihub work enable sales-etl && aihub work serve --bg\n  aihub run logs aihub-works -f",
+        arg("rest", nargs=argparse.REMAINDER, metavar="SUBCOMMAND", help="list, show, pull, import, export, setup, set, enable, disable, run, runs, logs, serve, cred, lib, rm (aihub work --help)."))
     add("onboard", cmd_onboard, "Optional guided credential setup for an installed bot.",
         "Runs the bot's own onboarding script. The Teams bot signs you in with the Teams Developer CLI (`teams login`, a browser popup), creates its app registration (`teams app create`) and writes CLIENT_ID, CLIENT_SECRET and TENANT_ID into the bot's .env; after that the bot runs without you signed in. Install offers it in a terminal; you can always edit .env by hand instead.",
         "Examples:\n  aihub onboard\n  aihub onboard aihub-teams-bot",
@@ -1742,11 +1758,12 @@ def build_parser():
         arg("--group", help="share/unshare: hub group name (everyone in it)."),
         arg("--write", action="store_true", help="share: let them edit the note too (default read-only)."))
     add("space", cmd_space, "Publish documents, slides, reports, PDFs, sheets and HTML pages as a Space on the hub.",
-        "A Space is addressed author@space-name and opens at <hub>/#/s/author@space-name. Send a .pptx, .docx, .md, .xlsx/.csv, .pdf, an .html file (a report, dashboard, or a slide deck made of <section class=\"slide\"> parts) or a folder with index.html. Slides play directly in the browser with transitions; the viewer size (canvas | fit | full screen) defaults to --view and the reader can switch. Spaces are public or private; share a private one with a user or group as view or edit, like a package. Publishing the same name again replaces the content (needs --private/--public only to change who sees it).",
-        "Examples:\n  aihub space publish deck.pptx q3-review --view fit\n  aihub space publish report.html --kind dashboard --private\n  aihub space publish ./site team-site\n  aihub space publish new.pptx alice@q3-review      # new version of a space you may edit\n  aihub space share me@q3-review --group data-team --edit\n  aihub space set me@q3-review --transition fade --autoplay 8\n  aihub space top\n  aihub space search quarterly\n  aihub space url me@q3-review --view full",
-        arg("action", choices=["publish", "list", "top", "search", "info", "url", "open", "get", "rm", "set", "share", "unshare", "shares"], help="What to do."),
+        "A Space is addressed author@space-name and opens at <hub>/#/s/author@space-name. Send a .pptx, .docx, .md, .xlsx/.csv, .pdf, an .html file (a report, dashboard, or a slide deck made of <section class=\"slide\"> parts) or a folder with index.html. Slides play directly in the browser with transitions; the viewer size (canvas | fit | full screen) defaults to --view and the reader can switch. Spaces are public or private; share one with a user or group as view, comment or edit, like a package. A public space is view only for everyone until its owner allows comments from signed-in people (--public-access comment). Publishing the same name again adds a new revision (older ones stay in the version history; `versions`, `get --rev N`, `restore REV`); --private/--public only to change who sees it.",
+        "Examples:\n  aihub space publish deck.pptx q3-review --view fit\n  aihub space publish report.html --kind dashboard --private\n  aihub space publish ./site team-site\n  aihub space publish new.pptx alice@q3-review      # new version of a space you may edit\n  aihub space share me@q3-review --group data-team --edit\n  aihub space share me@q3-review --user bob --access comment\n  aihub space comments me@q3-review\n  aihub space comment me@q3-review \"Typo on this slide\" --slide 4\n  aihub space resolve me@q3-review 12\n  aihub space versions me@q3-review\n  aihub space restore me@q3-review 3\n  aihub space set me@q3-review --transition fade --autoplay 8\n  aihub space top\n  aihub space search quarterly\n  aihub space url me@q3-review --view full",
+        arg("action", choices=["publish", "list", "top", "search", "info", "url", "open", "get", "rm", "set", "share", "unshare", "shares",
+                               "comments", "comment", "resolve", "versions", "restore"], help="What to do."),
         arg("target", nargs="?", metavar="PATH|SPACE", help="publish: file or folder; others: author@space-name (a pasted hub link works too)."),
-        arg("extra", nargs="?", metavar="NAME|WORDS", help="publish: space name (slug), or author@name to add a version to somebody else's space; search: the words."),
+        arg("extra", nargs="?", metavar="NAME|WORDS|TEXT|ID|REV", help="publish: space name (slug), or author@name to add a version to somebody else's space; search: the words; comment: the text; resolve: the comment id; restore: the revision."),
         arg("--kind", choices=list(("auto", "doc", "slides", "report", "pdf", "sheet", "dashboard", "html")), help="publish/list/set: kind (default: from the file)."),
         arg("--title", help="Title shown on the hub."),
         arg("--description", help="One line shown on cards."),
@@ -1760,7 +1777,14 @@ def build_parser():
         arg("--no-loop", dest="loop", action="store_false", help="Slides: stop at the last slide."),
         arg("--user", help="share/unshare: hub user."),
         arg("--group", help="share/unshare: hub group."),
-        arg("--edit", action="store_true", help="share: let them publish new versions and change settings (default view only)."),
+        arg("--edit", action="store_true", help="share: let them publish new versions and change settings (default view only); same as --access edit."),
+        arg("--access", choices=["view", "comment", "edit"], help="share: what they may do (default view)."),
+        arg("--public-access", dest="public_access", choices=["view", "comment"], help="set: what signed-in visitors of a PUBLIC space may do (anonymous visitors only ever view)."),
+        arg("--note", help="publish/restore: a note for the version history."),
+        arg("--rev", type=int, metavar="N", help="get: download revision N instead of the current one."),
+        arg("--reply", type=int, metavar="ID", help="comment: answer comment ID."),
+        arg("--slide", type=int, metavar="N", help="comment: about slide N."),
+        arg("--reopen", action="store_true", help="resolve: mark it open again."),
         arg("--bare", action="store_true", help="url: a link without the hub header and footer (for embedding)."),
         arg("--mine", action="store_true", help="list: only my spaces."),
         arg("--since", type=float, metavar="UNIX_TIME", help="list: only spaces changed at or after this time, oldest change first (for mirrors and sync)."),

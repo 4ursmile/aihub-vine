@@ -15,6 +15,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!aihub/builtin_packages/aihub-ui/ui/lib/
 lib64/
 parts/
 sdist/

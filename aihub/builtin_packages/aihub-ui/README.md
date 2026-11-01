@@ -16,9 +16,22 @@ aihub run aihub-ui          # background service; the address (with this session
 - **Working folder**: each chat works in `~/.aihub/workingspace/sessions/<id>` unless you pick a folder (folder chip in the chat header; a missing folder is created, the chat moves into a sidebar project of the same name, and new chats started in that project reuse it). Changing it starts a new Claude session that carries the conversation as text. **Soul**: the person button gives one chat its own soul text (or back to your soul note). **Search chats** in the sidebar looks in titles and messages.
 - **Canvas**: a file tree of the working folder, live; Preview, **Edit** (Ctrl/Cmd+S saves) and **Diff** (since your last message, or since the last git commit) tabs, and a split mode that shows the preview beside the editor or diff; `.html` files get a sandboxed live preview; `html`, `svg` and `openui` code blocks render under Elements. Components are [OpenUI](https://openui.com) (`@openuidev/react-lang` + `react-ui`), taught to Claude through the chat's frozen system prompt.
 - **Packages**: installed list, find, install (options default on, then a settings form for keys), update, enable/disable, uninstall.
-- **Services**, **MCP servers**, **Knowledge** (soul and notes = memory), **Works**: node graphs that start on a cron schedule, a webhook, a click or a package's own event source, with regex filters, Claude tasks (choose model / effort / mode) and package nodes. Mail: **Send email (SMTP)** (any server, any system; send, draft into the account's IMAP Drafts folder, or a `.eml` file) next to the Outlook package node (`aihub-nodes-outlook`, Windows; send, draft, display). **Saved nodes** (Works > Saved nodes): set a node up once, logins included (encrypted), then add it to any work from Add node > Saved nodes; empty fields follow it, typed ones change that work only. Guide: `docs/ui-nodes.md`.
+- **Services**, **MCP servers**, **Knowledge** (soul and notes = memory), **Works**: node graphs that start on a cron schedule, a webhook, a click or a package's own event source, with regex filters, Claude tasks (choose model / effort / mode) and package nodes. Mail: **Send email (SMTP)** (any server, any system; send, draft into the account's IMAP Drafts folder, or a `.eml` file) next to the Outlook package node (`aihub-nodes-outlook`, Windows; send, draft, display). **Saved nodes** (Works > Saved nodes): set a node up once, logins included (encrypted), then add it to any work from Add node > Saved nodes; empty fields follow it, typed ones change that work only. Data: **SQL database** (SQLAlchemy: PostgreSQL, SQL Server, Oracle, Trino, MySQL, SQLite, DuckDB; native, pandas or polars; writes tables), **Trino SQL** and **Spark job** nodes; node code reads the logins and S3 buckets it is granted through `aihub_vault`, databases through `aihub_data`. Code nodes have an **Environment** box (their Python, what is missing, one-click install or the one command), **Magic ask** (describe it, a model fills in the fields and code; Apply to keep) and a colour code editor that expands full screen to **Run** the node and preview its result. Headless runs: see "Works without the UI" below. Guide: `docs/ui-nodes.md`.
 - **Settings** also holds the Vault (git logins), the hub sign-in (highlighted while you are signed out) and the context window.
 - Same state as the terminal: it calls `aihub --json ...`, so login, vault and packages are shared.
+
+## Works without the UI
+
+`aihub work` runs the same Works as this page from a terminal or a server, with no browser. It reads the same files, so a work designed here runs there, and the other way round. It needs this package (`aihub work` offers to install it). Every command is in `docs/cli.md`.
+
+To run a shared workflow on a server:
+
+1. `aihub install aihub-ui`.
+2. `aihub work pull workflow-sales-etl` adds its works, switched off.
+3. `aihub work setup sales-etl --creds creds.json --env data` sets its credential sets, folders and secret fields (or answer the prompts; `aihub work cred template s3` prints a skeleton), then installs the Python packages its SQL / Spark / Python nodes need into the environment `data`. Later or on its own: `aihub work env install sales-etl` (`aihub work env check sales-etl` lists them).
+4. `aihub work run sales-etl --input day=2026-10-31` tries one run. Then `aihub work enable sales-etl && aihub work serve --bg` fires its triggers in the background, as the service `aihub-works` (log: `aihub run logs aihub-works -f`).
+
+Only one process per machine fires cron and package triggers: this UI or `aihub work serve`, never both.
 
 ## Safety
 

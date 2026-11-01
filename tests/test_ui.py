@@ -609,6 +609,19 @@ class UsageAndSpaces(unittest.TestCase):
             self.assertTrue(os.path.isfile(os.path.join(root, "shared", "My-chart.html")))
             with self.assertRaises(server.Err):
                 server.space_publish(None, {}, {"id": "c1", "content": "x", "filename": "a.exe"})
+            sent.clear()
+            server.space_publish(None, {}, {"id": "c1", "path": "report.html", "tags": "Finance, #Q3 ; finance"})
+            self.assertEqual(sent[0][0][sent[0][0].index("--tags") + 1], "finance,q3")
+            sent.clear()
+            server.space_publish(None, {}, {"id": "c1", "path": "report.html"})
+            self.assertNotIn("--tags", sent[0][0])
+
+    def test_space_tags_rule(self):
+        import server
+        self.assertEqual(server.space_tags("A b, #c;d,,a"), ["a-b", "c", "d", "a"])
+        self.assertEqual(server.space_tags(["X", "x"]), ["x"])
+        self.assertEqual(len(server.space_tags(",".join("t%d" % i for i in range(30)))), 12)
+        self.assertEqual(server.space_tags(None), [])
 
     def test_mentions_bring_another_chats_history_and_tools(self):
         import server

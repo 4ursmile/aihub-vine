@@ -127,17 +127,38 @@ A **Space** is a document, slide deck, report, PDF, sheet, dashboard or HTML pag
 aihub space publish deck.pptx q3-review --view fit            # .pptx -> slides with transitions
 aihub space publish report.html --kind dashboard --private    # one HTML file (sandboxed)
 aihub space publish ./site team-site                          # folder with index.html (packed as .tar.gz)
-aihub space publish new.pptx alice@q3-review                  # new version of a space you may edit
-aihub space share alice@q3-review --group data-team [--edit]  # private spaces: view or edit, like a package
+aihub space publish report.html --tags finance,q3             # tags = an easy category (search matches them; Spaces page shows them as chips)
+aihub space publish new.pptx alice@q3-review --note "Q3 numbers" # new revision of a space you may edit (note shown in the history)
+aihub space share alice@q3-review --group data-team [--edit]  # view (default), comment or edit, like a package
+aihub space share alice@q3-review --user bob --access comment
+aihub space set alice@q3-review --public-access comment       # a PUBLIC space: signed-in visitors may comment (anonymous: view only)
 aihub space set alice@q3-review --transition fade --autoplay 8 --loop --view full
 aihub space url alice@q3-review --view full                   # link that opens full screen (--bare: no hub header)
-aihub space list [--mine] [--kind slides] [--since UNIX_TIME] | top | search WORDS | info REF | get REF -o file | rm REF -y   # --since: changed at/after, oldest first
+aihub space list [--mine] [--kind slides] [--since UNIX_TIME] | top | search WORDS | info REF | get REF -o file [--rev N] | rm REF -y   # --since: changed at/after, oldest first
+aihub space comments alice@q3-review                          # threads, newest replies nested; --json for the raw list
+aihub space comment alice@q3-review "Typo here, @bob" --slide 4   # --reply ID answers a comment; @name / @group alerts that person or group on the hub (they must be able to open the space)
+aihub space resolve alice@q3-review 12 [--reopen]
+aihub space versions alice@q3-review                          # revision, date, author, size, note
+aihub space restore alice@q3-review 3 [--note TEXT]           # publishes revision 3 again as a NEW revision
 ```
 
 Accepted: `.pptx`, `.html` deck (`<section class="slide">` parts, optional `data-transition`, `<aside class="notes">`, `<meta name="aihub-slide-size" content="1280x720">`),
 `.docx`, `.md`, `.txt`, `.xlsx`/`.csv`/`.tsv`, `.pdf`, `.html`, `.zip`/`.tar.gz` with `index.html`. Kinds: doc, slides, report, pdf, sheet, dashboard, html.
 The same form is on the hub: Spaces > New space (drop a file). `--view canvas|fit|full` is the default viewer size; readers switch it on the page.
-Publishing the same name again replaces the content (rev + 1) and keeps the metadata you do not send. Needs the `publish` permission.
+Publishing the same name again adds a new revision (rev + 1) and keeps the metadata you do not send. Needs the `publish` permission.
+
+**Who may do what**: view < comment < edit < admin (the owner and site admins). A public space is VIEW for everyone, signed in or not; its owner can let
+signed-in visitors comment (`--public-access comment`, or the Share dialog on the page); anonymous visitors never comment. Sharing (`--access` or
+`--edit`) gives a user or group `view`, `comment` or `edit`; the highest level that applies wins.
+
+**Comments**: anyone with comment access writes, replies (`--reply ID`) and resolves (`resolve ID`, `--reopen`); the author edits their own text, the
+author or the space owner deletes it. A deleted comment keeps its replies readable under a "deleted" marker. A comment remembers the revision it was
+written on and, optionally, where (`--slide N`). On the page: Comments in the toolbar (new comments are anchored to the slide on screen).
+
+**Version history**: every publish (and every restore) is a revision with its author, size and `--note`. `versions` lists them, `get --rev N` downloads
+one, `restore REV` publishes an old one again as a new revision (edit access; history is never rewritten). The hub keeps the last
+`space_versions_keep` revisions per space (admin number in Admin > Sync, default 20; the current one is never removed). On the page: History in the
+toolbar (View / Download / Restore / Delete by level). With `--json` these commands return the hub's reply as `data`.
 
 ## Hub administration (`aihub admin`)
 
@@ -359,3 +380,38 @@ With a hub and `aihub login`, the CLI also uploads your **daily token totals** s
 - **Cheap:** routine uploads only total the last 2 UTC days (a full pass runs on the first upload, after a login, weekly, and for `aihub usage-sync`), send only rows that changed, gzip them, the hub writes uploads of all users in one transaction per few seconds, and answers a usage query with four SQL statements. A hook process no longer loads `ssl`/git (about 10 ms less per tool call).
 - **Hooks stay in place:** the hooks re-check `~/.claude/settings.json` themselves at most every 5 minutes, and every `aihub` command, the first run, `aihub login`, `aihub usage` and each upload run the same check, so a hand edit that removed one of our entries is undone. (If all three entries are deleted, Claude Code no longer calls us; the next `aihub` command restores them.)
 - `aihub usage-sync` uploads now. Turn it off with `aihub config set usage_sync off` or `AIHUB_USAGE_SYNC=off`. Codex has no turn hook: its usage is uploaded together with the next Claude turn or by `aihub usage-sync`.
+
+
+## Works without the UI (`aihub work`)
+
+`aihub work` is the aihub-ui Works engine for a terminal or a server: the same work files as the UI, so a work designed in the UI runs here and back. It needs the `aihub-ui` package (`aihub install aihub-ui`; `aihub work` offers to install it when it is missing). Every work is turned into a shareable copy with `export` and back with `import`; the rules are in [ui-nodes](ui-nodes.md#sharing-a-work-no-credentials-its-files-come-along).
+
+```sh
+aihub work list                                  # works: on/off, triggers, NEEDS SETUP count, who fires triggers
+aihub work show W                                # nodes, inputs, what it still needs
+aihub work pull PKG [--file F] [--again] [-i]    # aihub install PKG, then add its works (switched off)
+aihub work import FILE.work.json|FOLDER          # a shared work from a file or folder
+aihub work export W [-o DIR] [--no-notes]        # shareable copy: no secrets, no credential sets
+aihub work setup W [--creds FILE|-] [--folder NODE=PATH] [--env NAME] [--install]   # pick or create the credential sets, working folders and secret fields it needs, then the Python packages of its code nodes
+aihub work set W NODE key=value ... [--folder PATH] [--credential SET|none] [--grant SET] [--revoke SET] [--secret FIELD]
+aihub work enable W | disable W [--force]
+aihub work run W [--input name=value|name=@file] [--text T] [--node TRIGGER] [-q] [--timeout S]   # one run here, live step log; exit 0 = done, 1 otherwise; Ctrl-C stops it
+aihub work runs W [-n N] | logs W [RUN] [--node N]
+aihub work serve [--hooks PORT]                  # fire cron and package triggers of enabled works until stopped (--hooks: webhooks on 127.0.0.1:PORT, same URLs and tokens as the UI)
+aihub work serve --bg                            # the same in the background: runs as `aihub-works` under `aihub run` (restart always); `aihub run logs aihub-works -f`, `aihub run stop aihub-works`
+aihub work cred list | kinds | template KIND | show SET | add --kind K --name N [--file F|-] | set SET [--name N] [--file F|-] | rm SET [-y]
+aihub work lib                                   # folder of aihub_vault + aihub_data for your own scripts (PYTHONPATH=$(aihub work lib) python my_etl.py)
+aihub work env list                              # managed Python environments (~/.aihub/ui/envs/NAME)
+aihub work env check W [--node N]                # each SQL / Spark / Python node: its Python, the packages it needs (installed or not), Java for Spark; exit 1 if something is missing
+aihub work env install W [--node N] [--env NAME] # install what they miss, one pip run per Python (--env first points the nodes at that environment, made when missing)
+aihub work env check|install --type db.sql --set driver=oracle --set frame=polars --env data   # the same for a node type, before any work exists
+aihub work rm W [-y]
+```
+
+- `W` is the work id, its title (case does not matter; a unique prefix is enough), its slug, or the package it came from.
+- `--json` anywhere gives one JSON document; inside `aihub --json work ...` it becomes the envelope's `data`.
+- Secrets are typed at a hidden prompt or read from a JSON file or stdin (`--file -`, `--creds -`), never from argv, and never printed (stored values show as `(stored)`).
+- `--creds FILE` takes `{"s3": {"buckets": [...]}, "trino": {"host": "...", "password": "..."}}` (kind -> fields; the set is named after the kind) or `{"sets": [{"kind": "s3", "name": "Lake", "fields": {...}}]}`. `aihub work cred template s3` prints a skeleton. Without a terminal and without `--creds`, `setup` picks the only set of a kind and otherwise stops with the exact `aihub work cred add ...` to run.
+- Only ONE process on a machine fires cron and package triggers: the UI or `aihub work serve`, never both. The lease is `~/.aihub/ui/scheduler.json`, renewed every 15 s and taken over when it is older than 60 s or its process is dead. The Works page says when `aihub work serve` holds it. Manual runs, chat cards and `aihub work run` run in whatever process starts them; a starting process no longer marks runs of another live process as interrupted.
+- `env`: what a node needs comes from its settings (SQL: sqlalchemy, the database driver, pandas / polars; Spark: pyspark), its code's imports and a shared node's `requires`. Installs use `python -m pip install` (`uv pip` when the env has no pip); Java is never installed, its command is printed. `setup` installs packages after asking in a terminal; from a script only with `--install` or `--env NAME`.
+- Server flow: `aihub install aihub-ui`, `aihub work pull workflow-sales-etl`, `aihub work setup sales-etl --creds creds.json --env data`, `aihub work run sales-etl --input day=2026-10-31` to try it, then `aihub work enable sales-etl && aihub work serve --bg`.

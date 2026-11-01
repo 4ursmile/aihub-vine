@@ -142,6 +142,9 @@ class Mirror(Base):
         self.assertEqual(X.spaces("")[0]["chat"], True)
         self.assertEqual(self.refs(""), ["bob@design"])
 
+    def test_menu_listing_skips_shared_chats_and_orders_by_views(self):
+        self.assertEqual([x["ref"] for x in X.spaces("", 30, chats=False)], ["alice@q3-review", "alice@quarterly-plan"])
+
     def test_another_account_empties_the_mirror(self):
         X.merge_spaces([], {"context": {"hub": "h", "username": "someone-else"}})
         self.assertEqual(self.refs("alice"), [])
@@ -262,3 +265,39 @@ class Routes(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SuggestSpaces(Base):
+    """@space: menu (sources.suggest): answered from the mirror, hub only when the mirror has nothing."""
+
+    def setUp(self):
+        super().setUp()
+        X.merge_spaces([{"ref": "alice@q3-review", "title": "Q3 review", "kind": "slides", "tags": ["finance"], "views": 9},
+                        {"ref": "alice@plan", "title": "Plan", "kind": "doc", "tags": [], "views": 3}], {"context": {"hub": "h", "username": "me"}})
+        from aihubui import sources
+        self.S = sources
+
+    def test_local_answer_without_calling_the_hub(self):
+        with mock.patch.object(self.S.A, "run", side_effect=AssertionError("hub called")):
+            X.asked("hub", "q3")
+            items = self.S.suggest("space:q3", online=False)
+        self.assertEqual([i["name"] for i in items], ["space:alice@q3-review"])
+        self.assertTrue(items[0]["pre"])
+
+    def test_plain_menu_cap(self):
+        with mock.patch.object(self.S, "CAP", 1):
+            self.assertEqual(len([i for i in self.S.suggest("", online=False) if i["source"] == "space"]), 1)
+
+    def test_empty_mirror_asks_the_hub_once_and_remembers(self):
+        X.reset()
+        calls = []
+
+        def run(args, **k):
+            calls.append(args)
+            return {"ok": True, "context": {"hub": "h", "username": "me"}, "data": {"items": [{"ref": "dan@budget", "title": "Budget", "kind": "sheet", "tags": ["finance"], "views": 1}]}}
+        with mock.patch.object(self.S.A, "run", side_effect=run), mock.patch.object(X, "refresh", return_value=False):      # the background seed is not under test
+            first = self.S.suggest("space:budget")
+            second = self.S.suggest("space:budget")
+        self.assertEqual([i["name"] for i in first], ["space:dan@budget"])
+        self.assertEqual([i["name"] for i in second], ["space:dan@budget"])
+        self.assertEqual(len(calls), 1)

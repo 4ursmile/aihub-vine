@@ -4,6 +4,7 @@ import io
 import os
 import re
 import tarfile
+import time
 import urllib.parse
 import webbrowser
 
@@ -56,7 +57,7 @@ def _publish(a):
     else:
         raise ValueError("no such file or folder: " + a.path)
     q = {"filename": urllib.parse.quote(fname)}
-    for k in ("kind", "title", "description", "tags", "view", "transition", "autoplay"):
+    for k in ("kind", "title", "description", "tags", "view", "transition", "autoplay", "note"):
         v = getattr(a, k, None)
         if v not in (None, ""):
             q[k] = v
@@ -131,13 +132,14 @@ def cli(a):
         ui.result(d)
         ui.out()
         ui.out("%s  %s" % (ui.bold(d["ref"]), d["title"]))
-        for k in ("kind", "visibility", "views", "rev", "filename", "size", "tags", "description"):
-            ui.out("  %-12s %s" % (k, ", ".join(d[k]) if isinstance(d[k], list) else d[k]))
-        ui.out("  %-12s %s" % ("viewer", json_line(d["settings"]) or "(defaults)"))
-        ui.out("  %-12s %s" % ("link", link(ref)))
+        for k in ("kind", "visibility", "public_access", "views", "rev", "comments", "filename", "size", "tags", "description"):
+            if k in d:                                        # public_access / comments: hubs from before comments do not send them
+                ui.out("  %-14s %s" % (k, ", ".join(d[k]) if isinstance(d[k], list) else d[k]))
+        ui.out("  %-14s %s" % ("viewer", json_line(d["settings"]) or "(defaults)"))
+        ui.out("  %-14s %s" % ("link", link(ref)))
         if d.get("can_manage"):
             for x in api.call("GET", "/spaces/%s/access" % e)["access"]:
-                ui.out("  shared       %s %s: %s" % (x["type"], x["name"], x["access"]))
+                ui.out("  shared         %s %s: %s" % (x["type"], x["name"], x["access"]))
     elif act == "url":
         u = link(ref, **({"mode": a.view} if a.view else {}), **({"bare": 1} if a.bare else {}))
         ui.result({"url": u})
@@ -149,16 +151,25 @@ def cli(a):
         ui.out(u)
         webbrowser.open(u)
     elif act == "get":
-        out = a.output or api.call("GET", "/spaces/" + e)["filename"] or (ref.split("@")[1] + ".bin")
-        with api._req("GET", "/spaces/%s/file" % e, timeout=600) as r, open(out, "wb") as f:
+        rev = getattr(a, "rev", None)
+        if rev is not None:                                   # an older revision: its own file name
+            v = [x for x in api.call("GET", "/spaces/%s/versions" % e)["items"] if x["rev"] == rev]
+            if not v:
+                raise ValueError("%s has no revision %d (see `aihub space versions %s`)" % (ref, rev, ref))
+            name = v[0]["filename"]
+        else:
+            name = api.call("GET", "/spaces/" + e)["filename"]
+        out = a.output or name or (ref.split("@")[1] + ".bin")
+        path = "/spaces/%s/file" % e + ("?rev=%d" % rev if rev is not None else "")
+        with api._req("GET", path, timeout=600) as r, open(out, "wb") as f:
             while True:
                 b = r.read(1 << 20)
                 if not b:
                     break
                 f.write(b)
-        ui.result({"saved": out})
+        ui.result({"saved": out, "rev": rev})
         ui.out()
-        ui.good("saved " + out)
+        ui.good("saved " + out + (" (revision %d)" % rev if rev is not None else ""))
     elif act == "rm":
         if not a.yes and not ui.confirm("Delete %s for everyone?" % ref, default=False):
             raise ValueError("not deleted (use --yes to skip the question)")
@@ -167,7 +178,7 @@ def cli(a):
         ui.good("deleted " + ref)
     elif act == "set":
         body = {}
-        for k in ("title", "description", "tags", "view", "transition", "autoplay", "kind"):
+        for k in ("title", "description", "tags", "view", "transition", "autoplay", "kind", "public_access"):
             v = getattr(a, k, None)
             if v not in (None, ""):
                 body[k] = v
@@ -176,7 +187,7 @@ def cli(a):
         if a.private or a.public:
             body["visibility"] = "private" if a.private else "public"
         if not body:
-            raise ValueError("nothing to change: pass --title, --view, --transition, --public, ...")
+            raise ValueError("nothing to change: pass --title, --view, --transition, --public, --public-access, ...")
         d = api.call("PATCH", "/spaces/" + e, body)
         ui.result(d)
         ui.out()
@@ -195,15 +206,105 @@ def cli(a):
         if not who:
             raise ValueError("name who: --user NAME or --group NAME")
         ui.out()
+        level = getattr(a, "access", None) or ("edit" if a.edit else "view")
+        if a.edit and level != "edit":
+            raise ValueError("choose --edit or --access %s, not both" % level)
         for t, n in who:
             if act == "share":
-                api.call("PUT", "/spaces/%s/access" % e, {"type": t, "name": n, "access": "edit" if a.edit else "view"})
-                ui.good("shared %s with %s %s (%s)" % (ref, t, n, "edit" if a.edit else "view"))
+                api.call("PUT", "/spaces/%s/access" % e, {"type": t, "name": n, "access": level})
+                ui.good("shared %s with %s %s (%s)" % (ref, t, n, level))
             else:
                 api.call("DELETE", "/spaces/%s/access/%s/%s" % (e, t, urllib.parse.quote(n)))
                 ui.good("removed %s %s from %s" % (t, n, ref))
+    elif act in ("comments", "comment", "resolve"):
+        return _comments(a, act, ref, e)
+    elif act in ("versions", "restore"):
+        return _versions(a, act, ref, e)
     else:
         raise ValueError("unknown action " + act)
+
+
+def _size(n):
+    return "%d B" % n if n < 1024 else "%.1f KB" % (n / 1024.0) if n < 1 << 20 else "%.1f MB" % (n / 1048576.0)
+
+
+def _when(t):
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(t or 0))
+
+
+def _where(c):
+    an = c.get("anchor") or {}
+    return " ".join("%s %s" % (k, v) for k, v in sorted(an.items()))
+
+
+def _comments(a, act, ref, e):
+    if act == "comment":
+        text = a.extra
+        if not text:
+            raise ValueError('aihub space comment %s "your text" [--reply ID] [--slide N]' % ref)
+        body = {"body": text}
+        if a.reply is not None:
+            body["parent_id"] = a.reply
+        if a.slide is not None:
+            body["anchor"] = {"slide": a.slide}
+        c = api.call("POST", "/spaces/%s/comments" % e, body)
+        ui.result(c)
+        ui.out()
+        ui.good("comment %d added to %s" % (c["id"], ref))
+        return
+    if act == "resolve":
+        try:
+            cid = int(a.extra or "")
+        except ValueError:
+            raise ValueError("aihub space resolve %s COMMENT_ID [--reopen]   (ids: aihub space comments %s)" % (ref, ref))
+        c = api.call("PATCH", "/spaces/%s/comments/%d" % (e, cid), {"resolved": not a.reopen})
+        ui.result(c)
+        ui.out()
+        ui.good("comment %d %s" % (cid, "resolved" if c["resolved"] else "reopened"))
+        return
+    res = api.call("GET", "/spaces/%s/comments" % e)
+    ui.result(res)
+    ui.out()
+    if not res["items"]:
+        ui.info("no comments on %s yet%s" % (ref, "" if res.get("can_comment") else " (you may read, not write)"))
+        return
+
+    def show(c, depth):
+        pad = "  " * depth
+        if c["deleted"]:
+            ui.out("%s#%d  (deleted)" % (pad, c["id"]))
+        else:
+            who = (c["author"] or {}).get("username") or "?"
+            tags = [x for x in (_where(c), "resolved" if c["resolved"] else "", "edited" if c["edited"] else "", "rev %d" % c["rev"]) if x]
+            ui.out("%s#%d  %s  %s  %s" % (pad, c["id"], ui.bold(who), _when(c["created"]), ", ".join(tags)))
+            for line in c["body"].splitlines() or [""]:
+                ui.out("%s    %s" % (pad, line))
+        for x in c["replies"]:
+            show(x, depth + 1)
+    for c in res["items"]:
+        show(c, 0)
+    ui.info("%d comment%s, %d open" % (res["total"], "" if res["total"] == 1 else "s", res["open"]))
+
+
+def _versions(a, act, ref, e):
+    if act == "restore":
+        try:
+            rev = int(a.extra or "")
+        except ValueError:
+            raise ValueError("aihub space restore %s REV   (revisions: aihub space versions %s)" % (ref, ref))
+        res = api.call("POST", "/spaces/%s/versions/%d/restore" % (e, rev), {"note": a.note} if a.note else {})
+        ui.result(dict(res, url=link(ref)))
+        ui.out()
+        ui.good("restored revision %d of %s as revision %d" % (rev, ref, res["rev"]))
+        return
+    res = api.call("GET", "/spaces/%s/versions" % e)
+    ui.result(res)
+    ui.out()
+    rows = [[("* " if v["current"] else "  ") + str(v["rev"]), _when(v["created"]), v["author"] or "?", _size(v["size"] or 0),
+             v["filename"] + ("" if v["available"] else " (files gone)"), v["note"]] for v in res["items"]]
+    ui.table(["REV", "DATE", "BY", "SIZE", "FILE", "NOTE"], rows)
+    ui.info("* = current; up to %d revisions are kept. Open one: aihub space get %s --rev N; bring it back: aihub space restore %s N"
+            % (res["keep"], ref, ref))
 
 
 def json_line(d):

@@ -28,7 +28,7 @@ import threading
 import time
 import uuid
 
-from . import aihub as A, chat, sources, store
+from . import aihub as A, chat, nodeenv, sources, store
 from .secretbox import write_private
 
 MARK = "__stored__"                      # what a stored secret looks like inside the work file
@@ -37,7 +37,7 @@ WORKERS = 4                              # nodes of one run that may run at the 
 OUT_KINDS = ("text", "path", "json", "url")
 NODE_ID = re.compile(r"^[a-z][a-z0-9_.-]{0,40}$")
 KINDS = ("trigger", "action")
-FIELD_TYPES = ("text", "textarea", "number", "checkbox", "select", "password", "model", "effort", "mode", "folder", "code")
+FIELD_TYPES = ("text", "textarea", "number", "checkbox", "select", "password", "model", "effort", "mode", "folder", "code", "env")
 FILTER = {"name": "filter", "label": "Only start when the text matches (regex)", "type": "text", "default": "", "help": "Checked first; empty = every event starts a run."}
 
 TEAMS_OUT_GUIDE = """Send a message to Teams (no app registration, no admin consent):
@@ -129,9 +129,64 @@ PYFN_GUIDE = ("Write one function (`main`, else `run`, else the last one) with O
               "The argument is filled for you: {{data.x}} keys of the nodes before, the input text when it is a JSON object (a plain text input fills a field named `input` or `text`), then the Arguments field. "
               "The return becomes this node's output (JSON); each key is {{data.key}} later. print() goes to the run log. "
               "Runs on your machine with the UI's Python (pydantic must be installed for it: python -m pip install pydantic). Dict-only code needs nothing.")
+PYFN_GUIDE += (" Multi-step (ETL): put `# %% name` lines between the steps; they run in order in one namespace, each timed in the log, and see `data` (the parsed input), "
+               "`inputs`, `text`, `workdir`, `vault` (aihub_vault: the credential sets ticked under 'Code may read' and the node's own set: vault.bucket(\"raw\").uri(\"x.csv\"), "
+               "vault.credential(\"warehouse\")[\"password\"]) and `result` (a dict: the output). A main(args) defined by the steps is still called after them.")
+ETL_SAMPLE = """# %% extract
+import json
+rows = data.get("rows") or [{"country": "VN", "n": 2}, {"country": "FR", "n": 3}]
+# %% transform
+total = sum(r["n"] for r in rows)
+# %% load
+result["total"] = total
+result["countries"] = sorted({r["country"] for r in rows})
+"""
+SPARK_SAMPLE = """# %% extract
+# buckets of the node's S3 credential set are ready for s3a:// (endpoint, keys, path style per bucket)
+# df = spark.read.option("header", True).csv(s3a("raw", "in/*.csv"))
+df = spark.createDataFrame([("VN", 2), ("FR", 3), ("VN", 5)], ["country", "n"])
+# %% transform
+out = df.groupBy("country").sum("n").withColumnRenamed("sum(n)", "total")
+# %% load
+# out.write.mode("overwrite").parquet(s3a("lake", "daily/{}/".format(data.get("day", "today"))))
+result["rows"] = out.count()
+result["preview"] = out            # a DataFrame in result becomes its first rows (Max rows)
+"""
+TRINO_SAMPLE = """-- %% count
+SELECT count(*) AS n FROM tpch.tiny.nation;
+-- %% top regions
+SELECT r.name AS region, count(*) AS nations
+FROM tpch.tiny.nation n JOIN tpch.tiny.region r ON n.regionkey = r.regionkey
+GROUP BY r.name ORDER BY nations DESC
+"""
+TRINO_GUIDE = """Runs SQL on Trino (or Presto) with the stdlib HTTP protocol: no driver to install.
+* Login: pick a 'trino' credential set (Settings > Credentials or `aihub work cred add --kind trino`); a field typed here overrides it.
+* Several statements (`;` between them) run one after the other in ONE session (USE, SET SESSION and transactions carry over), each one a step in the log. `-- %% name` names a step.
+* The LAST statement that returns rows is the result: Output = table (markdown, first Max rows), json, csv, or path (all rows streamed to a file in the node folder: for big results; the next node gets the PATH).
+* {{input}} and {{data.x}} are filled into the SQL (the text is pasted as is: quote values yourself). Data for later nodes: columns, rows, row_count, steps, path."""
+SQL_SAMPLE = """-- %% orders per country
+SELECT country, count(*) AS orders
+FROM orders
+GROUP BY country
+ORDER BY orders DESC
+"""
+SQL_GUIDE = """Runs SQL on any database SQLAlchemy reaches: PostgreSQL, SQL Server, Oracle, Trino, MySQL, SQLite, DuckDB (or any SQLAlchemy URL).
+* Environment: the box above checks the Python this node runs with and installs what is missing in one click: SQLAlchemy, the DRIVER of your database (psycopg, pymssql / pyodbc, oracledb, trino, pymysql, duckdb-engine) and pandas / polars when you pick them. Or copy the one command it shows. A separate environment (e.g. `data`) keeps them away from the UI's own Python.
+* Login: pick a 'sql' credential set (Settings > Credentials or `aihub work cred add --kind sql`), or fill Host, Port, User, Database here; Password is stored encrypted. Or a full SQLAlchemy URL (secret field). Options = extra URL parameters (key=value&key=value).
+* Read and write with: native (SQLAlchemy rows), pandas or polars: the frame library reads the LAST query (SELECT, WITH, SHOW ...) and writes Write table.
+* Several statements (`;` between them, `-- %% name` names one) run in order on ONE connection, each committed; each is a step in the log.
+* Output = table (markdown, first Max rows), json, csv, or path (a csv / json / jsonl / parquet file in the node folder: the next node gets its path).
+* Write table: rows coming in ({{data.rows}} of a node before, a JSON list, or a csv / json / jsonl / parquet path) are written into that table BEFORE the SQL (append, replace or fail when it exists).
+* {{input}} and {{data.x}} are pasted into the SQL as they are: quote values yourself. In a Python node use the same with `import aihub_data as ad; eng = ad.engine("<set name>")`."""
+SPARK_GUIDE = """Runs PySpark code in steps (`# %% name` between them, like notebook cells), for ETL jobs.
+* Where: mode `session` builds a SparkSession with Master (local[*] on this machine, spark://host:7077, yarn, k8s://...); mode `spark-submit` hands the job to spark-submit (SPARK_HOME or PATH) for your cluster's own setup.
+* Environment: the box above checks the Python (pyspark) and Java this job needs and installs pyspark in one click (Java: the command it shows). Empty = $PYSPARK_PYTHON, else the UI's Python; a name such as `spark` = a separate environment made for it.
+* Storage: pick an S3 credential set (any number of buckets, each with its own endpoint and keys): every bucket is configured for s3a:// by itself, keys never on a command line. Packages `auto` adds the hadoop-aws that matches your pyspark (session mode, when buckets are granted).
+* The steps see spark, sc, s3a(bucket, path), buckets, vault (aihub_vault), data (the input + Arguments), inputs, text, workdir and result (a dict = the output; a DataFrame in it becomes its first Max rows)."""
 SPACE_GUIDE = """Publishes a file or folder to the hub as a Space (document, slides, report, PDF, sheet, dashboard, HTML page).
 - File or folder: the path to publish. Empty = the path the previous node ended with (a Claude task should end its answer with `OUTPUT: /full/path`). A folder must have index.html.
 - Space name: lower-case slug. The same name again publishes a new revision of that space; empty = named after the file.
+- Tags: comma separated words (finance, q3) that make it easy to find the space by category; the same name again keeps them unless new ones are given.
 - Private by default; choose public to let anyone with the link read it. Needs `aihub login` to the hub.
 Output: the space reference and its link."""
 
@@ -232,11 +287,64 @@ BUILTIN = {
                               {"name": "title", "label": "Title (optional)", "type": "text", "default": ""},
                               {"name": "text", "label": "Message", "type": "textarea", "default": "{{input}}", "required": True},
                               {"name": "payload", "label": "Payload", "type": "select", "options": ["card", "text"], "default": "card", "help": "card = Adaptive Card (the Teams template). text = {\"text\": ...} for your own flow."}]},
-    "code.python": {"title": "Python function", "kind": "action", "group": "Code", "desc": "Runs a Python function you write. Type its argument and its return as a pydantic model or a dict: the input is parsed into the argument and the return becomes JSON for the next nodes.",
+    "code.python": {"title": "Python function", "kind": "action", "group": "Code", "desc": "Runs a Python function you write (typed argument and return: pydantic or dict), or ETL code in steps (# %% cells) that reads granted credential sets with aihub_vault. The result becomes JSON for the next nodes.",
                     "run": ["{python}", "{pkg}/nodes/python_fn.py"], "timeout": 300, "timeout_key": "timeout", "templated": ["args"], "guide": PYFN_GUIDE,
-                    "fields": [{"name": "code", "label": "Python code", "type": "code", "required": True, "default": PYFN_SAMPLE},
+                    "fields": [{"name": "code", "label": "Python code", "type": "code", "lang": "python", "required": True, "default": PYFN_SAMPLE},
                                {"name": "args", "label": "Arguments (optional JSON object)", "type": "text", "default": "", "help": "Overrides the parsed input, e.g. {\"n\": {{data.count}}}. {{input}} and {{data.x}} are filled in."},
+                               {"name": "python", "label": "Python environment", "type": "env", "default": "", "help": "Empty = the UI's Python; a name (e.g. data) = a separate environment under ~/.aihub/ui/envs; or a path to a python / venv."},
                                {"name": "timeout", "label": "Timeout (seconds)", "type": "number", "default": 60}]},
+    "db.sql": {"title": "SQL database", "kind": "action", "group": "Data", "desc": "Runs SQL with SQLAlchemy on PostgreSQL, SQL Server, Oracle, Trino, MySQL, SQLite, DuckDB ...: statements in one connection, results read natively or with pandas / polars, rows written into a table. Checks and installs its drivers.",
+               "run": ["{python}", "{pkg}/nodes/sql_query.py"], "timeout": 600, "timeout_key": "timeout", "templated": ["sql"], "guide": SQL_GUIDE,
+               "fields": [{"name": "sql", "label": "SQL (statements separated by ;)", "type": "code", "lang": "sql", "default": SQL_SAMPLE},
+                          {"name": "driver", "label": "Database", "type": "select", "options": ["postgresql", "mssql", "mssql-odbc", "oracle", "trino", "mysql", "sqlite", "duckdb", "other"], "default": "postgresql",
+                           "help": "mssql = pymssql, mssql-odbc = pyodbc (needs Microsoft's ODBC Driver 18), oracle = oracledb thin (no client), other = write the URL."},
+                          {"name": "frame", "label": "Read and write with", "type": "select", "options": ["native", "pandas", "polars"], "default": "native", "help": "native = SQLAlchemy rows (nothing else to install)."},
+                          {"name": "python", "label": "Python environment", "type": "env", "default": "", "help": "Empty = the UI's Python; a name (e.g. data) = a separate environment under ~/.aihub/ui/envs; or a path to a python / venv."},
+                          {"name": "output", "label": "Result as", "type": "select", "options": ["table", "json", "csv", "path"], "default": "table", "help": "path = all rows written to a file in the node folder; the next node gets its path."},
+                          {"name": "file_format", "label": "File format (for path)", "type": "select", "options": ["csv", "json", "jsonl", "parquet"], "default": "csv"},
+                          {"name": "file_name", "label": "File name (for path)", "type": "text", "default": "result"},
+                          {"name": "max_rows", "label": "Max rows kept in the output", "type": "number", "default": 1000},
+                          {"name": "write_table", "label": "Write table (optional)", "type": "text", "default": "", "help": "Writes the rows coming in into this table before the SQL runs."},
+                          {"name": "if_exists", "label": "When the table exists", "type": "select", "options": ["append", "replace", "fail"], "default": "append"},
+                          {"name": "write_schema", "label": "Schema of the write table", "type": "text", "default": ""},
+                          {"name": "host", "label": "Host (or from the credential set)", "type": "text", "default": ""},
+                          {"name": "port", "label": "Port", "type": "text", "default": ""},
+                          {"name": "user", "label": "User", "type": "text", "default": ""},
+                          {"name": "password", "label": "Password", "type": "password"},
+                          {"name": "database", "label": "Database (Oracle: service name, SQLite / DuckDB: file, Trino: catalog/schema)", "type": "text", "default": ""},
+                          {"name": "options", "label": "Options (key=value&key=value)", "type": "text", "default": "", "help": "Extra URL parameters, e.g. sslmode=require or TrustServerCertificate=yes."},
+                          {"name": "url", "label": "SQLAlchemy URL (instead of the fields; stored encrypted)", "type": "password", "help": "e.g. postgresql+psycopg://me:pw@db:5432/sales"},
+                          {"name": "verify", "label": "Check TLS certificate (Trino: true / false)", "type": "text", "default": ""},
+                          {"name": "timeout", "label": "Timeout (seconds)", "type": "number", "default": 600}]},
+    "db.trino": {"title": "Trino SQL (no driver)", "kind": "action", "group": "Data", "desc": "Runs SQL on Trino / Presto over its HTTP protocol, nothing to install (for SQLAlchemy, pandas or polars use SQL database with Database = trino): several statements in one session (ETL steps), the last result as a table, JSON, CSV or a file. Uses a 'trino' credential set.",
+                 "run": ["{python}", "{pkg}/nodes/trino_query.py"], "timeout": 600, "timeout_key": "timeout", "templated": ["sql"], "guide": TRINO_GUIDE,
+                 "fields": [{"name": "sql", "label": "SQL (statements separated by ;)", "type": "code", "lang": "sql", "required": True, "default": TRINO_SAMPLE},
+                            {"name": "output", "label": "Result as", "type": "select", "options": ["table", "json", "csv", "path"], "default": "table", "help": "path = all rows written to a file in the node folder; the next node gets its path."},
+                            {"name": "file_format", "label": "File format (for path)", "type": "select", "options": ["csv", "json", "jsonl"], "default": "csv"},
+                            {"name": "file_name", "label": "File name (for path)", "type": "text", "default": "result"},
+                            {"name": "max_rows", "label": "Max rows kept in the output", "type": "number", "default": 1000},
+                            {"name": "host", "label": "Host (or from the credential set)", "type": "text", "default": ""},
+                            {"name": "port", "label": "Port", "type": "text", "default": ""},
+                            {"name": "http_scheme", "label": "Scheme", "type": "select", "options": ["", "https", "http"], "default": ""},
+                            {"name": "user", "label": "User", "type": "text", "default": ""},
+                            {"name": "password", "label": "Password", "type": "password"},
+                            {"name": "catalog", "label": "Catalog", "type": "text", "default": ""},
+                            {"name": "schema", "label": "Schema", "type": "text", "default": ""},
+                            {"name": "verify", "label": "Check TLS certificate (true / false)", "type": "text", "default": ""},
+                            {"name": "timeout", "label": "Timeout (seconds)", "type": "number", "default": 600}]},
+    "etl.spark": {"title": "Spark job", "kind": "action", "group": "Code", "desc": "Runs PySpark code in steps (# %% cells) locally or on your cluster, with every bucket of an S3 credential set ready for s3a://.",
+                  "run": ["{python}", "{pkg}/nodes/spark_job.py"], "timeout": 1800, "timeout_key": "timeout", "templated": ["args", "master"], "guide": SPARK_GUIDE,
+                  "fields": [{"name": "code", "label": "PySpark code (# %% name between steps)", "type": "code", "lang": "python", "required": True, "default": SPARK_SAMPLE},
+                             {"name": "mode", "label": "Run with", "type": "select", "options": ["session", "spark-submit"], "default": "session"},
+                             {"name": "master", "label": "Master", "type": "text", "default": "local[*]", "help": "local[*], spark://host:7077, yarn, k8s://https://... (session mode and spark-submit --master)"},
+                             {"name": "python", "label": "Python environment", "type": "env", "default": "", "help": "Empty = $PYSPARK_PYTHON or the UI's Python; a name (e.g. spark) = a separate environment under ~/.aihub/ui/envs; or a path to a python / venv."},
+                             {"name": "packages", "label": "Packages (spark.jars.packages)", "type": "text", "default": "auto", "help": "auto = hadoop-aws matching your pyspark when buckets are granted; empty = none; or maven coordinates, comma separated"},
+                             {"name": "conf", "label": "Spark settings (key=value per line)", "type": "textarea", "default": "", "help": "e.g. spark.executor.memory=4g. No secrets here: logins come from the credential set."},
+                             {"name": "spark_submit", "label": "spark-submit path (spark-submit mode)", "type": "text", "default": ""},
+                             {"name": "app_name", "label": "App name", "type": "text", "default": "aihub-works"},
+                             {"name": "args", "label": "Arguments (optional JSON object, = data)", "type": "text", "default": "", "help": "e.g. {\"day\": \"{{data.day}}\"}. Merged over the data of the nodes before."},
+                             {"name": "max_rows", "label": "Max rows of a DataFrame in the result", "type": "number", "default": 1000},
+                             {"name": "timeout", "label": "Timeout (seconds)", "type": "number", "default": 1800}]},
     "io.read_file": {"title": "Read file", "kind": "action", "group": "Data", "desc": "Reads a local text file (or lists a folder) and passes the text on. Key, secret and .env files are refused.",
                      "run": ["{python}", "{pkg}/nodes/read_file.py"], "timeout": 60, "templated": ["path"],
                      "fields": [{"name": "path", "label": "File or folder", "type": "text", "required": True, "default": "", "help": "~ works; a relative path starts in the run's working folder. {{data.x}} is filled in."},
@@ -279,12 +387,13 @@ BUILTIN = {
                 "fields": [{"name": "path", "label": "File, folder or pattern (one per line)", "type": "textarea", "required": True, "default": "", "help": "~ works; a relative path starts in the run's working folder."},
                            {"name": "must_exist", "label": "Fail when nothing is found", "type": "checkbox", "default": True}]},
     "space.publish": {"title": "Publish to Space", "kind": "action", "group": "Hub", "desc": "Publishes a document, slides, report, PDF, sheet, dashboard or HTML page (a file, or a folder with index.html) as a Space on the hub; the same name updates it.",
-                      "run": ["{python}", "{pkg}/nodes/space_publish.py"], "timeout": 930, "templated": ["path", "name", "title", "description"], "guide": SPACE_GUIDE,
+                      "run": ["{python}", "{pkg}/nodes/space_publish.py"], "timeout": 930, "templated": ["path", "name", "title", "description", "tags"], "guide": SPACE_GUIDE,
                       "fields": [{"name": "path", "label": "File or folder (empty = the path from the previous node)", "type": "text", "default": "{{input}}"},
                                  {"name": "name", "label": "Space name (slug; same name = new revision)", "type": "text", "default": ""},
                                  {"name": "kind", "label": "Kind", "type": "select", "options": ["auto", "doc", "slides", "report", "pdf", "sheet", "dashboard", "html"], "default": "auto"},
                                  {"name": "title", "label": "Title", "type": "text", "default": ""},
                                  {"name": "description", "label": "One line description", "type": "text", "default": ""},
+                                 {"name": "tags", "label": "Tags (comma separated, an easy category)", "type": "text", "default": "", "placeholder": "finance, q3, weekly"},
                                  {"name": "visibility", "label": "Who can open it", "type": "select", "options": ["private", "public"], "default": "private"}]},
     "send.email": {"title": "Send email (moved)", "kind": "action", "group": "Mail", "legacy": True, "hidden": True,
                    "desc": "Outlook mail moved to the package aihub-nodes-outlook (aihub install aihub-nodes-outlook). With it installed this node keeps working.",
@@ -346,7 +455,9 @@ for _t in ("git.read", "git.pull"):                                   # a login 
 BUILTIN_CRED = {"send.smtp": ("smtp", {}), "io.request": ("http", {}), "git.read": ("git", {"username": "username", "token": "token"}), "git.pull": ("git", {"username": "username", "token": "token"}),
                 "send.teams": ("teams", {"webhook_url": "webhook_url"}), "start.teams": ("teams", {"hook_secret": "secret"}),
                 "send.slack": ("slack", {"webhook_url": "webhook_url"}), "send.discord": ("discord", {"webhook_url": "webhook_url"}),
-                "start.slack": ("slack", {"signing_secret": "signing_secret"}), "start.telegram": ("telegram", {"bot_token": "bot_token"}), "send.telegram": ("telegram", {"bot_token": "bot_token"})}
+                "start.slack": ("slack", {"signing_secret": "signing_secret"}), "start.telegram": ("telegram", {"bot_token": "bot_token"}), "send.telegram": ("telegram", {"bot_token": "bot_token"}),
+                "db.trino": ("trino", {}), "etl.spark": ("s3", {}), "db.sql": ("sql", {})}
+CODE_NODES = ("code.python", "etl.spark", "db.trino")                # nodes whose code may read more credential sets with aihub_vault (`vault` on the node)
 for _t, (_k, _m) in BUILTIN_CRED.items():
     BUILTIN[_t]["credential"] = {"kind": _k, "map": _m}
 
@@ -379,7 +490,15 @@ BUILTIN_SCHEMA = {
     "flow.output": ([_IN_TEXT], [_o("text", "text", "the run's answer", "Report ready")]),
     "flow.memory": ([_IN_TEXT], [_o("text", "text", "remembered context + the input", "Remembered context: ...")]),
     "io.read_file": ([_i("path", "path", "a file (or folder) path; relative = the run folder (set in the node)", False)], [_o("text", "text", "the file's text", "col1,col2\n1,2"), _o("json", "json", "the parsed JSON when 'Parse' is JSON", "")]),
-    "code.python": ([_IN_TEXT], [_o("text", "json", "the function's return value as JSON", '{"total": 3}'), _o("<key>", "text", "each key of a returned object is {{data.key}}", "")]),
+    "code.python": ([_IN_TEXT], [_o("text", "json", "the function's return value (or `result` of the steps) as JSON", '{"total": 3}'), _o("<key>", "text", "each key of a returned object is {{data.key}}", ""),
+                                 _o("steps", "json", "multi-step code: name and seconds of each step", "")]),
+    "db.trino": ([_IN_TEXT], [_o("text", "text", "the last result as a table / JSON / CSV, or the file path", "| n |\n|---|\n| 25 |"), _o("rows", "json", "the rows (max rows) as objects", '[{"n": 25}]'),
+                              _o("columns", "json", "column names", '["n"]'), _o("row_count", "text", "rows of the last result", "25"), _o("path", "path", "the result file (output = path)", ""), _o("steps", "json", "each statement: name, seconds, rows", "")]),
+    "db.sql": ([_IN_TEXT, _i("rows", "json", "rows for Write table (a JSON list of objects); or a file path in the input", False)],
+               [_o("text", "text", "the last result as a table / JSON / CSV, or the file path", "| country | orders |\n|---|---|\n| VN | 12 |"), _o("rows", "json", "the rows (max rows) as objects", '[{"country": "VN", "orders": 12}]'),
+                _o("columns", "json", "column names", '["country", "orders"]'), _o("row_count", "text", "rows of the last result", "12"), _o("path", "path", "the result file (output = path)", ""),
+                _o("written", "json", "Write table: table, rows, from", ""), _o("steps", "json", "each statement: name, seconds, rows", "")]),
+    "etl.spark": ([_IN_TEXT], [_o("text", "json", "the `result` dict as JSON", '{"rows": 2}'), _o("<key>", "text", "each key of `result` is {{data.key}}", ""), _o("steps", "json", "name and seconds of each step", "")]),
     "io.request": ([_i("url", "url", "set in the node, may use {{data.x}}", False)], [_o("text", "json", "the answer text", '{"items": []}'), _o("status", "text", "HTTP status code", "200")]),
     "git.read": ([_i("url", "url", "repository URL", True)], [_o("text", "text", "the file text or folder listing", "# README ...")]),
     "git.pull": ([_i("url", "url", "repository URL", True)], [_o("text", "path", "the folder or file path, not its content", "/Users/me/.aihub/ui/git/repo"), _o("path", "path", "the same path as {{data.path}}", "/Users/me/.aihub/ui/git/repo")]),
@@ -475,8 +594,16 @@ def python_of(spec):
     return sys.executable
 
 
-def _argv(spec):
-    return [python_of(spec) if x == "{python}" else x.replace("{pkg}", spec["dir"]) for x in spec["run"]]
+def _argv(spec, cfg=None):
+    """The command of a node program. A node with an environment field runs with THAT Python (nodeenv: a managed env, a path, or the UI's)."""
+    py = python_of(spec)
+    ef = spec.get("env")
+    if ef and cfg is not None and str(cfg.get(ef) or "").strip():
+        try:
+            py = nodeenv.interpreter(cfg.get(ef), spark=spec.get("type") == "etl.spark")
+        except ValueError as e:
+            raise RuntimeError(str(e))
+    return [py if x == "{python}" else x.replace("{pkg}", spec["dir"]) for x in spec["run"]]
 
 
 def _spec_cred(raw, fields):
@@ -515,7 +642,7 @@ def _valid_spec(pkg, path, raw):
                 **_spec_io(raw),
                 "takes": [f["name"] for f in fields if f["name"] in _names(raw.get("takes")) and not f["secret"]][:20],
                 **_spec_cred(raw, fields),
-                "venv": str(pkg.get("venv") or ""), "templated": [x for x in raw.get("templated", []) if isinstance(x, str)][:20] if isinstance(raw.get("templated"), list) else []}
+                "vault": bool(raw.get("vault")), "venv": str(pkg.get("venv") or ""), "templated": [x for x in raw.get("templated", []) if isinstance(x, str)][:20] if isinstance(raw.get("templated"), list) else []}
         return spec
     except (KeyError, TypeError, ValueError):
         return None
@@ -595,7 +722,12 @@ def _build_catalogue():
     for s in out.values():
         s["fields"] = [dict(f, secret=bool(f.get("secret")) or f.get("type") == "password") for f in s["fields"]]
     for t, s in out.items():
+        ef = next((f["name"] for f in s["fields"] if f.get("type") == "env"), "")
+        if ef:
+            s["env"] = ef                                               # the field naming the Python environment it runs with (nodeenv)
         _default_assist(t, s)
+        if t in CODE_NODES:
+            s["vault"] = True                                           # its code may be granted more credential sets (aihub_vault)
     for s in out.values():
         if s["kind"] == "trigger" and not any(f["name"] == "filter" for f in s["fields"]):
             s["fields"] = s["fields"] + [FILTER]
@@ -840,9 +972,33 @@ CRED_KINDS = {                                     # builtin kinds; a package ad
             "fields": [{"name": "username", "label": "Username (empty = x-access-token)"}, {"name": "token", "label": "Access token", "secret": True}]},
     "http": {"title": "HTTP API", "hint": "Authorization header (and extra headers) for the HTTP request node.",
              "fields": [{"name": "authorization", "label": "Authorization value", "secret": True, "help": "e.g. Bearer abc123"}, {"name": "headers", "label": "Other headers (Name: value per line)"}]},
-    "generic": {"title": "Generic key / values", "hint": "Any names; fields whose name looks like a secret (token, key, password ...) are stored encrypted. A node takes the ones named like its own fields.",
+    "generic": {"title": "Generic key / values", "hint": "Any names; fields whose name looks like a secret (token, key, password ...) are stored encrypted. A node takes the ones named like its own fields. "
+                "A value may also be a LIST of entries (import JSON such as {\"buckets\": [{...}, {...}]}): secret-looking keys inside each entry are encrypted too.",
                 "free": True, "fields": []},
+    "s3": {"title": "Object storage (S3 / MinIO / R2)", "hint": "One set holds any number of buckets, each with its own endpoint and keys. Spark, Python and Trino code reads them with aihub_vault "
+           "(vault.bucket(\"raw\")); the Spark node configures every bucket for s3a:// by itself.",
+           "fields": [{"name": "buckets", "label": "Buckets", "type": "list", "key": "name", "items": [
+               {"name": "name", "label": "Name (how code refers to it)", "required": True},
+               {"name": "bucket", "label": "Bucket name", "aliases": ["bucket_name"]},
+               {"name": "endpoint_url", "label": "Endpoint URL (empty = AWS)", "aliases": ["endpoint", "url", "endpoint_uri"]},
+               {"name": "region", "label": "Region", "aliases": ["region_name"]},
+               {"name": "access_key", "label": "Access key (public)", "aliases": ["public", "public_key", "access_key_id", "aws_access_key_id", "key_id"]},
+               {"name": "secret_key", "label": "Secret key", "secret": True, "aliases": ["secret", "secret_access_key", "aws_secret_access_key"]},
+               {"name": "path_style", "label": "Path style (true for MinIO)", "aliases": ["force_path_style"]}]}]},
+    "sql": {"title": "SQL database (SQLAlchemy)", "hint": "Login for the SQL database node and for code: aihub_data.engine(\"<set name>\"). driver = postgresql, mssql, mssql-odbc, oracle, trino, mysql, sqlite, duckdb (or url).",
+            "fields": [{"name": "driver", "label": "Driver (postgresql, mssql, oracle, trino, mysql, sqlite, duckdb ...)", "aliases": ["dialect", "type"]},
+                       {"name": "host", "label": "Host", "aliases": ["server", "hostname"]}, {"name": "port", "label": "Port"},
+                       {"name": "user", "label": "User", "aliases": ["username", "login"]}, {"name": "password", "label": "Password", "secret": True},
+                       {"name": "database", "label": "Database / service name / file", "aliases": ["db", "dbname", "service_name", "catalog"]},
+                       {"name": "options", "label": "Options (key=value&key=value)", "aliases": ["query", "params"]},
+                       {"name": "url", "label": "SQLAlchemy URL (instead of the fields)", "secret": True, "aliases": ["sqlalchemy_url", "dsn", "uri"]}]},
+    "trino": {"title": "Trino / Presto", "hint": "Coordinator address and login for the Trino node (password = HTTP basic over https).",
+              "fields": [{"name": "host", "label": "Host", "aliases": ["server", "hostname"]}, {"name": "port", "label": "Port (default 443 https / 8080 http)"},
+                         {"name": "http_scheme", "label": "Scheme (https or http)", "aliases": ["scheme"]}, {"name": "user", "label": "User", "aliases": ["username"]},
+                         {"name": "password", "label": "Password", "secret": True}, {"name": "catalog", "label": "Catalog"}, {"name": "schema", "label": "Schema"},
+                         {"name": "verify", "label": "Check the TLS certificate (true / false)"}]},
 }
+LIST_MAX, ITEM_ID = 100, re.compile(r"^[a-z0-9]{4,12}$")
 
 
 def _valid_kind(pkg, raw):
@@ -850,23 +1006,46 @@ def _valid_kind(pkg, raw):
         kid = str(raw["kind"])
         if not KIND_ID.match(kid):
             return None
-        fields = [{"name": f["name"], "label": str(f.get("label", f["name"]))[:100], "secret": bool(f.get("secret")), "help": str(f.get("help", ""))[:300]}
-                  for f in raw.get("fields", []) if isinstance(f, dict) and FIELD_NAME.match(str(f.get("name", "")))][:30]
+        fields = [x for x in (_kind_field(f) for f in raw.get("fields", [])) if x][:30]
         return {"kind": kid, "title": str(raw.get("title", kid))[:60], "hint": str(raw.get("hint", ""))[:400], "fields": fields, "free": bool(raw.get("free")), "package": pkg}
     except (KeyError, TypeError):
         return None
 
 
+def _kind_field(f, sub=False):
+    """One field of a credential kind, normalised. `type: list` holds entries (`items` = their fields, `key` = the field naming an entry); one level only."""
+    if not isinstance(f, dict) or not FIELD_NAME.match(str(f.get("name", ""))):
+        return None
+    out = {"name": f["name"], "label": str(f.get("label", f["name"]))[:100], "secret": bool(f.get("secret")), "help": str(f.get("help", ""))[:300],
+           "required": bool(f.get("required")), "aliases": [str(a) for a in (f.get("aliases") if isinstance(f.get("aliases"), list) else []) if FIELD_NAME.match(str(a))][:10]}
+    if f.get("type") == "list" and not sub:
+        items = [x for x in (_kind_field(i, True) for i in (f.get("items") if isinstance(f.get("items"), list) else [])) if x][:20]
+        key = str(f.get("key") or "")
+        out.update(type="list", secret=False, items=items, key=key if any(i["name"] == key for i in items) else (items[0]["name"] if items else ""))
+    else:
+        out["type"] = "text"
+    return out
+
+
 def kinds():
     """-> {kind: {kind, title, hint, fields, free, package}}: builtin kinds plus those shipped by installed packages (the same kind in a package replaces the builtin)."""
     catalogue()
-    out = {k: dict(v, kind=k, package="", free=bool(v.get("free")), fields=[dict({"secret": False, "help": ""}, **f) for f in v["fields"]]) for k, v in CRED_KINDS.items()}
+    out = {k: dict(v, kind=k, package="", free=bool(v.get("free")), fields=[x for x in (_kind_field(f) for f in v["fields"]) if x]) for k, v in CRED_KINDS.items()}
     out.update(_cat.get("kinds") or {})
     return out
 
 
-def _ckey(cid, field):
-    return "cred:%s:%s" % (cid, field)
+def kind_template(kd):
+    """A JSON skeleton of a kind for people who fill a set in by hand (`aihub work cred template KIND`)."""
+    out = {}
+    for f in kd["fields"]:
+        out[f["name"]] = [{i["name"]: "" for i in f["items"]}] if f.get("type") == "list" else ""
+    return out if out or not kd.get("free") else {"api_key": "", "entries": [{"name": "", "secret": ""}]}
+
+
+def _ckey(cid, field, item=None, sub=None):
+    """Box key of a secret: cred:<set>:<field>, or cred:<set>:<field>:<entry id>:<entry field> inside a list field."""
+    return "cred:%s:%s" % (cid, field) if item is None else "cred:%s:%s:%s:%s" % (cid, field, item, sub)
 
 
 def _creds_file():
@@ -886,6 +1065,68 @@ def credential(cid):
 def _is_secret_field(kd, name):
     f = next((x for x in kd["fields"] if x["name"] == name), None)
     return bool(f["secret"]) if f else bool(kd.get("free")) and bool(SECRETISH.search(name))
+
+
+def _list_field(kd, name, value):
+    """The list definition of field NAME: from the kind, or (a free kind holding a list of entries) inferred from the entries themselves."""
+    f = next((x for x in kd["fields"] if x["name"] == name), None)
+    if f:
+        return f if f.get("type") == "list" else None
+    if kd.get("free") and isinstance(value, (list, dict)):
+        names = ["name"] if isinstance(value, dict) else []              # {"main": {...}}: the key is the entry's name
+        for r in (value if isinstance(value, list) else list(value.values())):
+            for k in (r if isinstance(r, dict) else {}):
+                if FIELD_NAME.match(str(k)) and k not in names and k != "id":
+                    names.append(k)
+        items = [{"name": k, "label": k, "secret": bool(SECRETISH.search(k)) and k not in ("name", "key_id"), "aliases": [], "required": False, "help": "", "type": "text"} for k in names[:20]]
+        return {"name": name, "type": "list", "items": items, "key": "name" if "name" in names or isinstance(value, dict) else (names[0] if names else ""), "label": name, "secret": False}
+    return None
+
+
+def _alias(defs, src):
+    """{field: value} of SRC with alias names (public -> access_key ...) mapped to the field names of DEFS; the real name wins over an alias."""
+    out = {}
+    for d in defs:
+        for a in [d["name"]] + list(d.get("aliases") or ()):
+            if a in src and src[a] not in (None, ""):
+                out.setdefault(d["name"], src[a])
+    return out
+
+
+def _entries(value, lf):
+    """Entries of a list field as dicts: a JSON list, or a dict of entries keyed by their name ({"raw": {...}} -> [{"name": "raw", ...}])."""
+    if isinstance(value, dict):
+        return [dict({lf.get("key") or "name": k}, **v) for k, v in value.items() if isinstance(v, dict)]
+    return [r for r in value if isinstance(r, dict)] if isinstance(value, list) else []
+
+
+def _save_list(cid, lf, src, old, box):
+    """Store one list field: typed secrets go to the box (the entry keeps MARK), MARK keeps the stored one, a dropped entry loses its secrets. -> stored entries."""
+    old_ids = {e.get("id") for e in (old if isinstance(old, list) else []) if isinstance(e, dict)}
+    out, seen = [], set()
+    for raw in _entries(src, lf)[:LIST_MAX]:
+        iid = str(raw.get("id") or "")
+        if not ITEM_ID.match(iid) or iid in seen:
+            iid = uuid.uuid4().hex[:8]
+        seen.add(iid)
+        vals, row = _alias(lf["items"], raw), {"id": iid}
+        for it in lf["items"]:
+            v = vals.get(it["name"])
+            if not it.get("secret"):
+                if v not in (None, ""):
+                    row[it["name"]] = v if isinstance(v, bool) else str(v)[:4000]
+            elif isinstance(v, str) and v and v != MARK:
+                box.put(_ckey(cid, lf["name"], iid, it["name"]), v)
+                row[it["name"]] = MARK
+            elif v == MARK and iid in old_ids:
+                row[it["name"]] = MARK
+            else:
+                box.remove(_ckey(cid, lf["name"], iid, it["name"]))
+        if len(row) > 1:
+            out.append(row)
+    for iid in old_ids - {r["id"] for r in out}:
+        box.remove_prefix("cred:%s:%s:%s:" % (cid, lf["name"], iid))
+    return out
 
 
 def cred_map(spec, kd=None):
@@ -909,11 +1150,61 @@ def cred_values(node, spec, box):
     names, allv, out = {f["name"] for f in spec["fields"]}, None, {}
     for sf, nf in cred_map(spec, kd).items():
         v = c["fields"].get(sf)
+        if isinstance(v, (list, dict)):                                 # a list of entries (buckets ...) reaches code through aihub_vault, not a node field
+            continue
         if v == MARK:
             allv = allv if allv is not None else box.get_all()
             v = allv.get(_ckey(c["id"], sf), "")
         if nf in names and v not in (None, ""):
             out[nf] = v
+    return out
+
+
+def resolve_credential(cid, box, allv=None):
+    """The whole set with its secrets filled in ({id, name, kind, fields}), for aihub_vault inside a node run. None when missing."""
+    c = credential(cid)
+    if not c:
+        return None
+    allv = allv if allv is not None else box.get_all()
+    fields = {}
+    for k, v in c["fields"].items():
+        if isinstance(v, list):
+            fields[k] = [{sk: (allv.get(_ckey(c["id"], k, e.get("id"), sk), "") if sv == MARK else sv) for sk, sv in e.items()} for e in v if isinstance(e, dict)]
+        else:
+            fields[k] = allv.get(_ckey(c["id"], k), "") if v == MARK else v
+    return {"id": c["id"], "name": c["name"], "kind": c["kind"], "fields": fields}
+
+
+def vault_ids(node):
+    """Credential sets a node's code may read with aihub_vault: its own set (`credential`) plus the extra ones granted in `vault`."""
+    ids = [node["credential"]] if node.get("credential") else []
+    for v in node.get("vault") or ():
+        if isinstance(v, str) and PRESET_ID.match(v) and v not in ids:
+            ids.append(v)
+    return ids
+
+
+def vault_grant(node, box):
+    """{set id: resolved set} handed to a node program (AIHUB_VAULT_FILE). Nothing else of the vault is readable from inside a node run."""
+    allv, out = box.get_all(), {}
+    for cid in vault_ids(node):
+        r = resolve_credential(cid, box, allv)
+        if r:
+            out[cid] = r
+    return out
+
+
+def secret_values(grant):
+    """Every secret string of a grant (masked in the node log)."""
+    out = []
+    for r in (grant or {}).values():
+        kd = kinds().get(r["kind"]) or {"fields": [], "free": True}
+        for k, v in r["fields"].items():
+            if isinstance(v, list):
+                sec = {i["name"] for i in (_list_field(kd, k, v) or {"items": []})["items"] if i.get("secret")}
+                out += [str(e[x]) for e in v for x in e if x in sec and e.get(x)]
+            elif _is_secret_field(kd, k) and v:
+                out.append(str(v))
     return out
 
 
@@ -929,6 +1220,12 @@ def credential_problem(node, spec):
             return "the credential set '%s' is a '%s' set but this node needs a '%s' one" % (c["name"], c["kind"], cs["kind"])
     elif node.get("credential_kind") and cs:
         return "this node needs a '%s' credential set (the workflow was shared without logins): pick or create one in the node's settings (Settings > Credentials)" % node["credential_kind"]
+    for v in node.get("vault") or ():
+        if not credential(v):
+            return "the credential set '%s' this node's code reads (aihub_vault) was deleted: grant another set or remove it" % v
+    for v in node.get("vault_kinds") or ():
+        return "this node's code reads a '%s' credential set%s (the workflow was shared without logins): grant one with `aihub work setup` or in the node's settings" % (
+            v.get("kind"), " named '%s'" % v["name"] if v.get("name") else "")
     return ""
 
 
@@ -938,8 +1235,8 @@ def credential_usage():
     for row in store.works():
         w = store.get_work(row["id"]) or {}
         for n in w.get("nodes", []):
-            if n.get("credential"):
-                lst = out.setdefault(n["credential"], [])
+            for cid in vault_ids(n):
+                lst = out.setdefault(cid, [])
                 hit = next((x for x in lst if x["id"] == w["id"]), None)
                 if not hit:
                     hit = {"id": w["id"], "title": w.get("title") or "Untitled", "nodes": []}
@@ -975,10 +1272,19 @@ def save_credential(p, box):
             i += 1
             cid = "%s-%d" % (base, i)
     src = p.get("fields") if isinstance(p.get("fields"), dict) else {}
+    src = dict(src, **_alias([f for f in kd["fields"] if f.get("type") != "list"], src))       # JSON written with alias names (username for user ...)
     names = [f["name"] for f in kd["fields"]] + ([k for k in src if FIELD_NAME.match(str(k)) and k not in {f["name"] for f in kd["fields"]}][:30] if kd.get("free") else [])
     fields = {}
     for k in names:
         v, sec = src.get(k), _is_secret_field(kd, k)
+        lf = _list_field(kd, k, v)
+        if lf:
+            rows = _save_list(cid, lf, v, have.get(cid, {}).get("fields", {}).get(k), box)
+            if rows:
+                fields[k] = rows
+            continue
+        if isinstance(v, (list, dict)):
+            v = json.dumps(v, ensure_ascii=False)
         if not sec:
             if v not in (None, ""):
                 fields[k] = str(v)[:4000]
@@ -992,6 +1298,8 @@ def save_credential(p, box):
     for k, v in have.get(cid, {}).get("fields", {}).items():       # a field dropped from a free set loses its stored secret
         if v == MARK and k not in fields:
             box.remove(_ckey(cid, k))
+        elif isinstance(v, list) and k not in fields:
+            box.remove_prefix("cred:%s:%s:" % (cid, k))
     rec = {"id": cid, "name": name, "kind": kd["kind"], "fields": fields, "updated": time.time()}
     have[cid] = rec
     store._write(_creds_file(), have)
@@ -1005,6 +1313,7 @@ def delete_credential(cid, box):
         for k, v in rec["fields"].items():
             if v == MARK:
                 box.remove(_ckey(cid, k))
+        box.remove_prefix("cred:%s:" % cid)                            # the entries of list fields too
         store._write(_creds_file(), have)
     return bool(rec)
 
@@ -1063,6 +1372,20 @@ def accepts(node, ev):
 
 # ---------- runs
 
+def work_files_dir(wid, make=False):
+    """Files a work brings along (the @file / @folder mentions bundled when it was shared): {{work.files}} in its prompts and fields.
+    Under workingspace, so the mention readers (which never read the rest of ~/.aihub) accept them."""
+    d = os.path.join(A.HOME(), "workingspace", "works", str(wid), "files")
+    if make:
+        os.makedirs(d, exist_ok=True)
+    return d
+
+
+def mention_text(prompt, root):
+    """Everything a prompt mentions, as text to append: knowledge notes, spaces, @file and @folder (relative to ROOT). Credentials are never mentionable."""
+    return sources.resolve(prompt, root) + sources.file_mentions(prompt, root) + sources.folder_mentions(prompt, root)
+
+
 def runs_dir(wid):
     return store.ui_dir("runs", wid)
 
@@ -1118,6 +1441,9 @@ def drop_work(wid):
         live = [rid for rid, c in CTL.items() if c.kind == "work" and c.work == wid]
     for rid in live:
         stopped += bool(stop_run(rid))
+    end = time.time() + 10                                              # let them finish: a run's last record save would bring the folder back
+    while live and time.time() < end and any(rid in CTL for rid in live):
+        time.sleep(0.05)
     d = runs_dir(wid) if store.ID.match(str(wid)) else None
     if d and os.path.isdir(d):
         for f in os.listdir(d):
@@ -1150,6 +1476,20 @@ def list_runs(wid):
 
 CHAT_RUNS = "chat"                                                     # runs/chat/: nodes run alone from a chat card (workflow runs stay with their work)
 CHAT_KEEP = 200
+TRY_RUNS = "try"                                                       # runs/try/: Run / Preview in the node code editor (never listed, pruned)
+TRY_KEEP = 30
+
+
+def prune_try(keep=TRY_KEEP):
+    """Keep the newest KEEP try runs (logs + folders), never one that is still running."""
+    d = runs_dir(TRY_RUNS)
+    try:
+        names = sorted((n for n in os.listdir(d) if re.match(r"^[0-9a-z-]{8,40}$", n)), key=lambda n: -os.path.getmtime(os.path.join(d, n)))
+    except OSError:
+        return
+    for n in names[keep:]:
+        if n not in CTL:
+            shutil.rmtree(os.path.join(d, n), ignore_errors=True)
 
 
 def save_chat_run(rec):
@@ -1444,7 +1784,7 @@ class NodeLog:
 
 def read_log(wid, rid, nid, after=0, limit=200_000):
     """-> {"text", "next", "size"} from byte offset AFTER of the logical stream (offsets stay valid after a cut). None if there is no log."""
-    if not (store.ID.match(str(wid)) or wid == CHAT_RUNS) or not re.match(r"^[0-9a-z-]{8,40}$", str(rid)):
+    if not (store.ID.match(str(wid)) or wid in (CHAT_RUNS, TRY_RUNS)) or not re.match(r"^[0-9a-z-]{8,40}$", str(rid)):
         return None
     p = log_path(wid, rid, nid)
     try:
@@ -1579,11 +1919,46 @@ def _pump(stream, sink, log, tag, cap=2_000_000):
         pass
 
 
-def run_package_node(spec, cfg, inputs, ctx, wd, log=None, ctl=None, info=None):
+LIB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")      # aihub_vault, importable by every node program
+
+
+def node_env(spec, wd, ctx, grant_file):
+    """Environment of a node program: aihub_vault on PYTHONPATH and pointed at this node's grant (only the sets granted to it)."""
+    pp = os.environ.get("PYTHONPATH", "")
+    return dict(os.environ, AIHUB_NODE=spec["type"], AIHUB_NODE_WORKDIR=wd, AIHUB_NO_UPDATE="1", AIHUB_RUN_DIR=str((ctx or {}).get("dir") or wd),
+                AIHUB_NODE_DIR=str((ctx or {}).get("node_dir") or ""), AIHUB_VAULT_FILE=grant_file, PYTHONPATH=LIB_DIR + (os.pathsep + pp if pp else ""))
+
+
+def write_grant(grant):
+    """The node's credential sets in a private temp file (0600, under ~/.aihub/ui/tmp); the caller removes it when the node ends."""
+    path = os.path.join(store.ui_dir("tmp"), "vault-%s.json" % uuid.uuid4().hex)
+    write_private(path, json.dumps({"credentials": grant or {}}, ensure_ascii=False).encode("utf-8"))
+    return path
+
+
+def run_package_node(spec, cfg, inputs, ctx, wd, log=None, ctl=None, info=None, vault=None):
     """Run a node program: JSON on stdin, last JSON line on stdout. stdout/stderr stream into LOG while it runs; the call ends when the
     PROGRAM ends (a detached grandchild that keeps the pipes open, such as the CLI's background updater, never holds it up).
-    INFO gets cmd and exit; CTL lets Stop kill the process group."""
-    argv = _argv(spec)
+    INFO gets cmd and exit; CTL lets Stop kill the process group. VAULT = {set id: resolved set} the program may read with aihub_vault."""
+    grant_file = write_grant(vault)
+    try:
+        return _run_package_node(spec, cfg, inputs, ctx, wd, log, ctl, info, grant_file)
+    finally:
+        try:
+            os.remove(grant_file)
+        except OSError:
+            pass
+
+
+def _run_package_node(spec, cfg, inputs, ctx, wd, log, ctl, info, grant_file):
+    try:
+        argv = _argv(spec, cfg)
+    except RuntimeError as e:
+        if log:
+            log.write("environment: %s" % e)
+        raise
+    if spec.get("env") and str(cfg.get(spec["env"]) or "").strip():
+        cfg = dict(cfg, **{spec["env"]: argv[0]})                      # the program sees the interpreter path, not the env name
     limit = spec["timeout"]
     if spec.get("timeout_key"):                                     # a node that lets the person set its own limit
         try:
@@ -1600,8 +1975,7 @@ def run_package_node(spec, cfg, inputs, ctx, wd, log=None, ctl=None, info=None):
         log.write("$ " + cmd + "   (timeout %ds, cwd %s)" % (limit, spec["dir"]))
     try:
         proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-                                cwd=spec["dir"], start_new_session=True,
-                                env=dict(os.environ, AIHUB_NODE=spec["type"], AIHUB_NODE_WORKDIR=wd, AIHUB_NO_UPDATE="1", AIHUB_RUN_DIR=str((ctx or {}).get("dir") or wd), AIHUB_NODE_DIR=str((ctx or {}).get("node_dir") or "")))
+                                cwd=spec["dir"], start_new_session=True, env=node_env(spec, wd, ctx, grant_file))
     except OSError as e:
         if log:
             log.write("cannot start: %s" % e)
@@ -1735,12 +2109,14 @@ def clean_node_config(spec, cfg):
     return out
 
 
-def run_single(spec, cfg, text, wd, rid=None, rec=None, box=None):
-    """Run one node alone. -> {"text", "data", "log", "exit", "cmd"}. Templated fields see {{input}}; secrets come in `cfg` for this run only.
-    With RID the run has a log (runs/chat/<rid>/node.log) and can be stopped (stop_run); REC is the chat run record (kept up to date)."""
+def run_single(spec, cfg, text, wd, rid=None, rec=None, box=None, vault=None, group=CHAT_RUNS, data=None):
+    """Run one node alone. -> {"text", "data", "log", "exit", "cmd"}. Templated fields see {{input}} (and {{data.x}} of DATA); secrets come in
+    `cfg` for this run only. With RID the run has a log (runs/<group>/<rid>/node.log: chat cards, or `try` = Run in the code editor) and can be
+    stopped (stop_run); REC is the run record (kept up to date)."""
     cfg = clean_node_config(spec, cfg)
-    ev = {"text": text}
-    ctx = {"input": text, "data": {}, "in": {}}
+    data = data if isinstance(data, dict) else {}
+    ev = {"text": text, **({"data": data} if data else {})}
+    ctx = {"input": text, "data": data, "in": {}}
     tpl = spec.get("templated") or ()
     if tpl:
         cfg = {k: (render(v, ctx) if k in tpl and isinstance(v, str) else v) for k, v in cfg.items()}
@@ -1748,14 +2124,14 @@ def run_single(spec, cfg, text, wd, rid=None, rec=None, box=None):
     info = {}
     if rid:
         t0 = time.time()
-        secrets = [cfg.get(f["name"]) for f in spec["fields"] if f.get("secret")] + list((box.get_all() if box else {}).values())
-        log = NodeLog(log_path(CHAT_RUNS, rid, "node"), [x for x in secrets if isinstance(x, str)])
+        secrets = [cfg.get(f["name"]) for f in spec["fields"] if f.get("secret")] + list((box.get_all() if box else {}).values()) + secret_values(vault)
+        log = NodeLog(log_path(group, rid, "node"), [x for x in secrets if isinstance(x, str)])
         ctl = ctl_for(rid, "node", rec if rec is not None else {"status": "running", "started": t0}, total=1)
         nrec = {"status": "running", "label": spec.get("title") or spec["type"], "started": t0, "t0": t0, "logfile": True}
         if rec is not None:
             rec["nodes"] = {"node": nrec}
     try:
-        out, lg = run_package_node(spec, cfg, [ev] if text else [], {"id": "chat", "work": "", "node": spec["type"], "dir": wd, "node_dir": wd}, wd, log=log, ctl=ctl, info=info)
+        out, lg = run_package_node(spec, cfg, [ev] if (text or data) else [], {"id": group, "work": "", "node": spec["type"], "dir": wd, "node_dir": wd}, wd, log=log, ctl=ctl, info=info, vault=vault)
     except BaseException as e:
         if rid and rec is not None:
             nrec.update(status="stopped" if isinstance(e, Stopped) else "error", ended=time.time(), error=str(e)[:300], **info)
@@ -1766,6 +2142,42 @@ def run_single(spec, cfg, text, wd, rid=None, rec=None, box=None):
     if rid and rec is not None:
         nrec.update(status="ok", ended=time.time(), **info)
     return {"text": text_of(out)[:20000], "data": out.get("data") if isinstance(out, dict) else None, "log": (lg or "")[-1500:], **info}
+
+
+def manual_event(w, node_id=None, text="", values=None, cat=None):
+    """The trigger node and event of a manual start of work W (the page's Run, a chat card, `aihub work run`): the start.manual inputs
+    checked and typed like the form does. -> (node, event). Raises ValueError with a message for the person."""
+    cat = cat or catalogue()
+    trig = [n for n in w["nodes"] if cat.get(n["type"], {}).get("kind") == "trigger"]
+    node = next((n for n in trig if n["id"] == node_id), None) or next((n for n in trig if n["type"] == "start.manual"), None) or (trig[0] if trig else None)
+    if not node:
+        raise ValueError("add a Start node first")
+    text, data = str(text or ""), {}
+    if node["type"] == "start.manual":
+        vals = values if isinstance(values, dict) else {}
+        for f in store.parse_inputs((node.get("config") or {}).get("inputs")):
+            v = vals.get(f["name"], f["default"])
+            if f["type"] == "checkbox":
+                v = v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on")
+            elif f["type"] == "number":
+                try:
+                    v = float(v) if str(v).strip() else ""
+                    v = int(v) if v != "" and v == int(v) else v
+                except ValueError:
+                    raise ValueError("%s must be a number" % f["label"])
+            else:
+                v = str(v if v is not None else "")[:20000]
+            if f["required"] and (v == "" or v is None):
+                raise ValueError("%s is required" % f["label"])
+            if f["type"] == "select" and v not in f["options"] and v != "":
+                raise ValueError("%s: pick one of the listed options" % f["label"])
+            data[f["name"]] = v
+        if not text and data:
+            text = "\n".join("%s: %s" % (k, v) for k, v in data.items())
+    elif isinstance(values, dict):
+        data = dict(values)
+    node = dict(node, config=dict(node.get("config") or {}, filter=""))               # a manual run is never filtered out
+    return node, {"text": text or "manual run", "data": data}
 
 
 LOOP, ENDLOOP = "flow.loop", "flow.endloop"
@@ -1830,11 +2242,102 @@ def loop_bodies(nodes, edges):
     return bodies, ends
 
 
-class Engine:
-    """Runs works, fires cron triggers, supervises package trigger processes. One thread per work executes its runs in order."""
+LEASE_STALE = 60                                                       # a scheduler that has not renewed its lease for this long is gone
 
-    def __init__(self, box):
+
+def _pid_alive(pid):
+    try:
+        pid = int(pid)
+        if pid <= 0:
+            return False
+        if os.name == "nt":
+            out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid, "/NH"], capture_output=True, text=True, timeout=10).stdout
+            return str(pid) in out
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return False
+
+
+class Lease:
+    """Only ONE process schedules (cron, package triggers): the UI, or `aihub work serve` running in the background, never both, or every
+    cron run would happen twice. ~/.aihub/ui/scheduler.json = {pid, host, who, beat}; taken when free, stale (LEASE_STALE) or its process is dead.
+    Manual runs, chat cards and `aihub work run` need no lease: they run in whatever process starts them."""
+
+    def __init__(self, who):
+        self.who, self.path = who, os.path.join(store.ui_dir(), "scheduler.json")
+
+    def holder(self):
+        h = store._read(self.path, None)
+        return h if isinstance(h, dict) else None
+
+    def _free(self, h):
+        if not h or h.get("pid") == os.getpid():
+            return True
+        if time.time() - float(h.get("beat") or 0) > LEASE_STALE:
+            return True
+        return h.get("host") == _host() and not _pid_alive(h.get("pid"))
+
+    def take(self):
+        """Take or renew; -> True when this process schedules."""
+        lock = self.path + ".lock"
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock) > 10:          # a writer died inside the few lines below
+                    os.remove(lock)
+            except OSError:
+                pass
+            return bool((self.holder() or {}).get("pid") == os.getpid())
+        except OSError:
+            return False
+        try:
+            os.close(fd)
+            h = self.holder()
+            if not self._free(h):
+                return False
+            store._write(self.path, {"pid": os.getpid(), "host": _host(), "who": self.who, "beat": time.time(), "since": (h or {}).get("since") if (h or {}).get("pid") == os.getpid() else time.time()})
+            return True
+        finally:
+            try:
+                os.remove(lock)
+            except OSError:
+                pass
+
+    def release(self):
+        h = self.holder()
+        if h and h.get("pid") == os.getpid():
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
+
+
+def scheduler():
+    """Who fires the cron and package triggers: {who, pid, host, mine, beat} or None (nobody: the UI and `aihub work serve` are both down)."""
+    h = Lease("ui").holder()
+    if not h or time.time() - float(h.get("beat") or 0) > LEASE_STALE:
+        return None
+    return {"who": h.get("who"), "pid": h.get("pid"), "host": h.get("host"), "mine": h.get("pid") == os.getpid(), "beat": h.get("beat")}
+
+
+def _host():
+    import socket
+    return socket.gethostname()
+
+
+class Engine:
+    """Runs works, fires cron triggers, supervises package trigger processes. One thread per work executes its runs in order.
+    SCHEDULE: also fire cron / package triggers, but only while this process holds the scheduler Lease (WHO names it: ui | serve)."""
+
+    def __init__(self, box, schedule=True, who="ui"):
         self.box = box
+        self.schedule = schedule
+        self.lease = Lease(who) if schedule else None
+        self.scheduling = False
         self.queues = {}
         self.running = 0                       # runs executing now (the UI waits for 0 before it restarts for an update)
         self.fired = {}
@@ -1857,7 +2360,7 @@ class Engine:
                     try:
                         with open(fp, encoding="utf-8") as fh:
                             r = json.load(fh)
-                        if r.get("status") in ("queued", "running"):
+                        if r.get("status") in ("queued", "running") and not (r.get("pid") and r.get("host") == _host() and _pid_alive(r["pid"]) and r["pid"] != os.getpid()):
                             r.update(status="interrupted", ended=time.time(), error=r.get("error") or "the UI stopped while this run was waiting or running")
                             write_private(fp, json.dumps(r, ensure_ascii=False).encode("utf-8"))
                     except (OSError, ValueError, AttributeError):
@@ -1871,7 +2374,7 @@ class Engine:
         if not accepts(node, event):
             return None
         run = {"id": time.strftime("%Y%m%d%H%M%S-") + uuid.uuid4().hex[:6], "work": work["id"], "status": "queued", "started": time.time(), "ended": None,
-               "via": via, "trigger": node["id"], "text": text_of(event)[:300], "nodes": {}, "chat": None, "result": None}
+               "via": via, "trigger": node["id"], "text": text_of(event)[:300], "nodes": {}, "chat": None, "result": None, "pid": os.getpid(), "host": _host()}
         run.update({k: v for k, v in (extra or {}).items() if k in ("origin", "card")})
         try:                                                              # what started it, so the run can be started again with the same inputs
             ev = {"text": text_of(event)[:20000], "data": event.get("data") if isinstance(event, dict) else {}}
@@ -1934,9 +2437,10 @@ class Engine:
         ctl = ctl_for(run["id"], "work", run, work=work["id"], total=len(nodes))
         ctl.total = len(nodes)
         rdir = run["dir"] = run_dir(work["id"], run["id"])
+        wfiles = work_files_dir(work["id"])
         _save_run(run, trim=False)
         outs = {run["trigger"]: event}
-        ctx_base = {"trigger": text_of(event), "data": event.get("data", {}) if isinstance(event, dict) else {}}
+        ctx_base = {"trigger": text_of(event), "data": event.get("data", {}) if isinstance(event, dict) else {}, "work": {"id": work["id"], "title": work.get("title") or "", "files": wfiles}}
         sess, sess_free, failed = None, None, False
         said = {}                                                           # chat id -> input texts already in that chat (never sent twice)
         lock = threading.RLock()                                            # run record, shared chats and `outs` are touched by several nodes at once
@@ -2078,7 +2582,8 @@ class Engine:
                                            "inputs": [{"from": u, "label": names[u][0], "kind": (cat.get((nodes.get(u) or {}).get("type")) or {}).get("out", "text"), "text": text_of(o)[:1200]} for u, o in got]}
             save()
             cfg = with_secrets(work["id"], n, spec, self.box)
-            nlog = NodeLog(log_path(work["id"], run["id"], nid), [cfg.get(f["name"]) for f in spec["fields"] if f.get("secret")] + list(self.box.get_all().values()))
+            grant = vault_grant(n, self.box) if spec.get("run") else {}
+            nlog = NodeLog(log_path(work["id"], run["id"], nid), [cfg.get(f["name"]) for f in spec["fields"] if f.get("secret")] + list(self.box.get_all().values()) + secret_values(grant))
             nlog.write("node %s (%s) started" % (n.get("label") or nid, n.get("type")))
             steps = rec["steps"] = []
             mine = []                                                      # shared chats this node holds (released when it ends)
@@ -2139,7 +2644,7 @@ class Engine:
                             cur = store.get_session(sess["id"])
                         run["chat"] = run["chat"] or cur["id"]
                     prompt = render(cfg.get("prompt", ""), ctx)
-                    prompt += sources.resolve(prompt, folder or store.session_dir(cur["id"]))
+                    prompt += mention_text(prompt, folder or store.session_dir(cur["id"]))
                     known = said.setdefault(cur["id"], set())
                     if text and not uses_input(cfg.get("prompt")):
                         if text.strip() in known:                           # this chat already holds it (a previous reply or input): do not repeat it
@@ -2156,7 +2661,7 @@ class Engine:
                     nlog.write("Claude Code chat %s: %d characters of prompt" % (cur["id"], len(prompt)))
                     ctl.check()
                     for ev in chat.turn(cur, prompt, str(cfg.get("model") or ""), str(cfg.get("effort") or ""), cfg.get("mode") if cfg.get("mode") in chat.MODES else "auto",
-                                         extra_env=self.box.get_all(), **({"add_dirs": dirs} if (dirs := pointer_dirs(cdata, inputs)) else {})):
+                                         extra_env=self.box.get_all(), **({"add_dirs": dirs} if (dirs := pointer_dirs(cdata, inputs) + ([wfiles] if os.path.isdir(wfiles) else [])) else {})):
                         log_ai(ev, nlog, steps)
                         if ev["k"] == "msg":
                             reply = "\n".join(b["text"] for b in ev["blocks"] if b["type"] == "text") or reply
@@ -2184,7 +2689,7 @@ class Engine:
                             made = sess_free
                         run["chat"] = run["chat"] or made["id"]
                     prompt = render(cfg.get("prompt", ""), ctx)
-                    prompt += sources.resolve(prompt, store.session_dir(made["id"]))
+                    prompt += mention_text(prompt, store.session_dir(made["id"]))
                     if text and not uses_input(cfg.get("prompt")):
                         prompt = "Input:\n%s\n\nTask: %s" % (text, prompt)
                     if cfg.get("read_pointers"):
@@ -2214,8 +2719,8 @@ class Engine:
                         v = cdata.get(k)
                         if not str(cfg.get(k) or "").strip() and v not in (None, "", [], {}):
                             cfg[k] = "\n".join(str(x) for x in v) if isinstance(v, list) else v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
-                    out, log = run_package_node(spec, cfg, inputs, {"id": run["id"], "work": work["id"], "node": nid, "dir": rdir, "node_dir": ndir}, rdir,
-                                               log=nlog, ctl=ctl, info=rec)
+                    out, log = run_package_node(spec, cfg, inputs, {"id": run["id"], "work": work["id"], "node": nid, "dir": rdir, "node_dir": ndir, "files": wfiles}, rdir,
+                                               log=nlog, ctl=ctl, info=rec, vault=grant)
                     if log:
                         upd(rec, log=log[-1500:])
                     if isinstance(out, dict) and out.get("skip"):
@@ -2284,7 +2789,13 @@ class Engine:
             if self.stop.is_set():
                 return
             try:
-                self.sync()
+                if self.schedule and self.lease.take():
+                    self.scheduling = True
+                    self.sync()
+                elif self.scheduling or self.procs:                            # another process took over (or never had it): its triggers, not ours
+                    self.scheduling = False
+                    for k in list(self.procs):
+                        self._kill(k)
             except Exception:
                 pass
 
@@ -2292,8 +2803,14 @@ class Engine:
         """Ask the scheduler thread to run sync() now (instead of calling it from a request handler)."""
         self.wake.set()
 
+    def scheduler(self):
+        return scheduler()
+
     def sync(self):
-        """Fire due cron triggers; start / stop package trigger processes to match the enabled works. Safe to call from any thread."""
+        """Fire due cron triggers; start / stop package trigger processes to match the enabled works. Safe to call from any thread.
+        Does nothing in a process that does not hold the scheduler lease."""
+        if not self.schedule or (self.lease and not self.lease.take()):
+            return
         with self.sync_lock:
             self._sync()
 
@@ -2419,6 +2936,8 @@ class Engine:
         self.stop.set()
         for k in list(self.procs):
             self._kill(k)
+        if self.lease:
+            self.lease.release()
 
 
 # ---------- generate a work from a description
@@ -2456,6 +2975,7 @@ SHAPES
 - git.pull -> ai.claude (analyse, build dashboard/index.html, end with OUTPUT:) -> space.publish.
 - start.cron -> io.request / git.read -> ai.claude -> send.teams / send.slack / send.discord / send.webhook or send.smtp (mail through any server; action draft saves it for review), or pkg:aihub-nodes-outlook/outlook-send for the Outlook app when it is in the list.
 - start.manual -> [git.read, io.request] in parallel -> ai.claude (prompt names {{in.<a>}} and {{in.<b>}}) -> flow.output.
+- ETL: start.cron -> db.sql (any database: config driver postgresql|mssql|oracle|trino|mysql|sqlite|duckdb, frame native|pandas|polars, statements separated by ;, output path for big results, write_table to load rows coming in) or db.trino or etl.spark (PySpark in `# %% name` steps; s3a("<bucket>", "path") for the buckets of its S3 credential set) -> code.python (more steps, `result` dict) -> flow.output. Never write a login into SQL or code: credential sets carry them.
 - Keep it as small as the request allows: 3 to 7 nodes.
 
 EXAMPLE (valid):

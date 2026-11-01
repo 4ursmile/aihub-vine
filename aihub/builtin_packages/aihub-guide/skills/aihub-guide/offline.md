@@ -112,14 +112,34 @@ aihub run [BOT] [-- ARGS]            # start an installed bot (type=bot) or serv
 aihub run BOT --fg | --name N | --schedule 5m|'0 8 * * *' | --restart no|on-failure|always | --no-hub | --venv PATH|default | --python PATH   (venv/python is remembered per package)
 aihub run list | logs N [-f] | listen N | stop N|--all | pause N | start N | restart N | set N --schedule .. --restart .. [-- ARGS] | status N | rm N
                                       # signed in: runs show on the hub page Running (stop/start/restart/change them there); off: aihub config set run_report off
+aihub work list                                  # works: on/off, triggers, NEEDS SETUP count, who fires triggers (--json for scripts)
+aihub work show W                                # nodes, inputs, what it still needs
+aihub work pull PKG [--file F] [--again] [-i]    # aihub install PKG, then add its works (switched off)
+aihub work import FILE.work.json|FOLDER          # a shared work from a file or folder
+aihub work export W [-o DIR] [--no-notes]        # shareable copy: no secrets, no credential sets
+aihub work setup W [--creds FILE|-] [--folder NODE=PATH] [--env NAME] [--install]   # credential sets, working folders, secret fields, then Python packages it needs
+aihub work set W NODE key=value ... [--folder PATH] [--credential SET|none] [--grant SET] [--revoke SET] [--secret FIELD]
+aihub work enable W | disable W [--force]
+aihub work run W [--input name=value|name=@file] [--text T] [--node TRIGGER] [-q] [--timeout S]   # one run here, live log; exit 0 = done, 1 otherwise
+aihub work runs W [-n N] | logs W [RUN] [--node N]
+aihub work serve [--hooks PORT] | serve --bg    # fire cron + package triggers of enabled works (one process per machine: the UI or serve)
+aihub work cred list | kinds | template KIND | show SET | add --kind K --name N [--file F|-] | set SET [--name N] [--file F|-] | rm SET [-y]
+aihub work lib                                   # folder of aihub_vault + aihub_data for your own scripts (PYTHONPATH=$(aihub work lib))
+aihub work env list | check W | install W [--node N] [--env NAME]   # Python packages of its SQL / Spark / Python nodes (drivers, pandas, polars, pyspark): check, one-command install
+aihub work env install --type db.sql --set driver=oracle --env data # set up an environment for a node type before any work exists
+aihub work rm W [-y]
 aihub onboard [BOT]                   # optional guided credential setup of a bot that has one ([bot] onboard); install offers it in a terminal
 aihub --json CMD ... | CMD --json | AIHUB_JSON=1   # ONE JSON document {schema, ok, command, exit, error, hint, data, output, messages, changes, context}; no prompts, no secrets; secrets in: login/register/password --password-stdin, vault add --token-stdin
 aihub space publish FILE|FOLDER [NAME|owner@name] [--kind K] [--title T] [--public|--private] [--view canvas|fit|full] [--transition fade|slide|zoom|flip|none] [--autoplay S] [--loop]   # publish a .pptx/.docx/.md/.xlsx/.csv/.pdf/.html (or folder with index.html) as a Space; opens at <hub>/#/s/author@name
-aihub space list [--since T]|top|search WORDS|info REF|url REF [--view full] [--bare]|get REF|rm REF|set REF ...|share REF --user U|--group G [--edit]|unshare|shares   # manage Spaces
+aihub space list [--since T]|top|search WORDS|info REF|url REF [--view full] [--bare]|get REF [--rev N]|rm REF|set REF ... [--public-access view|comment]|share REF --user U|--group G [--access view|comment|edit] [--edit]|unshare|shares   # manage Spaces; publish ... --note TEXT records a note in the version history
+aihub space comments REF | comment REF "text" [--reply ID] [--slide N] | resolve REF ID [--reopen]   # comments; "@name" / "@group" in the text alerts them on the hub (levels view < comment < edit < owner; a public space is view only unless --public-access comment; anonymous never comments)
+aihub space versions REF | restore REF REV [--note TEXT]    # version history; restore publishes the old revision again as a NEW one (edit access); the hub keeps the last space_versions_keep (default 20)
 aihub knowledge list|get NOTE|pull|push|edit NOTE|rm NOTE|path   # personal notes + bot soul (soul.md), also on the hub page Knowledge
 aihub knowledge share NOTE --user U|--group G [--write] | unshare | shares NOTE | shared | push-shared OWNER/NOTE   # shared notes land in ~/.aihub/knowledge/shared/<owner>/
 
 **Build a service (type = service).** `aihub dev init ./my-svc --type service --name my-svc`; `[service] run`, optional `restart` (default always) / `schedule` / `unique = true` (only one run at a time), `[[service.env]]`; `aihub run my-svc` keeps it up. Same as a bot otherwise.
+
+**Run a workflow on a server (no UI).** 1) `aihub install aihub-ui` (or let `aihub work` offer it). 2) `aihub work pull workflow-sales-etl` adds its works, switched off. 3) `aihub work setup sales-etl --creds creds.json --env data` (or answer the prompts; `aihub work cred template s3` prints a skeleton; `--env data` also installs the Python packages its code nodes need into ~/.aihub/ui/envs/data, or later: `aihub work env install sales-etl`). 4) `aihub work run sales-etl --input day=2026-10-31` tries one run with a live log, then `aihub work enable sales-etl && aihub work serve --bg` fires its triggers in the background (service `aihub-works`; `aihub run logs aihub-works -f` follows it). Only one process per machine fires triggers: the UI or `aihub work serve`.
 
 **Build Works nodes (type = node).** `aihub dev init ./my-node --type node --name my-node` writes `nodes/my-node.node.json` + `nodes/my_node.py` (reads one JSON document on stdin, prints one JSON line). `aihub dev publish` shares it; `aihub install NAME` makes it appear in aihub-ui Works > Add node. `dev validate` checks each `nodes/*.node.json` has id, kind (trigger|action) and a run list.
 

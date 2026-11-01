@@ -9,7 +9,11 @@ The user's code defines ONE entry function (`main`, else `run`, else the last fu
 
 Both the argument and the return must be a pydantic model, a dict / Dict[...] / TypedDict. The node fills the argument from the data of the
 nodes before it, the input text when it is a JSON object, and the optional "Arguments" field, and turns the return into JSON output
-(`data` keys become {{data.key}} for the nodes after it). pydantic is only needed when the code uses it."""
+(`data` keys become {{data.key}} for the nodes after it). pydantic is only needed when the code uses it.
+
+Multi-step (ETL): `# %% name` lines split the code into steps that run in order in one namespace (see _steps.py). The steps see
+`data` (the parsed input, as above), `inputs`, `text`, `workdir`, `vault` (aihub_vault: the credential sets granted to this node) and
+`result` (a dict: what it holds at the end is the output). A `main(args)` defined by the steps is still called as above, after them."""
 import contextlib
 import inspect
 import io
@@ -20,7 +24,19 @@ import sys
 import traceback
 import typing
 
+import _steps
+
 FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
+
+
+def pip_hint(mod):
+    """How to install the package that provides MOD into THIS Python (the node's environment)."""
+    try:
+        import aihub_data
+        pip = aihub_data.PIP.get(mod, mod)
+        return "Install it: %s  (or press Install in the node's Environment box)" % aihub_data.install_command([pip])
+    except ImportError:
+        return "Install it for this Python: %s -m pip install %s" % (sys.executable, mod)
 
 
 def done(**k):
@@ -98,6 +114,9 @@ def main():
     sys.modules["__aihub_node__"].__dict__.update(ns)
     ns = sys.modules["__aihub_node__"].__dict__
     log = io.StringIO()
+    args, text, obj = gather(d, cfg)
+    if _steps.has_steps(code):
+        return run_steps(code, ns, log, d, args, text, wd)
     try:
         with contextlib.redirect_stdout(log):
             exec(compile(code, "<python node>", "exec"), ns)
@@ -105,7 +124,7 @@ def main():
         fail("the code called sys.exit")
     except ImportError as e:
         name = getattr(e, "name", "") or ""
-        fail("%s. %s" % (e, "Install it for this Python: %s -m pip install %s" % (sys.executable, name.split(".")[0]) if name else ""))
+        fail("%s. %s" % (e, pip_hint(name.split(".")[0]) if name else ""))
     except SyntaxError as e:
         fail("syntax error on line %s: %s" % (e.lineno, e.msg))
     except Exception:
@@ -113,21 +132,11 @@ def main():
     fn = entry(ns)
     if fn is None:
         fail("define a function, for example: def main(args: In) -> Out")
-    try:
-        hints = typing.get_type_hints(fn, ns)
-    except Exception as e:
-        fail("cannot read the type hints of %s: %s" % (fn.__name__, e))
-    params = [p for p in inspect.signature(fn).parameters.values() if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)]
-    if len(params) > 1:
-        fail("%s() takes %d arguments: use ONE argument typed as a pydantic model or a dict" % (fn.__name__, len(params)))
-    arg_tp = hints.get(params[0].name) if params else None
-    if params and not kind_of(arg_tp):
-        fail("annotate the argument of %s() as a pydantic BaseModel or a dict, e.g. def %s(%s: In) -> Out" % (fn.__name__, fn.__name__, params[0].name))
-    ret_tp = hints.get("return")
-    if not kind_of(ret_tp):
-        fail("annotate the return of %s() as a pydantic BaseModel or a dict, e.g. -> Out" % fn.__name__)
+    call(fn, ns, log, args, text, obj)
 
-    # auto parse the input: data of the nodes before -> input text as a JSON object -> the Arguments field (later wins)
+
+def gather(d, cfg):
+    """The argument, auto parsed: data of the nodes before -> input text as a JSON object -> the Arguments field (later wins)."""
     args = {}
     for ev in d.get("inputs") or []:
         if isinstance(ev, dict) and isinstance(ev.get("data"), dict):
@@ -142,6 +151,52 @@ def main():
         if a is None:
             fail("Arguments must be a JSON object, e.g. {\"n\": 3}")
         args.update(a)
+    return args, text, obj
+
+
+def run_steps(code, ns, log, d, args, text, wd):
+    """Multi-step code: every `# %%` step in order, then main() if the steps defined one, else the `result` dict is the output."""
+    try:
+        import aihub_vault as vault
+    except ImportError:
+        vault = None
+    ns.update(data=dict(args), inputs=d.get("inputs") or [], text=text, workdir=wd, result={}, vault=vault, log=_steps.say)
+    try:
+        with contextlib.redirect_stdout(log):
+            steps = _steps.run(_steps.split(code), ns, "<python node>")
+    except _steps.StepFailed as e:
+        msg = str(e)
+        m = __import__("re").search(r"No module named '([\w.]+)'", msg)
+        fail(msg + ("\n" + pip_hint(m.group(1).split(".")[0]) if m else ""))
+    fn = next((ns[n] for n in ("main", "run") if inspect.isfunction(ns.get(n))), None)
+    if fn is not None:
+        return call(fn, ns, log, args, text, json_obj(text))
+    res = dump(ns.get("result"))
+    if not isinstance(res, dict):
+        res = {"result": res}
+    try:
+        res = json.loads(json.dumps(res, default=str))
+    except (TypeError, ValueError) as e:
+        fail("the result is not JSON serialisable: %s" % e)
+    done(ok=True, output=json.dumps(res, indent=2, ensure_ascii=False), data=dict(res, steps=steps),
+         log=(log.getvalue()[-1200:] + "\n" if log.getvalue() else "") + "%d step(s): %s" % (len(steps), ", ".join("%s %.1fs" % (s["name"], s["seconds"]) for s in steps)))
+
+
+def call(fn, ns, log, args, text, obj):
+    try:
+        hints = typing.get_type_hints(fn, ns)
+    except Exception as e:
+        fail("cannot read the type hints of %s: %s" % (fn.__name__, e))
+    params = [p for p in inspect.signature(fn).parameters.values() if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)]
+    if len(params) > 1:
+        fail("%s() takes %d arguments: use ONE argument typed as a pydantic model or a dict" % (fn.__name__, len(params)))
+    arg_tp = hints.get(params[0].name) if params else None
+    if params and not kind_of(arg_tp):
+        fail("annotate the argument of %s() as a pydantic BaseModel or a dict, e.g. def %s(%s: In) -> Out" % (fn.__name__, fn.__name__, params[0].name))
+    ret_tp = hints.get("return")
+    if not kind_of(ret_tp):
+        fail("annotate the return of %s() as a pydantic BaseModel or a dict, e.g. -> Out" % fn.__name__)
+
     if params:
         names = fields_of(arg_tp)
         for k in ("input", "text"):                                   # a plain-text input fills a field called input / text

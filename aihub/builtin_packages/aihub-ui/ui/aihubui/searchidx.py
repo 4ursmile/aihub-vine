@@ -516,8 +516,9 @@ def _space_rows(rows):
     return [{"ref": r[0], "title": r[1] or "", "kind": r[2] or "", "visibility": r[3] or "", "chat": bool(r[4]), "description": r[5] or ""} for r in rows]
 
 
-def spaces(q, limit=30):
-    """Local tiers over the Spaces mirror. Empty query = shared chats, newest seen first."""
+def spaces(q, limit=30, chats=True):
+    """Local tiers over the Spaces mirror. Empty query = shared chats, newest seen first (CHATS false: the most viewed spaces that are not chats,
+    for the @space: menu)."""
     c = _conn()
     if c is None:
         return []
@@ -526,12 +527,13 @@ def spaces(q, limit=30):
 
     def add(rows):
         for r in _space_rows(rows):
-            if r["ref"].lower() not in seen and len(out) < limit:
+            if r["ref"].lower() not in seen and len(out) < limit and (chats or not r["chat"]):
                 seen.add(r["ref"].lower())
                 out.append(r)
     with _lock:
         if not q:
-            add(c.execute("SELECT " + SPACE_COLS + " FROM space s WHERE chat=1 ORDER BY seen DESC LIMIT ?", (limit,)).fetchall())
+            add(c.execute("SELECT " + SPACE_COLS + " FROM space s WHERE chat=1 ORDER BY seen DESC LIMIT ?", (limit,)).fetchall() if chats else
+                c.execute("SELECT " + SPACE_COLS + " FROM space s WHERE chat=0 ORDER BY views DESC, seen DESC LIMIT ?", (limit,)).fetchall())
             return out
         m, rest = REF.match(q.split(" ")[0]), " ".join(q.split(" ")[1:])
         if m:

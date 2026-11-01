@@ -306,6 +306,16 @@ class PublishNode(unittest.TestCase):
                            capture_output=True, text=True, timeout=60)
         return json.loads(p.stdout.strip().splitlines()[-1]), time.time() - t0, out
 
+    def test_tags_are_cleaned_and_passed_to_the_cli(self):
+        site = tempfile.mkdtemp()
+        open(os.path.join(site, "index.html"), "w").write("<h1>hi</h1>")
+        r, _, out = self.run_node({"path": site, "name": "t2", "tags": "Finance, #Q3 report; finance, ,weekly"})
+        self.assertTrue(r["ok"], r)
+        argv = open(out + ".argv").read().split()
+        self.assertEqual(argv[argv.index("--tags") + 1], "finance,q3-report,weekly")
+        r, _, out = self.run_node({"path": site, "name": "t3"})
+        self.assertNotIn("--tags", open(out + ".argv").read())                  # none given: the hub keeps the tags the space has
+
     def test_publishes_a_staged_folder_without_hanging_on_stdin_or_pipes(self):
         site = tempfile.mkdtemp()
         os.makedirs(os.path.join(site, ".git"))
