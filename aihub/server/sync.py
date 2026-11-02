@@ -50,6 +50,9 @@ LIMITS = {
     "transfer_repo_ttl": (120, 0, 86400, "Seconds a git checkout fetched for `aihub install -i` is trusted before the hub asks git again (a monorepo is fetched once for all its packages)"),
     "backup_direct_max_mb": (90, 1, 2000, "Largest package archive (MB, from `aihub dev publish -i`) copied into the git backup; bigger ones are skipped and listed in backups/index.json (git hosts refuse files over ~100 MB)"),
     "space_versions_keep": (20, 1, 1000, "Revisions kept per Space (the current one included and never removed); older ones are deleted with their files"),
+    "pubsub_retention_hours": (72, 1, 8760, "Hours a pub/sub message is kept (a topic may set its own)"),
+    "pubsub_max_messages": (10000, 10, 10000000, "Messages kept per pub/sub topic, newest first (a topic may set a lower number)"),
+    "pubsub_max_kb": (256, 1, 4096, "Largest pub/sub message (KB)"),
     "backup_jitter": (10, 0, 50, "Backup start time is moved by up to this percent of the wait"),
     "backup_jitter_max": (600, 0, 3600, "...but never by more than this many seconds"),
 }

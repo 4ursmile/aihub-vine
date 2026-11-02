@@ -1680,7 +1680,7 @@ function Spaces() {
           : html`<div class="sp-list">${g.items.map((s) => html`<${SpRow} key=${s.ref} s=${s} onTag=${onTag} onOwner=${onOwner} />`)}</div>`}</section>`)}
       <div ref=${sentinel} class="sp-end">${items.length < total ? html`<button class="btn sec" disabled=${more} onClick=${loadMore}>${more ? "Loading…" : "Show " + Math.min(50, total - items.length) + " more"}</button>` : total > 50 ? html`<span class="sp-hint">That is all ${total.toLocaleString()} spaces.</span>` : null}</div></div>`;
   return html`<div class="stack"><div class="kn-head"><div><h1>Spaces</h1><p class="lead">Slides, docs, reports, sheets and dashboards your team can open straight from a link.</p></div>
-      ${me && can("publish") && html`<button class="btn" aria-haspopup="dialog" onClick=${() => setMk(true)}>New space</button>`}</div>
+      ${me && can("create_spaces") && html`<button class="btn" aria-haspopup="dialog" onClick=${() => setMk(true)}>New space</button>`}</div>
     ${mk && html`<${Dlg} title="New space" cls="sp-new" onClose=${() => setMk(false)}><${SpaceForm} bare onDone=${(s) => nav("/s/" + s.ref)} /><//>`}
     ${!filtered && showcase.length > 0 && html`<${SpShowcase} items=${showcase} />`}
     <div class="spx"><aside class=${"spx-rail" + (rail ? " open" : "")} aria-label="Filters">
@@ -2231,6 +2231,239 @@ function Notifications() {
       ${d.more && html`<button type="button" class="btn sec" onClick=${() => setLim(lim + 30)}>Show more</button>`}`
       : html`<${Empty} t=${f === "unread" ? "You are all caught up" : "Nothing here yet"} d="New alerts appear here and on the bell in the top bar." />`}</div>`;
 }
+// ---- Pub/Sub: topics (dotted names, sub topics), live messages with wildcards + regex, sharing (consume | produce | both), analytics.
+// Same frame as Spaces: a filter rail + list on the index, a head + tool bar + panels on a topic, the same share dialog shape.
+const PS_ACC = [["consume", "can consume"], ["produce", "can produce"], ["both", "can consume + produce"]];
+const PsAccOpts = () => PS_ACC.map(([v, l]) => html`<option key=${v} value=${v}>${l}</option>`);
+const PS_LVL = { admin: ["blue", "Owner"], both: ["green", "Consume + produce"], consume: ["", "Consume"], produce: ["orange", "Produce"] };
+const PS_SORTS = { name: "Name", active: "Last message", busy: "Most messages", new: "Newest" };
+const psBytes = (n) => n < 1024 ? (n || 0) + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(1) + " MB";
+const psTime = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+const PsLevel = ({ l }) => l && PS_LVL[l] ? html`<span class=${"badge " + PS_LVL[l][0]}>${PS_LVL[l][1]}</span>` : null;
+const PsRow = ({ t, onOwner }) => html`<div class="sp-row ps-row" style=${"--h:" + hue(t.root) + ";--d:" + Math.min(t.depth, 4)}>
+  <span class="sp-ico ps-ico" aria-hidden="true">${t.depth ? "SUB" : "TOP"}</span>
+  <div class="sp-rm"><a class="sp-rt mono" href=${"#/t/" + t.name}>${t.name}</a>${t.visibility === "private" && html`<span class="badge orange">private</span>`}${t.visibility === "public" && t.public_access === "produce" && html`<span class="badge green">open publish</span>`}
+    <div class="sp-rs"><button type="button" class="sp-by" onClick=${() => onOwner(t.owner)}>${t.owner_name || t.owner}</button>${t.title && html`<span>${t.title}</span>`}${t.description && html`<span class="sp-rd">${t.description}</span>`}</div></div>
+  <span class="ps-rn" title="Messages in the last 24 hours">${fmt(t.pub_24h)}<i>/24h</i></span><span class="sp-rt2" title=${t.last_ts ? new Date(t.last_ts * 1000).toLocaleString() : "No message yet"}>${t.last_ts ? ago(t.last_ts) : "idle"}</span></div>`;
+
+function TopicForm({ parent, onDone }) {           // a new root topic, or (with `parent`) a sub topic under it
+  const [f, setF] = useState({ name: parent ? parent.name + "." : "", title: "", description: "", visibility: parent ? parent.visibility : "public", public_access: "consume", retention_hours: "", max_messages: "", tags: [] });
+  const [busy, setBusy] = useState(false); const up = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const go = async (e) => { e.preventDefault(); setBusy(true);
+    try { const t = await api("/topics", { method: "POST", body: { ...f, tags: f.tags.join(","), retention_hours: +f.retention_hours || 0, max_messages: +f.max_messages || 0 } }); toast("Topic " + t.name + " created"); onDone(t); }
+    catch (er) { toast(er.message, 1); } setBusy(false); };
+  return html`<form class="sp-form stack" onSubmit=${go}>
+    <div class="sp-grid2"><label>Name<input class="field mono" value=${f.name} required placeholder="orders.eu" onInput=${(e) => setF({ ...f, name: e.target.value.toLowerCase().replace(/[^a-z0-9._-]+/g, "-") })} />
+        <small>${parent ? "Under " + parent.name + ": you are its owner, so you may add sub topics." : "Dots make levels: orders, orders.eu, orders.eu.paid."}</small></label>
+      <label>Title<input class="field" value=${f.title} placeholder="Shown on the list" onInput=${up("title")} /></label></div>
+    <label>Description<input class="field" value=${f.description} placeholder="What is published here, and by whom" onInput=${up("description")} /></label>
+    <div class="sp-f"><span>Tags</span><${TagInput} value=${f.tags} onChange=${(t) => setF({ ...f, tags: t })} /></div>
+    <div class="row"><div class="seg" role="group" aria-label="Who can see it">${["public", "private"].map((v) => html`<button type="button" key=${v} class=${f.visibility === v ? "on" : ""} onClick=${() => setF({ ...f, visibility: v })}>${v === "public" ? "Public" : "Private"}</button>`)}</div>
+      <span class="sp-hint">${f.visibility === "public" ? "Anyone may read it (signed out too). Share to let people publish." : "Only you, owners of the topics above it, and the people and groups you share it with."}</span></div>
+    <div class="sp-grid2">${f.visibility === "public" && html`<label>Signed-in people may<select class="field" value=${f.public_access} onChange=${up("public_access")}><option value="consume">consume only</option><option value="produce">consume and publish</option></select></label>`}
+      <label>Keep messages (hours, empty = hub default)<input class="field" type="number" min="1" max="8760" value=${f.retention_hours} onInput=${up("retention_hours")} /></label>
+      <label>At most messages (empty = hub default)<input class="field" type="number" min="10" value=${f.max_messages} onInput=${up("max_messages")} /></label></div>
+    <div class="row"><button class="btn" disabled=${busy || !f.name || /\.$/.test(f.name)}>${busy ? "Creating…" : parent ? "Create sub topic" : "Create topic"}</button><span class="sp-hint">or: <code>aihub pubsub create ${f.name || "NAME"}${f.visibility === "private" ? " --private" : ""}</code></span></div></form>`;
+}
+
+function PubSub() {
+  const { me } = useStore(); const qs = hashQ();
+  const [f, setF] = useState({ q: qs.get("q") || "", scope: qs.get("tab") || "all", owner: qs.get("owner") || "", vis: qs.get("vis") || "", sort: qs.get("sort") || "name" });
+  const [mk, setMk] = useState(qs.get("new") === "1"), [rail, setRail] = useState(false);
+  const set = (o) => setF((x) => ({ ...x, ...o })); const dq = debounced(f.q), scope = me ? f.scope : "all", who = me && me.username;
+  useEffect(() => { const h = location.hash.split("?")[0], p = new URLSearchParams();
+    for (const [k, v, d] of [["q", dq, ""], ["tab", scope, "all"], ["owner", f.owner, ""], ["vis", f.vis, ""], ["sort", f.sort, "name"]]) if (v && v !== d) p.set(k, v);
+    history.replaceState(null, "", h + (p.toString() ? "?" + p : "")); }, [dq, scope, f.owner, f.vis, f.sort]);
+  const l = useLoad(() => api("/topics?" + new URLSearchParams({ q: dq, scope, owner: f.owner, sort: f.sort, limit: 500 })), [dq, scope, f.owner, f.sort, who]);
+  const fx = useLoad(() => api("/topics/facets?" + new URLSearchParams({ q: dq })).catch(() => null), [dq, who]);
+  const ov = useLoad(() => api("/topics/overview").catch(() => null), [who]);
+  const X = fx.d || { owners: [], visibility: {}, scopes: {} }, O = ov.d || {};
+  const items = ((l.d && l.d.items) || []).filter((t) => !f.vis || t.visibility === f.vis);
+  const groups = []; for (const t of items) { const g = groups[groups.length - 1]; if (g && g.k === t.root && f.sort === "name") g.items.push(t); else groups.push({ k: f.sort === "name" ? t.root : "", items: [t] }); }
+  const active = [f.owner && ["Owner", f.owner, () => set({ owner: "" })], f.vis && ["Visibility", f.vis, () => set({ vis: "" })], dq && ["Search", dq, () => set({ q: "" })]].filter(Boolean);
+  const filtered = active.length > 0 || scope !== "all";
+  const body = l.e ? html`<${Err} e=${l.e} />` : !l.d ? html`<${Skels} n=${4} />`
+    : !items.length ? html`<${Empty} t=${filtered ? "No topics match" : "No topics yet"} d=${filtered ? "Try other words or remove a filter." : me ? "Create the first one with New topic, or: aihub pubsub create orders" : "Sign in to create the first one."} />`
+    : html`<div class=${"sp-res" + (l.loading ? " busy" : "")}>${groups.map((g, gi) => html`<section class="sp-grp" key=${gi + g.k}>${g.k && groups.length > 1 && html`<h2 class="sp-gh"><span class="mono">${g.k}</span><i>${g.items.length}</i></h2>`}
+        <div class="sp-list">${g.items.map((t) => html`<${PsRow} key=${t.name} t=${t} onOwner=${(o) => set({ owner: o })} />`)}</div></section>`)}</div>`;
+  return html`<div class="stack"><div class="kn-head"><div><h1>Pub/Sub</h1><p class="lead">Topics your tools, works and bots publish to and listen on: sub topics, wildcards and a regex on the message.</p></div>
+      ${me && can("create_topics") && html`<button class="btn" aria-haspopup="dialog" onClick=${() => setMk(true)}>New topic</button>`}</div>
+    ${mk && html`<${Dlg} title="New topic" cls="sp-new" onClose=${() => setMk(false)}><${TopicForm} onDone=${(t) => nav("/t/" + t.name)} /><//>`}
+    <div class="kpis"><div class="stat"><b>${fmt(O.topics || 0)}</b><span>topics you can see</span></div><div class="stat"><b>${fmt(O.pub_24h || 0)}</b><span>messages published, 24 h</span></div><div class="stat"><b>${fmt(O.deliv_24h || 0)}</b><span>messages delivered, 24 h</span></div></div>
+    <div class="spx"><aside class=${"spx-rail" + (rail ? " open" : "")} aria-label="Filters">
+        ${me && html`<section class="spf"><h3>Show</h3><div class="seg spf-seg" role="group" aria-label="Scope">${[["all", "All"], ["mine", "Mine"], ["shared", "Shared"]].map(([v, lb]) => html`<button type="button" key=${v} class=${scope === v ? "on" : ""} onClick=${() => set({ scope: v })}>${lb}${X.scopes[v] != null && html` <i>${X.scopes[v]}</i>`}</button>`)}</div></section>`}
+        <${Facet} title="Visibility" items=${["public", "private"].filter((v) => X.visibility[v]).map((v) => ({ id: v, label: v === "public" ? "Public" : "Private", n: X.visibility[v] }))} sel=${f.vis} onPick=${(v) => set({ vis: v })} />
+        <${Facet} title="Owners" items=${X.owners.map((o) => ({ id: o.username, label: o.name || o.username, n: o.n }))} sel=${f.owner} onPick=${(v) => set({ owner: v })} cap=${8} find=${true} /></aside>
+      <div class="spx-main">
+        <div class="spx-bar"><${Search} value=${f.q} onInput=${(v) => set({ q: v })} ph="Search topic, title, owner, tag…" />
+          <button type="button" class="btn sec spx-ft" aria-expanded=${rail} onClick=${() => setRail(!rail)}>Filters${filtered ? " ·" + (active.length + (scope !== "all" ? 1 : 0)) : ""}</button></div>
+        <div class="spx-tools"><span class="spx-n" aria-live="polite">${!l.d ? "Loading…" : items.length.toLocaleString() + (items.length === 1 ? " topic" : " topics")}</span>
+          <label>Sort<select class="field sm" value=${f.sort} onChange=${(e) => set({ sort: e.target.value })}>${Object.entries(PS_SORTS).map(([k, lb]) => html`<option value=${k}>${lb}</option>`)}</select></label></div>
+        ${filtered && html`<div class="spx-act">${active.map(([k, v, rm]) => html`<button type="button" class="chip on" key=${k} onClick=${rm}>${k}: ${v} <span aria-hidden="true">×</span></button>`)}
+          ${scope !== "all" && html`<button type="button" class="chip on" onClick=${() => set({ scope: "all" })}>${scope === "mine" ? "Mine" : "Shared with me"} <span aria-hidden="true">×</span></button>`}
+          <button type="button" class="spx-clear" onClick=${() => set({ q: "", owner: "", vis: "", scope: "all" })}>Clear all</button></div>`}
+        ${body}</div></div></div>`;
+}
+
+function TopicShare({ t, onClose, onSaved }) {
+  const [tick, setTick] = useState(0), [pick, setPick] = useState({}), [flt, setFlt] = useState(""), [type, setType] = useState(""), [acc, setAcc] = useState("consume"), [busy, setBusy] = useState(false);
+  const a = useLoad(() => api("/topics/" + t.name + "/access"), [t.name, tick]);
+  const all = useLoad(() => api("/groups/lookup?limit=500"), [t.name]);
+  const mine = (a.d && a.d.access) || [], inh = (a.d && a.d.inherited) || [];
+  const have = new Set(mine.map((x) => x.type + ":" + x.name)), q = flt.trim().toLowerCase(), key = (c) => c.type + ":" + c.name;
+  const cand = [...((all.d && all.d.groups) || []).map((n) => ({ type: "group", name: n, label: n })), ...((all.d && all.d.users) || []).map((u) => ({ type: "user", name: u.username, label: u.display_name ? u.display_name + " (" + u.username + ")" : u.username }))]
+    .filter((c) => c.name !== t.owner && !have.has(key(c)) && (!q || c.label.toLowerCase().includes(q)));
+  const shownC = type ? cand.filter((c) => c.type === type) : cand, chosen = Object.keys(pick).filter((k) => pick[k]);
+  const share = async () => { setBusy(true);
+    try { const items = chosen.map((k) => { const [ty, ...r] = k.split(":"); return { type: ty, name: r.join(":") }; }); await api("/topics/" + t.name + "/access", { method: "PUT", body: { items, access: acc } }); toast("Shared with " + items.length); setPick({}); setTick(tick + 1); }
+    catch (er) { toast(er.message, 1); } setBusy(false); };
+  const rm = async (x) => { try { await api("/topics/" + t.name + "/access/" + x.type + "/" + encodeURIComponent(x.name), { method: "DELETE" }); setTick(tick + 1); } catch (er) { toast(er.message, 1); } };
+  const setLevel = async (x, access) => { try { await api("/topics/" + t.name + "/access", { method: "PUT", body: { type: x.type, name: x.name, access } }); setTick(tick + 1); } catch (er) { toast(er.message, 1); } };
+  const setPublic = async (v) => { try { onSaved(await api("/topics/" + t.name, { method: "PATCH", body: { public_access: v } })); toast(v === "produce" ? "Signed-in people may publish now" : "The public may only consume now"); } catch (er) { toast(er.message, 1); } };
+  return html`<${Dlg} title="Who can consume and produce" cls="sp-share" onClose=${onClose}><p class="sp-hint">${t.visibility === "public" ? "Public: anyone may consume (read) it, signed out too. Share below to let people publish, or make it private." : "Private: you, owners of the topics above it, and these people and groups."} Grants here also reach every sub topic below ${t.name}.</p>
+    ${t.visibility === "public" && html`<div class="sp-prow sp-pubacc"><${Av} n="everyone" t="group" /><span class="sp-pn"><b>Signed-in people</b><small>Visitors who are not signed in can only consume</small></span>
+      <select class="field sm" value=${t.public_access} onChange=${(e) => setPublic(e.target.value)} aria-label="What signed-in people may do"><option value="consume">can consume</option><option value="produce">can consume + produce</option></select></div>`}
+    <div class="sp-tools"><input class="field" type="search" placeholder="Filter people and groups" value=${flt} onInput=${(e) => setFlt(e.target.value)} />
+      <div class="sp-chips">${[["", "All"], ["user", "People"], ["group", "Groups"]].map(([k, lb]) => html`<button type="button" key=${k} class=${"chip" + (type === k ? " on" : "")} onClick=${() => setType(k)}>${lb}</button>`)}</div></div>
+    <ul class="sp-pick">${all.d ? shownC.map((c) => html`<li key=${key(c)}><label class=${"sp-prow" + (pick[key(c)] ? " on" : "")}><input type="checkbox" checked=${!!pick[key(c)]} onChange=${() => setPick({ ...pick, [key(c)]: !pick[key(c)] })} /><${Av} n=${c.name} t=${c.type} /><span class="sp-pn"><b>${c.label}</b></span><span class="badge">${c.type === "group" ? "group" : "person"}</span></label></li>`) : html`<li class="sp-hint">Loading…</li>`}${all.d && !shownC.length && html`<li class="sp-hint">Nobody left to pick.</li>`}</ul>
+    <div class="sp-bar"><select class="field sm" value=${acc} onChange=${(e) => setAcc(e.target.value)} aria-label="Access level"><${PsAccOpts} /></select>
+      <button class="btn sm" onClick=${share} disabled=${!chosen.length || busy}>${busy ? "Sharing…" : chosen.length ? "Share with " + chosen.length : "Share"}</button></div>
+    <h3 style="margin-top:12px">Shared on ${t.name} <span class="mute">${mine.length || ""}</span></h3>
+    <ul class="sp-pick">${mine.map((x) => html`<li key=${x.type + x.name}><div class="sp-prow"><${Av} n=${x.name} t=${x.type} /><span class="sp-pn"><b>${x.name}</b><small>${x.type === "group" ? "group" : "person"}</small></span>
+      <select class="field sm" value=${x.access} onChange=${(e) => setLevel(x, e.target.value)} aria-label=${"Access for " + x.name}><${PsAccOpts} /></select>
+      <button class="btn sec sm" onClick=${() => rm(x)} aria-label=${"Remove " + x.name}>Remove</button></div></li>`)}${a.d && !mine.length && html`<li class="sp-hint">Not shared with anyone yet.</li>`}</ul>
+    ${inh.length > 0 && html`<h3 style="margin-top:12px">From the topics above</h3><ul class="sp-pick">${inh.map((x) => html`<li key=${x.topic + x.type + x.name}><div class="sp-prow"><${Av} n=${x.name} t=${x.type} /><span class="sp-pn"><b>${x.name}</b><small>on <a href=${"#/t/" + x.topic}>${x.topic}</a></small></span><span class="badge">${(PS_ACC.find((p) => p[0] === x.access) || [0, x.access])[1]}</span></div></li>`)}</ul>`}<//>`;
+}
+
+function TopicSettings({ t, onSaved, onClose }) {
+  const [f, setF] = useState({ title: t.title, description: t.description, tags: t.tags.slice(), visibility: t.visibility, public_access: t.public_access, retention_hours: t.retention_hours || "", max_messages: t.max_messages || "" });
+  const up = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const save = async (e) => { e.preventDefault(); try { onSaved(await api("/topics/" + t.name, { method: "PATCH", body: { ...f, tags: f.tags.join(","), retention_hours: +f.retention_hours || 0, max_messages: +f.max_messages || 0 } })); toast("Saved"); } catch (er) { toast(er.message, 1); } };
+  return html`<${Dlg} title="Topic settings" cls="sp-set" onClose=${onClose}><div class="sp-panel"><form class="stack" onSubmit=${save}>
+    <label>Title<input class="field" value=${f.title} onInput=${up("title")} /></label>
+    <label>Description<input class="field" value=${f.description} onInput=${up("description")} /></label>
+    <div class="sp-f"><span>Tags</span><${TagInput} value=${f.tags} onChange=${(x) => setF({ ...f, tags: x })} /></div>
+    <div class="sp-grid2"><label>Visibility<select class="field" value=${f.visibility} onChange=${up("visibility")}><option value="public">Public</option><option value="private">Private</option></select></label>
+      ${f.visibility === "public" && html`<label>Signed-in people may<select class="field" value=${f.public_access} onChange=${up("public_access")}><option value="consume">consume only</option><option value="produce">consume and publish</option></select></label>`}</div>
+    <div class="sp-grid2"><label>Keep messages (hours)<input class="field" type="number" min="1" max="8760" placeholder=${"hub default: " + t.effective_retention_hours} value=${f.retention_hours} onInput=${up("retention_hours")} /></label>
+      <label>At most messages<input class="field" type="number" min="10" placeholder=${"hub default: " + t.effective_max_messages} value=${f.max_messages} onInput=${up("max_messages")} /></label></div>
+    <div class="row"><button class="btn">Save</button></div></form></div><//>`;
+}
+
+const psShow = (d) => typeof d === "string" ? d : JSON.stringify(d, null, 2);
+function PsMsg({ m, open, onToggle }) {
+  const txt = psShow(m.data), flat = typeof m.data === "string" ? m.data.replace(/\s+/g, " ") : JSON.stringify(m.data);
+  return html`<li class=${"ps-msg" + (open ? " open" : "")}><button type="button" class="ps-mh" aria-expanded=${open} onClick=${onToggle}>
+      <span class="ps-mt" title=${new Date(m.ts * 1000).toLocaleString()}>${psTime(m.ts)}</span><span class="ps-ms"><span class="mono">${m.subject}</span>${m.key && html`<span class="badge">${m.key}</span>`}</span>
+      <span class="ps-mp">${open ? "" : flat.length > 240 ? flat.slice(0, 240) + "…" : flat}</span><span class="ps-mb">${m.by || "—"} · #${m.id}</span></button>
+    ${open && html`<div class="ps-md"><pre class="mono">${txt}</pre>${Object.keys(m.headers || {}).length > 0 && html`<p class="xs mut3 mono">${Object.entries(m.headers).map(([k, v]) => k + ": " + v).join("  ·  ")}</p>`}
+      <div class="row"><button type="button" class="btn sec sm" onClick=${() => copy(txt)}>Copy data</button><span class="xs mut3">${m.type} · ${psBytes(m.size)}</span></div></div>`}</li>`;
+}
+function PsLive({ t }) {                             // a live tail: the last 50 matching messages, then a long poll that appends as they arrive
+  const def = t.name + ".#", qs = hashQ();
+  const [pat, setPat] = useState(qs.get("pattern") || def), [rx, setRx] = useState(qs.get("match") || ""), [live, setLive] = useState(true);
+  const dpat = debounced(pat, 500), drx = debounced(rx, 500);
+  const [items, setItems] = useState(null), [err, setErr] = useState(null), [open, setOpen] = useState({}), [paused, setPaused] = useState(false);
+  useEffect(() => { setHashQ("pattern", dpat === def ? null : dpat); setHashQ("match", drx || null); }, [dpat, drx]);
+  useEffect(() => {
+    let dead = false; const ctl = new AbortController(); setErr(null); setItems(null);
+    const q = (x) => new URLSearchParams({ pattern: dpat, ...(drx ? { match: drx } : {}), ...x });
+    (async () => {
+      let pos;
+      try { const r = await api("/pubsub/messages?" + q({ tail: 50 }), { signal: ctl.signal }); if (dead) return; setItems(r.items.reverse()); pos = r.next; }
+      catch (e) { if (!dead) setErr(e.message); return; }
+      while (!dead && live) {
+        try { const r = await api("/pubsub/messages?" + q({ after: pos, wait: 25, limit: 200 }), { signal: ctl.signal }); if (dead) return; pos = r.next;
+          if (r.items.length) setItems((x) => [...r.items.reverse(), ...(x || [])].slice(0, 500)); setErr(null); }
+        catch (e) { if (dead) return; setErr(e.message); await new Promise((s) => setTimeout(s, 3000)); }
+      }
+    })();
+    return () => { dead = true; ctl.abort(); };
+  }, [dpat, drx, live, t.name]);
+  const [frozen, setFrozen] = useState(null); useEffect(() => { if (paused) setFrozen(items); }, [paused]);
+  const list = (paused ? frozen : items) || [];
+  return html`<div class="stack ps-live">
+    <div class="ps-filt"><label><span>Subject pattern</span><input class="field mono" value=${pat} onInput=${(e) => setPat(e.target.value.toLowerCase())} placeholder=${def} aria-describedby="ps-ph" /></label>
+      <label><span>Message regex (optional)</span><input class="field mono" value=${rx} onInput=${(e) => setRx(e.target.value)} placeholder="error|timeout" /></label>
+      <div class="ps-fb"><span class=${"ps-dot" + (live && !err ? " on" : "")} aria-hidden="true"></span><span class="xs mut">${err ? "" : live ? (paused ? "Paused (still listening)" : "Live") : "Stopped"}</span>
+        <button type="button" class="btn sec sm" onClick=${() => setPaused(!paused)} disabled=${!live}>${paused ? "Resume" : "Pause"}</button>
+        <button type="button" class="btn sec sm" onClick=${() => setLive(!live)}>${live ? "Stop" : "Listen"}</button>
+        <button type="button" class="btn sec sm" onClick=${() => { setItems([]); setFrozen([]); }}>Clear</button></div></div>
+    <p class="xs mut3" id="ps-ph"><code>*</code> one part · <code>></code> one or more parts below · <code>#</code> the topic and everything below · e.g. <code>${t.name}.*.created</code></p>
+    ${err && html`<p class="ps-err" role="alert">${err}</p>`}
+    ${items == null && !err ? html`<div class="skel" style="height:160px"></div>` : list.length ? html`<ul class="ps-msgs" aria-live="polite">${list.map((m) => html`<${PsMsg} key=${m.id} m=${m} open=${!!open[m.id]} onToggle=${() => setOpen({ ...open, [m.id]: !open[m.id] })} />`)}</ul>`
+      : !err && html`<${Empty} t="No messages yet" d=${"Nothing matches " + dpat + (drx ? " and /" + drx + "/" : "") + " in what the hub keeps. New ones show here as they arrive."} />`}</div>`;
+}
+function PsPublish({ t }) {
+  const [subj, setSubj] = useState(t.name), [key, setKey] = useState(""), [data, setData] = useState(""), [asJson, setAsJson] = useState(true), [busy, setBusy] = useState(false);
+  const send = async (e) => { e.preventDefault(); let d = data;
+    if (asJson && data.trim()) { try { d = JSON.parse(data); } catch { return toast("Not valid JSON: untick JSON to send it as text", 1); } }
+    setBusy(true); try { const r = await api("/pubsub/publish", { method: "POST", body: { subject: subj, data: d, ...(key ? { key } : {}) } }); toast("Published #" + r.ids[0]); setData(""); } catch (er) { toast(er.message, 1); } setBusy(false); };
+  return html`<form class="card stack ps-pub" onSubmit=${send}><h3>Publish</h3>
+    <div class="sp-grid2"><label>Subject<input class="field mono" value=${subj} onInput=${(e) => setSubj(e.target.value.toLowerCase())} /></label><label>Key (optional)<input class="field" value=${key} onInput=${(e) => setKey(e.target.value)} placeholder="order-42" /></label></div>
+    <label>Data<textarea class="field mono" rows="4" value=${data} onInput=${(e) => setData(e.target.value)} placeholder=${asJson ? '{"id": 42, "status": "paid"}' : "plain text"}></textarea></label>
+    <div class="row"><label class="sp-check"><input type="checkbox" checked=${asJson} onChange=${(e) => setAsJson(e.target.checked)} /> JSON</label><span class="sp"></span><button class="btn" disabled=${busy || !subj}>${busy ? "Sending…" : "Publish"}</button></div></form>`;
+}
+function PsStats({ t }) {
+  const [days, setDays] = useState(7); const s = useLoad(() => api("/topics/" + t.name + "/stats?days=" + days), [t.name, days]);
+  if (s.e) return html`<${Err} e=${s.e} />`; if (!s.d) return html`<div class="skel" style="height:300px"></div>`;
+  const d = s.d, PC = { pub: "var(--blue)", deliv: "var(--green)" };
+  const series = d.series.map((x) => ({ ...x, date: d.hourly ? x.date.slice(5) : x.date }));
+  return html`<div class="stack"><div class="row"><div class="seg" role="group" aria-label="Period">${[[1, "24 hours"], [7, "7 days"], [30, "30 days"], [90, "90 days"]].map(([v, lb]) => html`<button type="button" key=${v} class=${days === v ? "on" : ""} onClick=${() => setDays(v)}>${lb}</button>`)}</div>
+      <span class="xs mut3">${t.name} and ${d.topics > 1 ? d.topics - 1 + " sub topic record(s) below it" : "everything published under it"}</span></div>
+    <div class="kpis"><${Kpi} label="Published" value=${d.totals.pub} prev=${d.prior.pub} /><${Kpi} label="Delivered" value=${d.totals.deliv} prev=${d.prior.deliv} />
+      <div class="card stat"><span>Kept now</span><b>${fmt(d.stored.messages)}</b><span class="xs mut3">${psBytes(d.stored.bytes)}${d.stored.oldest ? " · since " + ago(d.stored.oldest) : ""}</span></div>
+      <div class="card stat"><span>Active clients (10 min)</span><b>${d.clients.filter((c) => c.active).length}</b><span class="xs mut3">${d.clients.length} in this period</span></div></div>
+    <div class="card"><h3>Messages ${d.hourly ? "per hour" : "per day"}</h3><${LineChart} daily=${series} series=${["pub", "deliv"]} colors=${PC} labels=${{ pub: "published", deliv: "delivered" }} /></div>
+    <div class="ps-2"><div class="card"><h3>Busiest subjects (kept messages)</h3><${Bars} items=${d.subjects} /></div>
+      <div class="card"><h3>Producers and consumers</h3>${d.clients.length ? html`<div class="tscroll"><table class="tbl ps-cl"><thead><tr><th>Who</th><th>Role</th><th>Pattern</th><th style="text-align:right">Messages</th><th>Last</th></tr></thead><tbody>
+        ${d.clients.map((c, i) => html`<tr key=${i}><td>${c.username ? c.display_name || c.username : html`<span class="mut3">hidden</span>`}</td><td><span class=${"badge " + (c.role === "produce" ? "orange" : "green")}>${c.role}</span></td><td class="mono xs">${c.pattern || "—"}</td><td style="text-align:right">${fmt(c.n)}</td><td>${c.active ? html`<span class="ps-dot on" title="active"></span>` : ""}${ago(c.last)}</td></tr>`)}</tbody></table></div>` : html`<p class="mut sm">Nobody published or listened in this period.</p>`}
+        ${!t.can_manage && d.clients.length > 0 && html`<p class="xs mut3">Names are shown to the owner only.</p>`}</div></div></div>`;
+}
+function PsConnect({ t }) {
+  const hub = location.origin + location.pathname.replace(/\/$/, "");
+  return html`<div class="stack"><div class="card stack"><h3>From a terminal</h3>
+      <${Cmd} text=${"aihub pubsub sub '" + t.name + ".#'"} /><${Cmd} text=${"aihub pubsub sub '" + t.name + ".>' --match 'error|fail' --durable my-worker"} />
+      <${Cmd} text=${"aihub pubsub pub " + t.name + " '{\"status\": \"paid\"}'"} /><${Cmd} text=${"tail -f app.log | aihub pubsub pub " + t.name + ".logs --lines"} /></div>
+    <div class="card stack"><h3>From aihub-ui works</h3><p class="sm mut">Add <b>Start: Pub/Sub message</b> (pattern <code>${t.name}.#</code>, optional regex) to start a run for each message, and <b>Publish to Pub/Sub</b> to send one. Both use your aihub login.</p></div>
+    <div class="card stack"><h3>HTTP</h3><p class="sm mut">Use a token from <code>aihub login</code> (Authorization: Bearer …).</p>
+      <${Cmd} text=${"curl -H \"Authorization: Bearer $TOKEN\" -H 'Content-Type: application/json' -d '{\"subject\":\"" + t.name + "\",\"data\":{\"id\":1}}' " + hub + "/api/v1/pubsub/publish"} />
+      <${Cmd} text=${"curl -H \"Authorization: Bearer $TOKEN\" '" + hub + "/api/v1/pubsub/messages?pattern=" + encodeURIComponent(t.name + ".#") + "&wait=25'"} /></div></div>`;
+}
+function TopicPage({ name }) {
+  const st = useStore(), { me } = st; const [tick, setTick] = useState(0), [panel, setPanel] = useState(null), [ask, setAsk] = useState(false), [mkSub, setMkSub] = useState(false);
+  const m = useLoad(() => api("/topics/" + name), [name, tick, me && me.username]); const t = m.d;
+  const tab0 = hashQ().get("tab"), [tab, setTabS] = useState(["live", "subs", "stats", "connect"].includes(tab0) ? tab0 : "live");
+  const setTab = (v) => { setTabS(v); setHashQ("tab", v === "live" ? null : v); };
+  if (!t) return m.e ? html`<${Empty} t="Topic not found" d=${me ? "It may be private, or the name is wrong. " + m.e : "It may be private: sign in, then open the link again."} />` : html`<div class="skel" style="height:50vh"></div>`;
+  const del = async () => { try { const r = await api("/topics/" + t.name, { method: "DELETE" }); toast("Deleted " + r.removed + " topic record(s)"); nav(t.parents.length ? "/t/" + t.parents[t.parents.length - 1] : "/pubsub"); } catch (e) { toast(e.message, 1); setAsk(false); } };
+  const saved = () => { setTick(tick + 1); setPanel(null); };
+  const Ib = ({ d, label, on, onClick, cls = "" }) => html`<button class=${"sp-ib " + cls + (on ? " on" : "")} title=${label} aria-label=${label} aria-pressed=${on == null ? null : !!on} onClick=${onClick}><${SIc} d=${d} /><span class="lb">${label}</span></button>`;
+  const crumbs = t.name.split("."), TABS = [["live", "Messages"], ["subs", "Sub topics", t.children_total], ["stats", "Analytics"], ["connect", "Connect"]];
+  return html`<div class="stack sp-page ps-page">
+    <div class="sp-head"><a class="sp-back" href="#/pubsub">‹ Pub/Sub</a><h1>${t.title || t.name}</h1>
+      <p class="sp-ref"><${Avatar} p=${{ username: t.owner, display_name: t.owner_name, avatar_url: t.owner_avatar }} size=${18} />
+        <span class="mono ps-crumbs">${crumbs.map((c, i) => { const n = crumbs.slice(0, i + 1).join("."), rec = i === crumbs.length - 1 || t.parents.includes(n); return html`${i ? "." : ""}${rec && i < crumbs.length - 1 ? html`<a href=${"#/t/" + n}>${c}</a>` : c}`; })}</span>
+        <span class=${"badge " + (t.visibility === "private" ? "orange" : "blue")}>${t.visibility}</span><${PsLevel} l=${t.level} /><span>${fmt(t.msgs)} published here · ${t.last_ts ? "last " + ago(t.last_ts) : "no message yet"}</span></p>
+      ${t.description && html`<p class="sp-desc">${t.description}</p>`}</div>
+    <div class="sp-tools" role="toolbar" aria-label="Topic tools">
+      <div class="seg" role="tablist" aria-label="View">${TABS.map(([k, lb, n]) => html`<button key=${k} role="tab" aria-selected=${tab === k} class=${tab === k ? "on" : ""} onClick=${() => setTab(k)}>${lb}${n ? html` <i>${n}</i>` : ""}</button>`)}</div>
+      <span class="sp-sep"></span>
+      <${Ib} d=${SI.link} label="Copy link" onClick=${() => copy(location.origin + location.pathname.replace(/\/$/, "/") + "#/t/" + t.name)} />
+      ${t.can_manage && html`<span class="sp-sep"></span><${Ib} d=${SI.gear} label="Settings" on=${panel === "set"} onClick=${() => setPanel(panel === "set" ? null : "set")} />
+        <${Ib} d=${SI.share} label="Share" on=${panel === "share"} onClick=${() => setPanel(panel === "share" ? null : "share")} />
+        ${ask ? html`<span class="sp-ask">Delete <b>${t.name}</b>${t.children_total ? " and " + t.children_total + " sub topic(s)" : ""} with all messages?<button class="btn sec sm" onClick=${() => setAsk(false)}>Cancel</button><button class="btn danger sm" onClick=${del}>Delete</button></span>` : html`<${Ib} d=${SI.trash} label="Delete" cls="warn" onClick=${() => setAsk(true)} />`}`}</div>
+    ${panel === "set" && html`<${TopicSettings} t=${t} onClose=${() => setPanel(null)} onSaved=${saved} />`}
+    ${panel === "share" && html`<${TopicShare} t=${t} onClose=${() => setPanel(null)} onSaved=${() => setTick(tick + 1)} />`}
+    ${mkSub && html`<${Dlg} title=${"New sub topic of " + t.name} cls="sp-new" onClose=${() => setMkSub(false)}><${TopicForm} parent=${t} onDone=${(x) => { setMkSub(false); nav("/t/" + x.name); }} /><//>`}
+    ${tab === "live" && html`<div class=${"ps-work" + (t.can_produce ? " has-pub" : "")}>${t.can_consume ? html`<${PsLive} t=${t} key=${t.name} />` : html`<${Empty} t="You may publish here, not read" d="Ask the owner to share it with you as consume to see messages." />`}${t.can_produce && html`<${PsPublish} t=${t} />`}</div>`}
+    ${tab === "subs" && html`<div class="stack"><div class="row"><p class="mut sm" style="flex:1">A subject needs no record of its own: <code>${t.name}.anything</code> is published to the nearest topic above it. Add a sub topic when it should have its own visibility, sharing or retention.</p>
+        ${t.can_manage && html`<button class="btn" onClick=${() => setMkSub(true)}>New sub topic</button>`}</div>
+      ${t.children.length ? html`<div class="sp-list">${t.children.map((x) => html`<${PsRow} key=${x.name} t=${x} onOwner=${(o) => nav("/pubsub?owner=" + o)} />`)}</div>` : html`<${Empty} t="No sub topics" d="Everything below this topic follows its rules." />`}</div>`}
+    ${tab === "stats" && html`<${PsStats} t=${t} />`}
+    ${tab === "connect" && html`<${PsConnect} t=${t} />`}</div>`;
+}
+
 function NavMenu({ label, lead, items }) {
   const [open, setOpen] = useState(false); const ref = useRef();
   useEffect(() => {
@@ -2285,10 +2518,10 @@ function App() {
   const navGroup = (label, items) => items.length > 1 ? html`<${NavMenu} label=${label} items=${items} />` : items.length ? html`<a class=${items[0].on ? "on" : ""} href=${items[0].href}>${items[0].label}</a>` : "";
   const br = s.brand || {}, ct = br.contact || {};
   const page = { "": html`<${Home} />`, browse: html`<${Browse} key=${s.route} />`, package: html`<${Package} name=${seg[1]} key=${seg[1]} />`, rankings: html`<${Rankings} />`, docs: html`<${Docs} slug=${seg[1]} key=${seg[1]} />`, start: html`<${Start} />`,
-    login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, knowledge: html`<${Knowledge} />`, dashboard: html`<${Dashboard} />`, usage: html`<${UsageHub} />`, running: html`<${Running} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />`, notifications: html`<${Notifications} />`, spaces: html`<${Spaces} key=${s.route.split("?")[0]} />`, s: html`<${SpacePage} sref=${decodeURIComponent(seg[1] || "")} key=${seg[1]} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
+    login: html`<${Auth} mode="login" />`, register: html`<${Auth} mode="register" />`, account: html`<${Account} />`, admin: html`<${Admin} />`, knowledge: html`<${Knowledge} />`, dashboard: html`<${Dashboard} />`, usage: html`<${UsageHub} />`, running: html`<${Running} />`, audit: html`<${Audit} />`, groups: html`<${Groups} />`, notifications: html`<${Notifications} />`, spaces: html`<${Spaces} key=${s.route.split("?")[0]} />`, s: html`<${SpacePage} sref=${decodeURIComponent(seg[1] || "")} key=${seg[1]} />`, pubsub: html`<${PubSub} key=${s.route.split("?")[0]} />`, t: html`<${TopicPage} name=${decodeURIComponent(seg[1] || "")} key=${seg[1]} />` }[seg[0] || ""] || html`<${Empty} t="Page not found" d="That page doesn’t exist." />`;
   return html`<div><a class="skip" href="#/" onClick=${(e) => { e.preventDefault(); const m = document.getElementById("main"); if (m) m.focus(); }}>Skip to content</a>${br.announcement && html`<div class="announce" role="status" dangerouslySetInnerHTML=${{ __html: br.announcement }}></div>`}<header class="nav"><div class="nav-in"><a class="brand glow" href="#/">${br.logo_url ? html`<img decoding="async" class="logo" src=${br.logo_url} alt="" />` : MARK}<span>${br.name || "AI Hub"}</span></a>
     <button type="button" class="burger" aria-label="Menu" aria-expanded=${menu} aria-controls="menu" onClick=${() => setMenu(!menu)}><i></i><i></i><i></i></button>
-    <div id="menu" class=${"menu" + (menu ? " open" : "")} onClick=${(e) => { if (e.target.closest && e.target.closest("a")) setMenu(false); }}><nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("spaces") || on("s")} href="#/spaces">Spaces</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
+    <div id="menu" class=${"menu" + (menu ? " open" : "")} onClick=${(e) => { if (e.target.closest && e.target.closest("a")) setMenu(false); }}><nav class="links" aria-label="Main" ref=${lk}><i class="ind" ref=${ind}></i><a class=${on("browse")} href="#/browse">Browse</a><a class=${on("rankings")} href="#/rankings">Rankings</a><a class=${on("spaces") || on("s")} href="#/spaces">Spaces</a><a class=${on("pubsub") || on("t")} href="#/pubsub">Pub/Sub</a><a class=${on("start")} href="#/start">Get started</a><a class=${on("docs")} href="#/docs">Docs</a></nav>
     <div class="r">${s.me ? html`${navGroup("Workspace", ws)}${navGroup("Manage", mg)}<${Bell} /><${NavMenu} label=${shown(s.me)} lead=${html`<${Avatar} p=${s.me} size=${22} />`} items=${[{ k: "account", label: "Account", href: "#/account", on: seg[0] === "account" }, { k: "out", label: "Sign out", href: "#/", onClick: logout }]} />` :
       html`${can("view_dashboard") ? html`<a href="#/dashboard">Dashboard</a>` : ""}<a href="#/login">Sign in</a>`}</div></div></div></header>
     <main id="main" tabindex="-1">${seg[0] === "login" || seg[0] === "register" ? html`<div class="page au-page" key="auth">${page}</div>` : html`<div class="page" key=${path}>${page}</div>`}</main>

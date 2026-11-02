@@ -134,6 +134,10 @@ aihub space publish FILE|FOLDER [NAME|owner@name] [--kind K] [--title T] [--publ
 aihub space list [--since T]|top|search WORDS|info REF|url REF [--view full] [--bare]|get REF [--rev N]|rm REF|set REF ... [--public-access view|comment]|share REF --user U|--group G [--access view|comment|edit] [--edit]|unshare|shares   # manage Spaces; publish ... --note TEXT records a note in the version history
 aihub space comments REF | comment REF "text" [--reply ID] [--slide N] | resolve REF ID [--reopen]   # comments; "@name" / "@group" in the text alerts them on the hub (levels view < comment < edit < owner; a public space is view only unless --public-access comment; anonymous never comments)
 aihub space versions REF | restore REF REV [--note TEXT]    # version history; restore publishes the old revision again as a NEW one (edit access); the hub keeps the last space_versions_keep (default 20)
+aihub pubsub create T [--private] [--open-publish] [--retention H] [--max N] | set T ... | rm T -y | list [--mine|--shared] | info T | stats T [--days N]   # pub/sub topics (dotted names; root needs create_topics, a sub topic needs owning a topic above it)
+aihub pubsub share T --user U|--group G [--access consume|produce|both] | unshare | shares T   # grants reach the sub topics; public = anyone consumes, --open-publish = signed-in people publish
+aihub pubsub pub SUBJECT [DATA|-] [--key K] [--header K=V] [--text] [--lines]   # JSON sent as JSON; stdin when no DATA; --lines = one message per line
+aihub pubsub sub PATTERN [--match REGEX] [--from-start|--after ID|--tail N] [--durable NAME [--exec CMD]] [--count N] [--timeout S] [--jsonl|--data-only]   # * one part, > one or more below, # topic and everything below; --durable resumes, with --exec at least once; --match is a regex run by the CLI on the message text (the hub filters subjects only)
 aihub knowledge list|get NOTE|pull|push|edit NOTE|rm NOTE|path   # personal notes + bot soul (soul.md), also on the hub page Knowledge
 aihub knowledge share NOTE --user U|--group G [--write] | unshare | shares NOTE | shared | push-shared OWNER/NOTE   # shared notes land in ~/.aihub/knowledge/shared/<owner>/
 

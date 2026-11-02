@@ -23,7 +23,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ..core import archive, textsafe
 from . import basepath, spaceconv
-from .deps import current_user, require_perm, require_user, viewer_of
+from .deps import current_user, require_user, viewer_of
 from .routers import C, _avatar_url, _cache_scope, _clean
 from .spaceconv import SLUG, SpaceError, TRANSITIONS
 from .spaces_repo import KINDS, LEVELS, PUBLIC_ACCESS, rank
@@ -324,6 +324,8 @@ def _publish(request, u, owner, slug, tmp, size, sha, q):
             raise HTTPException(403, "%s@%s belongs to someone else: you need edit access to publish a new version" % (owner["username"], slug))
     elif owner["id"] != u["id"] and "admin" not in repos.perms(u["role"]):
         raise HTTPException(403, "you can only create spaces under your own name")
+    elif "create_spaces" not in repos.perms(u["role"]):
+        raise HTTPException(403, "missing permission: create_spaces")
     kind_hint = (q.get("kind") or "").lower() or None
     work = os.path.dirname(tmp)
     built = os.path.join(work, "built")
@@ -360,7 +362,7 @@ def _publish(request, u, owner, slug, tmp, size, sha, q):
 
 # ---------------------------------------------------------------- publish
 @r.post("/spaces")
-async def space_create(request: Request, name: str = "", u=Depends(require_perm("publish"))):
+async def space_create(request: Request, name: str = "", u=Depends(require_user)):
     """Body = the file (or a .zip / .tar.gz site). Query: name (the slug; default from the file name), filename, kind, title, description,
     tags, visibility, view, transition, autoplay, loop, note (shown in the version history). Publishing the same name again adds a new
     revision (the previous ones stay in the history) and keeps the metadata you did not send."""
@@ -378,7 +380,7 @@ async def space_create(request: Request, name: str = "", u=Depends(require_perm(
 
 
 @r.put("/spaces/{ref}/content")
-async def space_replace(ref: str, request: Request, u=Depends(require_perm("publish"))):
+async def space_replace(ref: str, request: Request, u=Depends(require_user)):
     """New content for an existing space (needs edit access), also for one that belongs to somebody else."""
     sp, _ = _load(request, ref, u, "edit")
     q = dict(request.query_params)
@@ -1070,7 +1072,7 @@ def space_versions(ref: str, request: Request, u=Depends(current_user)):
 
 
 @r.post("/spaces/{ref}/versions/{rev}/restore")
-def space_restore(ref: str, rev: int, request: Request, body: Optional[dict] = Body(None), u=Depends(require_perm("publish"))):
+def space_restore(ref: str, rev: int, request: Request, body: Optional[dict] = Body(None), u=Depends(require_user)):
     """Publish revision REV again as a NEW revision (history is never rewritten). {note?}. Needs edit access."""
     sp, level = _load(request, ref, u, "edit")
     repos, st = R(request), S(request)

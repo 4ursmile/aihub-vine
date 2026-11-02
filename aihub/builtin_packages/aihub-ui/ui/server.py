@@ -243,7 +243,7 @@ class H(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(p)[0] or "text/plain"
         if ctype.startswith("text/") and "charset" not in ctype:
             ctype += "; charset=utf-8"
-        if p.lower().endswith(officeview.EXT) and "download=1" not in self.path:         # Word / Excel / PowerPoint -> a page the canvas can show
+        if p.lower().endswith(officeview.EXT) and "download=1" not in self.path:         # Word / Excel / PowerPoint / draw.io -> a page the canvas can show
             try:
                 page = officeview.render(p)
             except (ValueError, OSError) as e:

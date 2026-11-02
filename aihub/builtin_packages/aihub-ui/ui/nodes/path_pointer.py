@@ -4,6 +4,7 @@ JSON on stdin, JSON on stdout."""
 import glob
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -22,11 +23,13 @@ def done(**k):
 found = []
 for line in str(cfg.get("path") or "").splitlines():
     line = line.strip()
+    picked = line.startswith("@")                                         # a mention: @folder:C:/x/dash, @file:{{work.files}}/x, or @Documents/dash/ from the @ list
+    line = re.sub(r"^@(file|folder):|^@", "", line).strip()
     if not line:
         continue
     p = os.path.expanduser(line)
     if not os.path.isabs(p):
-        p = os.path.join(wd, p)
+        p = os.path.join(os.path.expanduser("~") if picked else wd, p)   # the @ list names paths inside the home folder
     hits = sorted(glob.glob(p)) if any(c in p for c in "*?[") else [p]
     for h in hits:
         h = os.path.realpath(h)

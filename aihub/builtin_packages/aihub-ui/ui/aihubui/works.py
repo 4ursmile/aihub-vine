@@ -183,6 +183,17 @@ SPARK_GUIDE = """Runs PySpark code in steps (`# %% name` between them, like note
 * Environment: the box above checks the Python (pyspark) and Java this job needs and installs pyspark in one click (Java: the command it shows). Empty = $PYSPARK_PYTHON, else the UI's Python; a name such as `spark` = a separate environment made for it.
 * Storage: pick an S3 credential set (any number of buckets, each with its own endpoint and keys): every bucket is configured for s3a:// by itself, keys never on a command line. Packages `auto` adds the hadoop-aws that matches your pyspark (session mode, when buckets are granted).
 * The steps see spark, sc, s3a(bucket, path), buckets, vault (aihub_vault), data (the input + Arguments), inputs, text, workdir and result (a dict = the output; a DataFrame in it becomes its first Max rows)."""
+PUBSUB_IN_GUIDE = """Starts a run for each message published on the hub's Pub/Sub that matches. Outbound HTTPS only (long poll): no tunnel, no open port.
+- Pattern: a subject (orders.eu), with * for one part (orders.*.paid), > for one or more parts below (orders.>) or # for the topic and everything below (orders.#).
+- Message regex (optional): only messages whose text matches (JSON as {"a": 1}). It runs in this node on your machine, not on the hub. The trigger's own filter field works too (tested on the same text).
+- Catch up: a durable cursor on the hub remembers the position, so messages published while this work was off or the UI was closed start runs when it is on again.
+- {{input}} is the message data (JSON as text); {{data.subject}}, {{data.key}}, {{data.id}}, {{data.by}} and, for a JSON object, each top-level field as {{data.field}}.
+Uses your aihub login (aihub login); you need consume access to the topic."""
+PUBSUB_PUB_GUIDE = """Publishes one message to the hub's Pub/Sub with your aihub login (you need produce access to the topic).
+- Subject: where to publish (orders.eu.paid). A subject needs no topic record of its own: it goes to the nearest topic above it (create topics on the hub's Pub/Sub page or with `aihub pubsub create`).
+- Data: default {{input}}. Format auto sends valid JSON as JSON and anything else as text.
+Output: "published #ID to SUBJECT"; data: id, subject."""
+
 SPACE_GUIDE = """Publishes a file or folder to the hub as a Space (document, slides, report, PDF, sheet, dashboard, HTML page).
 - File or folder: the path to publish. Empty = the path the previous node ended with (a Claude task should end its answer with `OUTPUT: /full/path`). A folder must have index.html.
 - Space name: lower-case slug. The same name again publishes a new revision of that space; empty = named after the file.
@@ -205,6 +216,13 @@ LOOP_GUIDE = """Repeats the nodes after it for every item of a list, for example
 3. A JSON list of objects such as [{"to": "a@x.com", "subject": "Hi A"}, ...] puts every key in {{data.<key>}}; nodes that take such a key (Send email takes to, subject, body ...) use it when their own field is empty.
 4. Add "End loop (collect)" after the last node of the body when something must run once afterwards (a summary, Output). Without it the loop is the last thing in its branch.
 Limits: items are capped (default 100, max 1000), nested loops are not supported, a failed item stops the loop unless you choose "continue"."""
+GATE_GUIDE = """Gates make a join explicit. A node "gave output" when it finished and passed text on; a Filter that did not match, a skipped node,
+a failed node or a node its branch never reached gave none.
+- Plain join (no gate): waits for all parents, runs when at least ONE of them gave output (with the texts of those that did).
+- All of (AND): waits for all, goes on only when EVERY parent gave output. Use it before a step that needs every input (data AND template).
+- Any of (OR): goes on when one parent gave output. wait = first starts at the first one, without waiting for the slow ones.
+- None of (NOT): waits for all, goes on only when NO parent gave output: the 'nothing new' or fallback branch (connect it after a Filter).
+{{data.passed}} / {{data.missing}} list the parents (by label) that did / did not give output."""
 
 BUILTIN = {
     "start.manual": {"title": "Start: manual", "kind": "trigger", "group": "Start", "desc": "Run it with the Run button, or from a chat with /work:NAME. Inputs (optional) become a form in the chat; later nodes read them as {{data.name}}.",
@@ -246,6 +264,12 @@ BUILTIN = {
                                {"name": "channel", "label": "Only these channel IDs (space or comma separated)", "type": "text", "default": ""},
                                {"name": "from_regex", "label": "Only from user IDs matching (regex)", "type": "text", "default": ""},
                                {"name": "include_bots", "label": "Include bot messages", "type": "checkbox", "default": False}]},
+    "start.pubsub": {"title": "Start: Pub/Sub message", "kind": "trigger", "group": "Hub", "desc": "Starts for each hub Pub/Sub message whose subject matches the pattern (wildcards * > #) and whose body matches the optional regex.",
+                     "run": ["{python}", "{pkg}/nodes/pubsub_in.py"], "timeout": 60, "guide": PUBSUB_IN_GUIDE,
+                     "fields": [{"name": "pattern", "label": "Subject pattern", "type": "text", "required": True, "default": "", "help": "orders.# · orders.*.paid · orders.>"},
+                                {"name": "match", "label": "Message regex (optional)", "type": "text", "default": "", "help": "Tested here, on your machine: only messages whose text matches, e.g. \"status\": \"failed\""},
+                                {"name": "catch_up", "label": "Catch up on messages missed while off (durable cursor)", "type": "checkbox", "default": True},
+                                {"name": "from_start", "label": "First start: take everything the hub still keeps", "type": "checkbox", "default": False}]},
     "start.telegram": {"title": "Start: Telegram message", "kind": "trigger", "group": "Chat", "desc": "Starts when your Telegram bot receives a message. Polls Telegram: no tunnel, no open port.",
                        "run": ["{python}", "{pkg}/nodes/telegram_in.py"], "timeout": 60, "guide": TELEGRAM_IN_GUIDE,
                        "fields": [{"name": "bot_token", "label": "Bot token", "type": "password", "required": True, "help": "From @BotFather. Stored encrypted."},
@@ -384,8 +408,15 @@ BUILTIN = {
                             {"name": "paths", "label": "File or folder inside the repo (one per line for several)", "type": "textarea", "default": "", "help": "Each becomes a pointer. Empty = the whole repository folder."}]},
     "io.path": {"title": "File / folder (path)", "kind": "action", "group": "Data", "desc": "Points at local files or folders and passes on their PATH, not the content. * and ? patterns work.",
                 "run": ["{python}", "{pkg}/nodes/path_pointer.py"], "timeout": 60, "templated": ["path"],
-                "fields": [{"name": "path", "label": "File, folder or pattern (one per line)", "type": "textarea", "required": True, "default": "", "help": "~ works; a relative path starts in the run's working folder."},
+                "fields": [{"name": "path", "label": "File, folder or pattern (one per line)", "type": "textarea", "required": True, "default": "", "assist": ["input", "data", "file"],
+                            "help": "~ works; a relative path starts in the run's working folder. Write @folder:/full/path (or @file:) to ATTACH it: Share copies it into the work, {{work.files}}/<name> on the other machine."},
                            {"name": "must_exist", "label": "Fail when nothing is found", "type": "checkbox", "default": True}]},
+    "pubsub.publish": {"title": "Publish to Pub/Sub", "kind": "action", "group": "Hub", "desc": "Publishes a message to a subject on the hub's Pub/Sub (orders.eu.paid) with your aihub login.",
+                       "run": ["{python}", "{pkg}/nodes/pubsub_pub.py"], "timeout": 60, "templated": ["subject", "key", "data"], "guide": PUBSUB_PUB_GUIDE,
+                       "fields": [{"name": "subject", "label": "Subject", "type": "text", "required": True, "default": "", "help": "e.g. orders.eu.paid"},
+                                  {"name": "data", "label": "Data", "type": "textarea", "default": "{{input}}"},
+                                  {"name": "key", "label": "Key (optional)", "type": "text", "default": ""},
+                                  {"name": "format", "label": "Format", "type": "select", "options": ["auto", "json", "text"], "default": "auto"}]},
     "space.publish": {"title": "Publish to Space", "kind": "action", "group": "Hub", "desc": "Publishes a document, slides, report, PDF, sheet, dashboard or HTML page (a file, or a folder with index.html) as a Space on the hub; the same name updates it.",
                       "run": ["{python}", "{pkg}/nodes/space_publish.py"], "timeout": 930, "templated": ["path", "name", "title", "description", "tags"], "guide": SPACE_GUIDE,
                       "fields": [{"name": "path", "label": "File or folder (empty = the path from the previous node)", "type": "text", "default": "{{input}}"},
@@ -440,6 +471,17 @@ BUILTIN = {
                      "desc": "Closes a Loop. Runs once after the last item with the result of every pass (the last text of each) as {{input}}; {{data.results}} is the JSON list, {{data.count}} / {{data.failed}} the numbers.",
                      "fields": [{"name": "join", "label": "Join the results as", "type": "select", "options": ["json", "lines", "blank line"], "default": "lines"}]},
     "flow.note": {"title": "Note", "kind": "action", "group": "Flow", "desc": "A comment on the canvas. Passes its input through.", "fields": [{"name": "text", "label": "Note", "type": "textarea", "default": ""}]},
+    "flow.all": {"title": "All of (AND)", "kind": "action", "group": "Flow", "guide": GATE_GUIDE,
+                 "desc": "Waits for EVERY node connected into it and goes on only when all of them gave output. One that stopped (a Filter that did not match, a skip) or failed ends this branch here.",
+                 "fields": []},
+    "flow.any": {"title": "Any of (OR)", "kind": "action", "group": "Flow", "guide": GATE_GUIDE,
+                 "desc": "Goes on when at least one node connected into it gave output. first = start as soon as the first one gives output, without waiting for the others; all = wait for all, pass on those that gave output.",
+                 "fields": [{"name": "wait", "label": "Start", "type": "select", "options": ["first", "all"], "default": "first",
+                             "help": "first = the first parent with output wins (the slower ones still run, their text is not used here). all = wait for every parent, join the texts of those that gave output."}]},
+    "flow.none": {"title": "None of (NOT)", "kind": "action", "group": "Flow", "guide": GATE_GUIDE,
+                  "desc": "Waits for every node connected into it and goes on only when NONE of them gave output (a Filter stopped, a skip, or a failure). For the 'nothing new' / fallback branch.",
+                  "fields": [{"name": "text", "label": "Text to pass on", "type": "textarea", "default": "{{trigger}}", "help": "There is no input text here: {{trigger}}, {{data.key}} and {{data.missing}} (the parents without output) work."},
+                             {"name": "failed", "label": "Also go on when a parent FAILED (not only when it stopped)", "type": "checkbox", "default": True}]},
 }
 
 
@@ -486,6 +528,13 @@ BUILTIN_SCHEMA = {
     "ai.free": ([_IN_TEXT], [_o("text", "text", "the reply text", "A short summary...")]),
     "flow.filter": ([_i("input", "text", "the text tested against the regex", True)], [_o("text", "text", "the same input, or nothing (the branch stops)", "")]),
     "flow.note": ([_IN_TEXT], [_o("text", "text", "the same input", "")]),
+    "flow.all": ([_i("input", "text", "two or more parents: every one must give output", True)],
+                 [_o("text", "text", "the parents' texts joined (## From <node>)", ""), _o("passed", "json", "labels of the parents that gave output", '["S3 to JSON", "Template"]')]),
+    "flow.any": ([_i("input", "text", "two or more parents: one with output is enough", True)],
+                 [_o("text", "text", "the first parent's text (wait = first) or the texts of those with output", ""), _o("passed", "json", "labels of the parents used", '["Fast path"]'),
+                  _o("missing", "json", "labels of the parents without output", "[]")]),
+    "flow.none": ([_i("input", "text", "one or more parents: goes on only when none gave output", True)],
+                  [_o("text", "text", "the node's Text field", "nothing new for 2026-11-01"), _o("missing", "json", "labels of the parents without output", '["Only new rows"]')]),
     "flow.template": ([_IN_TEXT], [_o("text", "text", "the template filled in", "Hello ada")]),
     "flow.output": ([_IN_TEXT], [_o("text", "text", "the run's answer", "Report ready")]),
     "flow.memory": ([_IN_TEXT], [_o("text", "text", "remembered context + the input", "Remembered context: ...")]),
@@ -503,6 +552,10 @@ BUILTIN_SCHEMA = {
     "git.read": ([_i("url", "url", "repository URL", True)], [_o("text", "text", "the file text or folder listing", "# README ...")]),
     "git.pull": ([_i("url", "url", "repository URL", True)], [_o("text", "path", "the folder or file path, not its content", "/Users/me/.aihub/ui/git/repo"), _o("path", "path", "the same path as {{data.path}}", "/Users/me/.aihub/ui/git/repo")]),
     "io.path": ([_IN_TEXT], [_o("text", "path", "the path(s), not the content", "/Users/me/data"), _o("path", "path", "the same path as {{data.path}}", "/Users/me/data")]),
+    "start.pubsub": ([], [_o("text", "text", "the message data (JSON as text)", '{"id": 42}'), _o("subject", "text", "the subject it was published to", "orders.eu.paid"),
+                          _o("key", "text", "message key", "42"), _o("id", "text", "message id on the hub", "17"), _o("by", "text", "who published it", "alice"),
+                          _o("json", "json", "the data when it is JSON", ""), _o("<field>", "json", "top-level fields of a JSON object", "")]),
+    "pubsub.publish": ([_IN_TEXT], [_o("text", "text", "what was published", "published #17 to orders.eu.paid"), _o("id", "text", "message id", "17"), _o("subject", "text", "", "orders.eu.paid")]),
     "space.publish": ([_i("path", "path", "a file or folder (folder: index.html at its top): a path node before it, or a Claude task that ends with OUTPUT: /full/path", True)],
                       [_o("text", "url", "the space reference and link", "Published space me@dash http://hub/#/s/me@dash"), _o("url", "url", "the link as {{data.url}}", "http://hub/#/s/me@dash")]),
     "send.email": (_MAIL_KEYS, [_o("text", "text", "what was sent", "Sent to a@x.com")]),
@@ -2181,6 +2234,7 @@ def manual_event(w, node_id=None, text="", values=None, cat=None):
 
 
 LOOP, ENDLOOP = "flow.loop", "flow.endloop"
+GATES = ("flow.all", "flow.any", "flow.none")
 LOOP_MAX = 1000
 
 
@@ -2555,8 +2609,16 @@ class Engine:
             got = [(u, outs[u]) for u in ins[nid] if outs.get(u) is not None]
             if n.get("type") == ENDLOOP and ends.get(nid) in outs:             # the closing node of a loop sees the results of all passes
                 got = [(ends[nid], collected[nid])] if nid in collected else []
+            gtype = n.get("type") if n.get("type") in GATES else ""
+            if gtype:                                                       # gates judge every parent: who gave output, who did not
+                with lock:
+                    pst = {u: (run["nodes"].get(u) or {}) for u in ins[nid]}
+                missing = [names[u][0] for u in ins[nid] if outs.get(u) is None]
+                broke = [names[u][0] for u in ins[nid] if pst[u].get("status") == "error"]
+                if gtype == "flow.any" and str((n.get("config") or {}).get("wait") or "first") == "first" and got:
+                    got = [min(got, key=lambda g: pst[g[0]].get("ended") or 0)]                   # the first parent that gave output
             inputs = [o for _, o in got]
-            if not inputs:
+            if not inputs and not gtype:
                 return
             if not spec:
                 with lock:
@@ -2613,6 +2675,35 @@ class Engine:
                     out = {"text": render(cfg.get("template", "{{input}}"), ctx), "data": cdata}
                 elif n["type"] == "flow.note":
                     out = inputs[-1]
+                elif gtype:
+                    passed = [names[u][0] for u, _ in got]
+                    gdata = dict(cdata, passed=passed, missing=missing)
+                    if gtype == "flow.all":
+                        ok = not missing and bool(got)
+                        out = {"text": text, "data": gdata} if ok else None
+                        upd(rec, note="all %d gave output" % len(got) if ok else "stopped here: no output from %s" % ", ".join(missing))
+                    elif gtype == "flow.any":
+                        out = {"text": text, "data": gdata} if got else None
+                        upd(rec, note="went on with %s" % ", ".join(passed) if got else "stopped here: none of the parents gave output")
+                    else:
+                        with lock:                                          # no input here: take the data that reached the point where each branch stopped
+                            stack, seen, near = list(ins[nid]), set(), []
+                            while stack:
+                                u = stack.pop()
+                                if u in seen:
+                                    continue
+                                seen.add(u)
+                                if outs.get(u) is None:
+                                    stack.extend(ins.get(u, []))
+                                    if (run["nodes"].get(u) or {}).get("status") == "error" and names[u][0] not in broke:
+                                        broke.append(names[u][0])       # a failure further up, not a branch that found nothing
+                                elif isinstance(outs[u], dict) and isinstance(outs[u].get("data"), dict):
+                                    near.append(outs[u]["data"])
+                        gdata = dict(cdata, **{k: v for d in near for k, v in d.items()}, passed=passed, missing=missing)
+                        ok = not got and (cfg.get("failed", True) or not broke)
+                        out = {"text": render(str(cfg.get("text") or "{{trigger}}"), dict(ctx, data=gdata)), "data": gdata} if ok else None
+                        upd(rec, note="went on: no output from %s" % ", ".join(missing) if ok else
+                            "stopped here: %s gave output" % ", ".join(passed) if got else "stopped here: %s failed" % ", ".join(broke))
                 elif n["type"] == "flow.output":
                     body = render(cfg.get("template", "{{input}}"), ctx)
                     run["result"] = {"title": str(cfg.get("title") or "")[:120], "text": body[:20000]}
@@ -2749,10 +2840,18 @@ class Engine:
             sess = sess_free = None                                          # the next Claude / Free node of a pass opens a chat of its own
 
         ext = {l: [u for b in v for u in ins[b] if u not in v and u != l] for l, v in bodies.items()}      # parents of a loop body that sit outside it
+
+        def early(i):
+            """Any of (OR) with wait = first starts as soon as one parent gave output; every other node waits for ALL its parents."""
+            n = nodes[i]
+            if n.get("type") != "flow.any" or str((n.get("config") or {}).get("wait") or "first") != "first":
+                return False
+            with lock:
+                return any(u in done and outs.get(u) is not None for u in ins[i])
         done, left, futs = set(), [i for i in order if i not in inbody], {}                           # independent branches run side by side; a node waits for ALL its parents
         with cf.ThreadPoolExecutor(WORKERS, thread_name_prefix="work-node") as ex:
             while left or futs:
-                ready = [i for i in left if all(u in done for u in ins[i] + ext.get(i, []))]
+                ready = [i for i in left if all(u in done for u in ins[i] + ext.get(i, [])) or early(i)]
                 if not ready and not futs:
                     ready = left[:1]                                        # a cycle: go on in order, as before
                 for i in ready:
@@ -2957,7 +3056,8 @@ STRUCTURE
 - Exactly one Start node, first (start.manual unless a schedule / webhook / package trigger fits). It has no incoming edge. Ids are short unique [a-z0-9]; give every node a short, distinct "label" (it is also how {{in.<label>}} names it).
 - Every other node is reachable from the Start; edges only join existing ids, never a node to itself, no cycles. Use ONLY the node types listed below and only their field names; fill the required (*) fields, leave password fields empty (the user fills them in), never put a secret in a config.
 - Layout is optional (it is tidied when missing or overlapping): x grows by 300 per column, y by 140 per branch (a card is 230 x 100).
-- Branches that do not depend on each other run IN PARALLEL; a node with several parents waits for all of them. Use that: independent reads / requests side by side, then ONE node that joins them.
+- Branches that do not depend on each other run IN PARALLEL; a node with several parents waits for all of them and runs when at least one gave output. Use that: independent reads / requests side by side, then ONE node that joins them.
+- GATES make a join explicit: flow.all (AND: goes on only when EVERY parent gave output, e.g. data AND template ready), flow.any (OR: one is enough; config wait = first starts at the first one), flow.none (NOT: goes on only when NO parent gave output, e.g. after a flow.filter that found nothing new; its config text is what it passes on). A Filter that does not match, a skip or a failure = no output. {{data.passed}} / {{data.missing}} name the parents.
 
 DATA: every node hands on text, plus a small data dict. In any text field (prompt, template, URL, body ...):
 - {{input}} = the text of the node(s) before it. With several parents it is their texts one under another, each headed `## From <label>`.

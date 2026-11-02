@@ -21,6 +21,11 @@ Before writing a node, check whether you need one:
 | `ai.claude` | action | Prompt with `{{input}}` (text from the previous node), `{{trigger}}` (the event text) and `{{data.key}}`. Model, effort, permission mode. All Claude nodes of one run share one chat (context and prompt cache carry over) unless `fresh` is ticked. Unattended runs use *Accept edits* by default; a tool that would need approval is denied. |
 | `flow.filter` | action | Regex on the incoming text. No match: this branch ends. `invert` flips it. |
 | `flow.template` | action | New text from `{{input}}`, `{{trigger}}`, `{{data.key}}`. |
+| `flow.all` | action | **All of (AND)**: waits for every parent, goes on only when ALL of them gave output; otherwise the branch ends here. Text = the joined texts, `{{data.passed}}`. |
+| `flow.any` | action | **Any of (OR)**: goes on when one parent gave output. `wait` = `first` (default: starts at the first one, does not wait for slower parents) or `all` (waits, joins the texts of those with output). `{{data.passed}}`, `{{data.missing}}`. |
+| `flow.none` | action | **None of (NOT)**: waits for every parent, goes on only when NONE gave output (a Filter stopped, a skip; a failure too unless `failed` is unticked, also a failure further up). Passes its `text` field on, with the data that reached the point where the branch stopped (`{{data.day}}` of the node before a Filter). |
+| `start.pubsub` | trigger | Hub Pub/Sub message: `pattern` (`orders.#`, `orders.*.paid`), optional regex `match` on the message text, tested by the node on your machine (the hub does not run regexes). `catch_up` (default on) keeps a durable cursor on the hub (`ui-<work>-<node>`), so messages published while the work was off start runs later. `{{input}}` = the data; `{{data.subject}}`, `key`, `id`, `by`, and each top-level field of a JSON object. Uses the aihub login. |
+| `pubsub.publish` | action | Publishes `data` (default `{{input}}`; format auto / json / text) to `subject` with an optional `key`. Data: `id`, `subject`. |
 
 Every **trigger** also has a `filter` field: a case-insensitive regex tested against the event text **before a run is created**. An event that does not match never starts anything, never shows in the run list and never reaches your nodes below it. Your trigger code does not need to implement this, send everything.
 
@@ -51,7 +56,7 @@ The list opens under the caret as you type `{{` (typing `{{` closes itself with 
 Every node hands on `{text, data}`. `text` is a string; `data` is a dict (only pointer, trigger and package nodes fill it: `path`, `status`, your Start inputs). The editor shows, for the selected node, what it **Receives** (each parent with its kind: text, path, json, link), what it **Produces** and what it **Needs** (a warning when a Publish node has nothing before it that can give a path).
 
 - **One parent**: `{{input}}` is that parent's text.
-- **Several parents** (a join): the node waits for ALL of them. `{{input}}` is their texts one after another, each under `## From <node name>`, in the order the lines were drawn. `{{in.1}}`, `{{in.2}}` (same order) or `{{in.<node name>}}` (lower case, other characters `_`, e.g. `{{in.git_read}}`, a second node with the same name is `claude_task_2`) is ONE parent's text. `{{data.x}}` merges the parents' data; on the same key the later parent wins.
+- **Several parents** (a join): the node waits for ALL of them, then runs when at least ONE gave output (with the texts of those that did; a parent whose Filter stopped is simply left out). When that is not what you mean, put a gate in front: **All of (AND)** = every parent must give output, **Any of (OR)** = one is enough and `wait = first` does not wait for the rest, **None of (NOT)** = only when none gave output (the "nothing new" branch). "Gave output" = finished and passed text on; a Filter that did not match, a skip, a failure or a branch that was never reached is no output. The node's note in the run view says which parents passed. `{{input}}` is their texts one after another, each under `## From <node name>`, in the order the lines were drawn. `{{in.1}}`, `{{in.2}}` (same order) or `{{in.<node name>}}` (lower case, other characters `_`, e.g. `{{in.git_read}}`, a second node with the same name is `claude_task_2`) is ONE parent's text. `{{data.x}}` merges the parents' data; on the same key the later parent wins.
 - **Claude prompt**: if the prompt contains `{{input}}` or an `{{in.x}}`, you place the text yourself. If it contains none, the engine puts `Input: <text>` before `Task: <prompt>`. Claude nodes of a run share one chat (earlier answers are already in it, so identical text is not repeated).
 - **Claude to Publish**: Claude only answers with text. A node after it (Publish to Space, email attachments) takes the path from the LAST line of that text that names an existing file or folder (`OUTPUT: /full/path`; backticks and quotes are ignored), or from the `path` data of a pointer node, or from its own File field. The prompt box offers **Add the instruction** (writes the `OUTPUT:` request into the prompt) and says so when a Publish node follows. The Data tab and the Publish log show which path was used and where it came from.
 - **Parallel branches**: nodes that do not depend on each other run at the same time (at most 4 per run); a node starts when all its parents are done. Claude nodes running side by side each get a chat of their own (the shared chat stays with whichever is alone); a sequence still shares one.
@@ -421,6 +426,8 @@ Claude writes one `.html` file; the canvas (Files > click the file) recognises i
 
 How it works: the file is opened with `?view=deck` / `?view=doc`; the server injects `static/deckrt.js` into the HTML (only then) and the page and the viewer talk by `postMessage` (the preview iframe stays sandboxed, no network). Export asks the page to *extract* its blocks (text with runs, lists, tables, pictures, computed colours/fonts, position on the slide) and builds the file in the browser with PptxGenJS / docx (vendored, loaded when you press Export). The built-in skill package `aihub-slides` and the chat's system prompt teach Claude the format. `SKILL.md` has the rules (variables on `:root`, no scripts, one idea per slide).
 
+**Other files the canvas previews.** Word `.docx`, Excel `.xlsx`, PowerPoint `.pptx` and draw.io `.drawio` / `.dio` are rendered on the server (stdlib, no network) into one sandboxed page (`?download=1` gets the raw file). draw.io files: every diagram page is a tab, plain and compressed pages both work; the common shapes, containers / swimlanes, edges (straight, waypoints, orthogonal, ports, arrows) and labels are drawn, HTML labels keep only safe tags and styles, and unknown stencils (`mxgraph.*` icons) show as boxes with their label. Click a diagram to switch between fit and actual size. `.drawio.svg` / `.drawio.png` exports open as normal images.
+
 **Themes** (Settings > Themes): name, six colours (background, text, muted, accent, dark accent, panels) and two fonts, plus notes for Claude. *Import from a PowerPoint* reads `ppt/theme/theme1.xml` in the browser (JSZip): colour scheme and major/minor fonts become the theme. Stored in `~/.aihub/ui/themes/<id>.json`. Mention one in a chat with `@theme:<id>` (typing `@` lists them): the server appends a `[Theme "Name" ... --bg:#...]` block to that message for Claude only; the visible message and the cached system prompt do not change.
 
 ## Slash commands from packages
@@ -446,6 +453,32 @@ The picker shows the aliases (Opus, Sonnet, Haiku and their full ids), then **Yo
 ## Which Claude settings.json is used
 
 The *Browse…* button opens a file picker over your home folder (folders and `.json` files only, sizes but never contents; `.ssh`, `.gnupg`, `.aws`, `Library` are hidden). Settings > *Claude settings file*: empty = `~/.claude/settings.json` (+ `settings.local.json`); or the path of any `.json` object file. The model list, effort, environment (secrets masked) and `apiKeyHelper` come from it, and chats and Claude nodes start with `claude --settings <file>`, merged over your normal Claude settings. Policy guard, auto-compact and themes follow the UI's own settings. Saved as pref `claude_settings` in `~/.aihub/ui/prefs.json`; a missing or non-JSON-object file is refused.
+
+## Sample: S3 to parquet to dashboard Space (gates, attach a folder, Windows to Linux)
+
+Works > Workflows from packages > Samples > **S3 sales to dashboard Space** (`ui/samples/s3-parquet-dashboard.work.json` + `.files/dashboard/`):
+
+```
+Run for a day ─┐                       ┌─ Parquet to JSON ─┐
+Every morning ─┴─ S3 to parquet ─ Has new rows ─┤                   ├─ Data AND template ─ Update dashboard data ─ Publish to Space ─┐
+                                       ├─ Pre-dashboard ───┘                                                                      ├─ Published OR skipped ─ Result
+                                       └─ NOT: nothing new ─────────────────────────────────────────────────────────────────────┘
+```
+
+- **S3 to parquet** (Python, environment `data`, grant: an `s3` set with a bucket entry `raw`): reads `s3://<bucket>/sales/<day>/*.csv|*.parquet`, aggregates per region and product, writes `~/.aihub/workingspace/data/sales-lake/date=<day>/part-0.parquet` (`SALES_LAKE` overrides it; a re-run replaces that day). Data: `day`, `rows`, `lake`, `partition`.
+- **Has new rows** (Filter `"rows": [1-9]`) stops the main branch on an empty day; **NOT: nothing new** then answers instead, and **Published OR skipped** passes whichever branch answered to **Result**.
+- **Parquet to JSON** reads all partitions of the lake, keeps the last 30 days, writes `dashboard-data.json` in the run folder (`data.json_path`). **Pre-dashboard** points at the template folder (`data.path`). **Data AND template** waits for both and merges their data.
+- **Update dashboard data** copies the template to `<run folder>/dashboard/`, writes `data.json` and fills `<script id="dash-data" type="application/json">` in `index.html` (a Space page needs no fetch). Its `data.dashboard` is the Publish node's `path` (`{{data.dashboard}}`): that is how the file is "attached" to the next node.
+- **Code reads paths from `data`**, never from a `{{data.x}}` typed into JSON Arguments (a Windows path `C:\Users\...` inside JSON is an invalid escape).
+
+**Use your own dashboard (attach a folder).** In *Pre-dashboard* type `@` and pick your folder from the list (it writes `@Documents/pre-dashboard/`, a path inside your home folder; `@folder:C:/Users/you/pre-dashboard` works too). A line starting with `@` in a File / folder node is ATTACHED: Share copies it into the package (folders up to 200 files / 20 MB, no hidden or key files) and rewrites it to `@folder:{{work.files}}/pre-dashboard`, which is where the other machine finds it. Without the `@` the path stays a plain path of your machine. Keep the `dash-data` script block in its `index.html`. A path with spaces cannot be a mention: move the folder.
+
+**Publish on Windows, run on a Linux server:**
+
+1. Windows (UI): Works > open the work > **Share** > *Build package* > publish (`aihub dev publish -i` in `~/.aihub/ui/export/workflow-<name>`). Credentials never leave the machine: the package keeps `vault_kinds: [{kind: s3, name: lake}]`, the environment name `data` and its pip packages.
+2. Linux: `aihub login` (Publish to Space uses it), `aihub install aihub-ui`, `aihub work pull workflow-<name>`.
+3. Write `creds.json` = `{"s3": {"buckets": [{"name": "raw", "bucket": "my-sales", "endpoint_url": "", "region": "eu-west-1", "access_key": "...", "secret_key": "..."}]}}` (`aihub work cred template s3` prints the fields; `chmod 600` it, delete it afterwards), then `aihub work setup <work> --creds creds.json --env data --install` (creates the `s3` set, grants it to the code node, makes `~/.aihub/ui/envs/data` with pandas, pyarrow, s3fs, boto3).
+4. `aihub work run <work> --input day=2026-11-01` (live step log, exit 0 = done). Then `aihub work enable <work> && aihub work serve --bg` fires *Every morning* (06:00, yesterday's data).
 
 ## Run works without the UI (`aihub work`)
 

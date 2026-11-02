@@ -69,6 +69,17 @@ CREATE TABLE IF NOT EXISTS space_access(space_id INTEGER, principal_type TEXT, p
 CREATE TABLE IF NOT EXISTS notifications(id {pk}, user_id INTEGER NOT NULL, kind TEXT NOT NULL, actor_id INTEGER, item_id INTEGER DEFAULT 0, comment_id INTEGER DEFAULT 0,
   rev INTEGER DEFAULT 0, body TEXT DEFAULT '', via TEXT DEFAULT '', created {real}, seen INTEGER DEFAULT 0);
 CREATE INDEX IF NOT EXISTS notifications_user ON notifications(user_id,seen,id);
+CREATE TABLE IF NOT EXISTS topics(id {pk}, name TEXT UNIQUE NOT NULL, owner_id INTEGER NOT NULL, title TEXT DEFAULT '', description TEXT DEFAULT '',
+  visibility TEXT NOT NULL DEFAULT 'public', public_access TEXT DEFAULT 'consume', retention_hours INTEGER DEFAULT 0, max_messages INTEGER DEFAULT 0,
+  tags TEXT DEFAULT '', msgs {bigint} DEFAULT 0, bytes {bigint} DEFAULT 0, last_ts {real} DEFAULT 0, created {real}, updated {real});
+CREATE TABLE IF NOT EXISTS topic_access(topic_id INTEGER, principal_type TEXT, principal_id INTEGER, access TEXT, PRIMARY KEY(topic_id,principal_type,principal_id));
+CREATE TABLE IF NOT EXISTS topic_messages(id {pk}, topic_id INTEGER NOT NULL, subject TEXT NOT NULL, ts {real}, user_id INTEGER, mkey TEXT DEFAULT '',
+  ctype TEXT DEFAULT 'text', body TEXT DEFAULT '', size INTEGER DEFAULT 0, headers TEXT DEFAULT '');
+CREATE INDEX IF NOT EXISTS topic_messages_t ON topic_messages(topic_id,id);
+CREATE INDEX IF NOT EXISTS topic_messages_ts ON topic_messages(ts);
+CREATE TABLE IF NOT EXISTS topic_stats(topic_id INTEGER, hour {bigint}, pub {bigint} DEFAULT 0, bytes {bigint} DEFAULT 0, deliv {bigint} DEFAULT 0, PRIMARY KEY(topic_id,hour));
+CREATE TABLE IF NOT EXISTS topic_clients(topic_id INTEGER, user_id INTEGER, role TEXT, pattern TEXT DEFAULT '', n {bigint} DEFAULT 0, last {real}, PRIMARY KEY(topic_id,user_id,role,pattern));
+CREATE TABLE IF NOT EXISTS topic_cursors(user_id INTEGER, name TEXT, pattern TEXT DEFAULT '', last_id {bigint} DEFAULT 0, updated {real}, PRIMARY KEY(user_id,name));
 """
 
 # Every permission the app checks. Admins grant these to roles in the UI.
@@ -84,14 +95,16 @@ ALL_PERMS = {
     "audit": "View the security audit (tool calls and admin actions)",
     "index": "Force a package into the index (aihub dev index)",
     "install_indirect": "Install through the hub (aihub install -i) instead of straight from git",
+    "create_spaces": "Create spaces (documents, slides, reports... with aihub space publish)",
+    "create_topics": "Create pub/sub topics (aihub pubsub create); sub topics need admin on their parent instead",
 }
 PERMS = {
     "admin": list(ALL_PERMS),
-    "publisher": ["publish", "review", "install_indirect", "view_usage"],
-    "user": ["publish", "review", "install_indirect", "view_usage"],
+    "publisher": ["publish", "review", "install_indirect", "view_usage", "create_spaces", "create_topics"],
+    "user": ["publish", "review", "install_indirect", "view_usage", "create_spaces", "create_topics"],
 }
 # Permissions a visitor who is not signed in can never hold: they would hand out control of accounts and the audit trail
-ANON_LOCKED = ("admin", "manage_all", "reset_password", "audit", "create_groups")   # create_groups: groups need a real owner
+ANON_LOCKED = ("admin", "manage_all", "reset_password", "audit", "create_groups", "create_spaces", "create_topics")   # groups, spaces and topics need a real owner
 DESCR = {"admin": "Full access", "publisher": "Can publish and review", "user": "Default role for new accounts"}
 
 # Columns added after the first release. Existing databases get them via ALTER TABLE.
@@ -192,7 +205,7 @@ class Conn:
 
 
 class DB:
-    ID_TABLES = {"users", "groups", "packages", "versions", "events", "audit_log", "run_commands", "spaces", "space_comments", "notifications"}
+    ID_TABLES = {"users", "groups", "packages", "versions", "events", "audit_log", "run_commands", "spaces", "space_comments", "notifications", "topics", "topic_messages"}
 
     def __init__(self, settings=None, path=None):
         from .config import Settings
@@ -260,6 +273,20 @@ class DB:
             self._pool.putconn(unit["c"].raw)
             unit.pop("c", None)
         _unit.reset(token)
+
+    def yield_unit(self):
+        """A request that waits a long time (pub/sub long poll): hand the unit's connection back to the pool while it waits; the next query
+        borrows a fresh one and end() returns that one. SQLite: no-op."""
+        if self.engine != "postgres":
+            return
+        unit = _unit.get()
+        if unit and "c" in unit:
+            try:
+                unit["c"].raw.rollback()
+            except Exception:
+                pass
+            self._pool.putconn(unit["c"].raw)
+            unit.pop("c", None)
 
     def release(self):
         """For background threads: hand this thread's connection back after each batch."""
@@ -387,6 +414,12 @@ class DB:
                 for (r,) in c.execute("SELECT name FROM roles").fetchall():
                     c.execute("INSERT OR IGNORE INTO role_permissions VALUES(?,?)", (r, "view_usage"))
                 c.execute("INSERT OR IGNORE INTO app_settings VALUES('perm_view_usage','1')")
+            if not c.execute("SELECT 1 FROM app_settings WHERE key='perm_create_spaces'").fetchone():     # existing databases: spaces needed `publish` before, topics are new
+                for (r,) in c.execute("SELECT DISTINCT role FROM role_permissions WHERE permission='publish'").fetchall():
+                    c.execute("INSERT OR IGNORE INTO role_permissions VALUES(?,?)", (r, "create_spaces"))
+                for (r,) in c.execute("SELECT name FROM roles WHERE name<>'anonymous'").fetchall():
+                    c.execute("INSERT OR IGNORE INTO role_permissions VALUES(?,?)", (r, "create_topics"))
+                c.execute("INSERT OR IGNORE INTO app_settings VALUES('perm_create_spaces','1')")
             for p in ALL_PERMS:
                 c.execute("INSERT OR IGNORE INTO role_permissions VALUES('admin',?)", (p,))
             c.execute("DELETE FROM role_permissions WHERE role='anonymous' AND permission IN (%s)" % ",".join("?" * len(ANON_LOCKED)), ANON_LOCKED)

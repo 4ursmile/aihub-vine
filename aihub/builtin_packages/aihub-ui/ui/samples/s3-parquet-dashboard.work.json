@@ -1,0 +1,224 @@
+{
+ "title": "S3 sales to dashboard Space",
+ "description": "Reads one day of sales files from S3, aggregates them into a date-partitioned parquet lake, turns the last 30 days into JSON, fills a prepared dashboard and publishes it as a Space. Nothing new = no publish.",
+ "enabled": false,
+ "keep": 30,
+ "nodes": [
+  {
+   "id": "a",
+   "type": "start.manual",
+   "label": "Run for a day",
+   "x": 40,
+   "y": 60,
+   "config": {
+    "inputs": "day|Day (YYYY-MM-DD, empty = yesterday)|text|"
+   }
+  },
+  {
+   "id": "c",
+   "type": "start.cron",
+   "label": "Every morning",
+   "x": 40,
+   "y": 200,
+   "config": {
+    "schedule": "0 6 * * *",
+    "text": "daily sales"
+   }
+  },
+  {
+   "id": "s3",
+   "type": "code.python",
+   "label": "S3 to parquet",
+   "x": 300,
+   "y": 130,
+   "requires": [
+    "pandas>=2",
+    "pyarrow",
+    "s3fs",
+    "boto3"
+   ],
+   "vault_kinds": [
+    {
+     "kind": "s3",
+     "name": "lake"
+    }
+   ],
+   "config": {
+    "code": "# %% settings\n# Needs ONE S3 credential set granted to this node (Settings > Credentials > Object storage) with a bucket entry named \"raw\".\n# Input layout: s3://<bucket>/sales/YYYY-MM-DD/*.csv or *.parquet with columns order_id, region, product, amount.\nimport datetime as dt\nimport os\nfrom pathlib import Path\nday = str(data.get(\"day\") or \"\").strip() or (dt.date.today() - dt.timedelta(days=1)).isoformat()   # empty (cron) = yesterday\ndt.date.fromisoformat(day)                         # stops here on anything that is not YYYY-MM-DD\nraw = vault.bucket(\"raw\")\nprefix = \"sales/%s/\" % day\n# The parquet lake stays on this machine between runs: ~/.aihub/workingspace/data/sales-lake/date=YYYY-MM-DD/ (same on Windows and Linux).\nlake = Path(os.environ.get(\"SALES_LAKE\") or Path.home() / \".aihub\" / \"workingspace\" / \"data\" / \"sales-lake\")\n\n# %% extract\nimport pandas as pd\ns3 = raw.boto3()\nkeys = [o[\"Key\"] for pg in s3.get_paginator(\"list_objects_v2\").paginate(Bucket=raw.bucket, Prefix=prefix) for o in pg.get(\"Contents\", [])]\nopts = raw.storage_options()\nframes = [pd.read_parquet(raw.uri(k, \"s3\"), storage_options=opts) if k.endswith(\".parquet\") else pd.read_csv(raw.uri(k, \"s3\"), storage_options=opts)\n          for k in keys if k.endswith((\".parquet\", \".csv\"))]\nlog(\"%d file(s) under s3://%s/%s\" % (len(frames), raw.bucket, prefix))\n\n# %% transform\nif frames:\n    df = pd.concat(frames, ignore_index=True)\n    df[\"amount\"] = pd.to_numeric(df[\"amount\"], errors=\"coerce\").fillna(0)\n    agg = df.groupby([\"region\", \"product\"], as_index=False).agg(orders=(\"order_id\", \"nunique\"), amount=(\"amount\", \"sum\"))\nelse:\n    agg = pd.DataFrame(columns=[\"region\", \"product\", \"orders\", \"amount\"])\n\n# %% load\npart = lake / (\"date=%s\" % day)                    # hive partition: the date lives in the folder name\nif len(agg):\n    part.mkdir(parents=True, exist_ok=True)\n    tmp = part / \"part-0.parquet.tmp\"\n    agg.to_parquet(tmp, index=False)\n    os.replace(tmp, part / \"part-0.parquet\")       # a re-run of the same day replaces it\nresult.update(day=day, rows=int(len(agg)), lake=str(lake), partition=str(part))\n",
+    "python": "data",
+    "timeout": 900
+   }
+  },
+  {
+   "id": "f",
+   "type": "flow.filter",
+   "label": "Has new rows",
+   "x": 560,
+   "y": 130,
+   "config": {
+    "regex": "\"rows\": [1-9]"
+   }
+  },
+  {
+   "id": "j",
+   "type": "code.python",
+   "label": "Parquet to JSON",
+   "x": 820,
+   "y": 60,
+   "requires": [
+    "pandas>=2",
+    "pyarrow",
+    "s3fs",
+    "boto3"
+   ],
+   "config": {
+    "code": "# %% read\nimport datetime as dt\nimport json\nfrom pathlib import Path\nimport pandas as pd\nlake, day = Path(data[\"lake\"]), data[\"day\"]        # from the node \"S3 to parquet\"\nkeep = int(data.get(\"days\") or 30)                 # days on the dashboard\ndf = pd.read_parquet(lake)                         # reads every date=... folder; `date` comes back as a column\ndf[\"date\"] = df[\"date\"].astype(str)\nstart = (dt.date.fromisoformat(day) - dt.timedelta(days=keep - 1)).isoformat()\ndf = df[(df[\"date\"] >= start) & (df[\"date\"] <= day)]\n\n# %% shape\ndaily = df.groupby(\"date\", as_index=False).agg(orders=(\"orders\", \"sum\"), amount=(\"amount\", \"sum\")).sort_values(\"date\")\ntoday = df[df[\"date\"] == day]\ndoc = {\"day\": day, \"generated\": dt.datetime.now().isoformat(timespec=\"seconds\"), \"window_days\": keep,\n       \"kpi\": {\"orders\": int(today[\"orders\"].sum()), \"amount\": round(float(today[\"amount\"].sum()), 2), \"regions\": int(today[\"region\"].nunique())},\n       \"daily\": daily.round(2).to_dict(\"records\"),\n       \"by_region\": today.groupby(\"region\", as_index=False)[\"amount\"].sum().sort_values(\"amount\", ascending=False).round(2).to_dict(\"records\"),\n       \"top_products\": today.groupby(\"product\", as_index=False)[\"amount\"].sum().nlargest(10, \"amount\").round(2).to_dict(\"records\")}\n\n# %% write\nout = Path(workdir) / \"dashboard-data.json\"        # the run folder: shows under Files in the run view\nout.write_text(json.dumps(doc, indent=1, default=str), encoding=\"utf-8\")\nresult.update(json_path=str(out), day=day, orders=doc[\"kpi\"][\"orders\"])\n",
+    "python": "data",
+    "timeout": 300
+   }
+  },
+  {
+   "id": "t",
+   "type": "io.path",
+   "label": "Pre-dashboard",
+   "x": 820,
+   "y": 200,
+   "config": {
+    "path": "@folder:{{work.files}}/dashboard",
+    "must_exist": true
+   }
+  },
+  {
+   "id": "g",
+   "type": "flow.all",
+   "label": "Data AND template",
+   "x": 1080,
+   "y": 130,
+   "config": {}
+  },
+  {
+   "id": "u",
+   "type": "code.python",
+   "label": "Update dashboard data",
+   "x": 1340,
+   "y": 130,
+   "config": {
+    "code": "# %% build\n# Joins two inputs (through \"All of\"): data.json_path from \"Parquet to JSON\" and data.path from \"Pre-dashboard\" (the template folder).\nimport json\nimport shutil\nfrom pathlib import Path\ntemplate, doc = Path(data[\"path\"]), json.loads(Path(data[\"json_path\"]).read_text(encoding=\"utf-8\"))\nout = Path(workdir) / \"dashboard\"\nshutil.rmtree(out, ignore_errors=True)\nshutil.copytree(template, out)                     # never edit the template itself\n(out / \"data.json\").write_text(json.dumps(doc, indent=1), encoding=\"utf-8\")\n\n# %% inline the data into index.html (a Space page needs no fetch)\npage = out / \"index.html\"\nhtml = page.read_text(encoding=\"utf-8\")\ntag = '<script id=\"dash-data\" type=\"application/json\">'\ni = html.find(tag)\nif i < 0:\n    raise ValueError('index.html of the template needs a <script id=\"dash-data\" type=\"application/json\"></script> block')\nj = html.find(\"</script>\", i)\nhtml = html[:i + len(tag)] + json.dumps(doc).replace(\"</\", \"<\\\\/\") + html[j:]\npage.write_text(html, encoding=\"utf-8\")\nresult.update(dashboard=str(out), day=doc[\"day\"])\n",
+    "python": "data",
+    "timeout": 120
+   }
+  },
+  {
+   "id": "p",
+   "type": "space.publish",
+   "label": "Publish to Space",
+   "x": 1600,
+   "y": 130,
+   "config": {
+    "path": "{{data.dashboard}}",
+    "name": "sales-daily",
+    "kind": "dashboard",
+    "title": "Daily sales {{data.day}}",
+    "description": "S3 sales aggregated per day (Works)",
+    "tags": "sales, daily",
+    "visibility": "private"
+   }
+  },
+  {
+   "id": "n",
+   "type": "flow.none",
+   "label": "NOT: nothing new",
+   "x": 820,
+   "y": 340,
+   "config": {
+    "text": "No sales files for {{data.day}}: the Space was not updated.",
+    "failed": false
+   }
+  },
+  {
+   "id": "o",
+   "type": "flow.any",
+   "label": "Published OR skipped",
+   "x": 1860,
+   "y": 200,
+   "config": {
+    "wait": "first"
+   }
+  },
+  {
+   "id": "r",
+   "type": "flow.output",
+   "label": "Result",
+   "x": 2120,
+   "y": 200,
+   "config": {
+    "title": "Daily sales",
+    "template": "{{input}}"
+   }
+  },
+  {
+   "id": "note",
+   "type": "flow.note",
+   "label": "How the data moves",
+   "x": 300,
+   "y": 340,
+   "config": {
+    "text": "Nodes pass PATHS in data, never the rows: S3 to parquet gives data.lake + data.day, Parquet to JSON gives data.json_path, Pre-dashboard gives data.path, the AND gate merges both, Update gives data.dashboard, which Publish uses. NOT fires when Has new rows stopped; OR picks whichever branch answered. Your own template: in Pre-dashboard type @ and pick your folder from the list; Share copies it into the package so the server gets it too."
+   }
+  }
+ ],
+ "edges": [
+  {
+   "from": "a",
+   "to": "s3"
+  },
+  {
+   "from": "c",
+   "to": "s3"
+  },
+  {
+   "from": "s3",
+   "to": "f"
+  },
+  {
+   "from": "f",
+   "to": "j"
+  },
+  {
+   "from": "f",
+   "to": "t"
+  },
+  {
+   "from": "j",
+   "to": "g"
+  },
+  {
+   "from": "t",
+   "to": "g"
+  },
+  {
+   "from": "g",
+   "to": "u"
+  },
+  {
+   "from": "u",
+   "to": "p"
+  },
+  {
+   "from": "f",
+   "to": "n"
+  },
+  {
+   "from": "p",
+   "to": "o"
+  },
+  {
+   "from": "n",
+   "to": "o"
+  },
+  {
+   "from": "o",
+   "to": "r"
+  }
+ ]
+}

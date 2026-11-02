@@ -12,7 +12,7 @@ import threading
 import zipfile
 import xml.etree.ElementTree as ET
 
-EXT = (".docx", ".xlsx", ".pptx")
+EXT = (".docx", ".xlsx", ".pptx", ".drawio", ".dio")      # draw.io pages come from drawioview
 MAX_FILE = 80 * 1024 * 1024
 MAX_UNZIPPED = 400 * 1024 * 1024
 MAX_SLIDES = 300
@@ -461,9 +461,9 @@ _clock = threading.Lock()
 
 
 def render(path):
-    """-> HTML page for a .docx/.xlsx/.pptx file. ValueError carries a message fit to show the person. Rendered pages are cached by (path, mtime, size)."""
+    """-> HTML page for a .docx/.xlsx/.pptx/.drawio file. ValueError carries a message fit to show the person. Rendered pages are cached by (path, mtime, size)."""
     ext = os.path.splitext(path)[1].lower()
-    fn = {".docx": docx, ".xlsx": xlsx, ".pptx": pptx}.get(ext)
+    fn = {".docx": docx, ".xlsx": xlsx, ".pptx": pptx, ".drawio": _drawio, ".dio": _drawio}.get(ext)
     if not fn:
         raise ValueError("no preview for " + ext)
     st = os.stat(path)
@@ -488,6 +488,11 @@ def _render(fn, path, ext):
         return fn(path)
     except (ET.ParseError, KeyError, zipfile.BadZipFile, AttributeError, TypeError) as e:
         raise ValueError("could not read this %s file (%s)" % (ext[1:], e.__class__.__name__))
+
+
+def _drawio(path):
+    from aihubui import drawioview
+    return drawioview.page(path)
 
 
 def error_page(msg):

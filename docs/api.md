@@ -74,7 +74,7 @@ visitors `comment` (anonymous visitors only ever view). No visible access = `404
 
 | Route | |
 | --- | --- |
-| `POST /spaces?name=&filename=&kind=&title=&description=&tags=&visibility=&view=&transition=&autoplay=&loop=&note=` | body = the file (raw); creates the caller's space or adds a revision (`note` goes to the version history). `publish` permission |
+| `POST /spaces?name=&filename=&kind=&title=&description=&tags=&visibility=&view=&transition=&autoplay=&loop=&note=` | body = the file (raw); creates the caller's space (`create_spaces` permission) or adds a revision (edit access; `note` goes to the version history) |
 | `PUT /spaces/{ref}/content?...&note=` | new revision of a space you may edit |
 | `GET /spaces?q=&kind=&tag=&owner=&mine=&shared=&sort=new\|old\|top\|name&group=kind\|owner&limit=&offset=` | visible spaces (`total` = all matches, page with `offset`). `tag` is one exact tag, `shared` = other people's spaces shared with me or my groups (public ones do not count), `group` keeps the rows of one type/author together (`sort` orders inside it; the id is the last key so pages never overlap). `GET /spaces/overview` = carousel, top, recent, counts per kind |
 | `GET /spaces/facets?q=&kind=&tag=&owner=&mine=&shared=` | counts for the Spaces filter rail: `total`, `kinds`, `owners` (top 300), `tags` (top 300), `scopes` {all, mine, shared} (signed in only). Each facet is counted under the OTHER filters, not its own. Cached 15 s per viewer, dropped by every space write |
@@ -89,7 +89,7 @@ visitors `comment` (anonymous visitors only ever view). No visible access = `404
 | `PATCH /spaces/{ref}/comments/{id}` | `{body}`: the author (still with comment access; only NEW names are alerted); `{resolved: bool}`: anyone with comment access (resolving tells the author) |
 | `DELETE /spaces/{ref}/comments/{id}` | the author or the space admin. Soft delete (text removed, row kept for its replies) |
 | `GET /spaces/{ref}/versions` | view. `{items: [{rev, kind, filename, size, sha256, note, created, author, author_name, author_avatar, current, available, comments (live comments about that revision)}], current, keep, level, can_restore, can_delete}`, newest first; `available` = the files of that revision are still on the hub |
-| `POST /spaces/{ref}/versions/{rev}/restore` | edit + `publish` permission. `{note?}`: publishes that revision again as a NEW revision; reply like a publish plus `restored`, `rev` |
+| `POST /spaces/{ref}/versions/{rev}/restore` | edit access. `{note?}`: publishes that revision again as a NEW revision; reply like a publish plus `restored`, `rev` |
 | `DELETE /spaces/{ref}/versions/{rev}` | owner/admin: forget one OLD revision and its files (`400` for the current one) |
 | `GET /spaces/{ref}/mentionable?q=` | comment level. `{users: [{username, display_name, avatar_url, access}], groups: [{name, members, access}]}` for the `@` picker; no `q` = owner, people in the conversation and groups the space is shared with. `access` false = they cannot open the space, so a mention would not be delivered |
 | `GET /spaces/{ref}/mention-card/{user\|group}/{name}` | view level, signed in. Hover card of an `@mention`: user `{type, name, display_name, title, role, avatar_url, since, groups, access}`, group `{type, name, description, members, people, access}`; `access` = can open this space. Unknown / inactive name: 404 |
@@ -107,6 +107,26 @@ Revisions: every publish and restore adds a `space_versions` row; the replaced f
 The hub keeps the newest `space_versions_keep` (admin number, default 20, 1 = no history); the current revision is never pruned.
 
 Untrusted HTML is served only from the signed `v/` URL with a `sandbox` CSP and shown in a sandboxed iframe: it never runs on the hub origin and cannot read the sign-in token.
+
+## Pub/Sub (topics, publish, subscribe)
+
+Topics are dotted names (`orders`, `orders.eu`); a subject is stored on the NEAREST topic record among its prefixes. Levels: `admin` (owner of
+the topic or of any topic above it, site admins), `both`, `consume`, `produce`. A public topic gives everybody `consume` (signed out too) and,
+with `public_access=produce`, every signed-in user `produce`. Shares on a topic flow down to its sub topics; visibility is per record.
+
+| Route | |
+| --- | --- |
+| `POST /topics` | `{name, title?, description?, visibility?, public_access? (consume\|produce), retention_hours?, max_messages?, tags?}`. A root topic needs `create_topics`; a name under an existing topic needs admin on it (`403`). `409` when it exists |
+| `GET /topics?q=&scope=all\|mine\|shared&owner=&under=&sort=name\|new\|active\|busy&limit=&offset=` | visible topic records, each with `pub_24h`, `msgs`, `bytes`, `last_ts`, `depth`, `root`, effective retention. `GET /topics/facets?q=` = `{owners, visibility, scopes}`; `GET /topics/overview` = `{topics, pub_24h, deliv_24h}` |
+| `GET /topics/{name}` / `PATCH` / `DELETE` | record + `level`, `can_consume`, `can_produce`, `can_manage`, `parents`, `children`. PATCH (admin): title, description, tags, visibility, public_access, retention_hours, max_messages, owner. DELETE (admin) removes the record, every record below it, their messages, shares and statistics: `{removed}` |
+| `GET\|PUT /topics/{name}/access`, `DELETE /topics/{name}/access/{user\|group}/{name}` | admin. `access` = consume \| produce \| both; PUT `{type, name, access}` or `{items: [...], access}`; GET adds `inherited` (grants from topics above, with `topic`) |
+| `GET /topics/{name}/stats?days=1..90` | the topic and everything below: `series` per day (per hour for `days=1`) `{date, pub, deliv, bytes}`, `totals`, `prior` (the period before), `stored {messages, bytes, oldest}`, `subjects` (top 20 kept), `clients` `[{username, role produce\|consume, pattern, n, last, active}]` (names only for admins of the topic) |
+| `POST /pubsub/publish` | signed in, produce. `{subject, data, key?, headers?}` or `{messages: [...]}` (1..500, all or none). `data` = any JSON (a string is stored as text; NaN/Infinity refused). `{ids, count}`. `404` no topic covers the subject, `413` over `pubsub_max_kb`. Concurrent publishes are group committed (one transaction and one commit for all calls waiting at that moment); retention runs in the background, so a topic can briefly hold a few more than `max_messages` |
+| `GET /pubsub/messages?pattern=&after=&from=latest\|start&tail=&cursor=&commit=&ack=&limit=&wait=` | consume. Messages (oldest first) whose subject matches `pattern` (`*` one part, `>` one or more below, `#` the topic and everything below) on topics you may consume. The hub never runs a regex on messages: filter the body on the client (`match=` is refused with 400). Position: `after` = the previous `next`; without it `from`; `tail=N` = the last N. `limit` ≤ 2000. `cursor=NAME` (signed in) stores the position on the hub (written only when it moves); `commit=0` + `ack=ID` = at least once. `wait` ≤ 30 s long poll: one pump thread per server process tails new messages into an in-memory ring (pre-encoded) and wakes the waiters, so waiting costs no queries; a publish in the same process arrives in milliseconds, one in another worker within 0.2 s. Positions older than the ring, and `tail`, read the database. `{items: [{id, subject, ts, key, type text\|json, data, headers, size, by}], next, cursor}` |
+| `GET /pubsub/cursors`, `DELETE /pubsub/cursors/{name}` | your durable cursors `{name, pattern, last_id, updated}` |
+
+Admin numbers (Admin > Sync): `pubsub_retention_hours` (72), `pubsub_max_messages` (10000 per topic record), `pubsub_max_kb` (256). Expired
+messages are removed when a topic is published to (at most every 30 s) and by a sweep over all topics every 10 minutes.
 
 ## Reviews
 

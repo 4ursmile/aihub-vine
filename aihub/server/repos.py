@@ -11,6 +11,7 @@ import zlib
 
 from ..core import naming, pkgindex, textsafe, version as V
 from .db import ALL_PERMS, ANON_LOCKED
+from .pubsub_repo import PubSubRepos
 from .spaces_repo import SpaceRepos
 
 log = logging.getLogger("aihub")
@@ -83,7 +84,7 @@ DOWNLOADS_SQL = ("(SELECT COALESCE(SUM(v.downloads),0) FROM versions v WHERE v.p
                  " + (SELECT COUNT(*) FROM events e WHERE e.package=packages.name AND e.kind IN ('install','update'))")
 
 
-class Repos(SpaceRepos):
+class Repos(SpaceRepos, PubSubRepos):
     def __init__(self, db):
         self.db = db
         self.lock = threading.Lock()  # serialize writers

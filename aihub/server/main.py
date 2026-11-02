@@ -7,7 +7,7 @@ import json
 import logging
 import time
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.background import BackgroundTask
 from fastapi.middleware.gzip import GZipMiddleware
@@ -28,6 +28,7 @@ from .db import init_db
 from .repos import EventBuffer, Repos
 from .routers import r as api
 from .routers_spaces import r as spaces_api
+from .routers_pubsub import r as pubsub_api
 from . import builtin
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -225,6 +226,8 @@ def create_app(settings: Settings = None) -> FastAPI:
             _app.state.backup.start()
             _app.state.updater.start()
         yield
+        if getattr(_app.state, "pubsub", None) is not None:
+            _app.state.pubsub.close()       # buffered pub/sub consumer statistics reach the database
         _app.state.usagebuf.close()         # last usage uploads reach the database
         _app.state.ingest.close()           # last events reach the database (and the git queue) before the sync stops
         _app.state.sync.close()
@@ -262,6 +265,7 @@ def create_app(settings: Settings = None) -> FastAPI:
     app.state.backup = Backup(app.state.repos, s, app.state.sync)
     app.state.updater = Updater(app)
     app.add_middleware(GZipMiddleware, minimum_size=800)
+    app.include_router(pubsub_api)          # FIRST: routes match in order, and a long poll / publish should not be tested against hundreds of others
     app.include_router(api)
     app.include_router(spaces_api)
 
@@ -287,30 +291,50 @@ def create_app(settings: Settings = None) -> FastAPI:
 
     log = logging.getLogger("aihub")
 
-    @app.middleware("http")
-    async def headers(request: Request, call_next):
-        t0 = time.time()
-        try:
-            resp = await call_next(request)
-        except Exception:
-            log.exception("unhandled error %s %s", request.method, request.url.path)
-            from fastapi.responses import JSONResponse
-            return JSONResponse({"detail": "internal error"}, status_code=500)
-        rp = basepath.current()          # the proxy prefix (NOT scope["root_path"]: a mount such as /static sets that to its own mount point)
-        route = request.url.path[len(rp):] if rp and request.url.path.startswith(rp + "/") else request.url.path      # the path the app routes
-        if route.startswith("/api/") and route not in ("/api/v1/healthz", "/api/v1/readyz"):
-            log.info("%s %s %d %.0fms", request.method, request.url.path, resp.status_code, (time.time() - t0) * 1000)
-        h = resp.headers
-        h.setdefault("X-Content-Type-Options", "nosniff")
-        h.setdefault("Referrer-Policy", "same-origin")
-        h.setdefault("Content-Security-Policy", CSP)
-        h.setdefault("X-Frame-Options", "DENY")
-        p = route
-        if p.startswith("/static/"):
-            h["Cache-Control"] = "no-cache"  # always revalidate (ETag); updates show on next load
-        elif p.startswith("/api/") and "cache-control" not in h:
-            h["Cache-Control"] = "no-store" if request.method != "GET" else "no-cache"
-        return resp
+    SEC = ((b"x-content-type-options", b"nosniff"), (b"referrer-policy", b"same-origin"), (b"content-security-policy", CSP.encode()),
+           (b"x-frame-options", b"DENY"))
+
+    class Headers:
+        """Pure ASGI (not @app.middleware("http"): that wraps every request in a task group and memory streams, which costs a long poll
+        waiting by the thousand, and every answer, measurable time). Security and cache headers, the access log line, and a JSON 500 for
+        an unhandled error before the answer started."""
+        def __init__(self, inner):
+            self.inner = inner
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                return await self.inner(scope, receive, send)
+            t0 = time.time()
+            path = scope.get("path", "")
+            rp = basepath.current()      # the proxy prefix (NOT scope["root_path"]: a mount such as /static sets that to its own mount point)
+            route = path[len(rp):] if rp and path.startswith(rp + "/") else path      # the path the app routes
+            method = scope.get("method", "GET")
+            started = []
+
+            async def send2(msg):
+                if msg["type"] == "http.response.start":
+                    started.append(1)
+                    hs = list(msg.get("headers") or [])
+                    have = {k.lower() for k, _ in hs}
+                    hs += [(k, v) for k, v in SEC if k not in have]
+                    if route.startswith("/static/"):
+                        hs = [(k, v) for k, v in hs if k.lower() != b"cache-control"] + [(b"cache-control", b"no-cache")]   # always revalidate (ETag)
+                    elif route.startswith("/api/") and b"cache-control" not in have:
+                        hs.append((b"cache-control", b"no-store" if method != "GET" else b"no-cache"))
+                    msg = dict(msg, headers=hs)
+                    if route.startswith("/api/") and route not in ("/api/v1/healthz", "/api/v1/readyz"):
+                        log.info("%s %s %d %.0fms", method, path, msg.get("status", 0), (time.time() - t0) * 1000)
+                await send(msg)
+            try:
+                await self.inner(scope, receive, send2)
+            except Exception:
+                log.exception("unhandled error %s %s", method, path)
+                if started:
+                    raise
+                from fastapi.responses import JSONResponse
+                await JSONResponse({"detail": "internal error"}, status_code=500)(scope, receive, send2)
+
+    app.add_middleware(Headers)
 
     app.add_middleware(basepath.Middleware, get_configured=lambda: basepath.configured(s, app.state.repos), done=lambda: db.release(),
                        trust_header=lambda: s.env_get("AIHUB_TRUST_PROXY_PREFIX").lower() in ("1", "true", "yes", "on"))    

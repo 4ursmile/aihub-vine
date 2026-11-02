@@ -467,6 +467,11 @@ def cmd_space(a):
     spaces.cli(a)
 
 
+def cmd_pubsub(a):
+    from . import pubsub
+    pubsub.cli(a)
+
+
 def cmd_work(a):
     from . import workcmd
     return workcmd.cli(a)
@@ -1535,7 +1540,7 @@ def build_parser():
         ("Install", ["install", "uninstall", "update", "list", "download", "unpublish"]),
         ("Manage", ["enable", "disable", "tree", "lock", "sync"]),
         ("Account", ["config", "login", "logout", "password", "register", "vault", "admin"]),
-        ("Publish", ["dev", "space"]),
+        ("Publish", ["dev", "space", "pubsub"]),
         ("Setup and maintenance", ["run", "work", "onboard", "knowledge", "soul", "policy", "welcome", "doctor", "version", "upgrade", "auto-update", "hook", "flush", "usage-sync", "hooks", "skill", "self-uninstall"]),
     ]
 
@@ -1791,6 +1796,45 @@ def build_parser():
         arg("--limit", type=int, default=30, help="list/top/search: how many (default 30)."),
         arg("-o", "--output", help="get: file to save."),
         arg("--open", action="store_true", help="publish: open the page in the browser."),
+        arg("-y", "--yes", action="store_true", help="rm: do not ask."))
+    add("pubsub", cmd_pubsub, "Pub/sub topics on the hub: create, share, publish and subscribe (wildcards, regex on the message).",
+        "Topics are dotted names (orders, orders.eu, orders.eu.paid). Creating a root topic needs the permission create_topics; a sub topic needs you to own a topic above it. A subject without a topic record of its own goes to the nearest topic above it. Topics are public (anyone may consume; --open-publish lets every signed-in person publish too) or private; share consume, produce or both with users and groups (grants reach the sub topics). Subscribe with a pattern: * = one part, > = one or more parts below, # = the topic and everything below; --match adds a regex on the message text, applied by the CLI on this machine (the hub only filters subjects). sub keeps listening (long poll) until Ctrl+C, --count or --timeout; --durable NAME keeps your position on the hub, and with --exec a message counts as handled only when the command exits 0 (at least once).",
+        "Examples:\n  aihub pubsub create orders --title 'Order events'\n  aihub pubsub create orders.eu --private\n  aihub pubsub share orders.eu --group billing --access both\n  aihub pubsub pub orders.eu.paid '{\"id\": 42}' --key 42\n  tail -f app.log | aihub pubsub pub ops.logs --lines\n  aihub pubsub sub 'orders.#'\n  aihub pubsub sub 'orders.*.paid' --match '\"amount\": [0-9]{4,}' --tail 20\n  aihub pubsub sub 'orders.>' --durable billing --exec './handle.sh'\n  aihub pubsub sub 'ops.#' --jsonl --count 10\n  aihub pubsub stats orders --days 7\n  aihub pubsub list --mine",
+        arg("action", choices=["list", "topics", "create", "info", "set", "rm", "share", "unshare", "shares", "pub", "sub", "stats", "cursors", "cursor-rm"], help="What to do."),
+        arg("target", nargs="?", metavar="TOPIC|SUBJECT|PATTERN", help="create/info/set/rm/share/stats: topic name; pub: subject; sub: pattern; list: search words; cursor-rm: cursor name."),
+        arg("extra", nargs="?", metavar="DATA", help="pub: the message (JSON is sent as JSON, anything else as text; - or nothing = stdin)."),
+        arg("--title", help="create/set: title."),
+        arg("--description", help="create/set: one line description."),
+        arg("--tags", help="create/set: comma list."),
+        arg("--public", action="store_true", help="create/set: anyone may consume (signed out too)."),
+        arg("--private", action="store_true", help="create/set: only you, owners above it and the people you share it with."),
+        arg("--open-publish", dest="open_publish", action="store_true", default=None, help="create/set: on a public topic every signed-in person may publish."),
+        arg("--no-open-publish", dest="open_publish", action="store_false", help="set: only owners and people you shared produce with may publish."),
+        arg("--retention", type=int, metavar="HOURS", help="create/set: hours messages are kept (0 = hub default)."),
+        arg("--max", type=int, metavar="N", help="create/set: messages kept at most (0 = hub default)."),
+        arg("--owner", help="set: hand the topic to another user."),
+        arg("--user", action="append", help="share/unshare: hub user (repeatable)."),
+        arg("--group", action="append", help="share/unshare: hub group (repeatable)."),
+        arg("--access", choices=list(("consume", "produce", "both")), help="share: what they may do (default consume)."),
+        arg("--key", help="pub: message key (e.g. an order id)."),
+        arg("--header", action="append", metavar="KEY=VALUE", help="pub: a message header (repeatable)."),
+        arg("--text", action="store_true", help="pub: send the data as text even if it is valid JSON."),
+        arg("--lines", action="store_true", help="pub: every stdin line is one message."),
+        arg("--match", metavar="REGEX", help="sub: only messages whose text matches this regular expression (tested here, not on the hub; JSON as {\"a\": 1})."),
+        arg("--from-start", dest="from_start", action="store_true", help="sub: start with everything the hub still keeps (default: only new messages)."),
+        arg("--after", type=int, metavar="ID", help="sub: start after this message id."),
+        arg("--tail", type=int, metavar="N", help="sub: first show the last N messages of the pattern (then --match)."),
+        arg("--durable", metavar="NAME", help="sub: a named cursor on the hub: the next run continues where this one stopped."),
+        arg("--exec", dest="exec_cmd", metavar="COMMAND", help="sub: run COMMAND per message (data on stdin, AIHUB_SUBJECT / AIHUB_MSG_ID / AIHUB_MSG_KEY in the environment)."),
+        arg("--count", type=int, metavar="N", help="sub: stop after N messages."),
+        arg("--timeout", type=int, metavar="SECONDS", help="sub: stop after this many seconds."),
+        arg("--jsonl", action="store_true", help="sub: one JSON object per message per line (for scripts)."),
+        arg("--data-only", dest="data_only", action="store_true", help="sub: print only the data of each message."),
+        arg("--verbose", action="store_true", help="sub --exec: also print each message."),
+        arg("--days", type=int, default=7, help="stats: period in days (default 7)."),
+        arg("--mine", action="store_true", help="list: only my topics."),
+        arg("--shared", action="store_true", help="list: topics shared with me or my groups."),
+        arg("--limit", type=int, default=200, help="list: how many (default 200)."),
         arg("-y", "--yes", action="store_true", help="rm: do not ask."))
     add("soul", cmd_soul, "Print your soul (persona) note.",
         "Shortcut for 'aihub knowledge get soul': the persona note from the hub (local copy if the hub is unreachable), written to stdout so an assistant or script can read it.",

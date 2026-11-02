@@ -16,7 +16,7 @@ import shutil
 from . import aihub as A, nodeenv, sources, store, works as W
 
 RISKS = {"io.read_file": "reads files on this computer", "io.request": "makes web requests", "code.python": "runs Python code written in the workflow on the installer's machine", "git.read": "reads git repositories with your Vault logins",
-         "start.webhook": "listens for local webhook calls", "start.teams": "listens for messages from outside (tunnel + secret)", "send.teams": "posts to Teams", "send.slack": "posts to Slack", "start.slack": "listens for Slack calls (tunnel + signing secret)", "start.telegram": "reads messages sent to your Telegram bot", "send.telegram": "posts to Telegram", "send.discord": "posts to Discord", "send.webhook": "sends data to an outside URL",
+         "start.webhook": "listens for local webhook calls", "start.teams": "listens for messages from outside (tunnel + secret)", "send.teams": "posts to Teams", "send.slack": "posts to Slack", "start.slack": "listens for Slack calls (tunnel + signing secret)", "start.telegram": "reads messages sent to your Telegram bot", "start.pubsub": "listens to hub Pub/Sub messages", "pubsub.publish": "publishes to hub Pub/Sub", "send.telegram": "posts to Telegram", "send.discord": "posts to Discord", "send.webhook": "sends data to an outside URL",
          "send.smtp": "sends mail (or saves drafts) through a mail server", "db.trino": "runs SQL on a Trino cluster with your login", "etl.spark": "runs Spark code written in the workflow (local or on your cluster)",
          "db.sql": "runs SQL on a database with your login (and may write tables)"}
 FILE_MAX, FOLDER_FILES, FOLDER_BYTES = 5_000_000, 200, 20_000_000
@@ -127,7 +127,7 @@ def bundle(src, out, dest, notes=True):
     """Copy what the prompts / fields of work SRC mention into DEST and rewrite the mentions in OUT (the stripped copy) to {{work.files}}/<name>.
     Credentials are never bundled (blocked paths are skipped, as the mention readers skip them). -> report {files, skipped}."""
     os.makedirs(dest, exist_ok=True)
-    used, done, report = set(os.listdir(dest)), {}, {"files": [], "skipped": []}
+    used, done, report, kinds = set(os.listdir(dest)), {}, {"files": [], "skipped": []}, {}
     home = os.path.realpath(HOME_ROOT or os.path.expanduser("~"))
     srcs = {n["id"]: n for n in src.get("nodes", [])}
     own = W.work_files_dir(src["id"]) if src.get("id") else ""
@@ -136,6 +136,7 @@ def bundle(src, out, dest, notes=True):
         raw = raw.rstrip(".,;:)")
         if raw.startswith(FILES_TAG):                              # already bundled (a work installed from a package): bring it along again
             p = os.path.join(own, raw[len(FILES_TAG):].lstrip("/\\"))
+            kind = "folder" if os.path.isdir(p) else "file"      # older shares wrote @file: for folders too
         else:
             p = raw if os.path.isabs(os.path.expanduser(raw)) else os.path.join(base or "", raw) if base else ""
             p = os.path.expanduser(p)
@@ -164,6 +165,7 @@ def bundle(src, out, dest, notes=True):
             if sk:
                 report["skipped"].append("%s: %d file(s) left out (hidden, private or over the size cap)" % (raw, sk))
         done[p] = "%s/%s" % (FILES_TAG, name)
+        kinds[done[p]] = kind
         report["files"].append(name)
         return done[p]
 
@@ -189,7 +191,17 @@ def bundle(src, out, dest, notes=True):
         for k, v in list(cfg.items()):
             if not isinstance(v, str) or not v:
                 continue
-            v2 = MENTION.sub(lambda m: ("@file:" + got) if (got := take(m.group(1), m.group(2), base)) else m.group(0), v)
+            v2 = MENTION.sub(lambda m: ("@%s:%s" % (kinds.get(got, m.group(1)), got)) if (got := take(m.group(1), m.group(2), base)) else m.group(0), v)
+            if k == "path" and n.get("type") == "io.path":           # File / folder node: a line picked from the @ list (@Documents/dash/) names a path in home
+                def picked(ln):
+                    m = re.match(r"^(\s*)@(?!file:|folder:)(\S+)\s*$", ln)
+                    if not m or "{{" in m.group(2):
+                        return ln
+                    raw = os.path.expanduser(m.group(2).rstrip("/\\"))
+                    p = raw if os.path.isabs(raw) else os.path.join(home, raw)
+                    got = take("folder" if os.path.isdir(p) else "file", p, "")
+                    return "%s@%s:%s" % (m.group(1), kinds.get(got), got) if got else ln
+                v2 = "\n".join(picked(ln) for ln in v2.split("\n"))
             if notes:
                 v2 = NOTE.sub(lambda m: ("@file:" + got) if (got := note(m.group(1))) else m.group(0), v2)
             if k == "attachments":                                  # mail attachments: absolute paths, one per line

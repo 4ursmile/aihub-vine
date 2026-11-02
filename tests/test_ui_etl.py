@@ -283,7 +283,7 @@ class Share(Base):
         cn, pn = shared["nodes"][1], shared["nodes"][2]
         self.assertEqual((cn["config"]["cwd"], cn["folder_hint"]), ("", "proj"))
         self.assertIn("@file:{{work.files}}/brief.md", cn["config"]["prompt"])
-        self.assertIn("@file:{{work.files}}/data", cn["config"]["prompt"])
+        self.assertIn("@folder:{{work.files}}/data", cn["config"]["prompt"])             # a folder stays a folder mention
         self.assertIn("@file:.env", cn["config"]["prompt"])                         # a secret file is never bundled
         self.assertEqual(sorted(os.listdir(workpkg.files_dir_of(wf))), ["brief.md", "data"])
         self.assertNotIn("credential", pn)

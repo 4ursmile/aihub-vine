@@ -145,7 +145,7 @@ aihub space restore alice@q3-review 3 [--note TEXT]           # publishes revisi
 Accepted: `.pptx`, `.html` deck (`<section class="slide">` parts, optional `data-transition`, `<aside class="notes">`, `<meta name="aihub-slide-size" content="1280x720">`),
 `.docx`, `.md`, `.txt`, `.xlsx`/`.csv`/`.tsv`, `.pdf`, `.html`, `.zip`/`.tar.gz` with `index.html`. Kinds: doc, slides, report, pdf, sheet, dashboard, html.
 The same form is on the hub: Spaces > New space (drop a file). `--view canvas|fit|full` is the default viewer size; readers switch it on the page.
-Publishing the same name again adds a new revision (rev + 1) and keeps the metadata you do not send. Needs the `publish` permission.
+Publishing the same name again adds a new revision (rev + 1) and keeps the metadata you do not send. Creating a space needs the `create_spaces` permission (Admin > Roles); a new revision only needs edit access.
 
 **Who may do what**: view < comment < edit < admin (the owner and site admins). A public space is VIEW for everyone, signed in or not; its owner can let
 signed-in visitors comment (`--public-access comment`, or the Share dialog on the page); anonymous visitors never comment. Sharing (`--access` or
@@ -159,6 +159,49 @@ written on and, optionally, where (`--slide N`). On the page: Comments in the to
 one, `restore REV` publishes an old one again as a new revision (edit access; history is never rewritten). The hub keeps the last
 `space_versions_keep` revisions per space (admin number in Admin > Sync, default 20; the current one is never removed). On the page: History in the
 toolbar (View / Download / Restore / Delete by level). With `--json` these commands return the hub's reply as `data`.
+
+## Pub/Sub (`aihub pubsub`)
+
+Lightweight topics on the hub for tools, works and bots: publish a message, listen with a pattern. Messages live in the hub database for a
+while (`pubsub_retention_hours`, default 72 h, and `pubsub_max_messages` per topic, default 10000; a topic may set lower numbers), up to
+`pubsub_max_kb` (default 256 KB) each. The hub's Pub/Sub page (`<hub>/#/pubsub`) does the same in the browser: topics, a live message view,
+a publish box, sharing and analytics.
+
+```sh
+aihub pubsub create orders --title "Order events"               # a ROOT topic: needs the create_topics permission
+aihub pubsub create orders.eu --private                         # a SUB topic: you must own a topic above it
+aihub pubsub share orders.eu --group billing --access both      # consume (default) | produce | both; grants reach every sub topic
+aihub pubsub set orders --open-publish                          # public topic: every signed-in person may publish too
+aihub pubsub pub orders.eu.paid '{"id": 42}' --key 42           # JSON is sent as JSON, anything else as text (--text forces text)
+echo "done" | aihub pubsub pub jobs.nightly                      # data from stdin
+tail -f app.log | aihub pubsub pub ops.logs --lines             # one message per line (batched)
+aihub pubsub sub 'orders.#'                                      # keeps listening; Ctrl+C to stop
+aihub pubsub sub 'orders.*.paid' --match '"amount": [0-9]{4,}' --tail 20
+aihub pubsub sub 'orders.>' --durable billing --exec ./handle.sh   # resumes where it stopped; a message counts only when the command exits 0
+aihub pubsub sub 'ops.#' --jsonl --count 10                     # one JSON object per line, for scripts (--data-only: just the data)
+aihub pubsub list [--mine|--shared] [WORDS] | info T | stats T [--days 7] | shares T | unshare T --user U | rm T -y | cursors | cursor-rm NAME
+```
+
+**Names**: dot separated parts of `a-z 0-9 _ -` (up to 16). A subject needs no topic record of its own: `orders.eu.paid` is published to the
+nearest topic above it (`orders.eu` if it exists, else `orders`). Create a sub topic only when it should differ (visibility, sharing, retention).
+
+**Patterns**: `orders.eu` exact, `*` one part (`orders.*.paid`), `>` one or more parts below (`orders.>`), `#` the topic and everything
+below (`orders.#`, `#` = everything you may read). `--match REGEX` keeps messages whose text matches (Python syntax, searched anywhere; JSON
+is tested as printed, `{"amount": 1200}`). The regex runs in the CLI on your machine: the hub filters by subject and permission only, so
+every message of the pattern is downloaded and the regex costs the hub nothing. `--tail N` takes the last N messages of the pattern, then
+applies `--match`.
+
+**Who may do what**: the owner of a topic, or of any topic above it, and site admins manage it (settings, sharing, sub topics, delete). A
+PUBLIC topic: anyone may consume, signed out too; `--open-publish` lets every signed-in person publish. A PRIVATE topic: only owners and the
+people and groups it is shared with. Shares (`consume`, `produce`, `both`) on a topic also apply to everything below it; visibility is per
+topic, so a private sub topic of a public topic stays private.
+
+**Delivery**: `sub` is a long poll (25 s). Without `--durable` it starts with new messages (`--from-start`: everything kept, `--after ID`,
+`--tail N`). `--durable NAME` keeps the position on the hub per account (`cursors` lists them): `sub` acknowledges each message once it was printed
+(or skipped by `--match`); with `--exec` only after the command succeeded (at least once), and a failing command stops `sub` so the message
+comes again on the next start. Each poll asks for up to 1000 messages, so a busy topic is drained in few round trips; `pub --lines` sends
+up to 500 per call. `--exec` gets the data on stdin and `AIHUB_SUBJECT`, `AIHUB_MSG_ID`, `AIHUB_MSG_KEY`, `AIHUB_MSG_BY`, `AIHUB_MSG_TS`,
+`AIHUB_MSG_HEADERS` in the environment. With `--json` the commands return the hub's reply as `data` (`sub` returns what arrived within one poll).
 
 ## Hub administration (`aihub admin`)
 

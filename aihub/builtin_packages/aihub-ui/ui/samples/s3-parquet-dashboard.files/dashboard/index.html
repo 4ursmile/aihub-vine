@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Daily sales</title>
+<style>
+  :root { --bg: #f6f7f9; --card: #fff; --ink: #1d2433; --mute: #667085; --line: #e4e7ec; --bar: #3b6fd8; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #12151c; --card: #1b2029; --ink: #e8ebf1; --mute: #98a2b3; --line: #2b3240; --bar: #6f98ee; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--mute); margin-bottom: 20px; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .kpi b { display: block; font-size: 24px; font-variant-numeric: tabular-nums; }
+  .kpi span { color: var(--mute); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+  h2 { font-size: 14px; margin: 0 0 10px; }
+  svg { width: 100%; height: auto; display: block; }
+  .axis { fill: var(--mute); font-size: 10px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  td { padding: 6px 4px; border-top: 1px solid var(--line); }
+  td:last-child { text-align: right; }
+  .empty { color: var(--mute); padding: 40px 0; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Daily sales</h1>
+  <div class="sub" id="sub">Waiting for data</div>
+  <div class="kpis" id="kpis"></div>
+  <div class="card" style="margin-bottom:12px"><h2>Amount per day</h2><div id="trend"></div></div>
+  <div class="grid">
+    <div class="card"><h2>By region</h2><div id="regions"></div></div>
+    <div class="card"><h2>Top products</h2><div id="products"></div></div>
+  </div>
+</main>
+<!-- The Works node "Update dashboard data" writes the JSON between these tags (and a data.json next to this file). Keep the id. -->
+<script id="dash-data" type="application/json">{}</script>
+<script>
+(function () {
+  var fmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+  var money = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+  function el(id) { return document.getElementById(id); }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+
+  function bars(rows, key, val) {
+    if (!rows || !rows.length) return '<div class="empty">No rows</div>';
+    var max = Math.max.apply(null, rows.map(function (r) { return +r[val] || 0; })) || 1;
+    return "<table>" + rows.map(function (r) {
+      var w = Math.max(2, Math.round((+r[val] || 0) / max * 100));
+      return "<tr><td>" + esc(r[key]) + '</td><td style="width:45%"><div style="height:8px;border-radius:4px;background:var(--bar);width:' + w + '%"></div></td><td>' + money.format(+r[val] || 0) + "</td></tr>";
+    }).join("") + "</table>";
+  }
+
+  function trend(rows) {
+    if (!rows || !rows.length) return '<div class="empty">No days yet</div>';
+    var W = 1000, H = 220, P = 28, n = rows.length, max = Math.max.apply(null, rows.map(function (r) { return +r.amount || 0; })) || 1;
+    var bw = (W - P * 2) / n, out = '<svg viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="Amount per day">';
+    rows.forEach(function (r, i) {
+      var h = Math.round((+r.amount || 0) / max * (H - P * 2)), x = P + i * bw;
+      out += '<rect x="' + (x + bw * 0.15).toFixed(1) + '" y="' + (H - P - h) + '" width="' + (bw * 0.7).toFixed(1) + '" height="' + h + '" rx="2" fill="var(--bar)"><title>' + esc(r.date) + ": " + money.format(+r.amount || 0) + "</title></rect>";
+      if (i === 0 || i === n - 1 || n <= 10) out += '<text class="axis" x="' + (x + bw / 2).toFixed(1) + '" y="' + (H - 8) + '" text-anchor="middle">' + esc(String(r.date).slice(5)) + "</text>";
+    });
+    return out + "</svg>";
+  }
+
+  function draw(d) {
+    if (!d || !d.day) return;
+    var k = d.kpi || {};
+    el("sub").textContent = "Day " + d.day + " · last " + (d.window_days || "") + " days · generated " + (d.generated || "");
+    el("kpis").innerHTML = [["Orders", fmt.format(k.orders || 0)], ["Amount", money.format(k.amount || 0)], ["Regions", fmt.format(k.regions || 0)]]
+      .map(function (p) { return '<div class="card kpi"><span>' + p[0] + "</span><b>" + p[1] + "</b></div>"; }).join("");
+    el("trend").innerHTML = trend(d.daily);
+    el("regions").innerHTML = bars(d.by_region, "region", "amount");
+    el("products").innerHTML = bars(d.top_products, "product", "amount");
+  }
+
+  var inline = {};
+  try { inline = JSON.parse(el("dash-data").textContent || "{}"); } catch (e) {}
+  if (inline && inline.day) draw(inline);
+  else fetch("data.json").then(function (r) { return r.json(); }).then(draw).catch(function () {});   // local preview of the template
+})();
+</script>
+</body>
+</html>

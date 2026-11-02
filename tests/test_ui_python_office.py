@@ -9,7 +9,7 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UI = os.path.join(ROOT, "aihub", "builtin_packages", "aihub-ui", "ui")
 sys.path.insert(0, UI)
-from aihubui import aihub as A, officeview, store, works as W  # noqa: E402
+from aihubui import aihub as A, drawioview, officeview, store, works as W  # noqa: E402
 
 
 class Settings(unittest.TestCase):
@@ -84,6 +84,46 @@ class Office(unittest.TestCase):
         self.assertIn("<td>5</td>", officeview.render(x))
         with self.assertRaises(ValueError):
             officeview.render(self.mk("bad.pptx", {"x": "y"}))
+
+
+class DrawioPreview(unittest.TestCase):
+    MODEL = ('<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>'
+             '<mxCell id="a" value="A &lt;b&gt;bold&lt;/b&gt;&lt;script&gt;bad()&lt;/script&gt;&lt;img src=x onerror=bad()&gt;" style="rounded=1;html=1;fillColor=#dae8fc;" vertex="1" parent="1">'
+             '<mxGeometry x="10" y="10" width="120" height="60" as="geometry"/></mxCell>'
+             '<mxCell id="g" value="Lane" style="swimlane;" vertex="1" parent="1"><mxGeometry x="200" y="0" width="200" height="120" as="geometry"/></mxCell>'
+             '<mxCell id="b" value="in&lt;group" style="ellipse;" vertex="1" parent="g"><mxGeometry x="40" y="40" width="80" height="40" as="geometry"/></mxCell>'
+             '<mxCell id="e" value="go" style="edgeStyle=orthogonalEdgeStyle;endArrow=block;" edge="1" parent="1" source="a" target="b"><mxGeometry relative="1" as="geometry"/></mxCell>'
+             '</root></mxGraphModel>')
+
+    def write(self, name, text):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        p = os.path.join(d, name)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+        return p
+
+    def test_plain_and_compressed_pages_render_safely(self):
+        import base64
+        import urllib.parse
+        import zlib
+        c = zlib.compressobj(9, zlib.DEFLATED, -15)
+        packed = base64.b64encode(c.compress(urllib.parse.quote(self.MODEL.replace("Lane", "Second lane")).encode()) + c.flush()).decode()
+        h = officeview.render(self.write("d.drawio", '<mxfile><diagram name="One">%s</diagram><diagram name="Two">%s</diagram></mxfile>' % (self.MODEL, packed)))
+        self.assertIn("<b>bold</b>", h)
+        self.assertNotIn("bad()", h)
+        self.assertIn("in&lt;group", h)
+        self.assertIn("Second lane", h)
+        self.assertIn(">One</button>", h)
+        self.assertIn("marker-end=", h)
+        self.assertIn('<ellipse cx="280" cy="60"', h)               # child of the swimlane placed at parent (200,0) + (40,40)
+        self.assertIn('d="M130,55 L241.27,55"', h)                      # boxes overlap vertically: one straight orthogonal run, clipped at both borders
+
+    def test_bad_files_raise_value_error(self):
+        for name, text in (("x.drawio", "<html/>"), ("y.dio", "<mxfile><diagram>!!notbase64</diagram></mxfile>"), ("z.drawio", "not xml"),
+                           ("e.drawio", '<!DOCTYPE x [<!ENTITY a "b">]><mxfile/>')):
+            with self.assertRaises(ValueError, msg=name):
+                drawioview.page(self.write(name, text))
 
 
 if __name__ == "__main__":

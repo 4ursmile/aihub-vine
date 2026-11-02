@@ -1095,6 +1095,114 @@ class LoopSharedFlag(Loop):
         self.assertIn("2 failed", r["nodes"]["l"]["note"])
 
 
+class Gates(Loop):
+    """All of (AND), Any of (OR), None of (NOT): explicit joins. "Gave output" = finished and passed text on (a non-matching Filter gives none)."""
+
+    def graph(self, gate, cfg=None, b_regex="."):
+        return ([{"id": "a", "type": "start.manual", "config": {}},
+                 {"id": "x", "type": "flow.template", "label": "Left", "config": {"template": "L {{input}}"}},
+                 {"id": "y", "type": "flow.filter", "label": "Right", "config": {"regex": b_regex}},
+                 {"id": "g", "type": gate, "config": cfg or {}},
+                 {"id": "o", "type": "flow.output", "config": {"template": "{{input}} | {{data.passed}} | {{data.missing}}"}}],
+                [{"from": "a", "to": "x"}, {"from": "a", "to": "y"}, {"from": "x", "to": "g"}, {"from": "y", "to": "g"}, {"from": "g", "to": "o"}])
+
+    def test_all_needs_every_parent(self):
+        r = self.run_work(*self.graph("flow.all"))
+        self.assertEqual(r["status"], "done")
+        self.assertIn("## From Left\nL go", r["result"]["text"])
+        self.assertIn("all 2 gave output", r["nodes"]["g"]["note"])
+        r = self.run_work(*self.graph("flow.all", b_regex="nomatch"))
+        self.assertIn("no output from Right", r["nodes"]["g"]["note"])
+        self.assertNotIn("o", r["nodes"])
+
+    def test_plain_join_runs_with_what_arrived(self):
+        nodes, edges = self.graph("flow.template", {"template": "{{input}}"}, b_regex="nomatch")
+        r = self.run_work(nodes, edges)
+        self.assertEqual(r["nodes"]["g"]["output"], "L go")         # documented: a plain join is an OR of the parents that finished with output
+
+    def test_any_and_none(self):
+        r = self.run_work(*self.graph("flow.any", {"wait": "all"}, b_regex="nomatch"))
+        self.assertTrue(r["result"]["text"].startswith('L go | ["Left"] | ["Right"]'), r["result"]["text"])
+        r = self.run_work(*self.graph("flow.none", {"text": "nothing for {{trigger}}"}, b_regex="nomatch"))
+        self.assertNotIn("o", r["nodes"])                           # Left gave output: NOT stops
+        nodes = [{"id": "a", "type": "start.manual", "config": {}}, {"id": "d", "type": "code.python", "config": {"code": "# %% x\nresult['day'] = '2026-11-01'"}},
+                 {"id": "f", "type": "flow.filter", "label": "Only new", "config": {"regex": "new"}},
+                 {"id": "n", "type": "flow.none", "config": {"text": "nothing new for {{trigger}} {{data.day}} ({{data.missing}})"}}]
+        edges = [{"from": "a", "to": "d"}, {"from": "d", "to": "f"}, {"from": "f", "to": "n"}]
+        r = self.run_work(nodes, edges, text="old rows")
+        self.assertEqual(r["result"]["text"], 'nothing new for old rows 2026-11-01 (["Only new"])')      # data of the node before the stopped Filter
+        nodes[2]["config"]["regex"] = "day"
+        r = self.run_work(nodes, edges, text="new rows")
+        self.assertIn("gave output", r["nodes"]["n"]["note"])
+
+    def test_none_and_a_failed_parent(self):
+        nodes = [{"id": "a", "type": "start.manual", "config": {}}, {"id": "f", "type": "flow.filter", "config": {"regex": "["}},
+                 {"id": "n", "type": "flow.none", "config": {"text": "fallback", "failed": False}}]
+        r = self.run_work(nodes, [{"from": "a", "to": "f"}, {"from": "f", "to": "n"}])
+        self.assertIn("failed", r["nodes"]["n"]["note"])
+        nodes[2]["config"]["failed"] = True
+        r = self.run_work(nodes, [{"from": "a", "to": "f"}, {"from": "f", "to": "n"}])
+        self.assertEqual(r["nodes"]["n"]["output"], "fallback")
+
+    def test_s3_dashboard_sample_is_valid_and_uses_the_gates(self):
+        c = W.catalogue(force=True)
+        path = os.path.join(UI, "samples", "s3-parquet-dashboard.work.json")
+        demo = json.load(open(path, encoding="utf-8"))
+        w = store.clean_work(demo)
+        self.assertEqual((len(w["nodes"]), len(w["edges"])), (len(demo["nodes"]), len(demo["edges"])))
+        self.assertTrue(all(n["type"] in c for n in w["nodes"]))
+        self.assertTrue({"flow.all", "flow.any", "flow.none"} <= {n["type"] for n in w["nodes"]})
+        s3 = next(n for n in w["nodes"] if n["id"] == "s3")
+        self.assertEqual(s3["vault_kinds"], [{"kind": "s3", "name": "lake"}])
+        self.assertIn("s3fs", s3["requires"])
+        warns = []
+        W.checked_work(demo, warnings=warns)
+        self.assertEqual(warns, [])
+        self.assertTrue(os.path.isfile(os.path.join(os.path.dirname(path), "s3-parquet-dashboard.files", "dashboard", "index.html")))
+        for n in w["nodes"]:
+            if n["type"] == "code.python":
+                compile(n["config"]["code"], n["id"], "exec")
+
+    def test_path_node_reads_a_mention(self):
+        d = os.path.join(self.tmp, "dash")
+        os.makedirs(d)
+        r = self.run_work([{"id": "a", "type": "start.manual", "config": {}}, {"id": "t", "type": "io.path", "config": {"path": "@folder:" + d}}],
+                          [{"from": "a", "to": "t"}])
+        self.assertEqual(r["status"], "done", r)
+        self.assertEqual(r["nodes"]["t"]["output"], os.path.realpath(d))
+
+    def test_a_picked_folder_is_attached_by_share_and_found_after_import(self):
+        from aihubui import workpkg
+        home = os.path.join(self.tmp, "home")
+        os.makedirs(os.path.join(home, "Docs", "dash"))
+        open(os.path.join(home, "Docs", "dash", "index.html"), "w").close()
+        old = os.environ.get("HOME"), workpkg.HOME_ROOT
+        os.environ["HOME"], workpkg.HOME_ROOT = home, home
+        self.addCleanup(lambda: (os.environ.__setitem__("HOME", old[0]) if old[0] else None, setattr(workpkg, "HOME_ROOT", old[1])))
+        w = self.save([{"id": "a", "type": "start.manual", "config": {}}, {"id": "t", "type": "io.path", "config": {"path": "@Docs/dash/"}}], [{"from": "a", "to": "t"}], enabled=False)
+        self.engine.fire(w, w["nodes"][0], {"text": "go"}, "test")
+        r = W.get_run(w["id"], self.final(w["id"])[0]["id"])
+        self.assertEqual(r["nodes"]["t"]["output"], os.path.realpath(os.path.join(home, "Docs", "dash")))      # @ = inside home, not the run folder
+        for round_ in (1, 2):                                       # share, import, share again: the folder keeps travelling
+            out = tempfile.mkdtemp()
+            wf = os.path.join(out, "x.work.json")
+            shared = workpkg.strip_for_share(w)
+            rep = workpkg.bundle(w, shared, workpkg.files_dir_of(wf))
+            self.assertEqual((rep["files"], rep["skipped"]), (["dash"], []), round_)
+            self.assertEqual(next(n for n in shared["nodes"] if n["id"] == "t")["config"]["path"], "@folder:{{work.files}}/dash")
+            json.dump(shared, open(wf, "w"))
+            w = workpkg.import_file(wf)["work"]
+            self.assertTrue(os.path.isfile(os.path.join(W.work_files_dir(w["id"]), "dash", "index.html")))
+
+    def test_any_first_does_not_wait_for_the_slow_parent(self):
+        nodes, edges = self.graph("flow.any", {"wait": "first"})
+        nodes[2] = {"id": "y", "type": "code.python", "label": "Slow", "config": {"code": "# %% wait\nimport time\ntime.sleep(2.5)\nresult['done'] = 1", "timeout": 30}}
+        r = self.run_work(nodes, edges)
+        self.assertEqual(r["status"], "done", r)
+        self.assertLess(r["nodes"]["g"]["ended"], r["nodes"]["y"]["ended"])
+        self.assertTrue(r["nodes"]["g"]["output"].startswith("L go"))
+
+
 class McpControl(unittest.TestCase):
     """The Toolbox: the aihub_mcp tool retries, hides and re-enables servers and tools; settings can switch a server off everywhere."""
 
