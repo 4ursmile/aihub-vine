@@ -1758,19 +1758,41 @@ def run_dir(wid, rid, nid=None, make=True):
     return d
 
 
-def run_files(wid, rid, limit=300):
-    """-> [{path (relative to the run folder), node, size, mtime}] of the files written in the run folder, newest first."""
-    root, out = run_dir(wid, rid, make=False), []
+def work_folder(work):
+    """The working folder the work set (absolute, made when missing), or "" when its runs get their own run folder. RuntimeError when unusable."""
+    raw = str((work or {}).get("workdir") or "").strip()
+    if not raw:
+        return ""
+    try:
+        return store.check_cwd(raw)
+    except ValueError as e:
+        raise RuntimeError("working folder of this work: %s" % e)
+
+
+def run_root(wid, rid, run=None):
+    """Folder of a run: the work's working folder when the run used one (run["workdir"]), else its own run folder."""
+    run = run if run is not None else get_run(wid, rid) or {}
+    return run["dir"] if run.get("workdir") and run.get("dir") else run_dir(wid, rid, make=False)
+
+
+def run_files(wid, rid, limit=300, run=None):
+    """-> [{path (relative to the run folder), node, size, mtime}] of the files written in the run folder, newest first.
+    In a work's working folder (a project) only files changed since the run started are listed, and `node` stays empty (nodes share it)."""
+    run = run if run is not None else (get_run(wid, rid) if wid not in (TRY_RUNS, CHAT_RUNS) else None) or {}
+    shared = bool(run.get("workdir"))
+    root, out, since = run_root(wid, rid, run), [], (float(run.get("started") or 0) - 1) if shared else 0
     for dp, dn, names in os.walk(root):
-        dn[:] = [x for x in dn if x != ".git" and x != "node_modules"]
+        dn[:] = [x for x in dn if x not in store.SKIP_DIRS and not (shared and x.startswith("."))]
         for n in names:
             fp = os.path.join(dp, n)
             try:
                 st = os.stat(fp)
             except OSError:
                 continue
+            if since and st.st_mtime < since:
+                continue
             rel = os.path.relpath(fp, root).replace(os.sep, "/")
-            out.append({"path": rel, "node": rel.split("/")[0] if "/" in rel else "", "size": st.st_size, "mtime": st.st_mtime})
+            out.append({"path": rel, "node": rel.split("/")[0] if "/" in rel and not shared else "", "size": st.st_size, "mtime": st.st_mtime})
             if len(out) > 5000:
                 break
     out.sort(key=lambda x: -x["mtime"])
@@ -2490,7 +2512,10 @@ class Engine:
         run["title"] = work.get("title") or "Workflow"
         ctl = ctl_for(run["id"], "work", run, work=work["id"], total=len(nodes))
         ctl.total = len(nodes)
-        rdir = run["dir"] = run_dir(work["id"], run["id"])
+        fixed = work_folder(work)                                           # the work's own working folder: every node of every run works in it
+        rdir = run["dir"] = fixed or run_dir(work["id"], run["id"])
+        if fixed:
+            run["workdir"] = True
         wfiles = work_files_dir(work["id"])
         _save_run(run, trim=False)
         outs = {run["trigger"]: event}
@@ -2636,7 +2661,7 @@ class Engine:
             inmap = {}
             for k, (u, o) in enumerate(got, 1):                            # {{in.1}} / {{in.<node>}}: one parent's text
                 inmap[str(k)] = inmap[names[u][1]] = text_of(o)
-            ndir = run_dir(work["id"], run["id"], nid, make=bool(spec.get("run")) or n.get("type", "").startswith("ai."))
+            ndir = rdir if fixed else run_dir(work["id"], run["id"], nid, make=bool(spec.get("run")) or n.get("type", "").startswith("ai."))
             ctx = dict(ctx_base, input=text, data=cdata, run={"id": run["id"], "dir": rdir}, node={"id": nid, "dir": ndir}, **{"in": inmap})
             ctx_of[nid] = ctx
             with lock:

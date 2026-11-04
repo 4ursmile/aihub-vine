@@ -55,6 +55,7 @@ def strip_for_share(w, cat=None):
     cat = cat or W.catalogue()
     out = json.loads(json.dumps(w))
     out.pop("id", None)
+    out.pop("workdir", None)                                     # a folder of this machine
     out.update(enabled=False)
     for n in out["nodes"]:
         c = W.credential(n.pop("credential", None))

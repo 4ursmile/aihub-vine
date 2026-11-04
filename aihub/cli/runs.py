@@ -677,8 +677,10 @@ def venv_of(r):
 
 def variant(args):
     """A run of a package in another role: `--works ...` = the aihub-ui Works engine without its page (`aihub work serve --bg`).
-    `unique` and the page address (url_file) apply per variant, so the UI and its headless scheduler can both run."""
-    return "works" if list(args or [])[:1] == ["--works"] else ""
+    `unique` and the page address (url_file) apply per variant, so the UI and its headless scheduler can both run. `--works run W`
+    (`aihub work run`, one run of one work, recorded on the hub's Running page) is a variant of its own and never unique."""
+    args = list(args or [])
+    return ("work-run" if args[1:2] == ["run"] else "works") if args[:1] == ["--works"] else ""
 
 
 def start(target, args, a, resume=False):
@@ -693,7 +695,7 @@ def start(target, args, a, resume=False):
     else:
         installer.bot_command(target)      # the usual "not an installed bot" error
         return 1
-    if M.runnable(found[bot][1]).get("unique"):
+    if M.runnable(found[bot][1]).get("unique") and var != "work-run":
         other = next((x for x in all_runs() if x.get("bot") == bot and x["id"] != rid and alive(x) and variant(x.get("args")) == var), None)
         if other:
             if not var and show_link(found[bot][1]):                  # a page service that is already up: show its address and open it

@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from aihubui import aihub as A, auth, chat, chatshare, freechat, hubusage, magic, mcpclient, nodeenv, officeview, searchidx, selfupdate, sources, spacebundle, store, term, usagereport, workpkg, works as W    # noqa: E402
+from aihubui import aihub as A, auth, chat, chatshare, drawioview, freechat, hubusage, magic, mcpclient, nodeenv, officeview, searchidx, selfupdate, sources, spacebundle, store, term, usagereport, workpkg, works as W    # noqa: E402
 from aihubui.secretbox import Box, write_private                  # noqa: E402
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -176,6 +176,8 @@ class H(BaseHTTPRequestHandler):
                 return self._send(403, b"bad host or origin", "text/plain")
             if u.path.startswith("/w/"):
                 return self._workfile(u.path)
+            if u.path.startswith(PUB_PREFIX) and method == "GET":         # vendored public viewer code for sandboxed previews (they carry no cookie)
+                return self._static(u.path, public=True)
             if u.path == "/" and q.get("t"):
                 if not hmac.compare_digest(q["t"], TOKEN):
                     return self._send(403, PAGE % b"This link carries an old key. Open the current one:", "text/html; charset=utf-8")
@@ -204,11 +206,13 @@ class H(BaseHTTPRequestHandler):
                 pass
 
     # ---- static and chat files
-    def _static(self, path):
-        if not self._authed():
+    def _static(self, path, public=False):
+        if public:                                       # only the public library folder, never the app itself
+            p = store.safe_join(PUB_DIR, unquote(path[len(PUB_PREFIX):]))
+        elif not self._authed():
             return self._send(401, PAGE % b"This browser has no key for the UI yet. Run this in a terminal to open it:", "text/html; charset=utf-8")
-        name = "index.html" if path in ("/", "") else path.lstrip("/")
-        p = store.safe_join(STATIC, unquote(name))
+        else:
+            p = store.safe_join(STATIC, unquote("index.html" if path in ("/", "") else path.lstrip("/")))
         if not p or not os.path.isfile(p):
             return self._send(404, b"not found", "text/plain")
         ext = os.path.splitext(p)[1].lower()           # fixed: the OS table (Windows registry) may call .js text/plain, and browsers refuse such a module
@@ -245,10 +249,12 @@ class H(BaseHTTPRequestHandler):
             ctype += "; charset=utf-8"
         if p.lower().endswith(officeview.EXT) and "download=1" not in self.path:         # Word / Excel / PowerPoint / draw.io -> a page the canvas can show
             try:
-                page = officeview.render(p)
+                page = drawio_native(p) if p.lower().endswith(drawioview.EXT) and "engine=basic" not in self.path else None
+                csp = DRAWIO_CSP if page else PREVIEW_CSP
+                page = page or officeview.render(p)
             except (ValueError, OSError) as e:
-                page = officeview.error_page(str(e))
-            return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8", {"Content-Security-Policy": PREVIEW_CSP, "Content-Disposition": "inline"})
+                page, csp = officeview.error_page(str(e)), PREVIEW_CSP
+            return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8", {"Content-Security-Policy": csp, "Content-Disposition": "inline"})
         disp = "inline" if self.path.find("download=1") < 0 else "attachment"
         if ctype == "application/pdf":                                                   # Chrome's PDF viewer does not run inside a sandbox
             return self._send_file(p, ctype, {"Content-Security-Policy": "frame-ancestors 'self'", "Content-Disposition": disp})
@@ -350,6 +356,23 @@ def boot(h, q, b):
 
 def models_now(h, q, b):
     return A.models()
+
+
+PUB_PREFIX = "/pub/"
+PUB_DIR = os.path.join(STATIC, "vendor", "lazy", "drawio")                # draw.io viewer (Apache-2.0): see VERSIONS.json
+DRAWIO_VIEWER = "viewer-static.min.js"
+DRAWIO_REMOTE = "https://www.draw.io/js/viewer.min.js"                     # official viewer, loaded by the browser when none is vendored
+DRAWIO_HOSTS = "https://www.draw.io https://app.diagrams.net https://viewer.diagrams.net"
+DRAWIO_CSP = ("sandbox allow-scripts allow-popups; default-src 'self' 'unsafe-inline' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' %s; "
+              "style-src 'self' 'unsafe-inline' %s; img-src 'self' data: blob: https:; font-src 'self' data: https:; connect-src https:; frame-ancestors 'self'") % (DRAWIO_HOSTS, DRAWIO_HOSTS)
+
+
+def drawio_native(path):
+    """draw.io's own viewer page for PATH: the vendored viewer when it is there (works offline), else draw.io's hosted one.
+    No network or a blocked host: the page falls back to the stdlib renderer (?engine=basic). None when DRAWIO_REMOTE is emptied."""
+    if os.path.isfile(os.path.join(PUB_DIR, DRAWIO_VIEWER)):
+        return drawioview.native_page(path, PUB_PREFIX + DRAWIO_VIEWER, PUB_PREFIX)
+    return drawioview.native_page(path, DRAWIO_REMOTE, "") if DRAWIO_REMOTE else None
 
 
 GZIP_EXT = {".js", ".mjs", ".css", ".html", ".json", ".svg"}
@@ -1192,40 +1215,100 @@ def _chat_of(q, b):
     return s
 
 
+def _win_code_exe():
+    """Code.exe of a Windows VS Code install (user, system, Insiders, or the one whose bin\\code.cmd is on PATH), else None.
+    The GUI exe is started directly: code.cmd is a batch file (a console window, and Python refuses some quoted args for .cmd)."""
+    cands = []
+    for name in ("code", "code-insiders"):
+        cmd = shutil.which(name)
+        if cmd:
+            bin_dir = os.path.dirname(os.path.realpath(cmd))
+            exe = "Code - Insiders.exe" if "insiders" in name else "Code.exe"
+            cands.append(cmd if cmd.lower().endswith(".exe") else os.path.join(os.path.dirname(bin_dir), exe))
+    for env, sub in (("LOCALAPPDATA", ("Programs", "Microsoft VS Code", "Code.exe")), ("ProgramFiles", ("Microsoft VS Code", "Code.exe")),
+                     ("ProgramFiles(x86)", ("Microsoft VS Code", "Code.exe")), ("LOCALAPPDATA", ("Programs", "Microsoft VS Code Insiders", "Code - Insiders.exe")),
+                     ("ProgramFiles", ("Microsoft VS Code Insiders", "Code - Insiders.exe"))):
+        base = os.environ.get(env)
+        if base:
+            cands.append(os.path.join(base, *sub))
+    return next((c for c in cands if c and os.path.isfile(c)), None)
+
+
 def _vscode_cmd():
     """argv prefix that launches VS Code: the `code` shell command, else the app bundle / install folder."""
+    if os.name == "nt":
+        exe = _win_code_exe()
+        return [exe] if exe else None
     exe = shutil.which("code")
     if exe:
         return [exe]
-    if sys.platform == "darwin" and os.path.isdir("/Applications/Visual Studio Code.app"):
-        return ["open", "-a", "Visual Studio Code", "--args"]
-    if os.name == "nt":
-        local = os.environ.get("LOCALAPPDATA")
-        for c in (local and os.path.join(local, "Programs", "Microsoft VS Code", "Code.exe"), os.path.join(os.environ.get("ProgramFiles", ""), "Microsoft VS Code", "Code.exe")):
-            if c and os.path.isfile(c):
-                return [c]
+    if sys.platform == "darwin":
+        for app in ("Visual Studio Code", "Visual Studio Code - Insiders"):
+            if os.path.isdir("/Applications/%s.app" % app) or os.path.isdir(os.path.expanduser("~/Applications/%s.app" % app)):
+                return ["open", "-a", app, "--args"]
     return None
+
+
+def _spawn_gui(argv):
+    """Start a desktop program and let it go: no console window on Windows, its own session elsewhere, never inherits our stdio."""
+    kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
+    env = {k: v for k, v in os.environ.items() if k not in ("ELECTRON_RUN_AS_NODE", "ELECTRON_NO_ATTACH_CONSOLE", "VSCODE_PID", "VSCODE_IPC_HOOK_CLI")}
+    if os.name == "nt":
+        kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
+    else:
+        kw["start_new_session"] = True
+    return subprocess.Popen(argv, env=env, **kw)
+
+
+def _chat_target(b):
+    """(working folder of the chat in B, full path of b.path in it or "")."""
+    s = _chat_of({}, b)
+    root = store.session_dir(s["id"])
+    rel = str(b.get("path") or "")
+    if not rel:
+        return root, ""
+    full = store.safe_join(root, rel)
+    if not full or not os.path.exists(full):
+        raise Err("no such file in this chat", 404)
+    return root, full
 
 
 def open_vscode(h, q, b):
     """Open the chat's working folder (and optionally one file in it) in VS Code. Local machine only, like the rest of the UI."""
-    s = _chat_of(q, b)
-    root = store.session_dir(s["id"])
-    args = [root]
-    rel = str(b.get("path") or "")
-    if rel:
-        full = store.safe_join(root, rel)
-        if not full or not os.path.isfile(full):
-            raise Err("no such file in this chat", 404)
-        args += ["-g", full]
+    root, full = _chat_target(b)
+    args = [root] + (["-g", full] if full and os.path.isfile(full) else [])
     cmd = _vscode_cmd()
     if not cmd:
-        raise Err("VS Code was not found: install it, and on macOS/Linux run 'Shell Command: Install code command in PATH'")
+        raise Err("VS Code was not found: install it" + ("" if os.name == "nt" else ", and run 'Shell Command: Install code command in PATH' from its command palette"))
     try:
-        subprocess.Popen(cmd + args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _spawn_gui(cmd + args)
     except OSError as e:
         raise Err("cannot start VS Code: " + str(e))
     return {"ok": True, "dir": root}
+
+
+def _reveal(path):
+    """Show PATH in the system file manager: a folder opens, a file is selected in its folder (Finder / Explorer; Linux opens the folder)."""
+    path = os.path.normpath(path)
+    if os.name == "nt":
+        _spawn_gui(["explorer", "/select," + path] if os.path.isfile(path) else ["explorer", path])
+    elif sys.platform == "darwin":
+        _spawn_gui(["open", "-R", path] if os.path.isfile(path) else ["open", path])
+    else:
+        opener = shutil.which("xdg-open") or shutil.which("gio")
+        if not opener:
+            raise Err("no file manager opener (xdg-open) on this machine")
+        _spawn_gui([opener] + (["open"] if opener.endswith("gio") else []) + [path if os.path.isdir(path) else os.path.dirname(path)])
+
+
+def reveal_file(h, q, b):
+    """Open the chat's working folder (or show one file of it) in Finder / Explorer / the desktop file manager."""
+    root, full = _chat_target(b)
+    try:
+        _reveal(full or root)
+    except OSError as e:
+        raise Err("cannot open the folder: " + str(e))
+    return {"ok": True, "path": full or root}
 
 
 def file_get(h, q, b):
@@ -2135,9 +2218,10 @@ def work_log(h, q, b):
 def work_files(h, q, b):
     """The run folder of a run (the one working folder every node of it shares) and the files in it."""
     wid, rid = q.get("work", ""), q.get("run", "")
-    if not W.get_run(wid, rid):
+    run = W.get_run(wid, rid)
+    if not run:
         raise Err("no such run", 404)
-    return {"dir": W.run_dir(wid, rid, make=False), "files": W.run_files(wid, rid)}
+    return {"dir": W.run_root(wid, rid, run), "workdir": bool(run.get("workdir")), "files": W.run_files(wid, rid, run=run)}
 
 
 def _os_open(path):
@@ -2150,9 +2234,10 @@ def _os_open(path):
 def work_open(h, q, b):
     """Open a run's folder (or one file in it) with the system's own app. Local machine only, like the rest of the UI."""
     wid, rid = str(b.get("work") or ""), str(b.get("run") or "")
-    if not W.get_run(wid, rid):
+    run = W.get_run(wid, rid)
+    if not run:
         raise Err("no such run", 404)
-    root = W.run_dir(wid, rid)
+    root = W.run_root(wid, rid, run) if run.get("workdir") else W.run_dir(wid, rid)
     full = store.safe_join(root, str(b.get("path"))) if b.get("path") else root
     if not full or not os.path.exists(full):
         raise Err("no such file", 404)
@@ -2597,7 +2682,7 @@ ROUTES = {
     ("POST", "knowledge/delete"): note_delete, ("POST", "knowledge/pull"): knowledge_pull,
     ("GET", "sessions"): sessions, ("POST", "sessions"): session_new, ("GET", "sessions/get"): session_get,
     ("POST", "sessions/update"): session_update, ("POST", "sessions/delete"): session_delete, ("POST", "sessions/delmsg"): session_delmsg, ("POST", "folders"): folders,
-    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("GET", "files/diff"): file_diff, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "update/apply"): update_act, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/hint"): chat_hint, ("POST", "chat/btw"): chat_btw, ("POST", "chat/card"): chat_card, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("GET", "sessions/export"): chat_export, ("POST", "sessions/share"): chat_share, ("GET", "sessions/shared"): chats_shared, ("POST", "sessions/import"): chat_import, ("POST", "sessions/rewind"): session_rewind,
+    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("POST", "files/reveal"): reveal_file, ("GET", "files/diff"): file_diff, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "update/apply"): update_act, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/hint"): chat_hint, ("POST", "chat/btw"): chat_btw, ("POST", "chat/card"): chat_card, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("GET", "sessions/export"): chat_export, ("POST", "sessions/share"): chat_share, ("GET", "sessions/shared"): chats_shared, ("POST", "sessions/import"): chat_import, ("POST", "sessions/rewind"): session_rewind,
     ("GET", "themes"): themes_list, ("POST", "themes/save"): theme_save, ("POST", "themes/delete"): theme_delete, ("GET", "usage"): usage_get, ("GET", "usage/sessions"): usage_sessions, ("GET", "usage/session"): usage_session, ("POST", "spaces/publish"): space_publish, ("GET", "spaces"): spaces_mine, ("GET", "prefs"): prefs_get, ("PUT", "prefs"): prefs_put, ("GET", "slash"): slash,
     ("GET", "works"): works, ("GET", "works/get"): work_get, ("POST", "works/save"): work_save, ("POST", "works/delete"): work_delete,
     ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("GET", "works/presets"): presets_list, ("GET", "works/credentials"): credentials_list, ("POST", "works/credentials/save"): credentials_save, ("POST", "works/credentials/delete"): credentials_delete, ("POST", "works/presets/save"): presets_save, ("POST", "works/presets/delete"): presets_delete, ("POST", "nodes/run"): node_run, ("POST", "works/env/check"): env_check, ("POST", "works/env/install"): env_install, ("GET", "works/env/job"): env_job, ("POST", "works/env/cancel"): env_cancel, ("GET", "works/envs"): env_list, ("POST", "works/magic"): work_magic, ("POST", "works/try"): work_try, ("GET", "works/try/status"): work_try_status, ("GET", "works/chatruns"): work_chat_runs, ("GET", "works/active"): work_active, ("GET", "works/files"): work_files, ("POST", "works/open"): work_open, ("POST", "works/rerun"): work_rerun, ("POST", "works/stop"): work_stop, ("GET", "works/log"): work_log, ("GET", "project/info"): project_info, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/generate/start"): work_generate_start, ("GET", "works/generate/status"): work_generate_status, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import,

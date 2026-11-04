@@ -647,7 +647,7 @@ function Running() {
   const forget = async (r) => { try { await api("/runs/" + r.key, { method: "DELETE" }); toast("Removed from the list"); load(); } catch (x) { toast(x.message, 1); } };
   const qq = q.trim().toLowerCase(); const items = d.items.filter((r) => !qq || [r.name, r.bot, r.host, r.owner, r.status].join(" ").toLowerCase().includes(qq));
   const n = (st) => d.items.filter((r) => r.status === st).length; const now = Date.now() / 1000;
-  return html`<div class="stack"><div class="row" style="flex-wrap:wrap;align-items:flex-end"><div><h1>Running</h1><p class="mut">Bots started with <code>aihub run</code> on your machines. Stop, start, restart or change them here; a change reaches the machine at its next report (a few seconds while this page is open).</p></div><span class="sp"></span>
+  return html`<div class="stack"><div class="row" style="flex-wrap:wrap;align-items:flex-end"><div><h1>Running</h1><p class="mut">Bots started with <code>aihub run</code> and works run with <code>aihub work run</code> on your machines. Stop, start, restart or change them here; a change reaches the machine at its next report (a few seconds while this page is open).</p></div><span class="sp"></span>
       ${d.is_admin && html`<div class="seg" role="group" aria-label="Whose runs">${[["mine", "Mine"], ["all", "Everyone"]].map(([k, l]) => html`<button key=${k} class=${scope === k ? "on" : ""} aria-pressed=${scope === k} onClick=${() => setScope(k)}>${l}</button>`)}</div>`}</div>
     <div class="kpis"><div class="stat"><b>${n("running")}</b><span>running</span></div><div class="stat"><b>${n("waiting")}</b><span>waiting (schedule / restart)</span></div><div class="stat"><b>${n("stopped")}</b><span>stopped</span></div><div class="stat"><b>${d.items.filter((r) => !r.online).length}</b><span>not connected</span></div></div>
     ${d.items.length ? html`<input class="field" type="search" placeholder="Filter by name, bot, machine, person, status" aria-label="Filter runs" value=${q} onInput=${(x) => setQ(x.target.value)} />` : ""}
@@ -1816,7 +1816,18 @@ function SpaceSettings({ s, onSaved, onClose }) {
       <label>Auto-advance (seconds, 0 = off)<input class="field" type="number" min="0" max="3600" value=${f.autoplay} onInput=${up("autoplay")} /></label></div>
       <label class="sp-check"><input type="checkbox" checked=${f.loop} onChange=${up("loop")} /> Start over after the last slide</label>`}
     <div class="row"><button class="btn">Save</button><button type="button" class="btn sec" onClick=${() => setNv(!nv)}>${nv ? "Cancel" : "Upload a new version"}</button></div></form>
-    ${nv && html`<${SpaceForm} bare space=${s.ref} onDone=${(x) => { setNv(false); onSaved(x); }} />`}</div><//>`;
+    ${nv && html`<${SpaceForm} bare space=${s.ref} onDone=${(x) => { setNv(false); onSaved(x); }} />`}
+    ${s.can_grant_net && ["report", "dashboard", "html"].includes(s.kind) && html`<${SpaceNet} s=${s} onSaved=${onSaved} />`}</div><//>`;
+}
+// Hub admins only: origins the sandboxed html page may embed (iframe), fetch / WebSocket and post forms to. Without any it is cut off from the network.
+function SpaceNet({ s, onSaved }) {
+  const [v, setV] = useState((s.net_origins || []).join("\n")), [busy, setBusy] = useState(false);
+  const save = async (list) => { setBusy(true); try { const x = await api("/spaces/" + s.ref, { method: "PATCH", body: { net_origins: list } }); onSaved(x); setV((x.net_origins || []).join("\n")); toast(x.net_origins && x.net_origins.length ? "This page may load " + x.net_origins.length + " site(s)" : "This page is cut off from other sites"); } catch (er) { toast(er.message, 1); } setBusy(false); };
+  return html`<div class="stack" style="margin-top:14px"><h3>Other sites this page may load <span class="badge orange">admin</span></h3>
+    <p class="sp-hint">One origin per line, e.g. <span class="mono">https://grafana.example.com</span>, <span class="mono">https://*.example.com</span>, or <span class="mono">https:</span> for any https site. The page may then show them in an iframe, fetch from them and post forms to them. It still never sees the hub sign-in.</p>
+    <textarea class="field mono" rows="4" value=${v} onInput=${(e) => setV(e.target.value)} placeholder="https://example.com"></textarea>
+    <div class="row"><button type="button" class="btn" disabled=${busy} onClick=${() => save(v.split(/[\s,]+/).filter(Boolean))}>Save sites</button>
+      ${(s.net_origins || []).length > 0 && html`<button type="button" class="btn sec" disabled=${busy} onClick=${() => save([])}>Block all</button>`}</div></div>`;
 }
 // ---- comments, @mentions and version history share ONE side panel next to the space (tabs Comments | History). The revision being previewed
 // is always shown at the top of the panel, comments are written about it, and every alert links to the revision it is about.

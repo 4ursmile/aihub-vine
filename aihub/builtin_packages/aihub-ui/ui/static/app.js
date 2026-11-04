@@ -20,7 +20,8 @@ function lazy(load, name) {
     return C ? h(C, p) : bad ? html`<div class="empty"><div>${Ic("alert", 24)}<div>${bad}</div></div></div>` : html`<div class="empty"><div class="shine">Loading…</div></div>`;
   };
 }
-const Viewer = lazy(() => import("./slides.js"), "Viewer"), Themes = lazy(() => import("./slides.js"), "Themes");
+const Viewer = lazy(() => import("./slides.js"), "Viewer"), Themes = lazy(() => import("./slides.js"), "Themes"), Notebook = lazy(() => import("./notebook.js"), "Notebook");
+const isNb = (p) => /\.ipynb$/i.test(p || "");
 
 // ---------- api
 // Accent palettes of the hub (same names as the hub's Settings > Site): [light, dark] -> accent, hover, tinted background.
@@ -328,6 +329,16 @@ function WorkDirDialog({ s, cur, busy, close, saved }) {
     <p class="mute small">Changing it starts a new Claude session: the conversation so far is carried over as text, and the next message rewrites the prompt cache.</p>
     ${busy && html`<p class="tag bad">This chat is answering. Wait for it to finish.</p>`}
     <div class="row" style="margin-top:14px">${s.cwd && html`<button class="btn" disabled=${wait || busy} onClick=${() => apply("")}>Use the private folder</button>`}<span class="grow"></span><button class="btn" onClick=${close}>Cancel</button><button class="btn acc" disabled=${!v.trim() || wait || busy || v.trim() === (s.cwd || "")} onClick=${() => apply(v)}>${wait ? "Applying…" : "Use this folder"}</button></div>
+    ${pick && html`<${FilePicker} dirs=${true} title="Choose a working folder" start=${v} onPick=${(p) => { setPick(false); setV(p); }} close=${() => setPick(false)}/>`}<//>`;
+}
+// Working folder of a work: every node of every run works in it (Claude / Free chat nodes, programs' workdir, {{run.dir}}); empty = a fresh run folder per run.
+function WorkFolderDialog({ value, close, apply }) {
+  const [v, setV] = useState(value || ""), [pick, setPick] = useState(false);
+  const done = (x) => { apply(x.trim()); close(); };
+  return html`<${Modal} close=${close}><h1>Working folder</h1><p class="sub">Every run of this work reads and writes files in this folder: Claude and Free chat nodes open in it, programs get it as their workdir and templates see it as <code>{{run.dir}}</code>. A folder that does not exist is created when a run starts. Leave it empty to give each run a fresh run folder.</p>
+    <div class="field"><label>Folder path</label><div class="row"><input class="grow mono" placeholder="/Users/you/projects/my-app" value=${v} onInput=${(e) => setV(e.target.value)} onKeyDown=${(e) => e.key === "Enter" && done(v)} autofocus/><button class="btn" onClick=${guard(async () => { const p = await nativePick({ dirs: true, start: v, title: "Choose a working folder for this work" }); if (p === null) setPick(true); else if (p) setV(p); })}>${Ic("folder", 14)} Browse…</button></div></div>
+    <p class="mute small">Runs share the folder, so two runs at the same time write to the same files. The folder is not part of a shared work package.</p>
+    <div class="row" style="margin-top:14px">${value && html`<button class="btn" onClick=${() => done("")}>Use run folders</button>`}<span class="grow"></span><button class="btn" onClick=${close}>Cancel</button><button class="btn acc" disabled=${!v.trim() || v.trim() === (value || "")} onClick=${() => done(v)}>Use this folder</button></div>
     ${pick && html`<${FilePicker} dirs=${true} title="Choose a working folder" start=${v} onPick=${(p) => { setPick(false); setV(p); }} close=${() => setPick(false)}/>`}<//>`;
 }
 function SoulDialog({ s, busy, close, saved }) {
@@ -715,13 +726,14 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const pickList = engine === "free" && freeIds && freeIds.length ? (() => { const base = (fresh || boot.models).models, have = new Set(base.map((m) => m.id)); return [...base, ...freeIds.filter((x) => !have.has(x.id)).map((x) => ({ id: x.id, label: x.id, kind: x.kind, note: x.kind === "image" ? "Image generation model from your API." : x.kind === "tts" ? "Text-to-speech model from your API." : "Available to your API key.", group: "settings", window: win }))]; })() : (fresh || boot.models).models;
   const mdl = pickList.find((m) => m.id === model) || (model ? { id: model, label: model, group: "picker", kind: "chat", note: "Model of this chat (not in your settings list)." } : pickList[0]);
   const lastCompact = [...hist].reverse().find((e) => e.k === "compact");
-  const canPrev = (p) => /\.(html?|svg|png|jpe?g|gif|webp|pdf|md|txt|docx|xlsx|pptx|drawio|dio)$/i.test(p || ""), fver = (files.find((f) => f.path === prev) || {}).mtime || 0;
+  const canPrev = (p) => /\.(html?|svg|png|jpe?g|gif|webp|pdf|md|txt|docx|xlsx|pptx|drawio|dio|ipynb)$/i.test(p || ""), fver = (files.find((f) => f.path === prev) || {}).mtime || 0;
   const leaveOk = async () => { if (!dirtyRef.current) return true; if (!(await discard(baseName(prevRef.current)))) return false; dirtyRef.current = false; return true; };
-  const changeTab = async (t) => { if (t !== tab && tab === "edit" && !(await leaveOk())) return; setTab(t); };
+  const changeTab = async (t) => { if (t !== tab && (tab === "edit" || (tab === "preview" && isNb(prev))) && !(await leaveOk())) return; setTab(t); };
   const pickFile = async (f) => { if (!(await leaveOk())) return; setPrev(f.path); setTab(canPrev(f.path) ? "preview" : "edit"); };
   const refreshFiles = () => api("files?id=" + id).then((d) => { setFiles(d.files); setSig(d.sig); }).catch(() => {});
   const noFile = html`<div class="empty"><div>${Ic("file", 26)}<div>Pick a file in Files first.</div></div></div>`;
-  const previewEl = prev ? (/\.html?$/i.test(prev) ? html`<${Viewer} url=${src(prev)} name=${prev} ver=${fver} sandbox="allow-scripts allow-forms allow-modals allow-popups"/>`
+  const previewEl = prev ? (isNb(prev) ? html`<${Notebook} key=${prev} id=${id} path=${prev} ver=${fver} api=${api} put=${put} onSaved=${refreshFiles} dirtyRef=${dirtyRef}/>`
+    : /\.html?$/i.test(prev) ? html`<${Viewer} url=${src(prev)} name=${prev} ver=${fver} sandbox="allow-scripts allow-forms allow-modals allow-popups"/>`
     : canPrev(prev) ? html`<iframe key=${prev + files.length + fver} sandbox=${/\.pdf$/i.test(prev) ? undefined : "allow-scripts allow-forms allow-modals allow-popups"} src=${src(prev)}></iframe>`
     : html`<div class="empty"><div>${Ic("file", 26)}<div>No preview for this kind of file.<br/>Use Edit to read it.</div></div></div>`)
     : html`<div class="empty"><div>${Ic("eye", 26)}<div>Select a file in Files,<br/>or let Claude write an .html one.</div></div></div>`;
@@ -731,6 +743,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const [proj, setProj] = useState([]), [pub, setPub] = useState(null);                 // aihub packages of the working folder: a Publish button shows only when there are some
   useEffect(() => { setProj([]); api("project/info?id=" + id).then((d) => setProj(d.packages || [])).catch(() => {}); }, [id, s && s.cwd, busy]);
   const openCode = guard(async (path) => { await post("files/vscode", { id, path: path || "" }); toast("Opening in VS Code"); });
+  const openDir = guard(async (path) => { await post("files/reveal", { id, path: path || "" }); toast(path ? "Showing it in its folder" : "Opening the folder"); });
   const switchTo = async (f) => { if (f.path === prev) return; if (dirtyRef.current && !(await discard(baseName(prev)))) return; dirtyRef.current = false; setPrev(f.path); };
   const editEl = prev && html`<div class="edlay">${rail && html`<div class="edfiles" style=${"width:" + ew + "px"}><${FileTree} files=${files} sel=${prev} src=${src} onPick=${switchTo}/></div><${Grip} cls="ed-grip" value=${() => ew} onChange=${setEw} onDone=${(v) => setPref("edw", String(v))} min=${120} max=${420} sign=${1} reset=${() => { setEw(200); setPref("edw", "200"); }}/>`}<${Editor} key=${prev} id=${id} path=${prev} ver=${fver} onSaved=${refreshFiles} dirtyRef=${dirtyRef}/></div>`, diffEl = prev && html`<${DiffView} key=${prev} id=${id} path=${prev} ver=${fver}/>`;
   // the message list is rebuilt only when the history, the busy state, the edit box or the folder signature change, not for every streamed token
@@ -741,7 +754,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
               : b.name === "AskUserQuestion" && b.input && b.input.questions ? html`<${AskCard} spec=${b.input} onSend=${(t) => sendRef.current(t)} locked=${busy || hist.slice(i + 1).some((x) => x.k === "user")}/>`
               : html`<${ToolRow} b=${b} res=${results[b.id]} hint=${toolHint(b)}/>`)}</div></div>`
           : e.k === "files" ? html`<div class="msg"><div class="fcard"><div class="fc-h">${Ic("folder", 14)}<b>${e.items.some((x) => x.new) ? "Files created" : "Files changed"}</b><span class="mute small">${e.items.length} in this chat's folder</span></div>
-              ${e.items.map((f) => { const open = /\.(html?|svg|png|jpe?g|gif|webp|pdf|md|txt|drawio|dio)$/i.test(f.path), img = /\.(png|jpe?g|gif|webp|svg)$/i.test(f.path);
+              ${e.items.map((f) => { const open = /\.(html?|svg|png|jpe?g|gif|webp|pdf|md|txt|drawio|dio|ipynb)$/i.test(f.path), img = /\.(png|jpe?g|gif|webp|svg)$/i.test(f.path);
                 return html`<div class="fc-r"><span class="fc-i">${img ? html`<img src=${src(f.path)} alt=""/>` : Ic(/\.(pptx?|docx?|xlsx?)$/i.test(f.path) ? "file" : /\.html?$/i.test(f.path) ? "eye" : "file", 16)}</span>
                   <span class="grow fc-n"><b>${f.path.split("/").pop()}</b><span class="mute small">${f.path.includes("/") ? f.path.split("/").slice(0, -1).join("/") + " · " : ""}${num(f.size)}B${f.new ? "" : " · changed"}</span></span>
                   ${open && html`<button class="btn" onClick=${async () => { if (!dirtyRef.current || (await discard(baseName(prevRef.current)))) { dirtyRef.current = false; setPrev(f.path); setTab("preview"); setOpen(true); } }}>${Ic("eye", 13)} Open</button>`}
@@ -812,10 +825,10 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
       <div class="ctabs"><${Seg} small value=${tab} onChange=${changeTab} items=${[{ id: "files", label: "Files", icon: "folder" }, { id: "preview", label: "Preview", icon: "eye" }, { id: "edit", label: "Edit", icon: "edit" }, { id: "diff", label: "Diff", icon: "layers" }, { id: "elements", label: "Elements", icon: "grid" }]}/><button class="ibtn cv-x" title="Close the canvas" aria-label="Close the canvas" onClick=${() => setOpen(false)}>${Ic("x", 16)}</button></div>
       ${(tab === "preview" || tab === "edit" || tab === "diff") && html`<div class="fbar"><span class="mono t" title=${prev}>${prev || "No file selected"}</span>${prev && canPrev(prev) && html`<a class="small" href=${src(prev)} target="_blank" rel="noopener">Open ${Ic("link", 12)}</a>`}${prev && !/\.(exe|dll|zip|gz|tar|bin)$/i.test(prev) && html`<button class="btn" title="Publish this file as a Space on the hub" onClick=${() => share(prev, false)}>${Ic("upload", 13)} Share</button>`}${/(^|\/)index\.html?$/i.test(prev || "") && html`<button class="btn" title="Publish the whole folder as a web page Space" onClick=${() => share(prev, true)}>${Ic("folder", 13)} Share bundle</button>`}
         ${tab === "edit" && html`<button class=${"ibtn" + (rail ? " on" : "")} style="width:26px;height:26px" title="Show the file list beside the editor" aria-label="Show the file list beside the editor" onClick=${() => { setRail(!rail); setPref("edrail", rail ? "0" : "1"); }}>${Ic("folder", 14)}</button>`}
-        ${prev && html`<button class="btn" title="Open this file, in the project folder, in VS Code" onClick=${() => openCode(prev)}>${Ic("code", 13)} VS Code</button>`}
+        ${prev && html`<button class="btn" title="Open this file, in the project folder, in VS Code" onClick=${() => openCode(prev)}>${Ic("code", 13)} VS Code</button><button class="btn" title="Show this file in its folder (Finder / Explorer)" onClick=${() => openDir(prev)}>${Ic("folder", 13)} Open folder</button>`}
         ${(tab === "edit" || tab === "diff") && html`<button class=${"ibtn" + (split ? " on" : "")} style="width:26px;height:26px" title="Show the preview beside the editor or diff" aria-label="Show the preview beside the editor or diff" onClick=${() => setSplit(!split)}>${Ic("panel", 14)}</button>`}</div>`}
       <div class="cbody">
-        ${tab === "files" && html`<div class="fdir"><span class="mono t" title=${dirInfo.dir}>${dirInfo.dir}</span><button class="btn" title="Open the project folder in VS Code" onClick=${() => openCode("")}>${Ic("code", 13)} VS Code</button><button class="btn" onClick=${() => setDlg("dir")}>${Ic("folder", 13)} Change</button></div>
+        ${tab === "files" && html`<div class="fdir"><span class="mono t" title=${dirInfo.dir}>${dirInfo.dir}</span><button class="btn" title="Open the project folder in VS Code" onClick=${() => openCode("")}>${Ic("code", 13)} VS Code</button><button class="btn" title="Open the project folder in Finder / Explorer" onClick=${() => openDir("")}>${Ic("folder", 13)} Open folder</button><button class="btn" onClick=${() => setDlg("dir")}>${Ic("folder", 13)} Change</button></div>
           ${files.length ? html`<${FileTree} files=${files} sel=${prev} src=${src} onPick=${pickFile}/>` : html`<div class="empty"><div>${Ic("folder", 26)}<div>No files yet.<br/>Ask Claude to build something.</div></div></div>`}`}
         ${tab === "preview" && previewEl}
         ${(tab === "edit" || tab === "diff") && (!prev ? noFile : split && canPrev(prev) ? html`<div class="split"><div class="pane">${previewEl}</div><div class="pane">${tab === "edit" ? editEl : diffEl}</div></div>` : tab === "edit" ? editEl : diffEl)}
@@ -1543,9 +1556,9 @@ function RunsPanel({ w, cat, runs, run, setRun, refresh, now }) {
           : html`<button class="btn" title="Start again with the same text and inputs" onClick=${guard(async () => { const r = await post("works/rerun", { work: w.id, run: run.id }); toast("Run queued"); refresh(); setTimeout(() => api(`works/run?id=${w.id}&run=${r.run}`).then((d) => setRun(d.run)), 600); })}>${Ic("refresh", 12)} Run again</button>`}
           ${run.chat && html`<a class="btn" href=${"#/chat/" + run.chat}>${Ic("chat", 12)} Chat</a>`}</div>
         ${run.error && html`<div class="werr rc-pad">${Ic("alert", 13)}<span>${run.error}</span></div>`}
-        <div class="io-k">Run folder <span class="mute small">(shared by every node; <code>{{run.dir}}</code>)</span></div>
+        <div class="io-k">${files && files.workdir ? "Working folder" : "Run folder"} <span class="mute small">(shared by every node; <code>{{run.dir}}</code>)</span></div>
         <div class="row small" style="gap:6px"><code class="rlog-cmd grow" title=${(files && files.dir) || run.dir || ""}>${(files && files.dir) || run.dir || "(none: this run is from before run folders)"}</code>${run.dir && html`<button class="btn" onClick=${guard(() => post("works/open", { work: w.id, run: run.id }))}>${Ic("folder", 12)} Open folder</button>`}</div>
-        ${files && files.files.length > 0 ? html`<div class="tl-files">${files.files.slice(0, 40).map((f) => html`<div class="small"><button type="button" class="lnk" onClick=${guard(() => post("works/open", { work: w.id, run: run.id, path: f.path }))}>${f.path}</button> <span class="mute">${f.size < 1024 ? f.size + " B" : Math.round(f.size / 1024) + " KB"}</span></div>`)}</div>` : html`<div class="mute small">No files written in the run folder.</div>`}
+        ${files && files.files.length > 0 ? html`<div class="tl-files">${files.files.slice(0, 40).map((f) => html`<div class="small"><button type="button" class="lnk" onClick=${guard(() => post("works/open", { work: w.id, run: run.id, path: f.path }))}>${f.path}</button> <span class="mute">${f.size < 1024 ? f.size + " B" : Math.round(f.size / 1024) + " KB"}</span></div>`)}</div>` : html`<div class="mute small">${files && files.workdir ? "No file in the working folder changed during this run." : "No files written in the run folder."}</div>`}
         <div class="io-k" style="margin-top:10px">Timeline</div>
         ${nodes.map(([id, rec]) => html`<${TimelineRow} key=${id} w=${w} run=${run} id=${id} label=${rec.label || label(id)} rec=${rec} total=${total} now=${now} files=${(files ? files.files : []).filter((f) => f.node === id)}/>`)}</div>`}</div></aside>`;
 }
@@ -1555,7 +1568,7 @@ function Works({ boot, openId }) {
   const [gen, setGen] = useState(""), [genBusy, setGenBusy] = useState(false), [wf, setWf] = useState(false), [nd, setNd] = useState(false), [shared, setShared] = useState(null), [share, setShare] = useState(null), [runs, setRuns] = useState([]), [run, setRun] = useState(null), [hook, setHook] = useState(""), [dirty, setDirty] = useState(false), [pal, setPal] = useState(null), graph = useRef();
   const [presets, setPresets] = useState([]), [pe, setPe] = useState(null), [tab, setTab] = useState(() => { try { return localStorage.getItem("aihub_works_tab") || "works"; } catch { return "works"; } });
   const pickTab = (t) => { setTab(t); try { localStorage.setItem("aihub_works_tab", t); } catch {} };
-  const [sched, setSched] = useState(null);
+  const [sched, setSched] = useState(null), [fdlg, setFdlg] = useState(false);
   const load = guard(async () => { const d = await api("works"); setList(d.works); setSched(d.scheduler || null); });
   const loadPresets = () => api("works/presets").then((d) => setPresets(d.presets || [])).catch(() => {});
   const loadCat = () => { loadPresets(); return api("works/nodes").then((d) => setCat(Object.fromEntries(d.nodes.map((n) => [n.type, n])))).catch(() => {}); };
@@ -1574,7 +1587,7 @@ function Works({ boot, openId }) {
   }, []);
   useEffect(() => { hist.current = { past: [], future: [], t: 0 }; }, [w && w.id]);
   const spc = useRef({}), ptr = useRef(null);                          // Space on the canvas opens the add-node palette where the pointer is (canvas centre if it is outside); one selected node = connect from it
-  spc.current = { open: !!(pal || share || shared || wf || nd || pe), sel, has: !!w };
+  spc.current = { open: !!(pal || share || shared || wf || nd || pe || fdlg), sel, has: !!w };
   useEffect(() => {
     const mv = (e) => { ptr.current = { x: e.clientX, y: e.clientY }; };
     const kd = (e) => {
@@ -1662,6 +1675,7 @@ function Works({ boot, openId }) {
   return html`<div class="wk"><${RunningBar} openRun=${openRun}/><div class="wkbar"><button class="ibtn" title="Back" aria-label="Back" onClick=${async () => { if (!dirty || (await discard(""))) { setW(null); load(); } }}>${Ic("left", 18)}</button>
       <input class="grow" style="font:600 16px var(--serif);border-color:transparent;background:transparent" value=${w.title} onInput=${(e) => upd((c) => ((c.title = e.target.value), c))}/>
       <label class="row small" style="gap:6px" title="How many runs are kept on disk, and offered to Memory nodes"><span class="mute">History</span><${Num} min="1" max="500" style="width:80px" value=${w.keep || 40} onInput=${(e) => upd((c) => ((c.keep = Math.max(1, Math.min(500, +e.target.value || 40))), c))}/></label>
+      <button class=${"dirchip" + (w.workdir ? " set" : "")} title=${w.workdir ? "Working folder: " + w.workdir + "\nClick to change" : "Each run gets its own run folder. Click to set a working folder for this work"} onClick=${() => setFdlg(true)}>${Ic("folder", 14)}<span>${w.workdir ? baseName(w.workdir) : "Run folders"}</span></button>
       ${w.id && html`<button class="btn" title="Share as an aihub workflow package" onClick=${guard(async () => { const saved = dirty ? await save() : w; setShare({ id: saved.id, info: await api("works/export-info?id=" + saved.id) }); })}>${Ic("upload", 14)} Share</button>`}
       ${w.id && html`<button class="ibtn bad" title="Delete this work" aria-label="Delete this work" onClick=${removeWork}>${Ic("trash", 16)}</button>`}
       <button class="btn" title="Re-arrange the nodes so none overlap" onClick=${guard(async () => { const r = await post("works/layout", { nodes: w.nodes, edges: w.edges }); upd((c) => (c.nodes.forEach((n) => { const p = r.positions[n.id]; if (p) { n.x = p.x; n.y = p.y; } }), c)); })}>${Ic("layers", 14)} Tidy</button>
@@ -1689,7 +1703,8 @@ function Works({ boot, openId }) {
         : html`<${RunsPanel} w=${w} cat=${cat} runs=${runs} run=${run} setRun=${setRun} refresh=${refreshRuns} now=${now}/>`}</div>
     ${share && html`<${ShareForm} id=${share.id} info=${share.info} close=${() => setShare(null)} done=${(r) => { setShare(null); setShared(r); }}/>`}
     ${shared && html`<${PublishSteps} r=${shared} boot=${boot} close=${() => setShared(null)}/>`}
-    ${pal && html`<${Palette} cat=${cat} presets=${presets} more=${() => { setPal(null); setNd(true); }} close=${() => { setPal(null); setLink(null); }} onPick=${(t, pid) => add(t, pal.x !== undefined ? pal : null, pid, pal.from)}/>`}${presetDlg}</div>`;
+    ${pal && html`<${Palette} cat=${cat} presets=${presets} more=${() => { setPal(null); setNd(true); }} close=${() => { setPal(null); setLink(null); }} onPick=${(t, pid) => add(t, pal.x !== undefined ? pal : null, pid, pal.from)}/>`}${presetDlg}
+    ${fdlg && html`<${WorkFolderDialog} value=${w.workdir || ""} close=${() => setFdlg(false)} apply=${(v) => upd((c) => { if (v) c.workdir = v; else delete c.workdir; return c; }, { hard: true })}/>`}</div>`;
 }
 
 // ---------- settings

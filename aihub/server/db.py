@@ -115,7 +115,7 @@ LATE_COLUMNS = [
     ("events", "source", "TEXT"),
     ("events", "local_user", "TEXT"), ("events", "host", "TEXT"), ("events", "os", "TEXT"), ("events", "detail", "TEXT"), ("events", "cwd", "TEXT"), ("events", "ip", "TEXT"),
     ("events", "ext_id", "TEXT"), ("events", "actor", "TEXT"), ("reviews", "reviewer", "TEXT"),
-    ("spaces", "public_access", "TEXT DEFAULT 'view'"), ("space_comments", "mentions", "TEXT DEFAULT ''"),
+    ("spaces", "public_access", "TEXT DEFAULT 'view'"), ("spaces", "net_origins", "TEXT DEFAULT ''"), ("space_comments", "mentions", "TEXT DEFAULT ''"),
 ]
 
 # a quoted string literal | a positional ? | a named :param (not the :: cast operator)

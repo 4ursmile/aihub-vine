@@ -366,6 +366,51 @@ class ServiceType(unittest.TestCase):
         self.assertEqual(launch.call_count, 1)
 
 
+    def test_work_run_is_its_own_variant_and_never_blocked_by_unique(self):
+        """`aihub work run W` (--works run) is recorded beside the unique UI and the `aihub-works` scheduler, and never blocks them."""
+        self.assertEqual(runs.variant(["--works", "run", "etl"]), "work-run")
+        self.assertEqual(runs.variant(["--works", "serve"]), "works")
+        self.assertEqual(runs.variant([]), "")
+        pkg = os.path.join(self.home, "packages", "one-svc")
+        os.makedirs(pkg)
+        open(os.path.join(pkg, "aihub.toml"), "w").write('[package]\nname="one-svc"\nversion="1.0.0"\ntype="service"\n[service]\nrun="run.py"\nunique=true\n')
+        open(os.path.join(pkg, "run.py"), "w").write("print('up')\n")
+        with open(os.path.join(self.home, "state.json"), "w") as f:
+            json.dump({"packages": {"one-svc": {"path": pkg, "version": "1.0.0", "components": ["service:one-svc"],
+                                                 "bot_home": os.path.join(self.home, "services", "one-svc")}}}, f)
+        serve = runs.new_spec("aihub-works", "aihub-works", "one-svc", ["--works", "serve"], "", "always", False)
+        runs._save(dict(serve, sup_pid=os.getpid(), beat=time.time(), status="running"))
+        a = mock.Mock(fg=True, schedule="", restart="no", no_hub=True, venv=None, python=None)
+        a.name = "work etl"
+        with mock.patch.object(runs, "launch", side_effect=lambda r, fg=False: 0) as launch:
+            runs.start("one-svc", ["--works", "run", "etl"], a)
+            a.name = "work other"
+            runs.start("one-svc", ["--works", "run", "other"], a)
+        self.assertEqual(launch.call_count, 2)
+        r = launch.call_args_list[0][0][0]
+        self.assertEqual((r["id"], r["mode"], r["restart"], r["args"]), ("work-etl", "fg", "no", ["--works", "run", "etl"]))
+
+
+class WorkRunRecorded(Home):
+    def test_work_run_goes_through_a_reporting_foreground_supervisor(self):
+        from aihub.cli import workcmd
+        with mock.patch.object(workcmd, "_ensure_ui"), mock.patch.object(workcmd.ui, "JSON", False), mock.patch.object(runs, "hub_on", return_value=True), \
+                mock.patch.object(runs, "start", return_value=0) as start, mock.patch.object(workcmd.installer, "bot_command") as direct:
+            workcmd.cli(mock.Mock(rest=["run", "sales-etl", "--input", "day=1"]))
+            args, a = start.call_args[0][1], start.call_args[0][2]
+            self.assertEqual(args, ["--works", "run", "sales-etl", "--input", "day=1"])
+            self.assertEqual((a.name, a.fg, a.restart, a.no_hub), ("work sales-etl", True, "no", False))
+            runs._save(dict(runs.new_spec("work-sales-etl", "work sales-etl", "tick-bot", [], "", "no", True, fg=True),
+                            sup_pid=os.getpid(), beat=time.time(), status="running"))
+            workcmd.cli(mock.Mock(rest=["run", "sales-etl"]))          # one is live in another terminal: a second record
+            self.assertEqual(start.call_args[0][2].name, "work sales-etl 2")
+            self.assertEqual(direct.call_count, 0)
+            direct.return_value = ([sys.executable, "-c", "pass"], False, None, None)
+            workcmd.cli(mock.Mock(rest=["run", "sales-etl", "--no-hub"]))     # not recorded: runs as before
+            self.assertEqual(direct.call_args[0][1], ["--works", "run", "sales-etl"])
+            self.assertEqual(start.call_count, 2)
+
+
 class VenvChoice(Home):
     """`aihub run --venv/--python`: replaces the interpreter, remembered per package, survives the supervisor's rebuild of the command."""
 

@@ -40,6 +40,41 @@ VIEW_SANDBOX = ("sandbox allow-scripts allow-popups allow-popups-to-escape-sandb
                 "style-src 'unsafe-inline' 'self' https:; img-src 'self' data: blob: https:; font-src 'self' data: https:; media-src 'self' data: blob: https:; "
                 "connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'self'; frame-ancestors 'self'")
 VIEW_FILE = "frame-ancestors 'self'; script-src 'none'"
+NET_MAX = 20                                          # origins per space
+# One allowed origin: https://host[:port], https://*.host (sub domains), http://localhost|127.0.0.1[:port], or "https:" (any https site).
+NET_ORIGIN = re.compile(r"^(?:https:|https://(?:\*\.)?[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)*(?::\d{1,5})?"
+                        r"|http://(?:localhost|127\.0\.0\.1)(?::\d{1,5})?)$")
+
+
+def _net_origins(v):
+    """Validated network allowlist (list or comma / space separated string). A path, query or bad host is an error, not dropped:
+    the admin should see the typo. `https://Example.com/x/` -> `https://example.com`."""
+    items = v if isinstance(v, list) else re.split(r"[\s,]+", str(v or ""))
+    out = []
+    for x in items:
+        x = str(x).strip().lower().rstrip("/")
+        if not x:
+            continue
+        if x in ("*", "https://*", "any"):
+            x = "https:"
+        if not NET_ORIGIN.match(x):
+            raise HTTPException(400, "not an origin: %r (use https://host[:port], https://*.host, http://localhost[:port] or https: for any https site)" % x[:80])
+        if x not in out:
+            out.append(x)
+    if len(out) > NET_MAX:
+        raise HTTPException(400, "at most %d origins per space" % NET_MAX)
+    return out
+
+
+def _sandbox_csp(origins):
+    """The frame CSP. A hub admin may allow a space some origins: it may then embed (iframe), fetch / WebSocket and post forms to them.
+    The page still runs without the hub's origin (sandbox, no allow-same-origin), so it never sees the viewer's hub session."""
+    if not origins:
+        return VIEW_SANDBOX
+    src = " ".join(origins)
+    ws = " ".join("wss://" + o[8:] for o in origins if o.startswith("https://")) + (" wss:" if "https:" in origins else "")
+    return (VIEW_SANDBOX.replace("connect-src 'none'", ("connect-src " + src + " " + ws).strip())
+            .replace("frame-src 'none'", "frame-src " + src).replace("form-action 'none'", "form-action " + src))
 
 
 def R(request): return request.app.state.repos
@@ -221,7 +256,7 @@ def _ser(sp, level=None, full=False):
     d = {"ref": sp["ref"], "owner": sp["owner"], "owner_name": sp.get("owner_name") or "", "owner_avatar": _avatar_url(sp["owner"], sp.get("owner_avatar_v") or 0),
          "slug": sp["slug"], "title": sp["title"] or sp["slug"], "description": sp["description"], "kind": sp["kind"], "visibility": sp["visibility"],
          "tags": sp["tags"], "views": sp["views"], "size": sp["size"], "rev": sp["rev"], "created": sp["created"], "updated": sp["updated"],
-         "settings": sp["settings"], "filename": sp["filename"], "public_access": sp.get("public_access") or "view", "comments": sp.get("comments") or 0}
+         "settings": sp["settings"], "filename": sp["filename"], "public_access": sp.get("public_access") or "view", "comments": sp.get("comments") or 0, "net_origins": sp.get("net_origins") or []}
     if level is not None:
         d["level"] = level
         d["can_comment"] = rank(level) >= rank("comment")
@@ -462,16 +497,27 @@ def space_overview(request: Request, u=Depends(current_user)):
     return {"carousel": [_ser(x) for x in top[:6]], "top": [_ser(x) for x in top], "recent": [_ser(x) for x in new], "kinds": repos.space_kinds(v)}
 
 
+def _hub_admin(request, u):
+    return bool(u and u.get("id")) and "admin" in R(request).perms(u["role"])
+
+
+def _ser_full(request, sp, level, u):
+    d = _ser(sp, level, full=True)
+    d["can_grant_net"] = _hub_admin(request, u)       # only a hub admin opens a space to other sites
+    return d
+
+
 @r.get("/spaces/{ref}")
 def space_get(ref: str, request: Request, u=Depends(current_user)):
     sp, level = _load(request, ref, u)
-    return _ser(sp, level, full=True)
+    return _ser_full(request, sp, level, u)
 
 
 @r.patch("/spaces/{ref}")
 def space_patch(ref: str, body: dict, request: Request, u=Depends(require_user)):
     """title, description, tags, kind (report | dashboard | html only), view / transition / autoplay / loop: edit access.
-    visibility, public_access (view | comment: may signed-in visitors of a PUBLIC space comment?): the owner or an admin."""
+    visibility, public_access (view | comment: may signed-in visitors of a PUBLIC space comment?): the owner or an admin.
+    net_origins (list of origins the html page may embed / fetch / post to; [] = none): hub admins only."""
     sp, level = _load(request, ref, u, "edit")
     f = {}
     if "title" in body:
@@ -495,14 +541,22 @@ def space_patch(ref: str, body: dict, request: Request, u=Depends(require_user))
         if level != "admin":
             raise HTTPException(403, "only the owner or an admin may change what the public may do")
         f["public_access"] = body["public_access"]
+    if "net_origins" in body:
+        net = _net_origins(body["net_origins"])
+        if net != sp["net_origins"]:
+            if not _hub_admin(request, u):
+                raise HTTPException(403, "only a hub admin may let a space load other sites")
+            f["net_origins"] = ",".join(net)
     s = _settings(body)
     if s:
         f["settings"] = s
     R(request).space_update(sp["id"], **f)
     _changed(request)
     R(request).audit(u["username"], "space.edit", sp["ref"], ",".join(sorted(list(f)))[:200])
+    if "net_origins" in f:
+        R(request).audit(u["username"], "space.net", sp["ref"], f["net_origins"][:500] or "(none)")
     sp = R(request).space_by_id(sp["id"])
-    return _ser(sp, level, full=True)
+    return _ser_full(request, sp, level, u)
 
 
 @r.delete("/spaces/{ref}")
@@ -659,7 +713,7 @@ def space_frame(ref: str, tok: str, path: str, request: Request):
     if not (full == root or full.startswith(root + os.sep)) or not os.path.isfile(full):
         raise HTTPException(404, "not found")
     mt = mimetypes.guess_type(full)[0] or "application/octet-stream"
-    hd = {"Content-Security-Policy": VIEW_SANDBOX, "X-Frame-Options": "SAMEORIGIN", "Cache-Control": "private, max-age=300"}
+    hd = {"Content-Security-Policy": _sandbox_csp(sp.get("net_origins")), "X-Frame-Options": "SAMEORIGIN", "Cache-Control": "private, max-age=300"}
     if mt.startswith("text/html") or mt in ("image/svg+xml", "application/xhtml+xml"):
         mt = "text/html; charset=utf-8" if mt.startswith("text/html") else mt
     return FileResponse(full, media_type=mt, headers=hd)

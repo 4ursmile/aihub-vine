@@ -133,6 +133,8 @@ aihub space share alice@q3-review --group data-team [--edit]  # view (default), 
 aihub space share alice@q3-review --user bob --access comment
 aihub space set alice@q3-review --public-access comment       # a PUBLIC space: signed-in visitors may comment (anonymous: view only)
 aihub space set alice@q3-review --transition fade --autoplay 8 --loop --view full
+aihub space set alice@dash --allow-site https://grafana.example.com --allow-site https://*.corp.example   # hub admins: the html page may iframe / fetch / post to these (replaces the list)
+aihub space set alice@dash --block-sites                      # hub admins: cut it off from other sites again (the default)
 aihub space url alice@q3-review --view full                   # link that opens full screen (--bare: no hub header)
 aihub space list [--mine] [--kind slides] [--since UNIX_TIME] | top | search WORDS | info REF | get REF -o file [--rev N] | rm REF -y   # --since: changed at/after, oldest first
 aihub space comments alice@q3-review                          # threads, newest replies nested; --json for the raw list
@@ -438,7 +440,7 @@ aihub work export W [-o DIR] [--no-notes]        # shareable copy: no secrets, n
 aihub work setup W [--creds FILE|-] [--folder NODE=PATH] [--env NAME] [--install]   # pick or create the credential sets, working folders and secret fields it needs, then the Python packages of its code nodes
 aihub work set W NODE key=value ... [--folder PATH] [--credential SET|none] [--grant SET] [--revoke SET] [--secret FIELD]
 aihub work enable W | disable W [--force]
-aihub work run W [--input name=value|name=@file] [--text T] [--node TRIGGER] [-q] [--timeout S]   # one run here, live step log; exit 0 = done, 1 otherwise; Ctrl-C stops it
+aihub work run W [--input name=value|name=@file] [--text T] [--node TRIGGER] [-q] [--timeout S] [--no-hub]   # one run here, live step log; exit 0 = done, 1 otherwise; Ctrl-C stops it. Signed in: recorded on the hub's Running page as `work-W` (live log, Stop there ends it); --no-hub / `run_report off` = not recorded
 aihub work runs W [-n N] | logs W [RUN] [--node N]
 aihub work serve [--hooks PORT]                  # fire cron and package triggers of enabled works until stopped (--hooks: webhooks on 127.0.0.1:PORT, same URLs and tokens as the UI)
 aihub work serve --bg                            # the same in the background: runs as `aihub-works` under `aihub run` (restart always); `aihub run logs aihub-works -f`, `aihub run stop aihub-works`

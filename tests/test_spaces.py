@@ -101,6 +101,31 @@ class Spaces(unittest.TestCase):
         bad = re.sub(r"/v/\d+\.", "/v/1.", url)
         self.assertEqual(self.c.get(bad).status_code, 403)
 
+    def test_only_a_hub_admin_lets_an_html_space_load_other_sites(self):
+        self.c.post(API + "/auth/register", json={"username": "nina", "password": "secret1"})
+        nina = {"Authorization": "Bearer " + self.c.post(API + "/auth/login", json={"username": "nina", "password": "secret1"}).json()["token"]}
+        self.assertEqual(self.pub(site(), "own.zip", h=nina, kind="html").status_code, 200)
+        csp = lambda: self.c.get(self.c.get(API + "/spaces/nina@own/viewurl", headers=nina).json()["url"]).headers["content-security-policy"]
+        self.assertIn("frame-src 'none'", csp())
+        self.assertFalse(self.c.get(API + "/spaces/nina@own", headers=nina).json()["can_grant_net"])
+        r = self.c.patch(API + "/spaces/nina@own", json={"net_origins": ["https://x.example"]}, headers=nina)   # the owner may not
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(self.c.patch(API + "/spaces/nina@own", json={"net_origins": ["https://x.example/path"]}, headers=self.h).status_code, 400)
+        self.assertEqual(self.c.patch(API + "/spaces/nina@own", json={"net_origins": ["javascript:alert(1)"]}, headers=self.h).status_code, 400)
+        r = self.c.patch(API + "/spaces/nina@own", json={"net_origins": "https://Grafana.Example.com/, https://*.corp.example"}, headers=self.h)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["net_origins"], ["https://grafana.example.com", "https://*.corp.example"])
+        self.assertTrue(r.json()["can_grant_net"])
+        c = csp()
+        self.assertIn("frame-src https://grafana.example.com https://*.corp.example", c)
+        self.assertIn("wss://grafana.example.com", c)
+        self.assertIn("form-action https://grafana.example.com", c)
+        self.assertIn("sandbox allow-scripts", c)
+        self.assertNotIn("allow-same-origin", c)
+        self.assertEqual(self.c.patch(API + "/spaces/nina@own", json={"title": "t"}, headers=nina).status_code, 200)   # editing without the field is fine
+        self.assertEqual(self.c.patch(API + "/spaces/nina@own", json={"net_origins": []}, headers=self.h).json()["net_origins"], [])
+        self.assertIn("connect-src 'none'", csp())
+
     def test_private_space_is_hidden_until_shared_and_edit_can_republish(self):
         self.pub(b"x,y\n", "s.csv", visibility="private")
         self.assertEqual(self.c.get(API + "/spaces/root@s").status_code, 404)

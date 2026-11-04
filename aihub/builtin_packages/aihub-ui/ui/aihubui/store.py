@@ -826,6 +826,9 @@ def clean_work(w):
          "description": " ".join(str(w.get("description") or "").split())[:300]}
     if re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", str(src.get("package") or "")):
         w["package"] = src["package"]                               # imported from a workflow package: its runs count as uses of it
+    wd = " ".join(str(src.get("workdir") or "").split("\n")).strip()[:1000]
+    if wd:
+        w["workdir"] = wd                                           # every run of the work uses this folder (checked when a run starts)
     try:
         w["keep"] = min(500, max(1, int(src.get("keep") or 40)))
     except (TypeError, ValueError):

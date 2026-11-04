@@ -132,7 +132,7 @@ def cli(a):
         ui.result(d)
         ui.out()
         ui.out("%s  %s" % (ui.bold(d["ref"]), d["title"]))
-        for k in ("kind", "visibility", "public_access", "views", "rev", "comments", "filename", "size", "tags", "description"):
+        for k in ("kind", "visibility", "public_access", "net_origins", "views", "rev", "comments", "filename", "size", "tags", "description"):
             if k in d:                                        # public_access / comments: hubs from before comments do not send them
                 ui.out("  %-14s %s" % (k, ", ".join(d[k]) if isinstance(d[k], list) else d[k]))
         ui.out("  %-14s %s" % ("viewer", json_line(d["settings"]) or "(defaults)"))
@@ -186,8 +186,12 @@ def cli(a):
             body["loop"] = a.loop
         if a.private or a.public:
             body["visibility"] = "private" if a.private else "public"
+        if getattr(a, "block_sites", False):
+            body["net_origins"] = []
+        elif getattr(a, "allow_site", None):
+            body["net_origins"] = [x.strip() for v in a.allow_site for x in v.split(",") if x.strip()]
         if not body:
-            raise ValueError("nothing to change: pass --title, --view, --transition, --public, --public-access, ...")
+            raise ValueError("nothing to change: pass --title, --view, --transition, --public, --public-access, --allow-site, ...")
         d = api.call("PATCH", "/spaces/" + e, body)
         ui.result(d)
         ui.out()

@@ -1785,6 +1785,8 @@ def build_parser():
         arg("--edit", action="store_true", help="share: let them publish new versions and change settings (default view only); same as --access edit."),
         arg("--access", choices=["view", "comment", "edit"], help="share: what they may do (default view)."),
         arg("--public-access", dest="public_access", choices=["view", "comment"], help="set: what signed-in visitors of a PUBLIC space may do (anonymous visitors only ever view)."),
+        arg("--allow-site", dest="allow_site", action="append", metavar="ORIGIN", help="set (hub admins): an html space may embed / fetch / post to ORIGIN (https://host, https://*.host, or https: for any https site); repeat or comma-separate. Replaces the list."),
+        arg("--block-sites", dest="block_sites", action="store_true", help="set (hub admins): cut the html space off from other sites again."),
         arg("--note", help="publish/restore: a note for the version history."),
         arg("--rev", type=int, metavar="N", help="get: download revision N instead of the current one."),
         arg("--reply", type=int, metavar="ID", help="comment: answer comment ID."),

@@ -895,3 +895,35 @@ def page(path):
         raise ValueError("could not read this draw.io file (%s)" % e.__class__.__name__)
     name = H.escape(os.path.basename(path))
     return PAGE % (name, "<div class='tabs'>%s</div>" % "".join(tabs) if len(tabs) > 1 else "", "".join(panes) + JS)
+
+
+# ---------------------------------------------------------------- native viewer
+
+NATIVE = ("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>%s</title><style>"
+          ":root{color-scheme:light}html,body{margin:0;height:100%%;background:#fff}.mxgraph{max-width:100%%}#fb{display:none;font:13px system-ui;color:#888;padding:24px}"
+          "</style></head><body><div class='mxgraph' data-mxgraph=\"%s\"></div><p id='fb'>Loading the draw.io viewer…</p>"
+          "<script>window.DRAWIO_LIGHTBOX_URL='';window.mxLoadResources=false;window.mxLoadStylesheets=false;"
+          "%s"
+          "function aihubBasic(){var u=new URL(location.href);u.searchParams.set('engine','basic');location.replace(u.href)}"
+          "setTimeout(function(){if(!window.GraphViewer||!document.querySelector('.mxgraph svg, .geDiagramContainer'))aihubBasic()},8000)</script>"
+          "<script src='%s' onerror='aihubBasic()'></script></body></html>")
+
+
+def native_page(path, viewer_url, assets_url):
+    """-> HTML page that draws the file with draw.io's own viewer (VIEWER_URL: vendored, or draw.io's hosted one; ASSETS_URL "" keeps the
+    viewer's own stencil / image paths); it falls back to ?engine=basic
+    (page() above) when the viewer cannot load. Pages, layers, zoom and fit come from the viewer's toolbar; the lightbox and edit
+    links (which would open app.diagrams.net) are off."""
+    import json
+    if os.path.getsize(path) > MAX_FILE:
+        raise ValueError("this diagram is too large to preview (over %d MB)" % (MAX_FILE // 1024 // 1024))
+    with open(path, "rb") as f:
+        text = f.read().decode("utf-8", "replace").lstrip("\ufeff")
+    try:
+        _parse_xml(text)                                    # a broken file gets the readable error, not a blank viewer
+    except (ET.ParseError, ValueError) as e:
+        raise ValueError("could not read this draw.io file (%s)" % e.__class__.__name__)
+    cfg = {"xml": text, "toolbar": "pages zoom layers tags", "toolbar-position": "top", "toolbar-nohide": True, "nav": True, "resize": True,
+           "fit": True, "center": True, "lightbox": False, "edit": None, "highlight": "#0a84ff", "border": 16, "dark-mode": "light"}
+    assets = ("window.STENCIL_PATH=window.SHAPES_PATH=window.GRAPH_IMAGE_PATH=window.mxImageBasePath=%s;" % json.dumps(assets_url)) if assets_url else ""
+    return NATIVE % (H.escape(os.path.basename(path)), H.escape(json.dumps(cfg, ensure_ascii=False), quote=True), assets, H.escape(viewer_url, quote=True))

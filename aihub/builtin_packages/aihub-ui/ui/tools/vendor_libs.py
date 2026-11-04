@@ -34,6 +34,7 @@ COPIES = {                                                      # out path -> no
     "openui/openui-defaults.css": "@openuidev/react-ui/dist/styles/openui-defaults.css",
     "openui/components.css": "@openuidev/react-ui/dist/components/index.css",
 }
+KEEP = {"drawio"}
 SOURCE = {"openui.mjs": ["react", "react-dom", "@openuidev/react-lang", "@openuidev/react-ui"], "xterm.mjs": ["@xterm/xterm"],
           "addon-fit.mjs": ["@xterm/addon-fit"], "viz.mjs": ["@viz-js/viz"], "mermaid.mjs": ["mermaid"]}
 
@@ -59,8 +60,11 @@ def main():
     sh(["npm", "install", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"], build)
     nm = os.path.join(build, "node_modules")
     esb = os.path.join(nm, ".bin", "esbuild")
-    shutil.rmtree(OUT, ignore_errors=True)
-    os.makedirs(OUT)
+    os.makedirs(OUT, exist_ok=True)
+    for n in os.listdir(OUT):                                   # drawio/ is placed by hand (draw.io viewer, not on npm): kept
+        if n not in KEEP:
+            p = os.path.join(OUT, n)
+            shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
     for out, src in BUNDLES.items():
         entry = os.path.join(build, "entry-" + out.replace(".mjs", ".js"))
         with open(entry, "w") as f:
@@ -77,6 +81,8 @@ def main():
             p = os.path.join(root, n)
             rel = os.path.relpath(p, OUT).replace(os.sep, "/")
             top = rel.split("/")[0]
+            if top in KEEP:
+                continue
             pk = SOURCE.get(rel) or [next((k for k, v in COPIES.items() if rel == k or rel.startswith(k + "/")), top)]
             pk = [COPIES[pk[0]].split("/dist")[0].split("/build")[0].split("/css")[0]] if pk[0] in COPIES else pk
             files[rel] = {"from": {k: PKGS.get(k, "") for k in pk}, "size": os.path.getsize(p), "sha256": sha(p)}

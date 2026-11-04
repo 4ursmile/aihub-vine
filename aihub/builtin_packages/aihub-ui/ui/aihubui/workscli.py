@@ -797,7 +797,15 @@ def cmd_run(a):
             os._exit(130)
         err("stopping the run (Ctrl-C again to quit at once)")
         W.stop_run(rid)
+
+    def on_term(*_):                    # `aihub run` supervisor (Stop on the hub's Running page): stop the work, keep its record
+        if not stop.get("term"):
+            stop["term"] = 1
+            err("stopping the run (stop requested)")
+            W.stop_run(rid)
     signal.signal(signal.SIGINT, on_int)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, on_term)
     deadline = time.time() + a.timeout if a.timeout else None
     r = {}
     while True:

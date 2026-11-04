@@ -120,7 +120,7 @@ aihub work export W [-o DIR] [--no-notes]        # shareable copy: no secrets, n
 aihub work setup W [--creds FILE|-] [--folder NODE=PATH] [--env NAME] [--install]   # credential sets, working folders, secret fields, then Python packages it needs
 aihub work set W NODE key=value ... [--folder PATH] [--credential SET|none] [--grant SET] [--revoke SET] [--secret FIELD]
 aihub work enable W | disable W [--force]
-aihub work run W [--input name=value|name=@file] [--text T] [--node TRIGGER] [-q] [--timeout S]   # one run here, live log; exit 0 = done, 1 otherwise
+aihub work run W [--input name=value|name=@file] [--text T] [--node TRIGGER] [-q] [--timeout S] [--no-hub]   # one run here, live log; exit 0 = done, 1 otherwise; signed in: shown on the hub's Running page as work-W
 aihub work runs W [-n N] | logs W [RUN] [--node N]
 aihub work serve [--hooks PORT] | serve --bg    # fire cron + package triggers of enabled works (one process per machine: the UI or serve)
 aihub work cred list | kinds | template KIND | show SET | add --kind K --name N [--file F|-] | set SET [--name N] [--file F|-] | rm SET [-y]
@@ -131,7 +131,7 @@ aihub work rm W [-y]
 aihub onboard [BOT]                   # optional guided credential setup of a bot that has one ([bot] onboard); install offers it in a terminal
 aihub --json CMD ... | CMD --json | AIHUB_JSON=1   # ONE JSON document {schema, ok, command, exit, error, hint, data, output, messages, changes, context}; no prompts, no secrets; secrets in: login/register/password --password-stdin, vault add --token-stdin
 aihub space publish FILE|FOLDER [NAME|owner@name] [--kind K] [--title T] [--public|--private] [--view canvas|fit|full] [--transition fade|slide|zoom|flip|none] [--autoplay S] [--loop]   # publish a .pptx/.docx/.md/.xlsx/.csv/.pdf/.html (or folder with index.html) as a Space; opens at <hub>/#/s/author@name
-aihub space list [--since T]|top|search WORDS|info REF|url REF [--view full] [--bare]|get REF [--rev N]|rm REF|set REF ... [--public-access view|comment]|share REF --user U|--group G [--access view|comment|edit] [--edit]|unshare|shares   # manage Spaces; publish ... --note TEXT records a note in the version history
+aihub space list [--since T]|top|search WORDS|info REF|url REF [--view full] [--bare]|get REF [--rev N]|rm REF|set REF ... [--public-access view|comment] [--allow-site ORIGIN ...|--block-sites (hub admins: html page may iframe/fetch those sites)]|share REF --user U|--group G [--access view|comment|edit] [--edit]|unshare|shares   # manage Spaces; publish ... --note TEXT records a note in the version history
 aihub space comments REF | comment REF "text" [--reply ID] [--slide N] | resolve REF ID [--reopen]   # comments; "@name" / "@group" in the text alerts them on the hub (levels view < comment < edit < owner; a public space is view only unless --public-access comment; anonymous never comments)
 aihub space versions REF | restore REF REV [--note TEXT]    # version history; restore publishes the old revision again as a NEW one (edit access); the hub keeps the last space_versions_keep (default 20)
 aihub pubsub create T [--private] [--open-publish] [--retention H] [--max N] | set T ... | rm T -y | list [--mine|--shared] | info T | stats T [--days N]   # pub/sub topics (dotted names; root needs create_topics, a sub topic needs owning a topic above it)

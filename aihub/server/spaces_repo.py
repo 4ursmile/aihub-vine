@@ -13,7 +13,7 @@ PUBLIC_ACCESS = ("view", "comment")
 COLS = ("s.id AS id,s.slug AS slug,s.title AS title,s.description AS description,s.kind AS kind,s.visibility AS visibility,s.filename AS filename,"
         "s.size AS size,s.sha256 AS sha256,s.rev AS rev,s.settings AS settings,s.tags AS tags,s.views AS views,s.created AS created,"
         "s.updated AS updated,s.owner_id AS owner_id,o.username AS owner,o.display_name AS owner_name,o.avatar_v AS owner_avatar_v,"
-        "s.public_access AS public_access,(SELECT COUNT(*) FROM space_comments k WHERE k.space_id=s.id AND k.deleted=0) AS comments")
+        "s.public_access AS public_access,s.net_origins AS net_origins,(SELECT COUNT(*) FROM space_comments k WHERE k.space_id=s.id AND k.deleted=0) AS comments")
 FROM = "FROM spaces s JOIN users o ON o.id=s.owner_id"
 
 
@@ -27,6 +27,7 @@ def _row(r):
     d["ref"] = "%s@%s" % (d["owner"], d["slug"])
     d["public_access"] = d.get("public_access") if d.get("public_access") in PUBLIC_ACCESS else "view"
     d["comments"] = int(d.get("comments") or 0)
+    d["net_origins"] = [x for x in (d.get("net_origins") or "").split(",") if x]
     return d
 
 
@@ -204,9 +205,9 @@ class SpaceRepos:
             return cur.lastrowid, True, 1
 
     def space_update(self, sid, **f):
-        """Metadata only (title, description, tags, visibility, public_access, settings, kind)."""
+        """Metadata only (title, description, tags, visibility, public_access, settings, kind, net_origins)."""
         sets, args = [], []
-        for k in ("title", "description", "tags", "visibility", "public_access", "kind"):
+        for k in ("title", "description", "tags", "visibility", "public_access", "kind", "net_origins"):
             if k in f and f[k] is not None:
                 sets.append(k + "=?")
                 args.append(f[k])
