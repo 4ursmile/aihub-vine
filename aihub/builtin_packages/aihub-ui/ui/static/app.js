@@ -91,7 +91,7 @@ const UI_CMDS = [
   { name: "effort", description: "Set the thinking effort", action: "effort" },
   { name: "mode", description: "Set the permission mode", action: "mode" },
   { name: "context", description: "Context window and auto-compact", action: "ctx" },
-  { name: "engine", description: "Switch engine: Claude Code or Free chat (/engine free, /engine claude)", action: "engine" },
+  { name: "engine", description: "Switch engine: Claude Code, AIHubness or Free chat (/engine claude, /engine aihub, /engine free)", action: "engine" },
   { name: "mcp", description: "MCP servers: see what is connected and choose what this chat may use", action: "mcp" },
   { name: "canvas", description: "Show or hide the canvas", action: "canvas" },
   { name: "create-work", description: "Describe a work; it is designed and opened in Works (also /workflow)", action: "workflow" },
@@ -102,7 +102,7 @@ const UI_CMDS = [
 const TIPS = ["/btw asks a side question without touching the chat", "@file: puts a project file in your message", "@folder: shares a folder's file list",
   "@chat: brings in another chat's messages", "@knowledge: quotes one of your notes", "@space: pulls in a Space from the hub", "@node: runs a Works node from the chat",
   "@work: runs one of your workflows", "@theme: styles slides and pages", "/create-work turns a sentence into a workflow", "/compact frees context when the ring fills up",
-  "/engine free talks to the model directly", "/mcp chooses the MCP servers of this chat", "/canvas shows the files Claude makes", "Paste or drop files to attach them",
+  "/engine free talks to the model directly", "/engine aihub works on files with few tokens", "/mcp chooses the MCP servers of this chat", "/canvas shows the files Claude makes", "Paste or drop files to attach them",
   "Shift+Enter starts a new line", "Cmd/Ctrl+K searches every chat", "Keep typing while Claude works: it reads you at its next step"];
 const BUSY_TIPS = ["Add to the running answer: Claude reads it at its next step", "Correct course now: \"use the other file\", \"skip the tests\"…",
   "/btw asks aside: the answer goes on", "Send more detail: it joins this answer, not the next one"];
@@ -174,8 +174,12 @@ function ModePick({ modes, value, onChange, close }) {
   const keys = useOptKeys();
   return html`<div ...${keys} tabindex="-1" class="optlist"><h5>Permission mode</h5>${modes.map((m) => { const [ic, name, d] = MODE_INFO[m] || ["shield", m, ""]; return html`<button class=${"opt" + (m === value ? " on" : "") + (m === "bypass" ? " danger" : "")} onClick=${() => { onChange(m); close(); }}><span class="oi">${Ic(ic, 16)}</span><span class="grow"><b>${name}</b><span class="d">${d}</span></span><span class="ck">${Ic("check", 16)}</span></button>`; })}<${OptKeys} n=${modes.length}/></div>`;
 }
-const ENGINES = [["claude", "terminal", "Claude Code", "The full harness: tools, files in the working folder, skills, agents and MCP servers."],
+const ENGINES = [["claude", "terminal", "Claude Code", "The full harness: tools, files in the working folder, skills, agents and MCP servers. Heavy: about 40k tokens of prompt per message."],
+  ["harness", "layers", "AIHubness", "Our mini agent: reads, edits and searches files, runs commands and retries, with its own memory. Built for few tokens (cut-off reads, digests, trimmed output). Same API key as Free chat; the permission mode applies."],
   ["free", "zap", "Free chat", "Our own light harness: straight to the model, answers fast. No shell or files; it can use the MCP servers you tick below. Needs ANTHROPIC_API_KEY (Settings > Encrypted secrets) or your Claude settings env / key helper."]];
+const PERM_DONE = { allow: "Allowed once", always: "Always allowed in this chat", deny: "Denied", timeout: "No answer: not run", stopped: "Stopped" };
+const ENG_NAME = { claude: "Claude Code", harness: "AIHubness", free: "Free chat" }, ENG_ICON = { claude: "terminal", harness: "layers", free: "zap" };
+const ownEngine = (e) => e === "free" || e === "harness";                 // the UI's own engines: API key, MCP servers ticked per chat, no /btw
 const MCP_TONE = { package: "package", claude: "terminal", ui: "sliders" };
 function McpPanel({ servers, on, onChange, engine, compact }) {
   const [q, setQ] = useState(""), keys = useOptKeys(servers && servers.length);
@@ -184,22 +188,23 @@ function McpPanel({ servers, on, onChange, engine, compact }) {
   const live = servers.filter((m) => !m.off && on.includes(m.name)).length, shown = servers.filter((m) => !q || (m.name + " " + (m.origin || "")).toLowerCase().includes(q.toLowerCase()));
   const toggle = (m, v) => onChange(v ? [...on, m.name] : on.filter((x) => x !== m.name));
   return html`<div ...${compact ? {} : keys} tabindex=${compact ? undefined : "-1"} class=${"mcp optlist" + (compact ? " compact" : "")}>
-    <div class="mcp-head"><span class="mcp-sum"><i class=${"dot" + (live ? " live" : "")}></i><b>${engine === "free" ? live + " of " + servers.length + " on for this chat" : servers.length + " server" + (servers.length === 1 ? "" : "s")}</b></span>
+    <div class="mcp-head"><span class="mcp-sum"><i class=${"dot" + (live ? " live" : "")}></i><b>${ownEngine(engine) ? live + " of " + servers.length + " on for this chat" : servers.length + " server" + (servers.length === 1 ? "" : "s")}</b></span>
       ${servers.length > 6 && html`<label class="mcp-q">${Ic("search", 13)}<input placeholder="Filter" value=${q} onInput=${(e) => setQ(e.target.value)}/></label>`}</div>
-    <div class="mcp-grid">${shown.map((m) => { const act = engine === "free" && !m.off && on.includes(m.name);
-      return html`<div class=${"mcp-card" + (act ? " on" : "") + (m.off ? " off" : "")} key=${m.name} tabindex="0" role=${engine === "free" ? "switch" : undefined} aria-checked=${engine === "free" ? act : undefined} aria-label=${m.name}>
-        <span class="mcp-ico">${Ic("plug", 17)}<i class=${"dot" + (m.off ? " off" : act || engine !== "free" ? " live" : "")}></i></span>
+    <div class="mcp-grid">${shown.map((m) => { const act = ownEngine(engine) && !m.off && on.includes(m.name);
+      return html`<div class=${"mcp-card" + (act ? " on" : "") + (m.off ? " off" : "")} key=${m.name} tabindex="0" role=${ownEngine(engine) ? "switch" : undefined} aria-checked=${ownEngine(engine) ? act : undefined} aria-label=${m.name}>
+        <span class="mcp-ico">${Ic("plug", 17)}<i class=${"dot" + (m.off ? " off" : act || !ownEngine(engine) ? " live" : "")}></i></span>
         <span class="grow"><b>${m.name}</b><span class="d">${m.off ? "Switched off on the MCP page" : m.command ? String(m.command).slice(0, 70) : "MCP server"}</span>
           <span class="mcp-tags"><span class="tag">${m.origin || "server"}</span>${(m.tools_off || []).length > 0 && html`<span class="tag">${m.tools_off.length} hidden</span>`}${m.default && !m.off && html`<span class="tag acc">default</span>`}</span></span>
-        ${engine === "free" ? html`<${Switch} on=${act} label=${"Use " + m.name} onChange=${(v) => !m.off && toggle(m, v)}/>` : html`<span class="tag acc">${Ic("check", 11)} ready</span>`}</div>`; })}</div>
+        ${ownEngine(engine) ? html`<${Switch} on=${act} label=${"Use " + m.name} onChange=${(v) => !m.off && toggle(m, v)}/>` : html`<span class="tag acc">${Ic("check", 11)} ready</span>`}</div>`; })}</div>
     ${!shown.length && html`<p class="mute small" style="padding:8px 4px">No server matches.</p>`}
-    <p class="mcp-note">${engine === "free" ? "Ticked servers start for each answer; the model may call their tools without asking." : "Claude Code uses every server it knows. Switch to Free chat (/engine free) to choose per chat."}</p>${!compact && engine === "free" && html`<${OptKeys} n=${shown.length} what="toggle" enter="toggle"/>`}</div>`;
+    <p class="mcp-note">${ownEngine(engine) ? "Ticked servers start for each answer; the model may call their tools without asking." : "Claude Code uses every server it knows. Switch to AIHubness or Free chat to choose per chat."}</p>${!compact && ownEngine(engine) && html`<${OptKeys} n=${shown.length} what="toggle" enter="toggle"/>`}</div>`;
 }
-function EnginePick({ value, onChange, close, mcpAll, mcpOn, onMcp, auto, onAuto }) {
+function EnginePick({ value, onChange, close, mcpAll, mcpOn, onMcp, auto, onAuto, autoCc, onAutoCc }) {
   const keys = useOptKeys();
   return html`<div ...${keys} tabindex="-1" class="optlist"><h5>Engine</h5>${ENGINES.map(([k, ic, name, d]) => html`<button class=${"opt" + (k === value ? " on" : "")} onClick=${() => { onChange(k); close(); }}><span class="oi">${Ic(ic, 16)}</span><span class="grow"><b>${name}</b><span class="d">${d}</span></span><span class="ck">${Ic("check", 16)}</span></button>`)}
-    ${value === "free" && html`<div class="row" style="padding:8px 10px 2px"><div class="grow"><b class="small">Switch to Claude Code by itself</b><div class="mute small">When a task needs your files, commands or multi-step coding.</div></div><${Switch} on=${auto !== false} label="Switch to Claude Code by itself" onChange=${(v) => onAuto && onAuto(v)}/></div>`}
-    ${value === "free" && html`<h5 style="margin-top:8px">Tools for free chat (MCP)</h5><div style="padding:0 6px"><${McpPanel} servers=${mcpAll} on=${mcpOn} onChange=${onMcp} engine="free" compact=${true}/></div>`}
+    ${value === "free" && html`<div class="row" style="padding:8px 10px 2px"><div class="grow"><b class="small">Switch to AIHubness by itself</b><div class="mute small">When a task needs your files, commands or multi-step coding.</div></div><${Switch} on=${auto !== false} label="Switch to AIHubness by itself" onChange=${(v) => onAuto && onAuto(v)}/></div>`}
+    ${value === "harness" && html`<div class="row" style="padding:8px 10px 2px"><div class="grow"><b class="small">Hand over to Claude Code when stuck</b><div class="mute small">After it tried and its tools cannot do the task (web, skills, agents). Off by default.</div></div><${Switch} on=${!!autoCc} label="Hand over to Claude Code when stuck" onChange=${(v) => onAutoCc && onAutoCc(v)}/></div>`}
+    ${ownEngine(value) && html`<h5 style="margin-top:8px">Tools for ${ENG_NAME[value]} (MCP)</h5><div style="padding:0 6px"><${McpPanel} servers=${mcpAll} on=${mcpOn} onChange=${onMcp} engine=${value} compact=${true}/></div>`}
     <div class="small mute" style="padding:6px 10px 4px">You can switch at any message (or type /engine): the earlier text carries over, tool calls do not.</div><${OptKeys} n=${ENGINES.length}/></div>`;
 }
 function Ring({ pct, size = 22 }) {
@@ -490,7 +495,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const setIncog = guard(async (v) => { const r = await post("sessions/update", { id, incognito: v }); setS(r.session); refresh(); toast(v ? "Incognito: this chat is removed when you leave it" : "Chat kept: it is in the sidebar now"); });
   const load = async () => {
     let d; try { d = await api("sessions/get?id=" + id); } catch (x) { if (sRef.current) toast(x.message); else setMissing(x.message || "Chat not found"); return; }
-    setMissing(""); setS(d.session); if (d.session.started || d.session.engine === "free") setEngine(d.session.engine === "free" ? "free" : "claude"); setDirInfo({ dir: d.dir, def: d.default_dir }); setHist(d.history); setFiles(d.files); setSig(d.sig); setBusy(d.busy); setLive({ text: "", think: "" }); setCtx(d.session.ctx || 0);
+    setMissing(""); setS(d.session); if (d.session.started || ownEngine(d.session.engine)) setEngine(ownEngine(d.session.engine) ? d.session.engine : "claude"); setDirInfo({ dir: d.dir, def: d.default_dir }); setHist(d.history); setFiles(d.files); setSig(d.sig); setBusy(d.busy); setLive({ text: "", think: "" }); setCtx(d.session.ctx || 0);
     if (d.session.model !== undefined && d.session.started) setModel(d.session.model);
     if (d.session.started) setEffort(d.session.effort || "");
     setOpen(false); setPrev(""); setEls([]);
@@ -568,7 +573,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
       if (att.length) { toast("Attachments go with the next message: wait for the answer to end"); return false; }
       setText(""); if (ta.current) ta.current.style.height = "auto";
       const queue = (why) => { pendingRef.current.push(t0); toast(why); };
-      if (engineNow.current === "free") { queue("Queued: sent when the answer ends"); return true; }
+      if (ownEngine(engineNow.current)) { queue("Queued: sent when the answer ends"); return true; }
       setHints((l) => [...l, t0]); nextTip();
       post("chat/hint", { id, text: t0 }).catch((e) => { setHints((l) => l.filter((x) => x !== t0)); queue(e.status === 409 ? "The answer was ending: sent as the next message" : e.message); });
       return true;
@@ -576,7 +581,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     doSend(override, opts); return true;
   };
   const askBtw = guard(async (q) => {
-    if (engineNow.current === "free") return toast("/btw works in Claude Code mode");
+    if (ownEngine(engineNow.current)) return toast("/btw works in Claude Code mode");
     const key = Math.random().toString(36).slice(2), up = (p) => setBtws((l) => l.map((x) => (x.key === key ? { ...x, ...p } : x)));
     setBtws((l) => [...l.slice(-2), { key, q, busy: true }]);
     try { const r = await post("chat/btw", { id, text: q, model, effort }); up(r.ok ? { busy: false, a: r.answer } : { busy: false, err: r.error }); }
@@ -585,9 +590,9 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const doSend = guard(async (override, opts = {}) => {
     let t = (override !== undefined ? override : text).trim();
     if (!t || busyRef.current) return;
-    if (engine === "free" && /^\/compact\b/.test(t)) return toast("Free chat has no compaction: switch to Claude Code, or start a new chat.");
+    if (ownEngine(engine) && /^\/compact\b/.test(t)) return toast(engine === "harness" ? "AIHubness trims its own context: later messages get earlier ones as text, never old tool output." : "Free chat has no compaction: switch to Claude Code, or start a new chat.");
     const m = override === undefined && /^\/([\w:.-]+)\s*([\s\S]*)$/.exec(t);
-    if (m) { const ui = UI_CMDS.find((c) => c.name === m[1]); if (m[1] === "workflow" || m[1] === "create-work") { if (!m[2]) return toast("Describe the work after /create-work, for example: /create-work pull data from git, build a dashboard, publish it as a space"); return genWork(m[2]); } if (m[1] === "engine" && m[2]) { const w = m[2].trim().toLowerCase(), e = /^(free|api|light)/.test(w) ? "free" : /^(claude|code|cc)/.test(w) ? "claude" : ""; if (!e) return toast("Use /engine claude or /engine free"); if (busyRef.current) return toast("Wait for the answer to finish first"); setText(""); setEng(e); return toast("Engine: " + (e === "free" ? "Free chat" : "Claude Code")); } if (ui && ui.action !== "send" && !m[2]) return runUi(ui.action); const wk = works.find((x) => "work:" + x.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") === m[1]); if (wk) return runWork(wk, m[2], t); const pk = slash.packages.find((c) => c.name === m[1]); if (pk) t = pk.prompt.replace(/\$ARGUMENTS/g, m[2]); }
+    if (m) { const ui = UI_CMDS.find((c) => c.name === m[1]); if (m[1] === "workflow" || m[1] === "create-work") { if (!m[2]) return toast("Describe the work after /create-work, for example: /create-work pull data from git, build a dashboard, publish it as a space"); return genWork(m[2]); } if (m[1] === "engine" && m[2]) { const w = m[2].trim().toLowerCase(), e = /^(free|api|light)/.test(w) ? "free" : /^(aihub|harness|hub|mini|agent)/.test(w) ? "harness" : /^(claude|code|cc)/.test(w) ? "claude" : ""; if (!e) return toast("Use /engine claude, /engine aihub or /engine free"); if (busyRef.current) return toast("Wait for the answer to finish first"); setText(""); setEng(e); return toast("Engine: " + ENG_NAME[e]); } if (ui && ui.action !== "send" && !m[2]) return runUi(ui.action); const wk = works.find((x) => "work:" + x.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") === m[1]); if (wk) return runWork(wk, m[2], t); const pk = slash.packages.find((c) => c.name === m[1]); if (pk) t = pk.prompt.replace(/\$ARGUMENTS/g, m[2]); }
     if (mode === "bypass" && engine !== "free" && !(await confirmBox({ title: "Bypass checks?", text: "Bypass checks lets Claude run any tool without asking.", ok: "Continue", danger: true }))) return;
     const typed = override === undefined, atts = typed ? att : [], draft = text;       // the draft comes back if the server never starts the turn
     if (typed) { setText(""); setAtt([]); if (ta.current) ta.current.style.height = "auto"; nextTip(); }
@@ -613,13 +618,13 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
         if (ev.k === "delta") { setActK({ k: "write" }); buf.text += ev.text; if (!buf.raf) buf.raf = requestAnimationFrame(flush); }
         else if (ev.k === "think") { setActK({ k: "think" }); buf.think += ev.text; if (!buf.raf) buf.raf = requestAnimationFrame(flush); }
         else if (ev.k === "ctx") setCtx(ev.used);
-        else if (ev.k === "engine") { if (ev.engine === "claude" || ev.engine === "free") setEngine(ev.engine); }          // free chat handed the message to Claude Code
+        else if (ev.k === "engine") { if (ENG_NAME[ev.engine]) setEngine(ev.engine); }          // free chat -> AIHubness -> Claude Code handed the message on
         else if (ev.k === "msg") { drop(); setLive({ text: "", think: "" }); setHist((h) => [...h, ev]); lastText = ev.blocks.filter((b) => b.type === "text").map((b) => b.text).join("\n"); const tl = ev.blocks.filter((b) => b.type === "tool").pop(); if (tl) setActK({ k: "tool", name: tl.name, hint: toolHint(tl) }); }
         else if (ev.k === "files") {                                           // a report or page was made: show it on the canvas
           setHist((h) => [...h, ev]); refreshFiles();
           const f = ev.items.find((x) => /\.(html?|svg)$/i.test(x.path)) || ev.items.find((x) => /\.md$/i.test(x.path)); if (f && engineNow.current === "free" && !dirtyRef.current) { setPrev(f.path); setTab("preview"); setOpen(true); }
         }
-        else if (ev.k === "tool_result" || ev.k === "result" || ev.k === "compact" || ev.k === "note") setHist((h) => [...h, ev]);
+        else if (ev.k === "tool_result" || ev.k === "result" || ev.k === "compact" || ev.k === "note" || ev.k === "perm" || ev.k === "perm_answer") setHist((h) => [...h, ev]);
         else if (ev.k === "user") { setHist((h) => [...h, ev]); setHints((l) => { const i = l.indexOf(ev.text); return i < 0 ? l.slice(1) : l.filter((_, j) => j !== i); }); }       // Claude read a message sent mid-answer
         else if (ev.k === "hint_lost") { setHints((l) => l.filter((x) => x !== ev.text)); setText((c) => c || ev.text); toast("Claude did not read your last message: it is back in the box"); }
         else if (ev.k === "error") { setHist((h) => [...h, ev]); if (ev.auth) setSignin(true); }
@@ -645,6 +650,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     await sendRef.current(DIRECT_PROMPT, { effort: "low" });
   });
   const stop = guard(async () => { await post("chat/stop", { id }); });                // the stream then ends by itself with `done`
+  const permit = guard(async (ask, answer) => { await post("chat/permit", { id, ask, answer }); });     // AIHubness waits on this card
   const pick = (fl) => {
     fl = [...fl]; const have = att.reduce((n, a) => n + (a.size || 0), 0), add = fl.reduce((n, f) => n + f.size, 0);
     if (have + add > 25 * 1024 * 1024) return toast("Attachments are limited to 25 MB in total (" + Math.round((have + add) / 1048576) + " MB selected)");
@@ -723,7 +729,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     } }); return () => { on = false; setNodeHost(null); }; }, [id]);
   useEffect(() => { setBlockSharer((content, filename) => shareRef.current && shareRef.current(filename, false, content)); return () => setBlockSharer(null); }, []);
   const src = (p) => `/w/${id}/${sig}/${p.split("/").map(encodeURIComponent).join("/")}`;
-  const pickList = engine === "free" && freeIds && freeIds.length ? (() => { const base = (fresh || boot.models).models, have = new Set(base.map((m) => m.id)); return [...base, ...freeIds.filter((x) => !have.has(x.id)).map((x) => ({ id: x.id, label: x.id, kind: x.kind, note: x.kind === "image" ? "Image generation model from your API." : x.kind === "tts" ? "Text-to-speech model from your API." : "Available to your API key.", group: "settings", window: win }))]; })() : (fresh || boot.models).models;
+  const pickList = ownEngine(engine) && freeIds && freeIds.length ? (() => { const base = (fresh || boot.models).models, have = new Set(base.map((m) => m.id)); return [...base, ...freeIds.filter((x) => !have.has(x.id)).map((x) => ({ id: x.id, label: x.id, kind: x.kind, note: x.kind === "image" ? "Image generation model from your API." : x.kind === "tts" ? "Text-to-speech model from your API." : "Available to your API key.", group: "settings", window: win }))]; })() : (fresh || boot.models).models;
   const mdl = pickList.find((m) => m.id === model) || (model ? { id: model, label: model, group: "picker", kind: "chat", note: "Model of this chat (not in your settings list)." } : pickList[0]);
   const lastCompact = [...hist].reverse().find((e) => e.k === "compact");
   const canPrev = (p) => /\.(html?|svg|png|jpe?g|gif|webp|pdf|md|txt|docx|xlsx|pptx|drawio|dio|ipynb)$/i.test(p || ""), fver = (files.find((f) => f.path === prev) || {}).mtime || 0;
@@ -762,15 +768,22 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
               <div class="fc-f"><button type="button" class="lnk" onClick=${() => { setTab("files"); setOpen(true); }}>All files ${Ic("right", 12)}</button></div></div></div>`
           : e.k === "result" ? html`<div class="stats"><span>${(e.ms / 1000).toFixed(1)}s</span><span>in ${num(e.usage.input)}</span><span title="Tokens the model wrote for this turn">${num(e.usage.output)} tokens written</span><span>cache read ${num(e.usage.cache_read)}</span><span>cache write ${num(e.usage.cache_write)}</span>${e.error && html`<span class="tag bad">failed</span>`}</div>`
           : e.k === "card" && e.kind === "work" && e.spec ? html`<div class="msg wcard"><${WorkRunCard} spec=${e.spec} onSend=${(t) => sendRef.current(t)} locked=${false}/></div>`
+          : e.k === "perm" ? (() => { const a = hist.find((x) => x.k === "perm_answer" && x.id === e.id), del = e.kind === "delete", risky = e.kind === "risky", ok = a && (a.answer === "allow" || a.answer === "always");
+              return html`<div class="msg"><div class=${"permcard" + (del ? " del" : risky ? " risky" : "") + (a ? " done" : "")}><div class="pc-h">${Ic(del ? "trash" : risky ? "alert" : "terminal", 15)}<b>${del ? "Allow this delete?" : risky ? "Allow this risky command?" : "Allow this command?"}</b><span class="mute small grow">${e.why}</span></div>
+                <pre class="pc-cmd">${e.text}</pre>
+                <div class="pc-f">${a ? html`<span class=${"tag" + (ok ? " acc" : " bad")}>${PERM_DONE[a.answer] || a.answer}</span>`
+                  : busy ? html`<button class=${"btn" + (del ? " bad" : " acc")} onClick=${() => permit(e.id, "allow")}>${Ic("check", 13)} ${del ? "Delete" : "Allow once"}</button>${e.prefix && html`<button class="btn" title="Commands starting with this run without asking in this chat (never deletes)" onClick=${() => permit(e.id, "always")}>Always allow <code>${e.prefix}</code></button>`}<button class="btn" onClick=${() => permit(e.id, "deny")}>${Ic("x", 13)} Deny</button>`
+                  : html`<span class="tag">not answered</span>`}</div></div></div>`; })()
+          : e.k === "perm_answer" ? null
           : e.k === "note" ? html`<div class="note-line">${Ic("info", 14)} ${e.text}</div>`
           : e.k === "compact" ? html`<div class="note-line">${Ic("compact", 14)} Context compacted · ${num(e.pre)} → ${num(e.post)} tokens (${e.trigger})</div>`
           : e.k === "error" ? html`<div class="msg"><span class="tag bad">${Ic("alert", 12)} error</span> ${linkify(e.text)} ${e.auth && html`<button class="btn" onClick=${() => setSignin(true)}>Sign in</button>`}</div>` : null), [hist, busy, edit, sig, boot]);
   if (!s) return missing ? html`<div class="empty"><div>${Ic("alert", 28)}<h1>Chat not found</h1><p class="mute">${missing}</p><div class="row" style="justify-content:center;gap:8px"><button class="btn acc" onClick=${newChat}>${Ic("plus", 14)} New chat</button><button class="btn" onClick=${load}>${Ic("refresh", 14)} Try again</button></div></div></div>` : html`<div class="empty"><div>${Ic("sparkles", 28)}<div>Loading…</div></div></div>`;
   return html`<div class="chatwrap">${signin && html`<${SignIn} close=${() => setSignin(false)}/>`}
-    <div class=${"chat" + (engine === "free" ? "" : " eng-claude") + (incog ? " incog" : "")}>
+    <div class=${"chat" + (engine === "claude" ? " eng-claude" : "") + (incog ? " incog" : "")}>
       ${pickF && html`<${FilePicker} ext="" title=${pickF === "dir" ? "Choose a folder to mention" : "Choose a file to mention"} start=${dirInfo.dir || ""} dirs=${pickF === "dir"} onPick=${(p) => { const kind = pickF === "dir" ? "@folder:" : "@file:"; setPickF(false); const d = (dirInfo.dir || "").replace(/\\/g, "/").replace(/\/+$/, ""), q = p.replace(/\\/g, "/"); setText((t) => (t && !/\s$/.test(t) ? t + " " : t) + kind + (d && q.startsWith(d + "/") ? q.slice(d.length + 1) : q) + " "); ta.current && ta.current.focus(); }} close=${() => setPickF(false)}/>`}
       ${dlg === "mcp" && html`<${Modal} wide=${true} close=${() => setDlg(null)}><div class="row"><h1 class="grow" style="margin:0">MCP servers</h1><button class="ibtn" aria-label="Close" onClick=${() => setDlg(null)}>${Ic("x", 17)}</button></div>
-        <p class="sub" style="margin-top:4px">Engine: <b>${engine === "free" ? "Free chat" : "Claude Code"}</b> · <button class="linkbtn" onClick=${() => setEng(engine === "free" ? "claude" : "free")}>switch to ${engine === "free" ? "Claude Code" : "Free chat"}</button></p>
+        <p class="sub" style="margin-top:4px">Engine: <b>${ENG_NAME[engine] || "Claude Code"}</b> · ${ENGINES.filter(([k]) => k !== engine).map(([k], i) => html`${i ? " · " : ""}<button class="linkbtn" onClick=${() => setEng(k)}>switch to ${ENG_NAME[k]}</button>`)}</p>
         <${McpPanel} servers=${mcpAll} on=${s.mcp || []} onChange=${saveMcp} engine=${engine}/>
         <div class="row" style="margin-top:14px"><a class="btn" href="#/mcp">${Ic("sliders", 14)} Manage servers</a><span class="grow"></span><button class="btn acc" onClick=${() => setDlg(null)}>Done</button></div><//>`}
       ${dlg === "dir" && html`<${WorkDirDialog} s=${s} cur=${dirInfo.dir} busy=${busy} close=${() => setDlg(null)} saved=${(n) => { setDlg(null); setS(n); load(); refresh(); }}/>`}
@@ -799,20 +812,20 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
         <div class=${"box" + (busy ? " busy" : "")} onDragOver=${(e) => e.preventDefault()} onDrop=${(e) => { e.preventDefault(); pick(e.dataTransfer.files); }}>
           ${(sm || mm) && html`<${SlashMenu} items=${menuItems} idx=${sidx} pick=${pickSlash} at=${!!mm}/>`}
           ${att.length ? html`<div>${att.map((a, i) => html`<span class="chip">${a.type.startsWith("image/") ? html`<img src=${a.url} height="16"/>` : Ic("file", 12)} ${a.name} <button type="button" class="chipx" aria-label=${"Remove " + a.name} onClick=${() => setAtt(att.filter((_, j) => j !== i))}>${Ic("x", 12)}</button></span>`)}</div>` : ""}
-          <textarea ref=${ta} rows="1" placeholder=${engine === "free" ? (busy ? "Queue a message for when the answer ends…" : "Ask the model directly…  (no tools, no files)") : busy ? tipOf(BUSY_TIPS, tipN) : hist.length ? "Message Claude…   @ for files, chats, notes, Spaces · Tip: " + tipOf(TIPS, tipN) : "Message Claude…   / for commands, @ for files, chats, notes and Spaces"} value=${text} onInput=${(e) => { setText(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 240) + "px"; }}
+          <textarea ref=${ta} rows="1" placeholder=${ownEngine(engine) ? (busy ? "Queue a message for when the answer ends…" : engine === "harness" ? "Ask AIHubness…  (files and commands in the working folder, light on tokens)" : "Ask the model directly…  (no tools, no files)") : busy ? tipOf(BUSY_TIPS, tipN) : hist.length ? "Message Claude…   @ for files, chats, notes, Spaces · Tip: " + tipOf(TIPS, tipN) : "Message Claude…   / for commands, @ for files, chats, notes and Spaces"} value=${text} onInput=${(e) => { setText(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 240) + "px"; }}
             onPaste=${(e) => { const f = [...e.clipboardData.files]; if (f.length) { e.preventDefault(); pick(f); } }} onKeyDown=${onKey}></textarea>
           <div class="tools">
             <button class="ibtn" title="Attach files" aria-label="Attach files" onClick=${() => fileIn.current && fileIn.current.click()}>${Ic("clip", 17)}</button><input type="file" multiple hidden ref=${fileIn} onChange=${(e) => { pick(e.target.files); e.target.value = ""; }}/>
             <button class="ibtn" title="Choose a file from this project (adds @file:path)" aria-label="Choose a file from this project (adds @file:path)" onClick=${() => setPickF("file")}>${Ic("file", 17)}</button>
             <button class="ibtn" title="Choose a folder from this project (adds @folder:path)" aria-label="Choose a folder from this project (adds @folder:path)" onClick=${() => setPickF("dir")}>${Ic("folder", 17)}</button>
-            <${Pop} open=${pop === "engine"} setOpen=${(v) => setPop(v ? "engine" : null)} button=${html`<${Pill} icon=${engine === "free" ? "zap" : "terminal"} label=${engine === "free" ? "Free chat" + ((s.mcp || []).length ? " · " + s.mcp.length + " tool" + (s.mcp.length > 1 ? "s" : "") : "") : "Claude Code"} tone=${engine === "free" ? "" : "claude"} active=${pop === "engine" || engine === "free"} title="Engine" onClick=${() => { setPop(pop === "engine" ? null : "engine"); if (!mcpAll) api("mcp/free").then((d) => setMcpAll(d.servers)).catch(() => setMcpAll([])); }}/>`}><${EnginePick} auto=${prefs.auto_engine} onAuto=${(v) => savePrefs({ auto_engine: v })} mcpAll=${mcpAll} mcpOn=${s.mcp || []} onMcp=${saveMcp} value=${engine} onChange=${setEng} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>
+            <${Pop} open=${pop === "engine"} setOpen=${(v) => setPop(v ? "engine" : null)} button=${html`<${Pill} icon=${ENG_ICON[engine] || "terminal"} label=${(ENG_NAME[engine] || "Claude Code") + (ownEngine(engine) && (s.mcp || []).length ? " · " + s.mcp.length + " tool" + (s.mcp.length > 1 ? "s" : "") : "")} tone=${engine === "claude" ? "claude" : ""} active=${pop === "engine" || ownEngine(engine)} title="Engine" onClick=${() => { setPop(pop === "engine" ? null : "engine"); if (!mcpAll) api("mcp/free").then((d) => setMcpAll(d.servers)).catch(() => setMcpAll([])); }}/>`}><${EnginePick} auto=${prefs.auto_engine} onAuto=${(v) => savePrefs({ auto_engine: v })} autoCc=${prefs.auto_engine_claude} onAutoCc=${(v) => savePrefs({ auto_engine_claude: v })} mcpAll=${mcpAll} mcpOn=${s.mcp || []} onMcp=${saveMcp} value=${engine} onChange=${setEng} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>
             <i class="tsep" aria-hidden="true"></i>
             ${engine !== "free" && html`<${Pop} open=${pop === "mode"} setOpen=${(v) => setPop(v ? "mode" : null)} button=${html`<${Pill} icon=${MODE_INFO[mode][0]} label=${MODE_INFO[mode][1]} tone=${MODE_TONE[mode]} active=${pop === "mode"} title=${"Permission mode: " + MODE_INFO[mode][1]} onClick=${() => setPop(pop === "mode" ? null : "mode")}/>`}><${ModePick} modes=${boot.modes} value=${mode} onChange=${setMode} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>`}
             <${Pop} open=${pop === "effort"} setOpen=${(v) => setPop(v ? "effort" : null)} button=${html`<${Pill} lead=${EffMeter(effort)} label=${effort ? (effort === "xhigh" ? "XHigh" : effort[0].toUpperCase() + effort.slice(1)) : "Effort"} tone=${EFFORT_TONE[effort]} active=${pop === "effort"} title=${"Thinking effort: " + (effort || "default")} onClick=${() => setPop(pop === "effort" ? null : "effort")}/>`}><${EffortPick} value=${effort} onChange=${setEffort} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>
             <span class="grow" style="flex:1"></span>
             <${Pop} open=${pop === "ctx"} setOpen=${(v) => setPop(v ? "ctx" : null)} align="right" button=${html`<button class="ctxbtn" title="Context window" aria-label="Context window" onClick=${() => setPop(pop === "ctx" ? null : "ctx")}><${Ring} pct=${win ? ctx / win : 0}/><span>${ctx ? Math.round((ctx / win) * 100) + "%" : ""}</span></button>`}>
               <${CtxPick} used=${ctx} win=${win} prefs=${prefs} savePrefs=${savePrefs} busy=${busy} compact=${() => { setPop(null); send("/compact"); }} note=${lastCompact && `Last compact: ${num(lastCompact.pre)} → ${num(lastCompact.post)}`}/><//>
-            <${Pop} open=${pop === "model"} setOpen=${(v) => setPop(v ? "model" : null)} align="right" button=${html`<${Pill} icon="cpu" label=${mdl.label.length > 26 ? mdl.label.slice(0, 24) + "…" : mdl.label} active=${pop === "model"} title="Model" onClick=${() => { setPop(pop === "model" ? null : "model"); api("models").then(setFresh).catch(() => {}); if (engine === "free" && !freeIds) api("free/models").then((d) => setFreeIds(d.items || (d.models || []).map((id) => ({ id, kind: "chat" })))).catch(() => setFreeIds([])); }}/>`}><${ModelPick} models=${pickList} value=${model} onChange=${setModel} close=${() => setPop(null)}/><//>
+            <${Pop} open=${pop === "model"} setOpen=${(v) => setPop(v ? "model" : null)} align="right" button=${html`<${Pill} icon="cpu" label=${mdl.label.length > 26 ? mdl.label.slice(0, 24) + "…" : mdl.label} active=${pop === "model"} title="Model" onClick=${() => { setPop(pop === "model" ? null : "model"); api("models").then(setFresh).catch(() => {}); if (ownEngine(engine) && !freeIds) api("free/models").then((d) => setFreeIds(d.items || (d.models || []).map((id) => ({ id, kind: "chat" })))).catch(() => setFreeIds([])); }}/>`}><${ModelPick} models=${pickList} value=${model} onChange=${setModel} close=${() => setPop(null)}/><//>
             ${busy ? html`${text.trim() && html`<button class="send" title="Send now: Claude reads it at its next step" aria-label="Send now" onClick=${() => send()}>${Ic("send", 17)}</button>`}<button class="send stop" title="Stop" aria-label="Stop" onClick=${stop}>${Ic("stop", 16)}</button>` : html`<button class="send" title="Send" aria-label="Send" onClick=${() => send()} disabled=${!text.trim()}>${Ic("send", 17)}</button>`}
           </div>
         </div>
@@ -1003,11 +1016,28 @@ function Knowledge({ focus }) {
   const save = guard(async () => { const r = await put("knowledge/note", { name: cur, body }); setDirty(false); toast(r.synced === false ? "Saved locally (hub not reachable)" : "Saved"); list(); });
   const names = ["soul", ...notes.map((n) => n.name).filter((n) => n !== "soul")];
   return html`<div class="page" style="max-width:1100px"><h1>Knowledge</h1><p class="sub">Soul and notes are your assistant's memory. New chats read them once and freeze them so the prompt cache stays warm; use the refresh button in a chat to pick up changes.</p>
-    <div class="row" style="align-items:flex-start"><div style="width:220px"><div class="card" style="padding:6px">${names.map((n) => html`<button class=${"item" + (n === cur ? " on" : "")} onClick=${() => open(n)}>${Ic(n === "soul" ? "sparkles" : "note", 15)}<span class="t">${n}</span></button>`)}</div>
+    <div class="row" style="align-items:flex-start"><div style="width:220px"><div class="card" style="padding:6px">${names.map((n) => html`<button class=${"item" + (n === cur ? " on" : "")} onClick=${() => open(n)}>${Ic(n === "soul" ? "sparkles" : "note", 15)}<span class="t">${n}</span></button>`)}
+        <button class=${"item" + (cur === "@memory" ? " on" : "")} title="Notes AIHubness keeps across chats" onClick=${() => setCur("@memory")}>${Ic("layers", 15)}<span class="t">AIHubness memory</span></button></div>
       <div class="row"><input class="grow" placeholder="new-note" value=${nn} onInput=${(e) => setNn(e.target.value)}/><button class="btn" onClick=${() => { if (/^[a-z0-9][a-z0-9._-]*$/.test(nn)) { setCur(nn); setBody(""); setDirty(true); setNn(""); } else toast("lowercase letters, digits, . _ -"); }}>${Ic("plus", 14)}</button></div>
       <button class="btn" style="margin-top:10px" onClick=${guard(async () => { await post("knowledge/pull"); toast("Pulled from hub"); list(); open(cur); })}>${Ic("download", 14)} Pull from hub</button></div>
-      <div class="grow"><textarea rows="24" style="font:13px var(--mono)" value=${body} onInput=${(e) => { setBody(e.target.value); setDirty(true); }}></textarea>
-        <div class="row" style="margin-top:10px"><span class="mute small grow">${cur}.md${dirty ? " · unsaved" : ""}</span>${cur !== "soul" && html`<button class="btn bad" onClick=${guard(async () => { if (await confirmBox({ title: "Delete note?", text: "Delete " + cur + "? Its shares go too.", ok: "Delete", danger: true })) { await post("knowledge/delete", { name: cur }); list(); open("soul"); } })}>${Ic("trash", 14)}</button>`}<button class="btn acc" disabled=${!dirty} onClick=${save}>Save</button></div></div></div></div>`;
+      ${cur === "@memory" ? html`<div class="grow"><${HarnessMemory}/></div>` : html`<div class="grow"><textarea rows="24" style="font:13px var(--mono)" value=${body} onInput=${(e) => { setBody(e.target.value); setDirty(true); }}></textarea>
+        <div class="row" style="margin-top:10px"><span class="mute small grow">${cur}.md${dirty ? " · unsaved" : ""}</span>${cur !== "soul" && html`<button class="btn bad" onClick=${guard(async () => { if (await confirmBox({ title: "Delete note?", text: "Delete " + cur + "? Its shares go too.", ok: "Delete", danger: true })) { await post("knowledge/delete", { name: cur }); list(); open("soul"); } })}>${Ic("trash", 14)}</button>`}<button class="btn acc" disabled=${!dirty} onClick=${save}>Save</button></div></div>`}</div></div>`;
+}
+
+// AIHubness memory: the notes its memory tool keeps (~/.aihub/ui/harness/memory.md). Each AIHubness chat reads them once when it starts.
+function HarnessMemory() {
+  const [items, setItems] = useState(null), [orig, setOrig] = useState([]), [add, setAdd] = useState(""), [max, setMax] = useState(60);
+  const load = guard(async () => { const d = await api("harness/memory"); setItems(d.items); setOrig(d.items); setMax(d.max); });
+  useEffect(() => { load(); }, []);
+  const save = guard(async (list) => { const d = await put("harness/memory", { items: list }); setItems(d.items); setOrig(d.items); toast("Memory saved"); });
+  if (!items) return html`<div class="card mute">Loading…</div>`;
+  const dirty = JSON.stringify(items) !== JSON.stringify(orig), more = () => { const t = add.trim(); if (t) { save([...items, t]); setAdd(""); } };
+  return html`<div class="card"><b>AIHubness memory</b><div class="mute small">Notes AIHubness keeps across chats (${items.length} of ${max}; the oldest go first). It adds them with its memory tool; a chat reads them once when it starts. When a chat wants to forget one, it always asks you first (unless Bypass).</div>
+    ${items.length ? items.map((t, i) => html`<div class="row" style="margin-top:8px" key=${i}><span class="mute small" style="width:24px;text-align:right">${i + 1}.</span><input class="grow" value=${t} onInput=${(e) => setItems(items.map((x, j) => (j === i ? e.target.value : x)))}/>
+      <button class="btn bad" title="Delete this note" aria-label="Delete this note" onClick=${guard(async () => { if (await confirmBox({ title: "Delete this note?", text: t, ok: "Delete", danger: true })) save(items.filter((_, j) => j !== i)); })}>${Ic("trash", 13)}</button></div>`)
+      : html`<p class="mute small" style="margin-top:10px">No notes yet. AIHubness adds one when it learns something worth keeping, or add one here.</p>`}
+    <div class="row" style="margin-top:12px"><input class="grow" placeholder="Add a note, e.g. Use tabs in Go files" value=${add} onInput=${(e) => setAdd(e.target.value)} onKeyDown=${(e) => e.key === "Enter" && more()}/><button class="btn" disabled=${!add.trim()} onClick=${more}>${Ic("plus", 13)} Add</button></div>
+    <div class="row" style="margin-top:12px"><span class="grow"></span><button class="btn" disabled=${!dirty} onClick=${() => setItems(orig)}>Undo</button><button class="btn acc" disabled=${!dirty} onClick=${() => save(items)}>Save</button></div></div>`;
 }
 
 // ---------- works: palette, canvas, inspector
@@ -1775,7 +1805,8 @@ function Settings({ boot, reload, prefs, savePrefs, focus }) {
     <div class="card"><div class="row"><div class="grow"><b>Auto-compact</b><div class="mute small">Summarise older turns near the limit. Applies to chats and Claude nodes.</div></div><${Switch} on=${prefs.autocompact} label="Auto-compact" onChange=${(v) => savePrefs({ autocompact: v })}/></div>
       ${prefs.autocompact && html`<div class="row" style="margin-top:10px"><span class="small">Limit</span><input type="range" min="40" max="95" step="5" value=${prefs.compact_pct} class="grow" onChange=${(e) => savePrefs({ compact_pct: +e.target.value })}/><b>${prefs.compact_pct}%</b></div>`}</div>
     <div class="card"><div class="row"><div class="grow"><b>Online search</b><div class="mute small">Search (<kbd>⌘K</kbd>) always answers from this machine first: chats, and a local copy of the hub's Spaces and packages. On: when the local answer is thin it asks the hub once (per query, every 2 min) and keeps the answer, and the local copy is refreshed in the background while you search. Off: the hub is never asked; <code>@hub:</code> and <code>@package:</code> show only what is already cached.</div></div><${Switch} on=${prefs.online_search !== false} label="Online search" onChange=${(v) => savePrefs({ online_search: v })}/></div></div>
-    <div class="card"><div class="row"><div class="grow"><b>Free chat hands over to Claude Code</b><div class="mute small">On by default. When a free chat message needs your files, shell commands or multi-step coding, the model can hand it to Claude Code: the chat switches engine, the conversation carries over and the same message is answered there. Never in Works runs.</div></div><${Switch} on=${prefs.auto_engine !== false} label="Free chat hands over to Claude Code" onChange=${(v) => savePrefs({ auto_engine: v })}/></div></div>
+    <div class="card"><div class="row"><div class="grow"><b>Free chat hands over to AIHubness</b><div class="mute small">On by default. When a free chat message needs your files, shell commands or multi-step coding, the model can hand it to AIHubness: the chat switches engine, the conversation carries over and the same message is answered there. Never in Works runs.</div></div><${Switch} on=${prefs.auto_engine !== false} label="Free chat hands over to AIHubness" onChange=${(v) => savePrefs({ auto_engine: v })}/></div>
+      <div class="row" style="margin-top:10px"><div class="grow"><b>AIHubness hands over to Claude Code</b><div class="mute small">Off by default. When AIHubness tried and its tools cannot do the task (web, skills, agents, plugins), it hands it to Claude Code with what it already did. Never in Works runs.</div></div><${Switch} on=${!!prefs.auto_engine_claude} label="AIHubness hands over to Claude Code" onChange=${(v) => savePrefs({ auto_engine_claude: v })}/></div></div>
     <div class="card"><div class="row"><div class="grow"><b>Model picker options</b><div class="mute small">List the <code>modelPicker.options</code> of your settings.json (chat, image and text-to-speech models) in the model menu. On by default. Off: only Opus, Sonnet and Haiku (the three tiers).</div></div><${Switch} on=${!!prefs.model_picker} label="Model picker options" onChange=${async (v) => { if (await savePrefs({ model_picker: v })) reload(); }}/></div></div>
     <div class="card"><div class="row"><div class="grow"><b>Free chat model</b><div class="mute small">The model id free chat sends when the chat's model is Default or an alias. Empty = built-in default; if your key does not have it, the first free message finds one that works and fills this in.</div></div>
       <input style="width:260px" placeholder="e.g. claude-sonnet-4-5" value=${fm} onInput=${(e) => setFm(e.target.value)} onKeyDown=${(e) => e.key === "Enter" && savePrefs({ free_model: fm.trim() })}/><button class="btn" disabled=${fm.trim() === (prefs.free_model || "")} onClick=${() => savePrefs({ free_model: fm.trim() })}>Save</button></div></div>

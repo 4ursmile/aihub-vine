@@ -94,17 +94,20 @@ class Handoff(Base):
         chat.start(sess, text, "", "", "auto", extra_env=self.env, engine="free", files=[])
         return list(chat.follow(sess["id"]))
 
-    def test_free_chat_hands_the_same_message_to_claude_code(self):
+    def test_free_chat_hands_the_same_message_through_aihubness_to_claude_code(self):
         env = self.fake(FAKE_CLAUDE)
+        store.save_prefs({"auto_engine_claude": True})                                     # AIHubness -> Claude Code (off by default)
         s = store.update_session(store.create_session("t", "", "sys")["id"], engine="free")
         evs = self.go(s)
         self.assertIn("aihub_handoff", [t["name"] for t in self.seen["bodies"][0]["tools"]])
         self.assertIn("aihub_handoff", json.dumps(self.seen["bodies"][0]["system"]))
         kinds = [e["k"] for e in evs]
         self.assertEqual(kinds.count("done"), 1)                                           # one run, one end
-        note = next(e for e in evs if e["k"] == "note")
-        self.assertEqual(note["text"], "Switched to Claude Code: it edits files")
-        self.assertIn({"k": "engine", "engine": "claude"}, evs)
+        notes = [e["text"] for e in evs if e["k"] == "note"]
+        self.assertEqual(notes, ["Switched to AIHubness: it edits files", "Switched to Claude Code: it edits files"])
+        engines = [e["engine"] for e in evs if e["k"] == "engine"]
+        self.assertEqual(engines, ["harness", "claude"])
+        self.assertIn("read", {t["name"] for t in self.seen["bodies"][1]["tools"]})          # the second call was AIHubness
         self.assertIn("edited by claude", json.dumps(evs))
         self.assertEqual(kinds.count("result"), 1)                                         # the free part sends no result row of its own
         argv, _, prompt = open(env["FAKE_OUT"]).read().partition("\n")
@@ -115,8 +118,8 @@ class Handoff(Base):
         now = store.get_session(s["id"])
         self.assertEqual((now["engine"], now["started"]), ("claude", True))
         self.assertNotIn("aihub_handoff", json.dumps(store.history(s["id"])))              # no tool row for the switch
-        self.assertEqual(len([e for e in store.history(s["id"]) if e["k"] == "note"]), 1)
-        self.assertEqual(now["usage"]["turns"], 1 + 1)                                     # the free part and Claude's own turn, each once
+        self.assertEqual(len([e for e in store.history(s["id"]) if e["k"] == "note"]), 2)
+        self.assertEqual(now["usage"]["turns"], 1 + 1 + 1)                                 # free chat, AIHubness and Claude's own turn, each once
 
     def test_off_pref_and_works_chats_get_no_handoff_tool(self):
         self.fake(FAKE_CLAUDE)

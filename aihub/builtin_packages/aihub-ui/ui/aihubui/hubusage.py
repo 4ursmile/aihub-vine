@@ -26,9 +26,9 @@ def log_path():
 
 
 def note(sid, engine, model, u):
-    """Free chat only: record the turn (Claude Code logs its own). Then schedule the upload."""
+    """Free chat / AIHubness only (they call the API themselves): record the turn (Claude Code logs its own). Then schedule the upload."""
     try:
-        if engine == "free" and u and any(int(u.get(k) or 0) for k in ("input", "output", "cache_read", "cache_write")):
+        if engine in ("free", "harness") and u and any(int(u.get(k) or 0) for k in ("input", "output", "cache_read", "cache_write")):
             os.makedirs(os.path.dirname(log_path()), exist_ok=True)
             line = {"ts": time.time(), "session": str(sid), "model": str(model or "unknown")[:128]}
             for k in ("input", "output", "cache_read", "cache_write"):

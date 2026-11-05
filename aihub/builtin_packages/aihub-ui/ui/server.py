@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from aihubui import aihub as A, auth, chat, chatshare, drawioview, freechat, hubusage, magic, mcpclient, nodeenv, officeview, searchidx, selfupdate, sources, spacebundle, store, term, usagereport, workpkg, works as W    # noqa: E402
+from aihubui import aihub as A, auth, chat, chatshare, drawioview, freechat, harness, harnesstools, hubusage, magic, mcpclient, nodeenv, officeview, searchidx, selfupdate, sources, spacebundle, store, term, usagereport, workpkg, works as W    # noqa: E402
 from aihubui.secretbox import Box, write_private                  # noqa: E402
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -981,11 +981,11 @@ def session_update(h, q, b):
     if not s:
         raise Err("no such chat", 404)
     kw = {}
-    if b.get("engine") in ("claude", "free"):
+    if b.get("engine") in ("claude", "free", "harness"):
         kw["engine"] = b["engine"]
     if isinstance(b.get("mcp"), list):                                     # MCP servers free chat may use in this chat
         kw["mcp"] = [str(n)[:64] for n in b["mcp"]][:20]
-    elif kw.get("engine") == "free" and s.get("engine") != "free" and not s.get("mcp"):
+    elif kw.get("engine") in ("free", "harness") and s.get("engine") not in ("free", "harness") and not s.get("mcp"):
         st = store.mcp_state()                                             # first time in free chat: the servers marked "on in new free chats"
         kw["mcp"] = [n for n in st["default_on"] if n in mcpclient.sources() and n not in st["off"]][:20]
     if "title" in b:
@@ -1163,7 +1163,7 @@ def chat_import(h, q, b):
         except (ValueError, OSError):
             pass
     kw = {"seed": store.transcript(store.parse_rows(rows)), "imported_from": ref or "file"}
-    if bun["settings"].get("engine") in ("claude", "free"):
+    if bun["settings"].get("engine") in ("claude", "free", "harness"):
         kw["engine"] = bun["settings"]["engine"]
     if soul is not None:
         kw["soul"] = soul
@@ -1452,6 +1452,31 @@ def chat_card(h, q, b):
     return {"rows": rows}
 
 
+def chat_permit(h, q, b):
+    """AIHubness permission card: {id: chat, ask: card id, answer: allow | always | deny}."""
+    if not harness.answer(str(need(b, "id")), str(need(b, "ask")), str(b.get("answer") or "deny")):
+        raise Err("this request is no longer waiting (the answer ended or was stopped)", 409)
+    return {"ok": True}
+
+
+def harness_memory(h, q, b):
+    """AIHubness memory notes (shared by every AIHubness chat; each chat froze them when it started)."""
+    return {"items": harnesstools.memory_items(), "max": harnesstools.MEM_MAX, "path": harnesstools.memory_path()}
+
+
+def harness_memory_put(h, q, b):
+    items = b.get("items")
+    if not isinstance(items, list):
+        raise Err("items: a list of notes")
+    out = []
+    for i in items:
+        t = " ".join(str(i or "").split())[:harnesstools.MEM_LINE]
+        if t and t not in out:
+            out.append(t)
+    harnesstools._memory_save(out[-harnesstools.MEM_MAX:])
+    return harness_memory(h, q, b)
+
+
 def chat_btw(h, q, b):
     """/btw <question>: a side answer from the chat's context; not added to the conversation, the running answer is not disturbed."""
     s = store.get_session(need(b, "id"))
@@ -1460,7 +1485,7 @@ def chat_btw(h, q, b):
     text = str(need(b, "text")).strip()[:20000]
     if not text:
         raise Err("ask something after /btw")
-    if s.get("engine") == "free":
+    if s.get("engine") in ("free", "harness"):
         raise Err("/btw works in Claude Code mode")
     model = str(b.get("model") or "")
     if model and not all(c.isalnum() or c in "._-:/[]" for c in model):
@@ -1552,9 +1577,9 @@ def chat_send(h, q, b):
         with open(os.path.join(folder, n), "wb") as f:
             f.write(raw)
         names.append("attachments/" + n)
-    engine = "free" if b.get("engine") == "free" else "claude"
+    engine = b["engine"] if b.get("engine") in ("free", "harness") else "claude"
     hubusage.use("chat", session=s["id"], detail={"engine": engine, "model": model or s.get("model") or ""})   # every send is counted on the hub
-    prompt = text + ("\n\n[Attached files in your working folder: %s]" % ", ".join(names) if names and engine == "claude" else "")
+    prompt = text + ("\n\n[Attached files in your working folder: %s]" % ", ".join(names) if names and engine != "free" else "")
     for tid in list(dict.fromkeys(__import__("re").findall(r"@theme:([a-z0-9-]{1,40})", text)))[:3]:
         t = store.get_theme(tid)
         if t and tid not in (s.get("themes") or []):                         # a theme already given in this chat stays in its context
@@ -1564,10 +1589,10 @@ def chat_send(h, q, b):
     prompt += more
     if chat.active(s["id"]):
         raise Err("this chat is still answering", 409)
-    if engine == "claude" and s.get("engine") == "free":                         # back from free chat: Claude's session never saw those messages, so a new one gets them as text
+    if engine == "claude" and s.get("engine") in ("free", "harness"):            # back from free chat / AIHubness: Claude's session never saw those messages, so a new one gets them as text
         s = store.update_session(s["id"], started=False, claude=str(__import__("uuid").uuid4()), themes=[], seed=store.transcript(store.history(s["id"])))
-    if engine == "free" and s.get("engine") != "free":
-        s = store.update_session(s["id"], engine="free")
+    if engine != "claude" and s.get("engine") != engine:
+        s = store.update_session(s["id"], engine=engine)
     if engine == "claude" and s.get("seed") and not s.get("started"):                                   # a branch / edited chat: the earlier conversation travels as text
         prompt = "[Earlier conversation of this chat, restored. Continue from it; its files are in your working folder.]\n" + s["seed"] + "\n[End of earlier conversation]\n\n" + prompt
         store.update_session(s["id"], seed="")
@@ -1578,7 +1603,7 @@ def chat_send(h, q, b):
     mcp = None
     if store.ui_mcp().get("mcpServers"):
         mcp = os.path.join(store.ui_dir(), "mcp.json")
-    if engine == "free" and tools:                                                # free chat: a mentioned MCP server is on for this message only
+    if engine != "claude" and tools:                                              # free chat: a mentioned MCP server is on for this message only
         known = set(mcpclient.sources())
         add = [t for t in tools if t in known and t not in (s.get("mcp") or [])]
         if add:
@@ -2682,7 +2707,7 @@ ROUTES = {
     ("POST", "knowledge/delete"): note_delete, ("POST", "knowledge/pull"): knowledge_pull,
     ("GET", "sessions"): sessions, ("POST", "sessions"): session_new, ("GET", "sessions/get"): session_get,
     ("POST", "sessions/update"): session_update, ("POST", "sessions/delete"): session_delete, ("POST", "sessions/delmsg"): session_delmsg, ("POST", "folders"): folders,
-    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("POST", "files/reveal"): reveal_file, ("GET", "files/diff"): file_diff, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "update/apply"): update_act, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/hint"): chat_hint, ("POST", "chat/btw"): chat_btw, ("POST", "chat/card"): chat_card, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("GET", "sessions/export"): chat_export, ("POST", "sessions/share"): chat_share, ("GET", "sessions/shared"): chats_shared, ("POST", "sessions/import"): chat_import, ("POST", "sessions/rewind"): session_rewind,
+    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("POST", "files/reveal"): reveal_file, ("GET", "files/diff"): file_diff, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "update/apply"): update_act, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/hint"): chat_hint, ("POST", "chat/btw"): chat_btw, ("POST", "chat/permit"): chat_permit, ("GET", "harness/memory"): harness_memory, ("PUT", "harness/memory"): harness_memory_put, ("POST", "chat/card"): chat_card, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("GET", "sessions/export"): chat_export, ("POST", "sessions/share"): chat_share, ("GET", "sessions/shared"): chats_shared, ("POST", "sessions/import"): chat_import, ("POST", "sessions/rewind"): session_rewind,
     ("GET", "themes"): themes_list, ("POST", "themes/save"): theme_save, ("POST", "themes/delete"): theme_delete, ("GET", "usage"): usage_get, ("GET", "usage/sessions"): usage_sessions, ("GET", "usage/session"): usage_session, ("POST", "spaces/publish"): space_publish, ("GET", "spaces"): spaces_mine, ("GET", "prefs"): prefs_get, ("PUT", "prefs"): prefs_put, ("GET", "slash"): slash,
     ("GET", "works"): works, ("GET", "works/get"): work_get, ("POST", "works/save"): work_save, ("POST", "works/delete"): work_delete,
     ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("GET", "works/presets"): presets_list, ("GET", "works/credentials"): credentials_list, ("POST", "works/credentials/save"): credentials_save, ("POST", "works/credentials/delete"): credentials_delete, ("POST", "works/presets/save"): presets_save, ("POST", "works/presets/delete"): presets_delete, ("POST", "nodes/run"): node_run, ("POST", "works/env/check"): env_check, ("POST", "works/env/install"): env_install, ("GET", "works/env/job"): env_job, ("POST", "works/env/cancel"): env_cancel, ("GET", "works/envs"): env_list, ("POST", "works/magic"): work_magic, ("POST", "works/try"): work_try, ("GET", "works/try/status"): work_try_status, ("GET", "works/chatruns"): work_chat_runs, ("GET", "works/active"): work_active, ("GET", "works/files"): work_files, ("POST", "works/open"): work_open, ("POST", "works/rerun"): work_rerun, ("POST", "works/stop"): work_stop, ("GET", "works/log"): work_log, ("GET", "project/info"): project_info, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/generate/start"): work_generate_start, ("GET", "works/generate/status"): work_generate_status, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import,

@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 
-from . import auth, freechat, store
+from . import auth, freechat, harness, store
 from .aihub import HOME, CLAUDE_HOME, settings_path
 
 MODES = {"auto": "auto", "edits": "acceptEdits", "plan": "plan", "ask": "dontAsk", "bypass": "bypassPermissions"}
@@ -102,6 +102,7 @@ class Run:
 
 
 runs = {}
+ENGINES = {"free": freechat.turn, "harness": harness.turn}           # the UI's own engines; anything else is Claude Code (turn)
 
 
 def active(sid):
@@ -113,8 +114,8 @@ def active(sid):
 def start(sess, *a, **kw):
     """Run turn() in a thread. -> the Run, or None when this chat is already answering."""
     sid = sess["id"]
-    engine, files = kw.pop("engine", "claude"), kw.pop("files", None)           # "free" = the UI's own harness (no Claude Code)
-    if engine == "free":
+    engine, files = kw.pop("engine", "claude"), kw.pop("files", None)           # "free" / "harness" (AIHubness) = the UI's own engines (no Claude Code)
+    if engine in ENGINES:
         kw["files"] = files
     base = store.count(sid)                                         # in memory after the first call; never counted while plock is held
     with plock:
@@ -126,17 +127,19 @@ def start(sess, *a, **kw):
 
     def go():
         try:
-            handed = None
-            for ev in (freechat.turn if engine == "free" else turn)(sess, *a, **kw):
-                if ev.get("k") == "handoff":                         # free chat asks Claude Code to take this message
-                    handed = ev
-                    continue
-                run.add(ev)
-            if handed and not run.cancel.is_set():
-                for ev in _handoff(sid, a, kw, handed.get("reason") or ""):
+            gen = ENGINES.get(engine, turn)(sess, *a, **kw)
+            while gen is not None:                                   # free chat -> AIHubness -> Claude Code: each step may hand the message on
+                handed = None
+                for ev in gen:
+                    if ev.get("k") == "handoff":
+                        handed = ev
+                        continue
                     run.add(ev)
-            elif handed:
-                run.add({"k": "done"})
+                gen = None
+                if handed and not run.cancel.is_set():
+                    gen = _handoff(sid, a, kw, handed.get("reason") or "", handed.get("to") or "claude")
+                elif handed:
+                    run.add({"k": "done"})
         except Exception as e:                                       # the thread must always end the run
             ev = {"k": "error", "text": "%s: %s" % (type(e).__name__, e)}
             store.append(sid, ev)
@@ -151,18 +154,32 @@ def start(sess, *a, **kw):
     return run
 
 
-def _handoff(sid, a, kw, why):
-    """Free chat -> Claude Code in the same run: the chat becomes a Claude chat (new Claude session that gets the earlier conversation as text, like a
-    manual switch), a note says why, then the SAME user message is answered by Claude Code. The free part's tokens were counted by freechat;
-    Claude's own are in Claude's logs, so nothing is logged twice."""
+def _handoff(sid, a, kw, why, to="claude"):
+    """One engine hands the SAME user message to the next in the same run: free chat -> AIHubness (it reads the chat history itself),
+    AIHubness or free chat -> Claude Code (a new Claude session that gets the earlier conversation, and what AIHubness tried, as text, like
+    a manual switch). A note says why. Each engine counted its own tokens (Claude's are in Claude's logs), so nothing is logged twice."""
+    if to == "harness":
+        cur = store.update_session(sid, engine="harness")
+        ev = {"k": "note", "text": "Switched to AIHubness: " + why}
+        store.append(sid, ev)
+        yield ev
+        yield {"k": "engine", "engine": "harness"}
+        prompt = a[0] if a else ""
+        if kw.get("files"):
+            prompt += "\n\n[Attached files in your working folder: %s]" % ", ".join(kw["files"])
+        yield from harness.turn(cur, prompt, *a[1:], **kw)
+        return
     rows = store.history(sid)
     last = max((i for i, r in enumerate(rows) if r.get("k") == "user"), default=len(rows))
     seed = store.transcript(rows[:last])
+    tried = store.transcript(rows[last + 1:], 8000) if last + 1 < len(rows) else ""
     cur = store.update_session(sid, engine="claude", started=False, claude=str(uuid.uuid4()), themes=[], seed="")
     prompt = a[0] if a else ""
     files = kw.get("files") or []
     if files:
         prompt += "\n\n[Attached files in your working folder: %s]" % ", ".join(files)
+    if tried:
+        prompt += "\n\n[AIHubness worked on this message first and handed it over (%s). What it did:]\n%s\n[End of what it did]" % (why, tried)
     if seed:
         prompt = "[Earlier conversation of this chat, restored. Continue from it; its files are in your working folder.]\n" + seed + "\n[End of earlier conversation]\n\n" + prompt
     ev = {"k": "note", "text": "Switched to Claude Code: " + why}

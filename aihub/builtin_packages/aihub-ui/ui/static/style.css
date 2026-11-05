@@ -752,3 +752,11 @@ details.lab-sec>summary{cursor:pointer}
 .nb-add{display:flex;justify-content:center;gap:6px;height:14px;opacity:0;transition:opacity .15s}.nb-add:hover,.nb-add:focus-within{opacity:1}
 .nb-add button{font-size:11px;padding:0 8px;border:1px solid var(--line2);border-radius:10px;background:var(--surface);color:var(--mute);display:flex;align-items:center;gap:3px}.nb-add button:hover{color:var(--ink);border-color:var(--accent)}
 .nb-tools .ibtn{width:24px;height:24px}
+
+.permcard{border:1px solid color-mix(in srgb,var(--accent) 45%,var(--line));border-radius:12px;padding:10px 12px;background:color-mix(in srgb,var(--accent) 5%,var(--surface));max-width:720px}
+.permcard.risky{border-color:color-mix(in srgb,var(--warn) 60%,var(--line));background:color-mix(in srgb,var(--warn) 7%,var(--surface))}
+.permcard.del{border-color:color-mix(in srgb,var(--bad) 60%,var(--line));background:color-mix(in srgb,var(--bad) 6%,var(--surface))}
+.permcard.done{opacity:.75}
+.permcard .pc-h{display:flex;gap:8px;align-items:center}
+.permcard .pc-cmd{margin:8px 0;padding:8px 10px;border-radius:8px;background:var(--soft2);font:12px var(--mono);white-space:pre-wrap;word-break:break-word;max-height:220px;overflow:auto}
+.permcard .pc-f{display:flex;gap:8px;flex-wrap:wrap;align-items:center}

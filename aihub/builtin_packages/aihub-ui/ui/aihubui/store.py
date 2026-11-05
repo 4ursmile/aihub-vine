@@ -239,7 +239,9 @@ def update_session(sid, **kw):
         return _full(s)
 
 
-def add_usage(sid, u):
+def add_usage(sid, u, model="", turn=True):
+    """Add a turn's tokens to the chat's totals and report them to the hub. MODEL is the id the API really used (the chat's own `model`
+    is only the picker value: an alias like "sonnet" or empty, which the hub cannot price). TURN=False: extra tokens of the same turn."""
     with _lock:
         d = _index()
         s = d["sessions"].get(sid)
@@ -249,10 +251,16 @@ def add_usage(sid, u):
         for k in ("input", "output", "cache_read", "cache_write"):
             t[k] = t.get(k, 0) + int(u.get(k) or 0)
         t["cost"] = round(t.get("cost", 0.0) + float(u.get("cost") or 0), 6)
-        t["turns"] = t.get("turns", 0) + 1
+        t["turns"] = t.get("turns", 0) + (1 if turn else 0)
         s["updated"] = time.time()
         _save_index(d)
-        engine, model = s.get("engine") or "claude", s.get("model") or prefs().get("free_model") or ""
+        engine = s.get("engine") or "claude"
+    if not model and engine in ("free", "harness"):                   # Claude Code turns are logged by Claude itself
+        from . import freechat
+        try:
+            model = prefs().get("free_model") or freechat.resolve_model(s.get("model") or "", freechat._env())
+        except Exception:
+            model = s.get("model") or ""
     try:
         from . import hubusage
         hubusage.note(sid, engine, model, u)                      # every turn reaches the hub; never fails the turn
@@ -884,7 +892,7 @@ def save_ui_mcp(d):
 
 
 # ---- preferences (not secret): policy guard for UI chats, auto-compact
-PREF_DEFAULTS = {"policy": "off", "autocompact": True, "compact_pct": 80, "claude_settings": "", "window": 1_000_000, "free_model": "", "model_picker": True, "online_search": True, "auto_engine": True, "alerts": [], "auto_update": "on"}
+PREF_DEFAULTS = {"policy": "off", "autocompact": True, "compact_pct": 80, "claude_settings": "", "window": 1_000_000, "free_model": "", "model_picker": True, "online_search": True, "auto_engine": True, "auto_engine_claude": False, "alerts": [], "auto_update": "on"}
 ALERT_PERIODS = ("today", "week", "month", "quarter", "last")
 
 
@@ -942,8 +950,10 @@ def save_prefs(new):
         d["auto_update"] = new["auto_update"]
     if isinstance(new.get("model_picker"), bool):
         d["model_picker"] = new["model_picker"]
-    if isinstance(new.get("auto_engine"), bool):                       # free chat may hand a message over to Claude Code
+    if isinstance(new.get("auto_engine"), bool):                       # free chat may hand a message over to AIHubness
         d["auto_engine"] = new["auto_engine"]
+    if isinstance(new.get("auto_engine_claude"), bool):                # AIHubness may hand a task over to Claude Code
+        d["auto_engine_claude"] = new["auto_engine_claude"]
     if isinstance(new.get("online_search"), bool):                     # off: Search answers only from this machine, the hub is never asked
         d["online_search"] = new["online_search"]
     try:
