@@ -42,6 +42,8 @@ Only one process per machine fires cron and package triggers: this UI or `aihub 
 
 The chat's system prompt (soul, note index, OpenUI rules) is built once and frozen, turns resume the same Claude session, and the page shows cache read/write per turn. Changing the model mid-chat or "Reload memory" rewrites the cache.
 
+**Finding Claude Code**: the UI looks for `claude` on PATH, then in the usual install places (native installer `~/.local/bin`, npm / pnpm / bun / volta / nvm globals, Homebrew, the VS Code / Cursor extension's bundled binary); set `AIHUB_CLAUDE` to a full path to choose one. When none is found, a Claude Code chat is answered by AIHubness with your API key instead of failing (Works Claude nodes still report the error).
+
 **Claude sign-in**: if `settings.json` has an `apiKeyHelper` that needs an OAuth sign-in, chats and Claude nodes check it first and offer Sign in. The key it prints is never stored or shown.
 
 Every library ships in `ui/static/vendor/` (the lazy ones in `vendor/lazy/`, built by `python ui/tools/vendor_libs.py`), so the page works offline and loads nothing from a CDN. Map tiles still come from OpenStreetMap. HTML pages Claude writes in a chat may still use jsDelivr.

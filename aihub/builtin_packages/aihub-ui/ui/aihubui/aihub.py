@@ -37,6 +37,62 @@ def command():
     return [sys.executable, "-m", "aihub.cli"]
 
 
+_claude = {"t": 0.0, "path": None}
+
+
+def _claude_candidates():
+    """Where Claude Code usually lives when the UI service's PATH (a launcher, a login item, a Windows service) does not have it:
+    the native installer, the old local install, npm / pnpm / bun / volta / nvm globals, Homebrew, and the binary bundled in the
+    VS Code / Cursor extension (API-key users often have only that)."""
+    import glob
+    h = os.path.expanduser("~")
+    win = os.name == "nt"
+    names = ("claude.exe", "claude.cmd", "claude") if win else ("claude",)
+    dirs = [os.path.join(h, ".local", "bin"), os.path.join(h, ".claude", "local"), os.path.join(h, ".claude", "local", "node_modules", ".bin"),
+            os.path.join(h, ".npm-global", "bin"), os.path.join(h, ".bun", "bin"), os.path.join(h, ".volta", "bin"),
+            os.path.join(h, "Library", "pnpm"), os.path.join(h, ".local", "share", "pnpm"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+    if os.environ.get("npm_config_prefix"):
+        dirs.append(os.path.join(os.environ["npm_config_prefix"], "" if win else "bin"))
+    if win:
+        for v in ("APPDATA", "LOCALAPPDATA"):
+            b = os.environ.get(v)
+            if b:
+                dirs += [os.path.join(b, "npm"), os.path.join(b, "pnpm"), os.path.join(b, "Programs", "claude")]
+    dirs += sorted(glob.glob(os.path.join(h, ".nvm", "versions", "node", "*", "bin")), reverse=True)
+    for d in dirs:
+        for n in names:
+            yield os.path.join(d, n)
+    for ext in (".vscode", ".vscode-insiders", ".cursor", ".windsurf"):
+        for p in sorted(glob.glob(os.path.join(h, ext, "extensions", "anthropic.claude-code-*", "resources", "native-binary", "claude*")), reverse=True):
+            yield p
+
+
+def claude_bin(fresh=False):
+    """Full path of the Claude Code CLI, or None. Env AIHUB_CLAUDE (or CLAUDE_BIN) wins, then PATH, then the usual install places
+    (that scan is cached a minute when it finds one, 10 s when not: installing Claude Code needs no UI restart)."""
+    for e in (os.environ.get("AIHUB_CLAUDE"), os.environ.get("CLAUDE_BIN")):
+        if e and os.path.isfile(os.path.expanduser(e)):
+            return os.path.expanduser(e)
+    w = (os.name == "nt" and shutil.which("claude.exe")) or shutil.which("claude")     # Windows: the real exe before an npm .cmd shim (cmd.exe quoting)
+    if w:
+        return w
+    now = time.time()
+    if fresh or now - _claude["t"] >= (60 if _claude["path"] else 10):
+        found = next((p for p in _claude_candidates() if os.path.isfile(p) and (os.name == "nt" or os.access(p, os.X_OK))), None)
+        _claude.update(t=now, path=found)
+    return _claude["path"]
+
+
+def claude_cmd():
+    """argv[0] for running Claude Code: the resolved path, else plain "claude" (Popen then raises a clear OSError)."""
+    return claude_bin() or "claude"
+
+
+CLAUDE_MISSING = ("Claude Code (the `claude` command) was not found on this machine. Install it (https://docs.claude.com/en/docs/claude-code/setup), "
+                  "or set AIHUB_CLAUDE to its full path. With an API key, set ANTHROPIC_API_KEY (Settings > Encrypted secrets, or the `env` block of "
+                  "Claude's settings.json); no `claude` sign-in is needed. Or switch this chat to AIHubness or Free chat, which need no Claude Code.")
+
+
 # ---- short-lived cache for the two read-only listings every page polls (a CLI process costs ~0.4 s)
 TTL = {("list",): 5.0, ("run", "list"): 2.0}
 _cache = {}                                            # key -> (time, doc); callers get a deep copy

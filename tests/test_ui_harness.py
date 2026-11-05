@@ -304,6 +304,36 @@ class Handoffs(Api):
         self.assertEqual(store.get_session(s["id"])["engine"], "harness")
         self.assertEqual(json.dumps(self.seen["bodies"][1]["messages"]).count("rename the files"), 1)
 
+    def test_claude_code_chat_without_claude_installed_is_answered_by_aihubness(self):
+        from aihubui import aihub as A
+        os.environ["PATH"] = tempfile.mkdtemp()                               # restored by fake()'s cleanup
+        cands, A._claude_candidates = A._claude_candidates, lambda: iter(())
+        self.addCleanup(setattr, A, "_claude_candidates", cands)
+        A._claude.update(t=0.0, path=None)
+        self.addCleanup(A._claude.update, t=0.0, path=None)
+        self.assertIsNone(A.claude_bin())
+        s = self.chat("claude")
+        self.seen["script"] = [text_reply("answered without claude")]
+        evs = self.go(s, "hello", engine="claude")
+        self.assertIn({"k": "engine", "engine": "harness"}, evs)
+        self.assertIn("not installed", next(e for e in evs if e["k"] == "note")["text"])
+        self.assertIn("answered without claude", json.dumps(evs))
+        self.assertNotIn("error", [e["k"] for e in evs])
+
+    def test_claude_found_outside_path(self):
+        from aihubui import aihub as A
+        d = tempfile.mkdtemp()
+        exe = os.path.join(d, "claude")
+        with open(exe, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(exe, 0o755)
+        os.environ["PATH"] = tempfile.mkdtemp()
+        cands, A._claude_candidates = A._claude_candidates, lambda: iter([os.path.join(d, "nope"), exe])
+        self.addCleanup(setattr, A, "_claude_candidates", cands)
+        self.addCleanup(A._claude.update, t=0.0, path=None)
+        self.assertEqual(A.claude_bin(fresh=True), exe)
+        self.assertEqual(A.claude_cmd(), exe)
+
     def test_handoff_not_offered_is_not_obeyed(self):
         s = self.chat()
         self.seen["script"] = [tool_reply(("h1", "aihub_handoff", {"reason": "lazy"})), text_reply("did it myself")]

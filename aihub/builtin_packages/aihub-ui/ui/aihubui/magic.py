@@ -210,8 +210,8 @@ def _direct(system, prompt, model, extra_env):
 
 
 def _claude(system, prompt, model):
-    from .aihub import settings_path
-    cmd = ["claude", "-p", "--output-format", "json", "--max-turns", "1", "--no-session-persistence", "--tools", "", "--append-system-prompt", system]
+    from .aihub import CLAUDE_MISSING, claude_cmd, settings_path
+    cmd = [claude_cmd(), "-p", "--output-format", "json", "--max-turns", "1", "--no-session-persistence", "--tools", "", "--append-system-prompt", system]
     sp, custom = settings_path()
     if custom:
         cmd += ["--settings", sp]
@@ -226,7 +226,7 @@ def _claude(system, prompt, model):
     except subprocess.TimeoutExpired:
         raise RuntimeError("no answer within 5 minutes")
     except OSError as e:
-        raise RuntimeError("cannot start claude: %s" % e)
+        raise RuntimeError("cannot start claude: %s. %s" % (e, CLAUDE_MISSING))
     try:
         m = json.loads(r.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):

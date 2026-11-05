@@ -15,7 +15,7 @@ import time
 import uuid
 
 from . import auth, freechat, harness, store
-from .aihub import HOME, CLAUDE_HOME, settings_path
+from .aihub import HOME, CLAUDE_HOME, CLAUDE_MISSING, claude_bin, claude_cmd, settings_path
 
 MODES = {"auto": "auto", "edits": "acceptEdits", "plan": "plan", "ask": "dontAsk", "bypass": "bypassPermissions"}
 EFFORT = ("low", "medium", "high", "xhigh", "max")
@@ -127,7 +127,10 @@ def start(sess, *a, **kw):
 
     def go():
         try:
-            gen = ENGINES.get(engine, turn)(sess, *a, **kw)
+            if engine not in ENGINES and not claude_bin() and not sess.get("work"):   # no Claude Code here (API-key users often have none): AIHubness answers instead
+                gen = _handoff(sid, a, kw, "Claude Code (the `claude` command) is not installed or not on this service's PATH; AIHubness uses your API key instead", "harness")
+            else:
+                gen = ENGINES.get(engine, turn)(sess, *a, **kw)
             while gen is not None:                                   # free chat -> AIHubness -> Claude Code: each step may hand the message on
                 handed = None
                 for ev in gen:
@@ -460,7 +463,7 @@ def btw(sess, text, model="", effort=""):
     sid = sess["id"]
     cwd = store.session_dir(sid)
     os.makedirs(cwd, exist_ok=True)
-    cmd = ["claude", "-p", "--output-format", "json", "--max-turns", "1", "--permission-mode", "dontAsk", "--no-session-persistence"]
+    cmd = [claude_cmd(), "-p", "--output-format", "json", "--max-turns", "1", "--permission-mode", "dontAsk", "--no-session-persistence"]
     sp, custom = settings_path()
     if custom:
         cmd += ["--settings", sp]
@@ -497,7 +500,7 @@ def btw(sess, text, model="", effort=""):
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "no answer within 3 minutes"}
     except OSError as e:
-        return {"ok": False, "error": "cannot start claude: %s" % e}
+        return {"ok": False, "error": "cannot start claude: %s. %s" % (e, CLAUDE_MISSING)}
     if m is None:
         return {"ok": False, "error": (r.stderr.strip() or "claude ended without an answer (exit %s)" % r.returncode)[-600:]}
     u = _usage(m.get("usage"))
@@ -551,7 +554,7 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
             pass
     snap_t = threading.Thread(target=snap, daemon=True)
     snap_t.start()
-    cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+    cmd = [claude_cmd(), "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
            "--input-format", "stream-json", "--replay-user-messages",          # stdin stays open: messages sent mid-answer reach it (hint())
            "--permission-mode", MODES.get(mode, "auto")]
     sp, custom = settings_path()
@@ -593,7 +596,7 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
                              text=True, encoding="utf-8", errors="replace", start_new_session=True)
     except OSError as e:
         snap_t.join()
-        ev = {"k": "error", "text": "cannot start claude: %s (install Claude Code and sign in with `claude`)" % e}
+        ev = {"k": "error", "text": "cannot start claude: %s. %s" % (e, CLAUDE_MISSING)}
         store.append(sid, ev)
         yield ev
         return
