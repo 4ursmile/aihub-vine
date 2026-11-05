@@ -168,6 +168,24 @@ class Steps(unittest.TestCase):
         res, _ = node({"config": {"code": "def main(a: dict) -> dict:\n    return {'z': 1}\n"}}, "python_fn.py")
         self.assertEqual(res["data"], {"z": 1})
 
+    def test_code_that_returns_nothing_passes_its_input_on(self):
+        ins = [{"text": "rows", "data": {"day": "2026-11-05"}}]
+        for code in ("print('saw', text)\n",                                         # a plain script
+                     "def main(a):\n    print(a['day'])\n",                          # untyped, returns None
+                     "# %% check\nassert data['day']\n# %% log\nprint('ok')\n"):     # steps with an empty result
+            res, _ = node({"config": {"code": code}, "input": "rows", "inputs": ins}, "python_fn.py")
+            self.assertTrue(res["ok"], (code, res))
+            self.assertEqual((res["output"], res["data"]), ("rows", {"day": "2026-11-05"}), code)
+            self.assertIn("passed on", res["log"])
+
+    def test_untyped_function_and_script_results(self):
+        res, _ = node({"config": {"code": "def main(a):\n    return len(a['input'])\n"}, "input": "hello"}, "python_fn.py")
+        self.assertEqual(res["data"], {"result": 5})
+        res, _ = node({"config": {"code": "result['n'] = data['n'] * 2\n", "args": "{\"n\": 4}"}}, "python_fn.py")
+        self.assertEqual(res["data"], {"n": 8})
+        res, _ = node({"config": {"code": "raise ValueError('bad data')\n"}, "input": "x"}, "python_fn.py")
+        self.assertFalse(res["ok"])                                                     # raising still fails the node
+
     def test_split_ignores_a_comment_only_head(self):
         sys.path.insert(0, os.path.join(UI, "nodes"))
         import _steps

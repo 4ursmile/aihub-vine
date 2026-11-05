@@ -13,7 +13,11 @@ nodes before it, the input text when it is a JSON object, and the optional "Argu
 
 Multi-step (ETL): `# %% name` lines split the code into steps that run in order in one namespace (see _steps.py). The steps see
 `data` (the parsed input, as above), `inputs`, `text`, `workdir`, `vault` (aihub_vault: the credential sets granted to this node) and
-`result` (a dict: what it holds at the end is the output). A `main(args)` defined by the steps is still called as above, after them."""
+`result` (a dict: what it holds at the end is the output). A `main(args)` defined by the steps is still called as above, after them.
+
+Free form (a side step in the middle of a flow): the code may also be a plain script (no function), or a function without type hints.
+When it gives nothing back (no `result`, or the function returns None) the node PASSES ITS INPUT ON unchanged (text and data), so it
+can log, write a file, call an API or check something between two nodes without having to match their input and output."""
 import contextlib
 import inspect
 import io
@@ -100,8 +104,12 @@ def dump(v):
     return v
 
 
+_D = {}
+
+
 def main():
     d = json.load(sys.stdin)
+    _D.update(d)
     cfg, wd = d.get("config") or {}, d.get("workdir") or ""
     code = str(cfg.get("code") or "")
     if not code.strip():
@@ -117,6 +125,12 @@ def main():
     args, text, obj = gather(d, cfg)
     if _steps.has_steps(code):
         return run_steps(code, ns, log, d, args, text, wd)
+    ns.update(data=dict(args), inputs=d.get("inputs") or [], text=text, workdir=wd, result={}, log=_steps.say)     # a plain script sees the same names as steps
+    try:
+        import aihub_vault
+        ns["vault"] = aihub_vault
+    except ImportError:
+        ns["vault"] = None
     try:
         with contextlib.redirect_stdout(log):
             exec(compile(code, "<python node>", "exec"), ns)
@@ -130,9 +144,36 @@ def main():
     except Exception:
         fail("the code failed while loading:\n" + traceback.format_exc(limit=3)[-600:])
     fn = entry(ns)
-    if fn is None:
-        fail("define a function, for example: def main(args: In) -> Out")
+    if fn is None:                                                   # a plain script: it ran while loading; `result` (if it set one) is the output
+        res = ns.get("result")
+        if res in (None, {}, [], ""):
+            passthrough(d, args, text, log, "script ran")
+        finish(res, log, "script ran")
     call(fn, ns, log, args, text, obj)
+
+
+def passthrough(d, args, text, log, what):
+    """Nothing given back: hand the input on unchanged (text and data), so the node can sit between two others as a side step."""
+    data = {}
+    for ev in d.get("inputs") or []:
+        if isinstance(ev, dict) and isinstance(ev.get("data"), dict):
+            data.update(ev["data"])
+    try:
+        data = json.loads(json.dumps(data, default=str))
+    except (TypeError, ValueError):
+        data = {}
+    done(ok=True, output=text, data=data, log=(log.getvalue()[-1500:].rstrip() + "\n" if log.getvalue().strip() else "") + what + "; nothing returned: the input is passed on")
+
+
+def finish(res, log, what):
+    res = dump(res)
+    if not isinstance(res, dict):
+        res = {"result": res}
+    try:
+        res = json.loads(json.dumps(res, default=str))
+    except (TypeError, ValueError) as e:
+        fail("the result is not JSON serialisable: %s" % e)
+    done(ok=True, output=json.dumps(res, indent=2, ensure_ascii=False), data=res, log=log.getvalue()[-1500:] or what)
 
 
 def gather(d, cfg):
@@ -171,7 +212,10 @@ def run_steps(code, ns, log, d, args, text, wd):
     fn = next((ns[n] for n in ("main", "run") if inspect.isfunction(ns.get(n))), None)
     if fn is not None:
         return call(fn, ns, log, args, text, json_obj(text))
+    summary = "%d step(s): %s" % (len(steps), ", ".join("%s %.1fs" % (s["name"], s["seconds"]) for s in steps))
     res = dump(ns.get("result"))
+    if res in (None, {}, [], ""):
+        passthrough(d, args, text, log, summary)
     if not isinstance(res, dict):
         res = {"result": res}
     try:
@@ -191,13 +235,16 @@ def call(fn, ns, log, args, text, obj):
     if len(params) > 1:
         fail("%s() takes %d arguments: use ONE argument typed as a pydantic model or a dict" % (fn.__name__, len(params)))
     arg_tp = hints.get(params[0].name) if params else None
-    if params and not kind_of(arg_tp):
-        fail("annotate the argument of %s() as a pydantic BaseModel or a dict, e.g. def %s(%s: In) -> Out" % (fn.__name__, fn.__name__, params[0].name))
-    ret_tp = hints.get("return")
-    if not kind_of(ret_tp):
-        fail("annotate the return of %s() as a pydantic BaseModel or a dict, e.g. -> Out" % fn.__name__)
+    if params and arg_tp is not None and not kind_of(arg_tp):
+        fail("type the argument of %s() as a pydantic BaseModel or a dict (or leave it untyped: it gets a dict), e.g. def %s(%s: In) -> Out" % (fn.__name__, fn.__name__, params[0].name))
+    ret_tp = hints.get("return")                                     # untyped / None / anything: dict = output, None = pass the input on, else {"result": value}
 
-    if params:
+    if params and arg_tp is None:                                   # untyped: the parsed input as a dict (plain text under `input` / `text`)
+        arg = dict(args)
+        if text.strip() and not obj:
+            arg.setdefault("input", text)
+            arg.setdefault("text", text)
+    elif params:
         names = fields_of(arg_tp)
         for k in ("input", "text"):                                   # a plain-text input fills a field called input / text
             if k in names and k not in args and text.strip() and not obj:
@@ -225,8 +272,10 @@ def call(fn, ns, log, args, text, obj):
     res = dump(res)
     if is_model(ret_tp) and not isinstance(res, dict):
         fail("%s() must return the %s model, got %s" % (fn.__name__, ret_tp.__name__, type(res).__name__))
+    if res is None:
+        passthrough(_D, args, text, log, "ran %s()" % fn.__name__)
     if not isinstance(res, dict):
-        fail("%s() must return a dict, got %s" % (fn.__name__, type(res).__name__))
+        res = {"result": res}
     try:
         res = json.loads(json.dumps(res, default=str))
     except (TypeError, ValueError) as e:

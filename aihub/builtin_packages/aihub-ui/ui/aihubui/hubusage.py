@@ -30,7 +30,7 @@ def note(sid, engine, model, u):
     try:
         if engine in ("free", "harness") and u and any(int(u.get(k) or 0) for k in ("input", "output", "cache_read", "cache_write")):
             os.makedirs(os.path.dirname(log_path()), exist_ok=True)
-            line = {"ts": time.time(), "session": str(sid), "model": str(model or "unknown")[:128]}
+            line = {"ts": time.time(), "session": str(sid), "model": str(_model(model) or "unknown")[:128]}
             for k in ("input", "output", "cache_read", "cache_write"):
                 line[k] = max(0, int(u.get(k) or 0))
             with open(log_path(), "a", encoding="utf-8") as f:
@@ -38,6 +38,22 @@ def note(sid, engine, model, u):
     except (OSError, TypeError, ValueError):
         pass
     kick()
+
+
+def _model(model):
+    """The model id the hub can price. An empty, "unknown" or alias value (opus / sonnet / haiku) becomes the id the UI's own engines send
+    for it (Settings > Free chat model, else the Claude settings defaults): an "unknown" row is counted but never priced."""
+    m = str(model or "").strip()
+    if m.lower() not in ("", "unknown", "default", "opus", "sonnet", "haiku") and "[" not in m:
+        return m
+    try:
+        from . import freechat, store
+        base = m.split("[")[0].lower()
+        if base in ("", "unknown", "default"):
+            return store.prefs().get("free_model") or freechat.resolve_model("", freechat._env())
+        return freechat.resolve_model(base, freechat._env())
+    except Exception:
+        return m
 
 
 def _json(name):

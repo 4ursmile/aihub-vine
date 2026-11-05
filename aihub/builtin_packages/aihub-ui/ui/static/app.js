@@ -148,7 +148,7 @@ function EffortPick({ value, onChange, close }) {
 }
 // keyboard for every composer panel: focus the search box or the current option on open; ↑ ↓ Home End move over
 // options, MCP cards, switches and fields; 1-9 pick an option / toggle a card; Enter/Space choose (native click)
-const OPT_NAV = ".opt, .mcp-card, .sw, .mq, .mcp-q input, input[type=range], .ctxp .btn";
+const OPT_NAV = ".opt, .mcp-card, .sw, .mq, .mcp-q input, .mcpsel-row input, .mcpsel-bar .link, input[type=range], .ctxp .btn";
 const isText = (el) => el && el.tagName === "INPUT" && el.type !== "range";
 function useOptKeys(ready = true) {
   const el = useRef();
@@ -199,13 +199,42 @@ function McpPanel({ servers, on, onChange, engine, compact }) {
     ${!shown.length && html`<p class="mute small" style="padding:8px 4px">No server matches.</p>`}
     <p class="mcp-note">${ownEngine(engine) ? "Ticked servers start for each answer; the model may call their tools without asking." : "Claude Code uses every server it knows. Switch to AIHubness or Free chat to choose per chat."}</p>${!compact && ownEngine(engine) && html`<${OptKeys} n=${shown.length} what="toggle" enter="toggle"/>`}</div>`;
 }
+// MCP servers for the UI's own engines: one collapsed row (what is on, as chips) that opens a checklist with a filter, so the engines stay in view
+function McpSelect({ servers, on, onChange, engine }) {
+  const [open, setOpen] = useState(false), [q, setQ] = useState("");
+  if (!ownEngine(engine)) return html`<div class="mcpsel-note">${Ic("plug", 13)}<span>Claude Code uses every MCP server it knows${servers && servers.length ? " (" + servers.length + ")" : ""}. Pick per chat in AIHubness or Free chat.</span></div>`;
+  if (!servers) return html`<div class="mcpsel-note"><span class="shine">Looking for MCP servers…</span></div>`;
+  if (!servers.length) return html`<div class="mcpsel-note">${Ic("plug", 13)}<span>No MCP servers yet: <a href="#/mcp">add one</a>.</span></div>`;
+  const picked = servers.filter((m) => !m.off && on.includes(m.name)), usable = servers.filter((m) => !m.off);
+  const shown = servers.filter((m) => !q || (m.name + " " + (m.origin || "")).toLowerCase().includes(q.toLowerCase()));
+  const set = (name, v) => onChange(v ? [...on.filter((x) => x !== name), name] : on.filter((x) => x !== name));
+  return html`<div class=${"mcpsel" + (open ? " open" : "")}>
+    <button class="opt mcpsel-btn" aria-expanded=${open} onClick=${() => setOpen(!open)}><span class="oi">${Ic("plug", 15)}</span>
+      <span class="grow"><b>MCP tools <span class="mute">${picked.length} of ${servers.length} on</span></b>
+        <span class="mcpsel-chips">${picked.length ? picked.slice(0, 3).map((m) => html`<span class="tag acc" key=${m.name}>${m.name}</span>`) : html`<span class="d">None: the model only talks</span>`}${picked.length > 3 && html`<span class="tag">+${picked.length - 3}</span>`}</span></span>
+      <span class=${"mcpsel-car" + (open ? " up" : "")}>${Ic("down", 13)}</span></button>
+    ${open && html`<div class="mcpsel-body">
+      <div class="mcpsel-bar">${servers.length > 6 && html`<label class="mcp-q">${Ic("search", 13)}<input placeholder="Filter" value=${q} onInput=${(e) => setQ(e.target.value)} onKeyDown=${(e) => { if (e.key !== "Enter") return; e.preventDefault(); const m = shown.find((x) => !x.off); m && set(m.name, !on.includes(m.name)); }}/></label>`}
+        <span class="mcpsel-act"><button class="linkbtn small link" onClick=${() => onChange(usable.map((m) => m.name))}>All</button><button class="linkbtn small link" onClick=${() => onChange([])}>None</button></span></div>
+      <div class="mcpsel-list">${shown.map((m) => { const act = !m.off && on.includes(m.name);
+        return html`<label class=${"mcpsel-row" + (act ? " on" : "") + (m.off ? " off" : "")} key=${m.name} title=${m.off ? "Switched off on the MCP page" : m.command ? String(m.command).slice(0, 200) : m.name}>
+          <input type="checkbox" checked=${act} disabled=${!!m.off} onChange=${(e) => set(m.name, e.target.checked)}/><span class="n">${m.name}</span>
+          ${(m.tools_off || []).length > 0 && html`<span class="tag">${m.tools_off.length} hidden</span>`}<span class="tag">${m.off ? "off" : m.origin || "server"}</span></label>`; })}
+        ${!shown.length && html`<p class="mute small" style="padding:6px 8px">No server matches.</p>`}</div>
+      <p class="mcpsel-note">Ticked servers start for each answer; the model may call their tools without asking.</p></div>`}</div>`;
+}
+const ENG_SHORT = { claude: "Full harness: files, tools, skills, agents, every MCP server. About 40k tokens of prompt per message.",
+  harness: "Mini agent: reads, edits and runs commands, with memory. Light on tokens; uses your API key.",
+  free: "Straight to the model, fastest. No files or shell; can use the MCP tools you tick. Needs an API key." };
 function EnginePick({ value, onChange, close, mcpAll, mcpOn, onMcp, auto, onAuto, autoCc, onAutoCc }) {
   const keys = useOptKeys();
-  return html`<div ...${keys} tabindex="-1" class="optlist"><h5>Engine</h5>${ENGINES.map(([k, ic, name, d]) => html`<button class=${"opt" + (k === value ? " on" : "")} onClick=${() => { onChange(k); close(); }}><span class="oi">${Ic(ic, 16)}</span><span class="grow"><b>${name}</b><span class="d">${d}</span></span><span class="ck">${Ic("check", 16)}</span></button>`)}
-    ${value === "free" && html`<div class="row" style="padding:8px 10px 2px"><div class="grow"><b class="small">Switch to AIHubness by itself</b><div class="mute small">When a task needs your files, commands or multi-step coding.</div></div><${Switch} on=${auto !== false} label="Switch to AIHubness by itself" onChange=${(v) => onAuto && onAuto(v)}/></div>`}
-    ${value === "harness" && html`<div class="row" style="padding:8px 10px 2px"><div class="grow"><b class="small">Hand over to Claude Code when stuck</b><div class="mute small">After it tried and its tools cannot do the task (web, skills, agents). Off by default.</div></div><${Switch} on=${!!autoCc} label="Hand over to Claude Code when stuck" onChange=${(v) => onAutoCc && onAutoCc(v)}/></div>`}
-    ${ownEngine(value) && html`<h5 style="margin-top:8px">Tools for ${ENG_NAME[value]} (MCP)</h5><div style="padding:0 6px"><${McpPanel} servers=${mcpAll} on=${mcpOn} onChange=${onMcp} engine=${value} compact=${true}/></div>`}
-    <div class="small mute" style="padding:6px 10px 4px">You can switch at any message (or type /engine): the earlier text carries over, tool calls do not.</div><${OptKeys} n=${ENGINES.length}/></div>`;
+  const auto1 = value === "free" ? ["Switch to AIHubness by itself", "When a task needs your files, commands or multi-step coding.", auto !== false, onAuto]
+    : value === "harness" ? ["Hand over to Claude Code when stuck", "After it tried and its tools cannot do the task (web, skills, agents).", !!autoCc, onAutoCc] : null;
+  return html`<div ...${keys} tabindex="-1" class="optlist engpick"><h5>Engine</h5>
+    ${ENGINES.map(([k, ic, name, d]) => html`<button class=${"opt" + (k === value ? " on" : "")} title=${d} onClick=${() => { onChange(k); if (k === "claude" || k === value) close(); }}><span class="oi">${Ic(ic, 15)}</span><span class="grow"><b>${name}</b><span class="d">${ENG_SHORT[k] || d}</span></span><span class="ck">${Ic("check", 16)}</span></button>`)}
+    ${auto1 && html`<div class="engpick-auto"><div class="grow"><b class="small">${auto1[0]}</b><div class="mute small">${auto1[1]}</div></div><${Switch} on=${auto1[2]} label=${auto1[0]} onChange=${(v) => auto1[3] && auto1[3](v)}/></div>`}
+    <h5>Tools</h5><${McpSelect} servers=${mcpAll} on=${mcpOn} onChange=${onMcp} engine=${value}/>
+    <div class="small mute engpick-foot">Switch at any message (or /engine): the text carries over, tool calls do not.</div><${OptKeys} n=${ENGINES.length}/></div>`;
 }
 function Ring({ pct, size = 22 }) {
   const r = (size - 4) / 2, c = 2 * Math.PI * r;
@@ -259,6 +288,18 @@ function Grip({ cls, value, onChange, onDone, min, max, sign, reset }) {
     addEventListener("pointermove", mv); addEventListener("pointerup", up); addEventListener("pointercancel", up);
   };
   return html`<div class=${"grip " + cls} role="separator" aria-orientation="vertical" title="Drag to resize (double-click to reset)" onPointerDown=${down} onDblClick=${reset}></div>`;
+}
+// A Markdown file in the canvas Preview: rendered in place by the same renderer as chat answers (tables, code, charts, mermaid ...),
+// relative images and links resolved against the file's own folder. Edit shows the source.
+function MdFile({ id, path, ver, src }) {
+  const [d, setD] = useState(null);
+  useEffect(() => { let on = true; api(`files/content?id=${id}&path=${encodeURIComponent(path)}`).then((r) => on && setD(r)).catch((e) => on && setD({ err: e.message })); return () => { on = false; }; }, [id, path, ver]);
+  if (!d) return html`<div class="empty"><div class="shine">Opening ${baseName(path)}…</div></div>`;
+  if (d.err) return html`<div class="empty"><div>${Ic("file", 26)}<div>${d.err}</div></div></div>`;
+  const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+  const rel = (u) => { if (/^([a-z][a-z0-9+.-]*:|\/|#)/i.test(u)) return u; const parts = []; for (const x of (dir + u).split("/")) { if (x === "..") parts.pop(); else if (x && x !== ".") parts.push(x); } return src(parts.join("/")); };
+  const text = String(d.text || "").replace(/(!?\[[^\]]*\]\()(<[^>]+>|[^)\s]+)/g, (m, a, u) => a + rel(u.replace(/^<|>$/g, "")));
+  return html`<div class="mdfile">${text.trim() ? html`<${Md} text=${text}/>` : html`<p class="mute">This file is empty.</p>`}</div>`;
 }
 function Editor({ id, path, ver, onSaved, dirtyRef }) {
   const [d, setD] = useState(null), [text, setText] = useState(""), [gen, setGen] = useState(0), dr = useRef(false);
@@ -732,13 +773,14 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const pickList = ownEngine(engine) && freeIds && freeIds.length ? (() => { const base = (fresh || boot.models).models, have = new Set(base.map((m) => m.id)); return [...base, ...freeIds.filter((x) => !have.has(x.id)).map((x) => ({ id: x.id, label: x.id, kind: x.kind, note: x.kind === "image" ? "Image generation model from your API." : x.kind === "tts" ? "Text-to-speech model from your API." : "Available to your API key.", group: "settings", window: win }))]; })() : (fresh || boot.models).models;
   const mdl = pickList.find((m) => m.id === model) || (model ? { id: model, label: model, group: "picker", kind: "chat", note: "Model of this chat (not in your settings list)." } : pickList[0]);
   const lastCompact = [...hist].reverse().find((e) => e.k === "compact");
-  const canPrev = (p) => /\.(html?|svg|png|jpe?g|gif|webp|pdf|md|txt|docx|xlsx|pptx|drawio|dio|ipynb)$/i.test(p || ""), fver = (files.find((f) => f.path === prev) || {}).mtime || 0;
+  const canPrev = (p) => /\.(html?|svg|png|jpe?g|gif|webp|pdf|md|markdown|txt|docx|xlsx|pptx|drawio|dio|ipynb)$/i.test(p || ""), fver = (files.find((f) => f.path === prev) || {}).mtime || 0;
   const leaveOk = async () => { if (!dirtyRef.current) return true; if (!(await discard(baseName(prevRef.current)))) return false; dirtyRef.current = false; return true; };
   const changeTab = async (t) => { if (t !== tab && (tab === "edit" || (tab === "preview" && isNb(prev))) && !(await leaveOk())) return; setTab(t); };
   const pickFile = async (f) => { if (!(await leaveOk())) return; setPrev(f.path); setTab(canPrev(f.path) ? "preview" : "edit"); };
   const refreshFiles = () => api("files?id=" + id).then((d) => { setFiles(d.files); setSig(d.sig); }).catch(() => {});
   const noFile = html`<div class="empty"><div>${Ic("file", 26)}<div>Pick a file in Files first.</div></div></div>`;
   const previewEl = prev ? (isNb(prev) ? html`<${Notebook} key=${prev} id=${id} path=${prev} ver=${fver} api=${api} put=${put} onSaved=${refreshFiles} dirtyRef=${dirtyRef}/>`
+    : /\.(md|markdown)$/i.test(prev) ? html`<${MdFile} key=${prev} id=${id} path=${prev} ver=${fver} src=${src}/>`
     : /\.html?$/i.test(prev) ? html`<${Viewer} url=${src(prev)} name=${prev} ver=${fver} sandbox="allow-scripts allow-forms allow-modals allow-popups"/>`
     : canPrev(prev) ? html`<iframe key=${prev + files.length + fver} sandbox=${/\.pdf$/i.test(prev) ? undefined : "allow-scripts allow-forms allow-modals allow-popups"} src=${src(prev)}></iframe>`
     : html`<div class="empty"><div>${Ic("file", 26)}<div>No preview for this kind of file.<br/>Use Edit to read it.</div></div></div>`)

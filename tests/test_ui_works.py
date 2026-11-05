@@ -533,6 +533,37 @@ class Generate(Base):
         self.assertEqual(w["title"], "Data dashboard")
 
 
+    def test_a_usable_answer_with_problems_gets_one_fix_round(self):
+        seen = []
+        bad = json.loads(json.dumps(W.GEN_EXAMPLE))
+        bad["nodes"][2]["config"]["prompt"] = "Use {{data.nothing}}"
+        good = W.GEN_EXAMPLE
+
+        def fake(sess, text, *a, **k):
+            seen.append(text)
+            yield {"k": "msg", "blocks": [{"type": "text", "text": "```json\n" + json.dumps(bad if len(seen) == 1 else good) + "\n```"}]}
+            yield {"k": "result", "usage": {}, "error": False}
+        old = W.chat.turn
+        W.chat.turn = fake
+        self.addCleanup(setattr, W.chat, "turn", old)
+        warns = []
+        w = W.generate("dashboard from a repo", warnings=warns)
+        self.assertEqual(len(seen), 2)
+        self.assertIn("data.nothing", seen[1])
+        self.assertEqual(warns, [])
+        self.assertNotIn("nothing", json.dumps(w["nodes"]))
+
+    def test_reference_documents_fields_guides_and_pass_through_code(self):
+        ref = W.node_reference()
+        self.assertIn("### code.python", ref)
+        self.assertIn("passes the input on unchanged", W.GEN_RULES)
+        self.assertIn("guide: ", ref)
+        self.assertIn("schedule* (text", ref)
+        p = W.write_guide()
+        self.assertTrue(p and os.path.isfile(p))
+        self.assertIn("### space.publish", open(p, encoding="utf-8").read())
+
+
 class Memory(Base):
     def test_memory_from_work_history_chat_and_the_history_limit(self):
         w = self.save([{"id": "a", "type": "start.manual"}, {"id": "m", "type": "flow.memory", "config": {"source": "work", "limit": 2}},

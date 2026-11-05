@@ -125,9 +125,12 @@ def main(args: In) -> Out:
     result = args.text * args.times
     return Out(result=result, length=len(result))
 """
-PYFN_GUIDE = ("Write one function (`main`, else `run`, else the last one) with ONE argument and a return, both typed as a pydantic BaseModel or a dict / TypedDict. "
+PYFN_GUIDE = ("Three ways to write it. (1) A function (`main`, else `run`, else the last one) with ONE argument: typed as a pydantic BaseModel or a dict / TypedDict, or untyped (it gets a dict). "
               "The argument is filled for you: {{data.x}} keys of the nodes before, the input text when it is a JSON object (a plain text input fills a field named `input` or `text`), then the Arguments field. "
-              "The return becomes this node's output (JSON); each key is {{data.key}} later. print() goes to the run log. "
+              "(2) A plain script with no function: it sees `data`, `text`, `inputs`, `workdir`, `vault` and may fill the dict `result`. (3) Steps, see below. "
+              "A returned dict (or `result`) becomes this node's output (JSON); each key is {{data.key}} later; another value becomes {\"result\": value}. "
+              "Returning nothing (None, or an empty `result`) PASSES THE INPUT ON unchanged, text and data: the node can sit between any two nodes to log, write a file, call an API or check something, with no input / output to match. "
+              "Raise an exception to fail the node (that stops its branch). print() goes to the run log. "
               "Runs on your machine with the UI's Python (pydantic must be installed for it: python -m pip install pydantic). Dict-only code needs nothing.")
 PYFN_GUIDE += (" Multi-step (ETL): put `# %% name` lines between the steps; they run in order in one namespace, each timed in the log, and see `data` (the parsed input), "
                "`inputs`, `text`, `workdir`, `vault` (aihub_vault: the credential sets ticked under 'Code may read' and the node's own set: vault.bucket(\"raw\").uri(\"x.csv\"), "
@@ -311,7 +314,7 @@ BUILTIN = {
                               {"name": "title", "label": "Title (optional)", "type": "text", "default": ""},
                               {"name": "text", "label": "Message", "type": "textarea", "default": "{{input}}", "required": True},
                               {"name": "payload", "label": "Payload", "type": "select", "options": ["card", "text"], "default": "card", "help": "card = Adaptive Card (the Teams template). text = {\"text\": ...} for your own flow."}]},
-    "code.python": {"title": "Python function", "kind": "action", "group": "Code", "desc": "Runs a Python function you write (typed argument and return: pydantic or dict), or ETL code in steps (# %% cells) that reads granted credential sets with aihub_vault. The result becomes JSON for the next nodes.",
+    "code.python": {"title": "Python function", "kind": "action", "group": "Code", "desc": "Runs Python on your machine: a function (typed with pydantic / dict, or untyped), ETL steps (# %% cells), or a plain script. A returned dict / `result` becomes JSON for the next nodes; returning nothing passes the input on unchanged (a side step anywhere in a flow).",
                     "run": ["{python}", "{pkg}/nodes/python_fn.py"], "timeout": 300, "timeout_key": "timeout", "templated": ["args"], "guide": PYFN_GUIDE,
                     "fields": [{"name": "code", "label": "Python code", "type": "code", "lang": "python", "required": True, "default": PYFN_SAMPLE},
                                {"name": "args", "label": "Arguments (optional JSON object)", "type": "text", "default": "", "help": "Overrides the parsed input, e.g. {\"n\": {{data.count}}}. {{input}} and {{data.x}} are filled in."},
@@ -539,7 +542,7 @@ BUILTIN_SCHEMA = {
     "flow.output": ([_IN_TEXT], [_o("text", "text", "the run's answer", "Report ready")]),
     "flow.memory": ([_IN_TEXT], [_o("text", "text", "remembered context + the input", "Remembered context: ...")]),
     "io.read_file": ([_i("path", "path", "a file (or folder) path; relative = the run folder (set in the node)", False)], [_o("text", "text", "the file's text", "col1,col2\n1,2"), _o("json", "json", "the parsed JSON when 'Parse' is JSON", "")]),
-    "code.python": ([_IN_TEXT], [_o("text", "json", "the function's return value (or `result` of the steps) as JSON", '{"total": 3}'), _o("<key>", "text", "each key of a returned object is {{data.key}}", ""),
+    "code.python": ([_IN_TEXT], [_o("text", "json", "the returned dict (or `result`) as JSON; when the code returns nothing, the input text unchanged", '{"total": 3}'), _o("<key>", "text", "each key of a returned object is {{data.key}}", ""),
                                  _o("steps", "json", "multi-step code: name and seconds of each step", "")]),
     "db.trino": ([_IN_TEXT], [_o("text", "text", "the last result as a table / JSON / CSV, or the file path", "| n |\n|---|\n| 25 |"), _o("rows", "json", "the rows (max rows) as objects", '[{"n": 25}]'),
                               _o("columns", "json", "column names", '["n"]'), _o("row_count", "text", "rows of the last result", "25"), _o("path", "path", "the result file (output = path)", ""), _o("steps", "json", "each statement: name, seconds, rows", "")]),
@@ -718,7 +721,9 @@ def catalogue(force=False):
     with _cat_lock:
         if not force and time.time() - _cat["t"] < CAT_TTL and _cat["v"]:
             return _cat["v"]
-        return _build_catalogue()
+        v = _build_catalogue()
+    threading.Thread(target=write_guide, daemon=True).start()       # works-guide.md for chats follows the installed nodes (written only when it changed)
+    return v
 
 
 def _build_catalogue():
@@ -3074,63 +3079,176 @@ GEN_EXAMPLE = {"title": "Data dashboard", "description": "Pulls a repo, builds a
                           "config": {"prompt": "Open the data in {{input}}, analyse it and build a one-page dashboard as a folder with index.html." + OUTPUT_ASK}},
                          {"id": "p", "type": "space.publish", "label": "Publish", "x": 940, "y": 40, "config": {"name": "data-dashboard"}}],
                "edges": [{"from": "a", "to": "g"}, {"from": "g", "to": "c"}, {"from": "c", "to": "p"}]}
-GEN_RULES = """You design a Works flow for AI Hub UI. Reply with ONE ```json block holding the work and nothing else that matters.
+FLOW_BASICS = """HOW A RUN WORKS
+- A work is a graph: ONE trigger (Start) node, then action nodes joined by edges. A run starts at the trigger and every node runs when its
+  parents are done. Branches that do not depend on each other run IN PARALLEL. A node with several parents waits for all of them and runs
+  when at least one gave output (gates below make that strict).
+- Each node gets TEXT in and hands TEXT on, plus a small DATA dict ({{data.key}}). A node "gave no output" when it was a Filter that did
+  not match, was skipped, or failed: its branch stops there (a failure also marks the run failed).
+- The answer of the whole run is the flow.output node (title + template such as {{input}}); without one, the last text.
+
+DATA in any text field (prompt, template, URL, body, SQL, code Arguments ...)
+- {{input}} = the text of the node(s) before it. With several parents: their texts one under another, each headed `## From <label>`.
+- {{in.1}}, {{in.2}} (parents in edge order) or {{in.<label>}} (label lower case, other characters as _: "Git data" -> {{in.git_data}})
+  = ONE parent's text. Use it after a join when the sources must be told apart. Never name a node that is not a parent.
+- {{trigger}} = the text that started the run. {{data.key}} = a key an EARLIER node declares in its `out:` (each key of a code node's
+  returned dict, the inputs of start.manual, path of git.pull / io.path, status of io.request ...). Never use a key nothing declares.
+- start.manual "inputs": one per line `name|Label|type|options or default|*` (type text/textarea/number/select/checkbox, * = required);
+  each becomes {{data.name}} and a form when the work is run from a chat (/work:NAME).
+- ai.claude / ai.free without {{input}} or {{in.x}} in the prompt still get the incoming text first ("Input: ..."): only write {{input}}
+  to place it yourself. A trigger's `filter` (regex) drops runs whose text does not match.
+
+PATHS AND FILES
+- git.pull, io.path and db.sql / db.trino with output = path hand on a PATH, not the content. The AI node after them opens the files
+  itself: say what to read and what to do with it. io.read_file / git.read hand on the CONTENT (small text files only).
+- AI nodes answer with text. When a later node needs a FILE or FOLDER (space.publish, mail attachments), the prompt must say: write the
+  result to a file (a dashboard or site: a folder with index.html) and end the answer with the last line `OUTPUT: /full/path`.
+  space.publish then needs no path field; give it a lower-case slug name.
+
+CODE NODES (code.python, etl.spark, db.sql, db.trino)
+- code.python runs on the user's machine. Its code may be: a function main(args) (typed with pydantic / dict, or untyped: args is a
+  dict of the parsed input + data + Arguments), a plain script (sees `data`, `text`, `inputs`, `workdir`, `vault`, fills the dict
+  `result`), or steps split by `# %% name` lines (one namespace, each timed). A returned dict / `result` = JSON output, each key a
+  {{data.key}}. Returning NOTHING passes the input on unchanged (text and data): use it as a SIDE STEP in the middle of a flow (log,
+  save a file into `workdir`, call an API, validate and `raise` to stop the branch) without matching the nodes around it.
+- Code must be complete and runnable: imports included, no placeholders, stdlib first (pydantic / pandas only when asked).
+- Never put a login, password, token or URL with a key into code, SQL or config. Credential sets carry them: code reads the sets
+  ticked for it with `vault.credential("name")["field"]` / `vault.bucket("raw").uri("x.csv")`; db.sql takes `import aihub_data`.
+
+FLOW CONTROL
+- flow.filter (regex; invert) lets the text through only when it matches, else the branch stops.
+- Gates make a join explicit: flow.all (AND: every parent gave output), flow.any (OR: one is enough; wait = first starts at the first),
+  flow.none (NOT: no parent gave output, the "nothing new" / fallback branch after a Filter; its text field is what it passes on).
+  {{data.passed}} / {{data.missing}} name the parents.
+- flow.loop repeats everything after it once per item of a list (one item per line, comma list, or a JSON list of objects). Inside:
+  {{input}} / {{data.item}} is the item, {{data.index}}, {{data.total}}, and an object's keys are {{data.<key>}} (mail nodes take to /
+  subject / body from them when their fields are empty). Close it with flow.endloop when something must run once after
+  ({{input}} = every pass's result, {{data.results}}, {{data.count}}). No loop inside a loop.
+- flow.template builds text; flow.memory adds remembered context (earlier runs, a chat); flow.note is a comment (passes input on)."""
+
+GEN_RULES = """You design a Works flow (a visual automation) for AI Hub UI from the user's description. Think through the steps first,
+then reply with ONE ```json block holding the work; a short sentence before it is fine, nothing after it.
 Shape: {"title": str, "description": str, "nodes": [{"id": "a", "type": T, "label": str, "x": int, "y": int, "config": {...}}], "edges": [{"from": "a", "to": "b"}]}
 
-STRUCTURE
-- Exactly one Start node, first (start.manual unless a schedule / webhook / package trigger fits). It has no incoming edge. Ids are short unique [a-z0-9]; give every node a short, distinct "label" (it is also how {{in.<label>}} names it).
-- Every other node is reachable from the Start; edges only join existing ids, never a node to itself, no cycles. Use ONLY the node types listed below and only their field names; fill the required (*) fields, leave password fields empty (the user fills them in), never put a secret in a config.
-- Layout is optional (it is tidied when missing or overlapping): x grows by 300 per column, y by 140 per branch (a card is 230 x 100).
-- Branches that do not depend on each other run IN PARALLEL; a node with several parents waits for all of them and runs when at least one gave output. Use that: independent reads / requests side by side, then ONE node that joins them.
-- GATES make a join explicit: flow.all (AND: goes on only when EVERY parent gave output, e.g. data AND template ready), flow.any (OR: one is enough; config wait = first starts at the first one), flow.none (NOT: goes on only when NO parent gave output, e.g. after a flow.filter that found nothing new; its config text is what it passes on). A Filter that does not match, a skip or a failure = no output. {{data.passed}} / {{data.missing}} name the parents.
+""" + FLOW_BASICS + """
 
-DATA: every node hands on text, plus a small data dict. In any text field (prompt, template, URL, body ...):
-- {{input}} = the text of the node(s) before it. With several parents it is their texts one under another, each headed `## From <label>`.
-- {{in.1}}, {{in.2}} (parents in the order the edges are listed) or {{in.<label>}} (label in lower case, other characters as _, e.g. label "Git data" -> {{in.git_data}}) = ONE parent only. Use it after a join when the prompt must tell the sources apart. Never use a name that is not a parent's label.
-- {{trigger}} = the text that started the run. {{data.key}} = the inputs of start.manual (its "inputs" field: one per line `name|Label|type|options or default|*`, * = required, type text/textarea/number/select/checkbox) and the data keys other nodes list (git.pull / io.path: path).
-- A Claude prompt without {{input}} / {{in.x}} still receives the incoming text first ("Input: ..."), so only write {{input}} to place it yourself.
-- PATHS, not content: git.pull / io.path output a path. The Claude task after them opens the files itself (give it {{input}} or {{data.path}} and say what to analyse).
-- Claude only answers with text. When a later node needs a FILE or FOLDER (space.publish, mail attachments), the Claude prompt must say: write the result to a file (a dashboard or site: a folder with index.html) and end the answer with the last line `OUTPUT: /full/path`. space.publish then needs no File field; set a Space name (lower-case slug).
-- The answer of the whole run: add a flow.output node (title + template such as {{input}}); without one the last text is the answer.
-
-- LOOPS: flow.loop repeats everything after it once per item of a list (one mail per sender). Feed it a list (a Claude node that answers one item per line, or a JSON list of objects such as [{"to","subject","body"}]); inside, {{data.item}} / {{input}} is the item, {{data.index}}, and an object's keys are {{data.<key>}} (send mail nodes take to / subject / body from them when their fields are empty). Close it with flow.endloop when something must run once afterwards. No loop inside a loop.
+DESIGN RULES
+- Exactly one trigger node (start.manual unless a schedule, webhook, message or package trigger fits), with no incoming edge. Ids are
+  short unique [a-z0-9]; every node gets a short distinct "label" (it is also its {{in.<label>}} name).
+- Every node is reachable from the trigger; edges only join existing ids, never a node to itself, no cycles.
+- Use ONLY the node types listed below and only their field names. Fill every required (*) field with a real value; select fields take
+  one of the listed options exactly. Leave secret fields empty (the user fills them, or a saved credential set does).
+- Pick the node that does the job natively (HTTP request for an API call, db.sql for a database, send.* to post a message) before an AI
+  node; use an AI node for reading, judging, writing or summarising. Prompts are specific: what to read, what to produce, in what shape.
+- Independent reads side by side (parallel), then ONE node that joins them. Keep it as small as the request allows (usually 3 to 8 nodes).
+- Layout is optional (tidied when missing or overlapping): x grows by 300 per column, y by 140 per branch.
+- Prefer a saved node (preset, listed at the end) when one fits: {"id","type": <its type>, "preset": <its id>, "config": {}} with only
+  the fields this work changes.
 
 SHAPES
-- ai.claude (list the recipients, one per line) -> flow.loop -> ai.claude (write the mail for {{data.item}}) -> a mail node -> flow.endloop -> flow.output.
 - git.pull -> ai.claude (analyse, build dashboard/index.html, end with OUTPUT:) -> space.publish.
-- start.cron -> io.request / git.read -> ai.claude -> send.teams / send.slack / send.discord / send.webhook or send.smtp (mail through any server; action draft saves it for review), or pkg:aihub-nodes-outlook/outlook-send for the Outlook app when it is in the list.
+- start.cron -> io.request / git.read / db.sql -> ai.claude or ai.free (summarise) -> send.teams / send.slack / send.discord / send.webhook /
+  send.smtp (action draft saves it for review) or a package mail node such as pkg:aihub-nodes-outlook/outlook-send when listed.
 - start.manual -> [git.read, io.request] in parallel -> ai.claude (prompt names {{in.<a>}} and {{in.<b>}}) -> flow.output.
-- ETL: start.cron -> db.sql (any database: config driver postgresql|mssql|oracle|trino|mysql|sqlite|duckdb, frame native|pandas|polars, statements separated by ;, output path for big results, write_table to load rows coming in) or db.trino or etl.spark (PySpark in `# %% name` steps; s3a("<bucket>", "path") for the buckets of its S3 credential set) -> code.python (more steps, `result` dict) -> flow.output. Never write a login into SQL or code: credential sets carry them.
-- Keep it as small as the request allows: 3 to 7 nodes.
+- ai.claude (one recipient per line, or a JSON list) -> flow.loop -> ai.claude (mail for {{data.item}}) -> send.smtp -> flow.endloop -> flow.output.
+- ETL: start.cron -> db.sql (driver postgresql|mssql|oracle|trino|mysql|sqlite|duckdb; frame native|pandas|polars; output path for big
+  results; write_table loads rows coming in) or db.trino or etl.spark (PySpark steps; s3a("<bucket>", "path")) -> code.python (more steps,
+  `result` dict) -> flow.output.
+- A check or log in the middle: ... -> code.python (validates {{input}} / data, raises on bad data, returns nothing) -> the next node gets the
+  same input as if the code node were not there.
+- "Only when something new": source -> flow.filter / code.python -> action, plus flow.none after the filter for the "nothing new" note.
 
 EXAMPLE (valid):
 ```json
 """ + json.dumps(GEN_EXAMPLE, indent=1) + """
 ```
-Each node type below lists `in:` (name:type, * = required) and `out:` (name:type (what it is)). An output called `text` is {{input}} for the next node; every other output is {{data.name}}. Only write {{data.x}} when x is declared in `out:` of a node before it (or is an input of the Start node). Connect an `out` to an `in` of the same type (path -> path, url -> url); a `text` output can feed any `input`.
-Node types:
+
+NODE REFERENCE. Each node lists what it does, `in:` (name:type, * = required), `out:` (name:type (what it is)), its fields
+(name*, type, options, help) and, when it has one, its guide. An output called `text` is {{input}} for the next node; every other output
+is {{data.name}}. A `text` output can feed any node; for the other inputs match the kind (path -> path, url -> url). Code nodes take any
+input and, when they return nothing, give back what they got, so they fit anywhere.
 """
 
 
+def _flat(t, n):
+    t = " ".join(str(t or "").split())
+    return t if len(t) <= n else t[:n - 3].rsplit(" ", 1)[0] + "..."
 
-def _gen_catalogue():
+
+def _field_line(f):
+    if f["name"] == "filter":
+        return "filter (regex: runs whose text does not match are dropped)"
+    bits = [f["type"]]
+    if f.get("options"):
+        bits.append("=" + "/".join(str(o) for o in f["options"]))
+    if f.get("secret") or f["type"] == "password":
+        bits.append("secret: leave empty")
+    elif f["type"] in ("env", "model", "mode", "effort", "folder"):
+        bits.append("the user picks it; leave out")
+    d = f.get("default")
+    if d not in (None, "", [], {}) and f["type"] in ("select", "number", "checkbox", "text") and len(str(d)) <= 30:
+        bits.append("default %s" % json.dumps(d, ensure_ascii=False))
+    help_ = _flat(". ".join(x.strip().rstrip(".") for x in (f.get("label") or "", f.get("help") or "") if x.strip()), 160)
+    return "%s%s (%s)%s" % (f["name"], "*" if f.get("required") else "", ", ".join(bits), ": " + help_ if help_ else "")
+
+
+def node_reference(cat=None, guides=True):
+    """The node catalogue as text for a model: what each node does, in / out, every field with its help and (short) guide. Built from the
+    live catalogue (builtin + package nodes), so it is never out of date. Used by the work generator, chats (works-guide.md) and Magic."""
+    cat = catalogue() if cat is None else cat
     lines = []
-    for t, sp in catalogue().items():
+    for t, sp in cat.items():
         if sp.get("hidden"):
             continue
-        fl = ", ".join("%s%s%s" % (f["name"], "*" if f.get("required") else "", "=" + "/".join(f["options"]) if f.get("options") else "") for f in sp["fields"])
         sio = sp.get("io") or {}
-        io = " | in: %s | out: %s" % (", ".join("%s:%s%s" % (i["name"], i["type"], "*" if i.get("required") else "") for i in sio.get("inputs", ())) or "-",
-                                      "; ".join("%s:%s%s" % (o["name"], o["type"], " (%s)" % o["desc"][:110] if o.get("desc") else "") for o in sio.get("outputs", ())) or "text")
+        ins = ", ".join("%s:%s%s" % (i["name"], i["type"], "*" if i.get("required") else "") for i in sio.get("inputs", ())) or "-"
+        outs = "; ".join("%s:%s%s" % (o["name"], o["type"], " (%s)" % _flat(o["desc"], 140) if o.get("desc") else "") for o in sio.get("outputs", ())) or "text"
+        lines.append("\n### %s: %s (%s, %s)" % (t, sp.get("title") or t, sp["kind"], sp["group"]))
+        lines.append(_flat(sp.get("desc"), 600))
+        lines.append("in: %s | out: %s" % (ins, outs))
+        fl = [_field_line(f) for f in sp["fields"]]
+        lines.append("fields: " + ("; ".join(fl) if fl else "-"))
         ck = (sp.get("credential") or {}).get("kind")
-        lines.append("- %s (%s, %s): %s%s | fields: %s%s" % (t, sp["kind"], sp["group"], sp["desc"][:160], io, fl or "-",
-                                                         " | credential kind: %s (a saved login set is linked automatically: leave its secret fields out of config)" % ck if ck else ""))
+        if ck:
+            lines.append("credential kind: %s (a saved login set is linked automatically: leave its secret fields out of config)" % ck)
+        if guides and sp.get("guide"):
+            lines.append("guide: " + _flat(sp["guide"], 900))
+    return "\n".join(lines).lstrip("\n")
+
+
+def _gen_catalogue():
+    lines = [node_reference()]
     saved = [p for p in presets().values() if p["type"] in catalogue()]
     if saved:
         lines.append("\nSaved nodes (set up by the user, logins included). When one fits, use it: {\"id\",\"type\": <its type>, \"preset\": <its id>, \"config\": {}} and put in config only the fields this work changes (never logins):")
         for p in saved[:40]:
             lines.append("- preset %s (type %s): %s%s | set: %s" % (p["id"], p["type"], p["name"], " - " + p["description"] if p["description"] else "", ", ".join(sorted(p["config"])) or "-"))
     return "\n".join(lines)
+
+
+def guide_path():
+    return os.path.join(store.ui_dir(), "works-guide.md")
+
+
+def write_guide():
+    """~/.aihub/ui/works-guide.md: the rules + node reference, for chats that design a ```workflow block (Claude Code / AIHubness read it).
+    Rewritten only when it changed. Never raises."""
+    try:
+        text = "# Works guide (generated from the installed nodes)\n\n" + GEN_RULES.split("SHAPES", 1)[0] + "\nSHAPES" + GEN_RULES.split("SHAPES", 1)[1] + _gen_catalogue() + "\n"
+        p = guide_path()
+        try:
+            with open(p, encoding="utf-8") as f:
+                if f.read() == text:
+                    return p
+        except OSError:
+            pass
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, p)
+        return p
+    except Exception:
+        return None
 
 
 NODE_W, NODE_H, GAP_X, GAP_Y = 230, 100, 70, 40       # a node card is 230 wide (NW in app.js) and ~70-100 tall
@@ -3332,15 +3450,54 @@ def checked_work(w, strip_secrets_with=None, warnings=None):
     return w
 
 
+GEN_TRIES = 3
+
+
+def _gen_problems(w, warns):
+    """What a checked work still gets wrong, for one fix round: unknown data keys, required fields left empty, a lonely node."""
+    cat, out = catalogue(), list(warns)
+    by = {n["id"]: n for n in w.get("nodes", [])}
+    reach, todo = set(), [n["id"] for n in w["nodes"] if cat[n["type"]]["kind"] == "trigger"]
+    while todo:
+        u = todo.pop()
+        if u not in reach:
+            reach.add(u)
+            todo.extend(e["to"] for e in w.get("edges", []) if e["from"] == u)
+    for n in w["nodes"]:
+        sp, cfg = cat[n["type"]], n.get("config") or {}
+        if n["id"] not in reach:
+            out.append('"%s" is not connected to the Start node' % (n.get("label") or n["id"]))
+        if n.get("preset"):
+            continue
+        for f in sp["fields"]:
+            if f.get("required") and not f.get("secret") and f["type"] not in ("password", "env", "model", "mode", "effort", "folder") \
+                    and str(cfg.get(f["name"], f.get("default", "")) or "").strip() == "" and not (sp.get("credential") and f["name"] in cred_fields(sp)) \
+                    and f["name"] not in (sp.get("takes") or ()):
+                out.append('"%s" (%s) leaves the required field %s empty' % (n.get("label") or n["id"], n["type"], f["name"]))
+    return out[:12]
+
+
 def generate(prompt, model="", box=None, warnings=None):
-    """Ask Claude to design a work from PROMPT; -> the saved (disabled) work. Raises RuntimeError.
-    An answer that cannot be used (no JSON, unknown node type ...) is sent back once with the reason, in the same chat."""
+    """Design a work from PROMPT; -> the saved (disabled) work. Raises RuntimeError.
+    The model gets the rules and the live node reference. Its answer is checked (JSON, node types, a Start, links) and, when it cannot be
+    used, sent back with the reason; when it can be used but has problems (a {{data.x}} nothing declares, a required field left empty, a
+    node not connected), it is sent back ONCE to fix them and the better answer is kept. Claude Code answers when it is installed (plan
+    mode, the same chat for the fix rounds); else the API directly (same key as Free chat)."""
     prompt = " ".join(str(prompt or "").split())[:4000]
     if not prompt:
         raise RuntimeError("describe the workflow you want")
-    s = store.create_session("Workflow generator", "", chat.build_system(GEN_RULES + _gen_catalogue()))
+    system = GEN_RULES + _gen_catalogue()
+    use_claude = bool(chat.claude_bin()) or getattr(chat.turn, "__module__", "") != chat.__name__     # tests replace chat.turn
+    s = store.create_session("Workflow generator", "", chat.build_system(system)) if use_claude else None
+    said = []                                                          # the direct API path has no session: earlier rounds travel as text
 
     def ask(text):
+        if not use_claude:
+            from . import magic
+            full = text if not said else "\n\n".join(said) + "\n\n" + text
+            reply, _, _ = magic.ask_model(system, full, model or "opus", box.get_all() if box else None, engine="api", max_tokens=16000)
+            said.extend(["[Your earlier request]\n" + text, "[Your earlier answer]\n" + reply])
+            return reply
         reply, err = "", None
         for ev in chat.turn(store.get_session(s["id"]) or s, text, model, "", "plan", extra_env=box.get_all() if box else None):
             if ev["k"] == "msg":
@@ -3351,19 +3508,35 @@ def generate(prompt, model="", box=None, warnings=None):
             raise RuntimeError(err)
         return reply
     try:
-        text, last = "Create this workflow:\n" + prompt, None
-        for _ in range(2):
+        text, last, best, fixed = "Create this workflow:\n" + prompt, None, None, False
+        for _ in range(GEN_TRIES):
+            warns = []
             try:
-                return store.save_work(checked_work(extract_work(ask(text)), warnings=warnings))
+                w = checked_work(extract_work(ask(text)), warnings=warns)
             except ValueError as e:
                 last = e
-                text = "That answer cannot be used: %s. Reply again with ONE corrected ```json block (only the listed node types and their fields, one Start node)." % e
-        raise RuntimeError("could not build the work: %s" % last)
+                text = ("That answer cannot be used: %s. Reply again with ONE corrected ```json block (only the listed node types and their fields, "
+                        "one Start node, edges between existing ids)." % e)
+                continue
+            probs = _gen_problems(w, warns)
+            if best is None or len(probs) < best[1]:
+                best = (w, len(probs), warns)
+            if not probs or fixed:
+                break
+            fixed = True
+            text = ("Almost: fix these problems and reply with the WHOLE corrected work in ONE ```json block:\n- " + "\n- ".join(probs) +
+                    "\nA {{data.x}} must be declared in the out: of a node before it (or be an input of start.manual); a code.python node may return a dict to declare keys.")
+        if best is None:
+            raise RuntimeError("could not build the work: %s" % last)
+        if warnings is not None:
+            warnings.extend(best[2])
+        return store.save_work(best[0])
     finally:
-        try:
-            store.delete_session(s["id"])
-        except Exception:
-            pass
+        if s:
+            try:
+                store.delete_session(s["id"])
+            except Exception:
+                pass
 
 
 # ---------- webhook tokens (stable across restarts)

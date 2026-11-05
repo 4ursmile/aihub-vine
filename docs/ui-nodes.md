@@ -330,7 +330,7 @@ PySpark code in steps, on a Spark cluster or a local Spark. Group **Code**.
 
 ## Python function node (`code.python`)
 
-Write one function in the node's code box. Its argument and its return must be typed as a pydantic `BaseModel` or a `dict` / `Dict[...]` / `TypedDict`; the node refuses anything else with a message that says what to annotate.
+Write a function, steps, or a plain script in the node's code box. A typed function takes and returns a pydantic `BaseModel` or a `dict` / `Dict[...]` / `TypedDict`. An untyped function gets the parsed input as a dict.
 
 ```python
 from pydantic import BaseModel
@@ -348,7 +348,9 @@ def main(args: In) -> Out:
 
 - Entry point: `main`, else `run`, else the last function defined. One argument at most.
 - Input is parsed for you: `data` of the nodes before, then the input text when it is a JSON object (also inside a ```json fence; a plain text input fills a field called `input` or `text`), then the optional **Arguments** JSON field (`{{input}}` / `{{data.x}}` are filled in). A model drops keys it has no field for (unless `extra = "allow"`).
-- Output: the return becomes JSON text; every top-level key is `{{data.key}}` for later nodes. `print()` goes to the run log.
+- Output: a returned dict becomes JSON text, and every top-level key is `{{data.key}}` for later nodes. Any other value becomes `{"result": value}`. `print()` goes to the run log.
+- **Side step (pass-through).** The node may return nothing: a function that returns `None`, a plain script with no function, or steps that leave `result` empty. The node then passes its input on unchanged, text and `data`. It can sit between any two nodes to log, save a file into `workdir`, call an API or validate data. It does not have to match their input or output. Raise an exception to fail the node and stop its branch.
+- Plain script (no function): it sees `data`, `text`, `inputs`, `workdir` and `vault`, and may fill the dict `result`.
 - Runs with the UI's Python (`nodes/python_fn.py`, own process, timeout field, default 60 s, max 3600). pydantic is only needed when the code imports it; a missing module is reported with the pip command. Shared workflows list "runs Python code ..." under Safety.
 
 **Several steps.** `# %% name` lines split the code into steps (cells, as in Jupyter or VS Code). The steps run in order in ONE namespace, each timed in the log. The first failing step stops the run, and the log names it with its line number. The steps see `data`, `inputs`, `text`, `workdir`, `vault` and `result` (a dict = the node's output). If the steps define `main(args)` or `run(args)`, it is still called afterwards with the typed contract. Code without `# %%` works exactly as before.

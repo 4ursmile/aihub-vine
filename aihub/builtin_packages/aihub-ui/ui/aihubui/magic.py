@@ -19,9 +19,10 @@ VALUE_CAP = 12000
 FENCE = re.compile(r"```[ \t]*([A-Za-z0-9_+-]*)[ \t]+field=([A-Za-z_][A-Za-z0-9_]*)[^\n]*\n(.*?)\n[ \t]*```", re.S)
 JSON_FENCE = re.compile(r"```(?:json)?[ \t]*\n(.*?)\n[ \t]*```", re.S)
 
-SYSTEM = """You set up ONE node of an AI Hub "Works" flow (a visual workflow) for the user. You get the node's type, its guide, every
-settings field (name, type, options, current value) and what flows into it from earlier nodes. Do what the user asks: fill in or change
-fields so the node does it.
+SYSTEM = """You set up ONE node of an AI Hub "Works" flow (a visual automation) for the user. You get the node's type, its description and
+guide, every settings field (name, type, options, help, current value), what flows into it from earlier nodes (texts and {{data.x}} keys
+with examples), its last run (input, output, error, log) and the Python it runs with. Do what the user asks: fill in or change the fields
+so the node does it. When the last run failed, find the cause in its error and log and fix it.
 
 Reply with exactly:
 1. ONE ```json block: {"config": {"<field name>": <value>, ...}, "note": "<one or two sentences: what you set and anything the user must still do>"}
@@ -30,10 +31,18 @@ Reply with exactly:
    ```<language> field=<field name>
    ...complete text...
    ```
-Rules: never invent passwords, tokens or keys and never put a login into code or SQL (secret fields and credential sets are filled by
-the user). Use {{input}} / {{data.key}} only for values that really come from earlier nodes (listed under "Flows in"). Code must be
-complete and runnable as the node's guide describes (no placeholders like ...), short, with brief comments only where useful.
-If the request cannot be done with this node, change nothing and say why in the note."""
+Rules:
+- Never invent passwords, tokens or keys and never put a login into code, SQL, URLs or headers (secret fields and credential sets are
+  filled by the user; code reads granted sets with `vault.credential("name")["field"]`).
+- Use {{input}}, {{in.<parent>}} and {{data.key}} only for values that really come from earlier nodes (listed under "Flows in"); use the
+  example values to get names, shapes and types right.
+- Code must be complete and runnable (imports, no placeholders like ...), short, with brief comments only where useful, using only the
+  installed packages unless the user asks for more (then say in the note what to install).
+- A code.python node does NOT have to match the nodes around it: a plain script or an untyped main(args) is fine, and returning nothing
+  passes the input on unchanged (a side step: log, save, call an API, check and raise). Return a dict only when later nodes need its keys.
+- Prompts for AI nodes are specific: what to read, what to produce, in what shape; when a later node needs a file, the prompt asks for it
+  and ends with the line `OUTPUT: /full/path`.
+- If the request cannot be done with this node, change nothing and say in the note which node type would do it."""
 
 
 def _short(v, n=VALUE_CAP):
@@ -182,7 +191,7 @@ def _usage(u):
             "cache_write": int(u.get("cache_creation_input_tokens") or 0)}
 
 
-def _direct(system, prompt, model, extra_env):
+def _direct(system, prompt, model, extra_env, max_tokens=MAX_OUT):
     """-> (text, model) through the API, or raises LookupError when no key is configured (the caller falls back to claude -p)."""
     from . import freechat
     try:
@@ -191,7 +200,7 @@ def _direct(system, prompt, model, extra_env):
         raise LookupError(str(e))
     head = dict(head, accept="application/json")
     mid = freechat.resolve_model(model or "sonnet", env)
-    body = {"model": mid, "max_tokens": MAX_OUT, "system": system, "messages": [{"role": "user", "content": prompt}]}
+    body = {"model": mid, "max_tokens": max_tokens, "system": system, "messages": [{"role": "user", "content": prompt}]}
     req = urllib.request.Request(base + "/v1/messages", data=json.dumps(body).encode("utf-8"), headers=head, method="POST")
     secrets = [v for k, v in head.items() if k in ("x-api-key", "authorization")]
     try:
@@ -242,11 +251,11 @@ def _claude(system, prompt, model):
     return str(m.get("result") or ""), used
 
 
-def ask_model(system, prompt, model="", extra_env=None, engine="auto"):
+def ask_model(system, prompt, model="", extra_env=None, engine="auto", max_tokens=MAX_OUT):
     """-> (text, model, engine)."""
     if engine in ("auto", "api"):
         try:
-            t, m = _direct(system, prompt, model, extra_env)
+            t, m = _direct(system, prompt, model, extra_env, max_tokens)
             return t, m, "api"
         except LookupError:
             if engine == "api":
@@ -263,7 +272,12 @@ def magic(spec, config, ask, field=None, context=None, model="", box=None, engin
         raise ValueError("this field cannot be filled by Magic ask")
     safe = {f["name"]: config.get(f["name"]) for f in spec.get("fields") or [] if editable(f) and f["name"] in (config or {})}
     prompt = brief(spec, safe, ask, field, context)
-    text, used, how = ask_model(SYSTEM, prompt, model, box.get_all() if box else None, engine)
+    try:
+        from . import works
+        system = SYSTEM + "\n\n" + works.FLOW_BASICS                   # how data moves between nodes: the same rules the work generator gets
+    except Exception:
+        system = SYSTEM
+    text, used, how = ask_model(system, prompt, model, box.get_all() if box else None, engine)
     try:
         raw, note = parse(text)
     except ValueError:

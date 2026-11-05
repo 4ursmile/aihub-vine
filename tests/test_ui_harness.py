@@ -121,6 +121,31 @@ class Loop(Api):
         self.go(s, "hello", engine="free")
         self.assertEqual(self.usage_lines()[-1]["model"], "claude-haiku-5-5-x")
 
+    def test_free_chat_counts_a_gateway_unknown_model_as_the_asked_model(self):
+        s = self.chat("free")
+        store.save_prefs({"auto_engine": False, "free_model": "claude-sonnet-5-5-y"})
+        self.seen["script"] = [text_reply("hi", model="unknown")]               # some gateways name no model
+        self.go(s, "hello", engine="free")
+        self.assertEqual(self.usage_lines()[-1]["model"], "claude-sonnet-5-5-y")
+
+    def test_free_chat_counts_tokens_of_a_failed_answer(self):
+        s = self.chat("free")
+        store.save_prefs({"auto_engine": False})
+        bad = text_reply("") + [("error", {"error": {"message": "overloaded"}})]
+        self.seen["script"] = [bad]
+        evs = self.go(s, "hello", engine="free")
+        self.assertTrue(any(e.get("k") == "error" for e in evs))
+        self.assertEqual(self.usage_lines()[-1]["input"], 11)                   # spent even though the answer failed
+
+    def test_note_never_logs_unknown_when_a_model_can_be_resolved(self):
+        store.save_prefs({"free_model": "claude-opus-5-5-z"})
+        for m in ("", "unknown", "opus"):
+            hubusage.note("s1", "free", m, {"input": 1, "output": 1})
+            self.assertNotEqual(self.usage_lines()[-1]["model"], "unknown", m)
+        self.assertEqual(self.usage_lines()[-3]["model"], "claude-opus-5-5-z")
+        hubusage.note("s1", "harness", "claude-x-1", {"input": 1})
+        self.assertEqual(self.usage_lines()[-1]["model"], "claude-x-1")
+
     def test_failed_command_comes_back_as_an_error_and_the_model_retries(self):
         self.seen["script"] = [tool_reply(("r1", "run", {"cmd": "exit 3"})), tool_reply(("r2", "run", {"cmd": "echo fixed"})), text_reply("ok")]
         evs = self.go(self.chat(), "run it", mode="bypass")

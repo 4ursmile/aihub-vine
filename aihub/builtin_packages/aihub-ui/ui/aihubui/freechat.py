@@ -413,6 +413,8 @@ def _round(base, head, body, env, state, secrets):
             resp and resp.close()
         except Exception:
             pass
+    if served.lower() in ("unknown", "none", "null"):
+        served = ""                                                      # some gateways name no model: keep the id we asked for (the hub prices it)
     yield "done", {"blocks": blocks, "stop": stop, "usage": usage, "err": err, "code": code, "model": served or str(body.get("model") or "")}
 
 
@@ -610,6 +612,8 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
             store.append(sid, ev)
             yield ev
         if err:
+            if any(total.values()):
+                store.add_usage(sid, dict(total, cost=0), model=used_model)    # the tokens were spent even when the answer failed
             ev = {"k": "error", "text": err}
             store.append(sid, ev)
             yield ev
@@ -619,6 +623,8 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
             ev = {"k": "result", "usage": total, "ms": int((time.time() - t0) * 1000), "error": False, "text": ""}
             store.append(sid, ev)
             yield ev
+        elif any(total.values()):
+            store.add_usage(sid, dict(total, cost=0), model=used_model)        # stopped: what was already streamed is still billed
     finally:
         with lock:
             live.pop(sid, None)
