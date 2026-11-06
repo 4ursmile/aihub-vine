@@ -2003,10 +2003,10 @@ LIB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 
 def node_env(spec, wd, ctx, grant_file):
-    """Environment of a node program: aihub_vault on PYTHONPATH and pointed at this node's grant (only the sets granted to it)."""
+    """Environment of a node program (UTF-8 stdio: Windows defaults to cp1252): aihub_vault on PYTHONPATH and pointed at this node's grant (only the sets granted to it)."""
     pp = os.environ.get("PYTHONPATH", "")
     return dict(os.environ, AIHUB_NODE=spec["type"], AIHUB_NODE_WORKDIR=wd, AIHUB_NO_UPDATE="1", AIHUB_RUN_DIR=str((ctx or {}).get("dir") or wd),
-                AIHUB_NODE_DIR=str((ctx or {}).get("node_dir") or ""), AIHUB_VAULT_FILE=grant_file, PYTHONPATH=LIB_DIR + (os.pathsep + pp if pp else ""))
+                AIHUB_NODE_DIR=str((ctx or {}).get("node_dir") or ""), AIHUB_VAULT_FILE=grant_file, PYTHONIOENCODING="utf-8", PYTHONPATH=LIB_DIR + (os.pathsep + pp if pp else ""))
 
 
 def write_grant(grant):
@@ -3018,7 +3018,7 @@ class Engine:
         retry = time.time() + min(900, 30 * 2 ** fails)
         try:
             p = subprocess.Popen(argv, cwd=spec["dir"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-                                 env=dict(os.environ, AIHUB_NODE=spec["type"]), start_new_session=True)
+                                 env=dict(os.environ, AIHUB_NODE=spec["type"], PYTHONIOENCODING="utf-8"), start_new_session=True)
             p.stdin.write(json.dumps({"config": cfg, "run": {"work": w["id"], "node": n["id"]}}) + "\n")
             p.stdin.flush()
         except OSError as e:
