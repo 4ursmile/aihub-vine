@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from aihubui import aihub as A, auth, chat, chatshare, drawioview, freechat, harness, harnesstools, hubusage, magic, mcpclient, nodeenv, officeview, searchidx, selfupdate, sources, spacebundle, store, term, usagereport, workpkg, works as W    # noqa: E402
+from aihubui import aihub as A, auth, chat, chatshare, drawioview, freechat, gitinspect, harness, harnesstools, hubusage, magic, mcpclient, nodeenv, officeview, searchidx, selfupdate, sources, spacebundle, store, term, usagereport, workpkg, works as W    # noqa: E402
 from aihubui.secretbox import Box, write_private                  # noqa: E402
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -1345,15 +1345,96 @@ def file_put(h, q, b):
         raise Err(str(e))
 
 
+def _textish(v):
+    """A file version as the page wants it: (text or None, why not text: "binary" / "big" / None)."""
+    if isinstance(v, dict):
+        return None, "big" if "big" in v else "binary"
+    return v, None
+
+
 def file_diff(h, q, b):
-    """The file now and what it was before: the last turn started (`turn`) or at the last git commit (`git`). `base` None = nothing to compare."""
+    """One file now and before: the last turn started (`turn`) or the last git commit (`git`). `base` None = nothing to compare.
+    A deleted file compares its old text with "" (`deleted`); binary or big files say so instead of failing."""
     s = _chat_of(q, b)
-    now = store.read_text(s["id"], q.get("path"))
-    if now is None or "text" not in now:
-        raise Err("this file cannot be compared as text")
+    path = gitinspect.clean(q.get("path"))
+    if not path:
+        raise Err("bad path")
     want = q.get("base") if q.get("base") in ("turn", "git") else "turn"
-    base = store.snap_text(s["id"], q["path"]) if want == "turn" else store.git_text(s["id"], q["path"])
-    return {"now": now["text"], "base": base, "source": want, "git": store.git_text(s["id"], q["path"]) is not None, "turn": store.snap_text(s["id"], q["path"]) is not None}
+    snap, com = store.snap_text(s["id"], path), store.git_text(s["id"], path)
+    base = snap if want == "turn" else com
+    cur = store.read_text(s["id"], path)
+    out = {"source": want, "git": com is not None, "turn": snap is not None, "path": path, "deleted": cur is None}
+    if cur is None:
+        if not base:
+            raise Err("no such file", 404)
+        return dict(out, now="", base=base)
+    if "text" not in cur:
+        return dict(out, now=None, base=None, binary=True, big=cur.get("big"))
+    return dict(out, now=cur["text"], base=base)
+
+
+def file_changes(h, q, b):
+    """Every changed file of the folder: since the last turn (`turn`, the snapshot) or vs HEAD (`git`: staged, unstaged, untracked).
+    `files` None = nothing to compare against (no snapshot yet / not a git repository with a commit)."""
+    s = _chat_of(q, b)
+    want = q.get("base") if q.get("base") in ("turn", "git") else "turn"
+    items = store.snap_changes(s["id"], store.tree(s["id"])) if want == "turn" else gitinspect.changes(store.session_dir(s["id"]))
+    return {"source": want, "files": items}
+
+
+def _git_dir(q, b):
+    s = _chat_of(q, b)
+    d = store.session_dir(s["id"])
+    if not gitinspect.repo(d):
+        raise Err("not a git repository", 404)
+    return d
+
+
+def _rev(d, q):
+    """A revision from the query: a commit id or HEAD as is, a branch / tag name resolved to its id."""
+    r = q.get("rev") or "HEAD"
+    if gitinspect.good_rev(r):
+        return r
+    sha = gitinspect.resolve_ref(d, r)
+    if not sha:
+        raise Err("no such branch or commit", 404)
+    return sha
+
+
+def git_info(h, q, b):
+    """The Git tab: {"repo": False} outside a repository, else branch, HEAD, ahead/behind, status, branches, remotes."""
+    s = _chat_of(q, b)
+    return gitinspect.info(store.session_dir(s["id"])) or {"repo": False}
+
+
+def git_log(h, q, b):
+    d = _git_dir(q, b)
+    try:
+        skip, n = int(q.get("skip") or 0), int(q.get("n") or 50)
+    except ValueError:
+        raise Err("bad skip / n")
+    if not gitinspect.head(d):
+        return {"commits": [], "more": False}
+    return gitinspect.log(d, path=q.get("path") or None, skip=skip, n=n, rev=_rev(d, q), grep=(q.get("q") or "").strip() or None)
+
+
+def git_commit(h, q, b):
+    d = _git_dir(q, b)
+    c = gitinspect.commit(d, _rev(d, q))
+    if not c:
+        raise Err("no such commit", 404)
+    return {"commit": c}
+
+
+def git_file(h, q, b):
+    """A file before and after one commit: {"old", "new"} texts (null + binary/big when it is not text)."""
+    d = _git_dir(q, b)
+    r = gitinspect.file_pair(d, _rev(d, q), q.get("path"))
+    if r is None:
+        raise Err("no such commit or file", 404)
+    old, ob = _textish(r["old"])
+    new, nb = _textish(r["new"])
+    return {"old": old, "new": new, "binary": bool(ob or nb), "big": ob == "big" or nb == "big", "rev": r["rev"], "parent": r["parent"]}
 
 
 def free_models(h, q, b):
@@ -1419,8 +1500,8 @@ def chat_stop(h, q, b):
 
 
 def chat_hint(h, q, b):
-    """A message typed while Claude Code answers: it joins THAT answer at its next step. 409 when no answer can take it any more
-    (finished, Free chat): the page then sends it as the next message."""
+    """A message typed while Claude Code or AIHubness answers: it joins THAT answer at its next step. 409 when no answer can take it
+    any more (finished, Free chat): the page then queues it as the next message."""
     s = store.get_session(need(b, "id"))
     if not s:
         raise Err("no such chat", 404)
@@ -1430,6 +1511,11 @@ def chat_hint(h, q, b):
     if not chat.hint(s["id"], text):
         raise Err("no running answer to add this to", 409)
     return {"sent": True}
+
+
+def chat_agent_stop(h, q, b):
+    """Stop one helper agent of a running AIHubness answer; the answer goes on with what that agent found so far."""
+    return {"stopped": chat.stop_agent(need(b, "id"), str(need(b, "agent"))[:80])}
 
 
 def chat_card(h, q, b):
@@ -2707,7 +2793,7 @@ ROUTES = {
     ("POST", "knowledge/delete"): note_delete, ("POST", "knowledge/pull"): knowledge_pull,
     ("GET", "sessions"): sessions, ("POST", "sessions"): session_new, ("GET", "sessions/get"): session_get,
     ("POST", "sessions/update"): session_update, ("POST", "sessions/delete"): session_delete, ("POST", "sessions/delmsg"): session_delmsg, ("POST", "folders"): folders,
-    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("POST", "files/reveal"): reveal_file, ("GET", "files/diff"): file_diff, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "update/apply"): update_act, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/hint"): chat_hint, ("POST", "chat/btw"): chat_btw, ("POST", "chat/permit"): chat_permit, ("GET", "harness/memory"): harness_memory, ("PUT", "harness/memory"): harness_memory_put, ("POST", "chat/card"): chat_card, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("GET", "sessions/export"): chat_export, ("POST", "sessions/share"): chat_share, ("GET", "sessions/shared"): chats_shared, ("POST", "sessions/import"): chat_import, ("POST", "sessions/rewind"): session_rewind,
+    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("POST", "files/reveal"): reveal_file, ("GET", "files/diff"): file_diff, ("GET", "files/changes"): file_changes, ("GET", "git/info"): git_info, ("GET", "git/log"): git_log, ("GET", "git/commit"): git_commit, ("GET", "git/file"): git_file, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "update/apply"): update_act, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/hint"): chat_hint, ("POST", "chat/agent_stop"): chat_agent_stop, ("POST", "chat/btw"): chat_btw, ("POST", "chat/permit"): chat_permit, ("GET", "harness/memory"): harness_memory, ("PUT", "harness/memory"): harness_memory_put, ("POST", "chat/card"): chat_card, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("GET", "sessions/export"): chat_export, ("POST", "sessions/share"): chat_share, ("GET", "sessions/shared"): chats_shared, ("POST", "sessions/import"): chat_import, ("POST", "sessions/rewind"): session_rewind,
     ("GET", "themes"): themes_list, ("POST", "themes/save"): theme_save, ("POST", "themes/delete"): theme_delete, ("GET", "usage"): usage_get, ("GET", "usage/sessions"): usage_sessions, ("GET", "usage/session"): usage_session, ("POST", "spaces/publish"): space_publish, ("GET", "spaces"): spaces_mine, ("GET", "prefs"): prefs_get, ("PUT", "prefs"): prefs_put, ("GET", "slash"): slash,
     ("GET", "works"): works, ("GET", "works/get"): work_get, ("POST", "works/save"): work_save, ("POST", "works/delete"): work_delete,
     ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("GET", "works/presets"): presets_list, ("GET", "works/credentials"): credentials_list, ("POST", "works/credentials/save"): credentials_save, ("POST", "works/credentials/delete"): credentials_delete, ("POST", "works/presets/save"): presets_save, ("POST", "works/presets/delete"): presets_delete, ("POST", "nodes/run"): node_run, ("POST", "works/env/check"): env_check, ("POST", "works/env/install"): env_install, ("GET", "works/env/job"): env_job, ("POST", "works/env/cancel"): env_cancel, ("GET", "works/envs"): env_list, ("POST", "works/magic"): work_magic, ("POST", "works/try"): work_try, ("GET", "works/try/status"): work_try_status, ("GET", "works/chatruns"): work_chat_runs, ("GET", "works/active"): work_active, ("GET", "works/files"): work_files, ("POST", "works/open"): work_open, ("POST", "works/rerun"): work_rerun, ("POST", "works/stop"): work_stop, ("GET", "works/log"): work_log, ("GET", "project/info"): project_info, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/generate/start"): work_generate_start, ("GET", "works/generate/status"): work_generate_status, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import,

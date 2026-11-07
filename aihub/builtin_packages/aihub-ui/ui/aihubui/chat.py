@@ -5,6 +5,7 @@ Prompt-cache friendly by construction:
   * the model, tools and MCP list stay the same inside a chat (the page warns before a change: it rewrites the cache)
   * turns continue the same Claude session (--resume), so the long prefix is read from cache, not written again
 Claude's own login and settings.json (model, env, hooks, MCP, skills, agents) apply because the real CLI runs."""
+import hashlib
 import json
 import os
 import re
@@ -22,25 +23,86 @@ EFFORT = ("low", "medium", "high", "xhigh", "max")
 procs = {}
 plock = threading.Lock()
 
+# Always in the prompt: what most answers need. The long rules live in guide files the model reads only when it needs them
+# (like Claude Code's skills), so a chat that never draws a diagram or writes a deck never pays for those rules.
 CANVAS_HELP = """You run inside AI Hub UI. Answers render rich blocks from fenced code: ```sh for a shell session (lines starting with $ are commands, others output), markdown tables, ```chart for a graph
 (JSON: {"type":"bar|line|pie","title":"...","labels":["a","b"],"series":[{"name":"x","data":[1,2]}]}) and ```form to ask the user for several inputs at once
 (JSON: {"title":"...","fields":[{"name":"k","label":"...","type":"text|textarea|number|select|checkbox","options":["a","b"],"required":true}],"submit":"Send"}); the submitted values come back as the next user message.
-Diagrams are drawn from code, so write code, not hand-made SVG: ```mermaid (flowchart, sequenceDiagram, mindmap, classDiagram, stateDiagram-v2, erDiagram, gantt, timeline, journey, gitGraph, pie),
-```dot (Graphviz: graphs, networks, trees, dependency maps; `layout=neato|circo|twopi|fdp` picks another engine), ```echarts (a JSON ECharts option, no functions: graph, tree, treemap, sunburst, sankey, radar, heatmap, scatter, gauge...)
-and ```map (JSON {"center":[lat,lng],"zoom":5,"markers":[{"lat":0,"lng":0,"label":"..."}],"lines":[{"points":[[lat,lng],[lat,lng]],"label":"..."}],"geojson":{...}} on OpenStreetMap). Use ```svg only for an icon, logo or illustration that code cannot express (self-contained, viewBox set, no script). Prefer ```chart for simple bar/line/pie numbers.
 To ask the user to choose, use a ```ask block (JSON: {"questions":[{"header":"short tag","question":"...","multiSelect":false,"options":[{"label":"...","description":"..."}]}]}); the page shows a card and the
 answers come back as the next user message. After asking, stop and wait. Do not use the AskUserQuestion tool; it cannot be answered in this mode.
-Slides and documents: write ONE self-contained .html file. A deck has <meta name="aihub-kind" content="slides"> and `<section class="slide">` blocks of exactly 1280x720 CSS px (one idea each, h1/h2, short ul, img, table;
-speaker notes in <aside class="notes">); a document has <meta name="aihub-kind" content="doc"> and one <article class="doc"> (h1-h3, p, ul/ol, table, img, pre). Take every color and font from CSS variables on :root
-(--bg --fg --muted --accent --accent2 --surface --font-head --font-body) so a theme can replace them; use system fonts and local images only; slides and documents carry no scripts. The canvas presents the file as a slideshow or paged document
-and exports PowerPoint, Word, PDF or Markdown. If the user's message carries a [Theme "Name" ...] block, use those variable values exactly.
 Use them when they make the answer clearer; plain prose otherwise.
- Your working folder is where this chat works (the user may have chosen it): put every file you create there.
+Guides: read one (once per chat, only when the answer needs it) before writing what it covers:
+- diagrams, graphs, maps (```mermaid, ```dot, ```echarts, ```map, ```svg): {G_DIAGRAMS}
+- slides, decks and documents (one .html the canvas exports to PowerPoint, Word, PDF): {G_DOCS}
+{G_EXTRA}- workflows / works / automations: {WORKS_GUIDE}
+Your working folder is where this chat works (the user may have chosen it): put every file you create there.
 A side canvas shows the folder live: an .html file you write (relative assets are fine; JavaScript works in full, so reports and dashboards can be fully interactive with their data inline) appears in a live preview,
 so for a page, chart, diagram or small app write one index.html instead of pasting long code in the reply. Markdown, SVG and images render too.
-For a dashboard, form, table or cards you may instead answer with an OpenUI Lang block (a ```openui fenced block, language rules below): the canvas renders it with OpenUI components.
 Files the user attaches are saved under attachments/. Keep answers short; do not repeat file contents you just wrote.
-When the user asks you to build a workflow / work / automation (a flow of nodes that runs on a schedule, a message or a click), FIRST read the Works guide {WORKS_GUIDE} (the rules of a run, {{input}} / {{in.x}} / {{data.x}}, and every installed node type with its fields, inputs and outputs; it follows the installed nodes), then answer with a short explanation and ONE ```workflow block holding the JSON {"title","description","nodes":[{"id","type","label","x","y","config"}],"edges":[{"from","to"}]}; the page shows a button that saves it in Works (switched off) and opens it. Use only node types and field names from the guide, one Start node, required fields filled, secret fields empty (credential sets carry logins). Without the guide (no file tools): start.manual / start.cron -> git.pull, io.path, io.read_file, io.request, db.sql, db.trino, code.python, etl.spark, ai.claude, ai.free, flow.filter, flow.template, flow.all, flow.any, flow.none, flow.loop, flow.endloop, flow.output, space.publish, send.teams / slack / telegram / discord / webhook / smtp, pkg:<package>/<id>; or tell the user to type /create-work <description>. git.pull / io.path pass a PATH, not content: a later ai.claude reads the files itself and ends with `OUTPUT: /full/path` when it creates one. A code.python node that returns nothing passes its input on unchanged, so it can sit anywhere as a side step (log, save, check)."""
+When the user asks you to build a workflow / work / automation (a flow of nodes that runs on a schedule, a message or a click), FIRST read the Works guide (the rules of a run and every installed node type
+with its fields), then answer with a short explanation and ONE ```workflow block (not ```json) holding the JSON {"title","description","nodes":[{"id","type","label","x","y","config"}],"edges":[{"from","to"}]}; the page shows a
+button that saves it in Works (switched off) and opens it. Use only node types and field names from the guide, one Start node, required fields filled, secret fields empty (credential sets carry logins).
+Without the guide: tell the user to type /create-work <description>."""
+
+GUIDES = {
+    "diagrams": """# Diagrams in AI Hub UI answers
+Diagrams are drawn from code, so write code, not hand-made SVG:
+- ```mermaid: flowchart, sequenceDiagram, mindmap, classDiagram, stateDiagram-v2, erDiagram, gantt, timeline, journey, gitGraph, pie
+- ```dot (Graphviz): graphs, networks, trees, dependency maps; `layout=neato|circo|twopi|fdp` picks another engine
+- ```echarts: a JSON ECharts option, no functions: graph, tree, treemap, sunburst, sankey, radar, heatmap, scatter, gauge...
+- ```map: JSON {"center":[lat,lng],"zoom":5,"markers":[{"lat":0,"lng":0,"label":"..."}],"lines":[{"points":[[lat,lng],[lat,lng]],"label":"..."}],"geojson":{...}} on OpenStreetMap
+- ```svg only for an icon, logo or illustration that code cannot express (self-contained, viewBox set, no script).
+Prefer ```chart for simple bar/line/pie numbers.
+""",
+    "documents": """# Slides and documents in AI Hub UI
+Write ONE self-contained .html file in the working folder.
+- A deck has <meta name="aihub-kind" content="slides"> and `<section class="slide">` blocks of exactly 1280x720 CSS px (one idea each, h1/h2, short ul, img, table;
+  speaker notes in <aside class="notes">).
+- A document has <meta name="aihub-kind" content="doc"> and one <article class="doc"> (h1-h3, p, ul/ol, table, img, pre).
+Take every color and font from CSS variables on :root (--bg --fg --muted --accent --accent2 --surface --font-head --font-body) so a theme can replace them;
+use system fonts and local images only; slides and documents carry no scripts. The canvas presents the file as a slideshow or paged document
+and exports PowerPoint, Word, PDF or Markdown. If the user's message carries a [Theme "Name" ...] block, use those variable values exactly.
+""",
+}
+LAZY_EXTRA = 4000                  # page rules longer than this (the OpenUI language, ~30 KB) go to a guide file instead of the prompt
+
+
+def guides_dir():
+    return os.path.join(HOME(), "ui", "guides")
+
+
+def _guide(name, text):
+    """Write a guide file when it is missing or changed. -> its path. Content-named files never change under a running chat."""
+    d = guides_dir()
+    path = os.path.join(d, name + ".md")
+    try:
+        os.makedirs(d, exist_ok=True)
+        try:
+            with open(path, encoding="utf-8") as f:
+                same = f.read() == text
+        except OSError:
+            same = False
+        if not same:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, path)
+    except OSError:
+        return ""
+    return path
+
+
+def _lazy_extra(extra):
+    """Long page rules -> (one guide line for the prompt, ""), short ones stay inline -> ("", extra)."""
+    if len(extra) <= LAZY_EXTRA:
+        return "", extra
+    head = next((ln.strip("# ").strip() for ln in extra.splitlines() if ln.strip()), "Extra rules")[:80]
+    name = "extra-" + hashlib.sha1(extra.encode("utf-8", "replace")).hexdigest()[:10]
+    path = _guide(name, extra)
+    if not path:
+        return "", extra
+    what = "OpenUI Lang (a ```openui block for a dashboard, form, table or cards the canvas renders with components)" if "openui" in head.lower() else head
+    return "- %s: %s\n" % (what, path), ""
 
 
 def knowledge_index():
@@ -60,7 +122,10 @@ def knowledge_index():
 def build_system(extra="", soul=None):
     """Frozen text for a new chat. Same inputs -> same bytes (cache hit across chats that start from the same notes).
     SOUL = this chat's own persona text instead of the soul note (None = use the note)."""
-    parts = [CANVAS_HELP.replace("{WORKS_GUIDE}", "(" + os.path.join(HOME(), "ui", "works-guide.md") + ")")]
+    line, extra = _lazy_extra(extra or "")
+    g = {k: _guide(k, v) or "(not available)" for k, v in GUIDES.items()}
+    parts = [CANVAS_HELP.replace("{WORKS_GUIDE}", os.path.join(HOME(), "ui", "works-guide.md")).replace("{G_DIAGRAMS}", g["diagrams"])
+             .replace("{G_DOCS}", g["documents"]).replace("{G_EXTRA}", line)]
     try:
         if soul is None:
             with open(os.path.join(HOME(), "knowledge", "soul.md"), encoding="utf-8") as f:
@@ -450,7 +515,14 @@ def hint(sid, text):
     """Give a running Claude Code answer one more message. -> True when claude has it (it reads it at its next step)."""
     with plock:
         f = feeds.get(sid)
-    return bool(f and f.write(text, hint=True))
+    if f:
+        return f.write(text, hint=True)
+    return harness.hint(sid, text)                                    # AIHubness reads it at its next step too
+
+
+def stop_agent(sid, aid):
+    """Stop one helper agent of a running AIHubness turn (Claude Code's own sub-agents end with the turn). -> True when one stopped."""
+    return harness.stop_agent(sid, aid)
 
 
 BTW_PROMPT = ("[Side question (/btw). Answer it briefly from what you already know in this conversation: no tools, no files, do not continue "
@@ -574,6 +646,8 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
     kd = os.path.join(HOME(), "knowledge")
     if os.path.isdir(kd):
         cmd += ["--add-dir", kd]
+    if os.path.isdir(guides_dir()):                                  # the guide files the prompt points to (read on demand)
+        cmd += ["--add-dir", guides_dir()]
     for ad in add_dirs or ():                                        # folders a Works pointer names: Claude may read them
         if os.path.isdir(ad):
             cmd += ["--add-dir", ad]
@@ -626,6 +700,9 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
             if not isinstance(m, dict):                              # "null" or a bare number on stdout (a killed child): not an event
                 continue
             t = m.get("type")
+            parent = m.get("parent_tool_use_id") or ""                 # set on everything a sub-agent (Task / Agent tool) does
+            if t == "stream_event" and parent:
+                continue                                             # a sub-agent's streamed text is not the answer: its whole messages come below
             if t == "stream_event":
                 e = m.get("event") or {}
                 d = e.get("delta") or {}
@@ -634,6 +711,15 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
                         yield {"k": "delta", "text": d.get("text", "")}
                     elif d.get("type") == "thinking_delta":
                         yield {"k": "think", "text": d.get("thinking", "")}
+            elif t == "system" and m.get("subtype") == "status":          # "compacting" while Claude Code summarises the conversation, then null
+                yield {"k": "status", "status": str(m.get("status") or "")}
+            elif t == "system" and m.get("subtype") in ("task_started", "task_notification", "task_progress"):
+                ev = {"k": "task", "id": m.get("tool_use_id") or "", "task": str(m.get("task_id") or ""),
+                      "state": "run" if m.get("subtype") != "task_notification" else str(m.get("status") or "completed"),
+                      "text": str(m.get("summary") or m.get("description") or "")[:600]}
+                if m.get("subtype") == "task_notification":             # a background agent ended: keep it (the page marks its card)
+                    store.append(sid, ev)
+                yield ev
             elif t == "system" and m.get("subtype") == "compact_boundary":
                 c = m.get("compact_metadata") or {}
                 ev = {"k": "compact", "pre": c.get("pre_tokens", 0), "post": c.get("post_tokens", 0), "trigger": c.get("trigger", "auto")}
@@ -643,13 +729,15 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
                 yield {"k": "ctx", "used": ev["post"]}
             elif t == "assistant":
                 u = _usage((m.get("message") or {}).get("usage"))
-                used = u["input"] + u["cache_read"] + u["cache_write"]
+                used = 0 if parent else u["input"] + u["cache_read"] + u["cache_write"]     # a sub-agent has its own context
                 if used:
                     ctx = used
                     yield {"k": "ctx", "used": used}
                 blocks = _fresh(_blocks((m.get("message") or {}).get("content")), (m.get("message") or {}).get("id"), seen_blocks)
                 if blocks:
                     ev = {"k": "msg", "blocks": blocks}
+                    if parent:
+                        ev["parent"] = parent
                     store.append(sid, ev)
                     yield ev
                     for b in blocks:
@@ -665,6 +753,8 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
                 for b in (m.get("message") or {}).get("content") or []:
                     if isinstance(b, dict) and b.get("type") == "tool_result":
                         ev = {"k": "tool_result", "id": b.get("tool_use_id"), "text": _result_text(b.get("content"))[:4000], "error": bool(b.get("is_error"))}
+                        if parent:
+                            ev["parent"] = parent
                         store.append(sid, ev)
                         yield ev
             elif t == "result":

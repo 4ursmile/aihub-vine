@@ -193,6 +193,8 @@ def messages_from(rows, budget=None):
             out.append({"role": role, "content": [{"type": "text", "text": text}]})
     for e in rows:
         k = e.get("k")
+        if e.get("parent"):                                               # a sub-agent's steps are not the conversation
+            continue
         if k == "user":
             add("user", e.get("text"))
         elif k == "msg":

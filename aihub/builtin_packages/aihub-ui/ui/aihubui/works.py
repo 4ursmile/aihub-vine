@@ -1633,6 +1633,8 @@ def memory_text(cfg, work_id, run_id=""):
             cand = [x for x in store.sessions()["sessions"] if not x.get("title", "").startswith("Work:")]
             sid = cand[0]["id"] if cand else ""
         for e in store.history(sid)[-400:]:
+            if e.get("parent"):
+                continue
             if e.get("k") == "user":
                 lines.append("User: " + _clip(e.get("text"), 600))
             elif e.get("k") == "msg":

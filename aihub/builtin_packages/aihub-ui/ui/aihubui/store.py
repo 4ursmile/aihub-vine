@@ -12,7 +12,7 @@ from collections import deque
 from itertools import islice
 
 from .aihub import HOME
-from . import searchidx
+from . import gitinspect, searchidx
 from .secretbox import write_private
 
 _lock = threading.RLock()
@@ -376,6 +376,8 @@ def transcript(rows, limit=60000):
     out = []
     for e in rows:
         k = e.get("k")
+        if e.get("parent"):                                               # a sub-agent's steps are not the conversation
+            continue
         if k == "user":
             out.append("User: " + str(e.get("text", "")))
         elif k == "msg":
@@ -550,9 +552,15 @@ def snapshot(sid, files):
     base = os.path.join(dst, "files")
     keep = set()
     n = total = 0
+    seen = {}                                          # every file of the folder then (copied or not): later new = not in here
     for f in files:
+        try:
+            st0 = os.stat(os.path.join(root, f["path"]))
+            seen[f["path"]] = [st0.st_size, st0.st_mtime_ns]
+        except OSError:
+            pass
         if n >= SNAP_FILES or total >= SNAP_TOTAL:
-            break
+            continue                                   # (not break: every file still goes in the index)
         if f["size"] > SNAP_FILE_MAX:
             continue
         rel = f["path"]
@@ -600,33 +608,105 @@ def snapshot(sid, files):
             except OSError:
                 pass
     os.makedirs(dst, exist_ok=True)
+    tmp = os.path.join(dst, "index.json.%s.tmp" % secrets.token_hex(4))
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"at": time.time(), "files": seen}, fh)
+    os.replace(tmp, os.path.join(dst, "index.json"))
+
+
+def _snap_index(sid):
+    """{path: [size, mtime_ns]} of every file at the last snapshot, None for a snapshot made before the index existed."""
+    try:
+        with open(os.path.join(ui_dir("snap"), sid, "index.json"), encoding="utf-8") as f:
+            d = json.load(f)
+        return d["files"] if isinstance(d.get("files"), dict) else None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
 
 
 def snap_text(sid, rel):
-    """Content of a file before the last turn: str, "" for a file that did not exist then, None when no snapshot was taken."""
+    """Content of a file before the last turn: str, "" for a file that did not exist then, None when no snapshot was taken
+    or the file was there but not copied (binary, too big)."""
     base = os.path.join(ui_dir("snap"), sid)
     if not os.path.isdir(base):
         return None
-    rel = str(rel).replace("\\", "/").lstrip("/")
+    rel = gitinspect.clean(rel)
+    if not rel:
+        return None
     p = safe_join(os.path.join(base, "files"), rel)
     if p and os.path.isfile(p):
         with open(p, "rb") as f:
             return f.read().decode("utf-8", "replace")
-    return ""
+    idx = _snap_index(sid)
+    return None if idx is not None and rel in idx else ""
+
+
+def snap_changes(sid, files, budget=1.5):
+    """Files that changed since the last snapshot: [{path, status: added|modified|deleted, add, del, binary}], None without a snapshot.
+    A copy whose size and mtime match the file is unchanged (the copy keeps the mtime); line counts stop after BUDGET seconds."""
+    snap = os.path.join(ui_dir("snap"), sid)
+    if not os.path.isdir(snap):
+        return None
+    root, base, idx = session_dir(sid), os.path.join(snap, "files"), _snap_index(sid)
+    now = {f["path"]: f for f in files}
+    copied = {}
+    for d, _dirs, fs in os.walk(base):
+        for x in fs:
+            p = os.path.join(d, x)
+            copied[os.path.relpath(p, base).replace(os.sep, "/")] = p
+    deadline, out = time.monotonic() + budget, []
+
+    def text(p, most=SNAP_FILE_MAX):
+        try:
+            if os.path.getsize(p) > most:
+                return None
+            with open(p, "rb") as fh:
+                b = fh.read()
+        except OSError:
+            return None
+        return None if _looks_binary(b) else b.decode("utf-8", "replace")
+
+    def add(path, status, old, new, binary=False):
+        c = gitinspect.counts(old, new, deadline) if old is not None and new is not None else None
+        out.append({"path": path, "status": status, "add": c[0] if c else None, "del": c[1] if c else None, "binary": binary})
+
+    for rel, cp in sorted(copied.items()):
+        cur = os.path.join(root, rel)
+        if rel not in now and not os.path.isfile(cur):
+            add(rel, "deleted", text(cp), "")
+            continue
+        try:
+            a, b = os.stat(cp), os.stat(cur)
+        except OSError:
+            continue
+        if a.st_size == b.st_size and a.st_mtime_ns == b.st_mtime_ns:
+            continue
+        old, new = text(cp), text(cur)
+        if old is not None and old == new:
+            continue
+        add(rel, "modified", old, new, binary=new is None)
+    if idx is not None:
+        for rel in sorted(now):
+            if rel in copied:
+                continue
+            if rel not in idx:
+                add(rel, "added", "", text(os.path.join(root, rel)))
+                continue
+            try:
+                st = os.stat(os.path.join(root, rel))
+            except OSError:
+                continue
+            if [st.st_size, st.st_mtime_ns] != idx[rel]:                   # there but not copied (binary / too big): changed by size or time
+                out.append({"path": rel, "status": "modified", "add": None, "del": None, "binary": True})
+        for rel in sorted(idx):
+            if rel not in copied and rel not in now and not os.path.isfile(os.path.join(root, rel)):
+                out.append({"path": rel, "status": "deleted", "add": None, "del": None, "binary": True})
+    return sorted(out, key=lambda x: x["path"])
 
 
 def git_text(sid, rel):
-    """Committed (HEAD) content of a file when the folder is in a git repo and the file is tracked, else None."""
-    p, rel = _file(sid, rel)
-    if not p:
-        return None
-    try:
-        r = subprocess.run(["git", "show", "HEAD:./" + rel], cwd=session_dir(sid), capture_output=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if r.returncode != 0 or _looks_binary(r.stdout):
-        return None
-    return r.stdout.decode("utf-8", "replace")
+    """Committed (HEAD) content of a file when the folder is in a git repo and the file is tracked, else None. Works for deleted files too."""
+    return gitinspect.committed(session_dir(sid), rel)
 
 
 # ---- search across chats (title + what was said)

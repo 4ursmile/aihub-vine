@@ -20,6 +20,7 @@ function lazy(load, name) {
     return C ? h(C, p) : bad ? html`<div class="empty"><div>${Ic("alert", 24)}<div>${bad}</div></div></div>` : html`<div class="empty"><div class="shine">Loading…</div></div>`;
   };
 }
+const DiffView = lazy(() => import("./diff.js"), "DiffView"), GitView = lazy(() => import("./diff.js"), "GitView");
 const Viewer = lazy(() => import("./slides.js"), "Viewer"), Themes = lazy(() => import("./slides.js"), "Themes"), Notebook = lazy(() => import("./notebook.js"), "Notebook");
 const isNb = (p) => /\.ipynb$/i.test(p || "");
 
@@ -104,8 +105,36 @@ const TIPS = ["/btw asks a side question without touching the chat", "@file: put
   "@work: runs one of your workflows", "@theme: styles slides and pages", "/create-work turns a sentence into a workflow", "/compact frees context when the ring fills up",
   "/engine free talks to the model directly", "/engine aihub works on files with few tokens", "/mcp chooses the MCP servers of this chat", "/canvas shows the files Claude makes", "Paste or drop files to attach them",
   "Shift+Enter starts a new line", "Cmd/Ctrl+K searches every chat", "Keep typing while Claude works: it reads you at its next step"];
-const BUSY_TIPS = ["Add to the running answer: Claude reads it at its next step", "Correct course now: \"use the other file\", \"skip the tests\"…",
-  "/btw asks aside: the answer goes on", "Send more detail: it joins this answer, not the next one"];
+const BUSY_TIPS = ["Add to the running answer: it is read at the next step · Alt+Enter queues it for after", "Correct course now: \"use the other file\", \"skip the tests\"…",
+  "/btw asks aside: the answer goes on", "Alt+Enter: queue a message for when this answer ends", "Commands and attachments wait in the queue until the answer ends"];
+const AGENT_TOOLS = new Set(["Task", "Agent", "agent"]);           // Claude Code's sub-agents, AIHubness's helper agents
+const CHAT_QUEUES = {};                                             // chat id -> messages waiting for the answer to end (kept while you look at another chat)
+// One agent of a turn: what it was asked, where it is, its steps (rows tagged parent = the agent's tool call id).
+function agentOf(b, results, kids, tasks, busy) {
+  const i = b.input || {}, rows = kids[b.id] || [], tools = rows.filter((e) => e.k === "msg").flatMap((e) => e.blocks.filter((x) => x.type === "tool")), last = tools[tools.length - 1];
+  const res = results[b.id], tk = tasks[b.id], bg = !!i.run_in_background;
+  const state = tk && tk.state !== "run" ? (/fail|error|stop/.test(tk.state) ? "bad" : "ok") : res && !(bg && !res.error) ? (res.error ? "bad" : "ok") : busy ? "run" : "gone";
+  return { id: b.id, kind: i.subagent_type || (b.name === "agent" ? "helper" : "agent"), title: i.description || i.name || String(i.task || i.prompt || "").slice(0, 70), task: String(i.prompt || i.task || ""),
+    state, steps: tools.length, done: rows.filter((e) => e.k === "tool_result").length, last: last ? last.name + " " + toolHint(last) : "", rows, report: (tk && tk.state !== "run" && tk.text) || (res && res.text) || "" };
+}
+const AG_ICON = (st) => (st === "ok" ? Ic("check", 13) : st === "bad" ? Ic("x", 13) : st === "gone" ? Ic("stop", 12) : html`<i class="spin"></i>`);
+// Live list of the agents this answer started (Claude Code sub-agents or AIHubness helpers): which run, which finished, their latest step.
+function AgentsBar({ agents, onStop }) {
+  const run = agents.filter((a) => a.state === "run").length;
+  return html`<div class="agbar"><div class="agbar-h">${Ic("layers", 13)}<b>Agents</b><span class="mute small">${run ? run + " running · " : ""}${agents.length - run} done</span></div>
+    ${agents.map((a) => html`<div class=${"agrow " + a.state} key=${a.id}><span class="wi">${AG_ICON(a.state)}</span><span class="agk">${a.kind}</span><b class="agt" title=${a.task}>${a.title}</b>
+      <span class="mute small agl">${a.state === "run" ? a.last || "starting…" : a.steps + " step" + (a.steps === 1 ? "" : "s")}</span>
+      ${a.state === "run" && onStop && html`<button class="ibtn" title="Stop this agent (the answer goes on with what it found)" aria-label="Stop this agent" onClick=${() => onStop(a.id)}>${Ic("stop", 11)}</button>`}</div>`)}</div>`;
+}
+// An agent in the conversation: one card, its own steps folded inside, its report at the end.
+function AgentCard({ a, results, onSend }) {
+  const [open, setOpen] = useState(false);
+  return html`<details class=${"agcard " + a.state} onToggle=${(e) => setOpen(e.currentTarget.open)}><summary><span class="wi">${AG_ICON(a.state)}</span><span class="agk">${a.kind}</span><b class="agt">${a.title || "agent"}</b>
+      <span class="mute small">${a.steps} step${a.steps === 1 ? "" : "s"}${a.state === "run" && a.last ? " · " + a.last : ""}</span></summary>
+    ${open && html`<div class="agbody">${a.task && html`<div class="agtask"><span class="mute small">Task</span><div>${a.task.slice(0, 1500)}</div></div>`}
+      ${a.rows.filter((e) => e.k === "msg").map((e) => e.blocks.map((b) => b.type === "text" ? html`<div class="agtext"><${Md} text=${b.text}/></div>` : b.type === "tool" ? html`<${ToolRow} b=${b} res=${results[b.id]} hint=${toolHint(b)}/>` : null))}
+      ${a.report && html`<div class="agrep"><span class="mute small">Report</span><${Md} text=${a.report} onSend=${onSend}/></div>`}</div>`}</details>`;
+}
 const tipOf = (l, n) => l[n % l.length];
 const SLASH_ICON = { folder: "folder", file: "file", theme: "palette", chat: "chat", tool: "bolt", work: "flow", ui: "slash", command: "terminal", skill: "sparkles", plugin: "plug", package: "package" };
 
@@ -330,42 +359,6 @@ function Editor({ id, path, ver, onSaved, dirtyRef }) {
     footer=${(t) => html`<div class="ebar"><button class="ibtn sm" title=${"Undo (" + mk + "Z)"} aria-label="Undo" disabled=${!t.canUndo} onClick=${t.undo}>${Ic("undo", 15)}</button><button class="ibtn sm" title=${"Redo (" + (isMacUI ? "⇧⌘Z" : "Ctrl+Y") + ")"} aria-label="Redo" disabled=${!t.canRedo} onClick=${t.redo}>${Ic("redo", 15)}</button><button class=${"ibtn sm" + (t.finding ? " on" : "")} title=${"Find and replace (" + mk + "F)"} aria-label="Find and replace" onClick=${t.find}>${Ic("search", 15)}</button>
       <span class="mute small grow">${dirty ? "Unsaved changes" : "Saved"} · ${num(text.split("\n").length)} lines${t.lang ? " · " + t.lang : ""}</span><button class="btn" disabled=${!dirty} onClick=${() => setText(d.text || "")}>Revert</button><button class="btn acc" disabled=${!dirty} onClick=${() => save()}>${Ic("check", 13)} Save</button></div>`}/></div>`;
 }
-function lineDiff(a, b) {
-  const A = a === "" ? [] : a.split("\n"), B = b === "" ? [] : b.split("\n");
-  let s = 0; while (s < A.length && s < B.length && A[s] === B[s]) s++;
-  let ea = A.length, eb = B.length; while (ea > s && eb > s && A[ea - 1] === B[eb - 1]) { ea--; eb--; }
-  const x = A.slice(s, ea), y = B.slice(s, eb), n = x.length, m = y.length, mid = [];
-  if (n * m > 4e6) { x.forEach((t) => mid.push(["-", t])); y.forEach((t) => mid.push(["+", t])); }
-  else {
-    const w = m + 1, L = new Uint32Array((n + 1) * w);
-    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i * w + j] = x[i] === y[j] ? L[(i + 1) * w + j + 1] + 1 : Math.max(L[(i + 1) * w + j], L[i * w + j + 1]);
-    let i = 0, j = 0;
-    while (i < n && j < m) { if (x[i] === y[j]) { mid.push([" ", x[i]]); i++; j++; } else if (L[(i + 1) * w + j] >= L[i * w + j + 1]) mid.push(["-", x[i++]]); else mid.push(["+", y[j++]]); }
-    while (i < n) mid.push(["-", x[i++]]); while (j < m) mid.push(["+", y[j++]]);
-  }
-  return [...A.slice(0, s).map((t) => [" ", t]), ...mid, ...A.slice(ea).map((t) => [" ", t])];
-}
-function DiffView({ id, path, ver }) {
-  const [base, setBase] = useState("turn"), [d, setD] = useState(null), hl = useHl();
-  const hlOf = useMemo(() => { const lang = langOf(hl, path); return (t) => splitHl(colorize(hl, lang, t || "")); }, [hl, path]);
-  const oldL = useMemo(() => d && typeof d.base === "string" ? hlOf(d.base) : [], [d, hlOf]), newL = useMemo(() => d && typeof d.now === "string" ? hlOf(d.now) : [], [d, hlOf]);
-  useEffect(() => { setD(null); api(`files/diff?id=${id}&path=${encodeURIComponent(path)}&base=${base}`).then(setD).catch((e) => setD({ err: e.message })); }, [id, path, ver, base]);
-  const seg = html`<div class="dbar"><${Seg} small value=${base} onChange=${setBase} items=${[{ id: "turn", label: "Since last message" }, { id: "git", label: "Since last commit" }]}/></div>`;
-  if (!d) return html`<div class="diffv">${seg}<div class="empty"><div class="shine">Comparing…</div></div></div>`;
-  if (d.err) return html`<div class="diffv">${seg}<div class="empty"><div>${Ic("alert", 24)}<div>${d.err}</div></div></div></div>`;
-  if (d.base === null) return html`<div class="diffv">${seg}<div class="empty"><div>${Ic("layers", 26)}<div>${base === "git" ? "This file is not tracked in a git repository here." : "Nothing to compare yet: the snapshot is taken when you send a message."}${d.git && base === "turn" ? " Try “Since last commit”." : d.turn && base === "git" ? " Try “Since last message”." : ""}</div></div></div></div>`;
-  const ops = lineDiff(d.base, d.now), changed = ops.map((o, i) => (o[0] !== " " ? i : -1)).filter((i) => i >= 0), add = ops.filter((o) => o[0] === "+").length, del = ops.filter((o) => o[0] === "-").length;
-  if (!changed.length) return html`<div class="diffv">${seg}<div class="empty"><div>${Ic("check", 26)}<div>No changes.</div></div></div></div>`;
-  const keep = new Set(); changed.forEach((i) => { for (let k = Math.max(0, i - 3); k <= Math.min(ops.length - 1, i + 3); k++) keep.add(k); });
-  const rows = []; let o = 1, nn = 1, gap = 0;
-  ops.forEach((op, i) => {
-    if (keep.has(i)) { if (gap) { rows.push(html`<div class="dl gap">⋯ ${gap} unchanged line${gap > 1 ? "s" : ""}</div>`); gap = 0; }
-      rows.push(html`<div class=${"dl " + (op[0] === "+" ? "add" : op[0] === "-" ? "del" : "")}><span class="ln">${op[0] === "+" ? "" : o}</span><span class="ln">${op[0] === "-" ? "" : nn}</span><span class="tx syn"><span class="dm">${op[0]} </span><span dangerouslySetInnerHTML=${{ __html: (op[0] === "+" ? newL[nn - 1] : oldL[o - 1]) ?? esc(op[1]) }}></span></span></div>`); } else gap++;
-    if (op[0] !== "+") o++; if (op[0] !== "-") nn++;
-  });
-  if (gap) rows.push(html`<div class="dl gap">⋯ ${gap} unchanged line${gap > 1 ? "s" : ""}</div>`);
-  return html`<div class="diffv">${seg}<div class="dsum"><span class="tag good">+${add}</span> <span class="tag bad">−${del}</span> <span class="mute small">${baseName(path)}</span></div><div class="dlist">${rows}</div></div>`;
-}
 function WorkDirDialog({ s, cur, busy, close, saved }) {
   const [v, setV] = useState(s.cwd || ""), [pick, setPick] = useState(false), [wait, setWait] = useState(false);
   const apply = guard(async (val) => { setWait(true); try { const r = await post("sessions/update", { id: s.id, cwd: val }); toast(val ? "Working folder set" : "Back to the private folder"); saved(r.session); } finally { setWait(false); } });
@@ -406,15 +399,18 @@ const DIRECT_PROMPT = "Stop using tools and stop exploring. Answer my last quest
 const words = (t) => (String(t).trim().match(/\S+/g) || []).length;
 const fmtT = (sec) => (sec < 60 ? sec + "s" : Math.floor(sec / 60) + "m " + (sec % 60) + "s");
 // What the assistant is doing right now: phase, a live step list (tools and their results), reasoning as it streams, counters, and the Stop / Answer now buttons.
-function Working({ act, since, live, steps, ctx, win, free, onStop, onDirect }) {
+function Working({ act, since, live, steps, ctx, win, free, onStop, onDirect, agents, onStopAgent }) {
   const [n, setN] = useState(0), [openR, setOpenR] = useState(true), rb = useRef(), w0 = useRef(0);
   useEffect(() => { const t = setInterval(() => setN((x) => x + 1), 1000); return () => clearInterval(t); }, []);
   useEffect(() => { if (rb.current) rb.current.scrollTop = rb.current.scrollHeight; }, [live.think.length]);
   const sec = Math.max(0, Math.round((Date.now() - since) / 1000)), writing = live.text.length > 0;
   if (!writing) w0.current = 0; else if (!w0.current) w0.current = Date.now();
   const wsec = writing ? (Date.now() - w0.current) / 1000 : 0, speed = wsec >= 2 ? Math.round(live.text.length / 4 / wsec) : 0;
-  const phase = writing ? "write" : act && act.k === "tool" ? "tool" : "think";
-  const label = phase === "write" ? "Writing the answer" : phase === "tool" ? "Running " + act.name : live.think ? "Reasoning" : "Thinking";
+  const cpt = useRef(0), compacting = !!(act && act.k === "compact");
+  if (!compacting) cpt.current = 0; else if (!cpt.current) cpt.current = Date.now();
+  const phase = compacting ? "compact" : writing ? "write" : act && act.k === "tool" ? "tool" : "think";
+  const label = phase === "compact" ? "Compacting the conversation" : phase === "write" ? "Writing the answer" : phase === "tool" ? "Running " + act.name : live.think ? "Reasoning" : "Thinking";
+  const csec = compacting ? Math.max(0, Math.round((Date.now() - cpt.current) / 1000)) : 0, cpct = Math.min(95, Math.round(100 * (1 - Math.exp(-csec / 25))));   // no real progress is reported: an easing estimate
   const done = steps.filter((x) => x.state !== "run").length, shown = steps.slice(-6), pct = win ? Math.min(100, Math.round((ctx / win) * 100)) : 0;
   return html`<div class=${"work2 p-" + phase}><i class="wbar"></i>
     <div class="w-head"><span class="spark lgk">${Ic("logo", 20, "lgm lg-think")}</span><b class="shine">${label}…</b><span class="w-time">${fmtT(sec)}</span><span class="grow"></span>
@@ -422,6 +418,9 @@ function Working({ act, since, live, steps, ctx, win, free, onStop, onDirect }) 
     <div class="w-phases"><span class=${"ph" + (phase === "think" ? " on" : live.think || steps.length || writing ? " done" : "")}>${Ic("sparkles", 12)} Reasoning</span>
       ${(!free || steps.length > 0) && html`<span class=${"ph" + (phase === "tool" ? " on" : steps.length ? " done" : "")}>${Ic("terminal", 12)} Tools${steps.length ? " · " + steps.length : ""}</span>`}
       <span class=${"ph" + (phase === "write" ? " on" : "")}>${Ic("edit", 12)} Answer</span></div>
+    ${compacting && html`<div class="w-compact" role="status" aria-live="polite"><div class="row small"><span class="grow">Summarising ${ctx ? "~" + num(ctx) + " tokens of " : ""}older turns so the chat fits the context window</span><b>${fmtT(csec)}</b></div>
+      <div class="ccbar"><i style=${"width:" + cpct + "%"}></i></div><div class="mute small">${csec < 10 ? "Reading the conversation" : csec < 40 ? "Writing the summary" : "Almost there"}… the answer continues after it.</div></div>`}
+    ${agents && agents.length > 0 && html`<${AgentsBar} agents=${agents} onStop=${onStopAgent}/>`}
     ${shown.length > 0 && html`<div class="w-steps">${steps.length > shown.length && html`<div class="mute small">+ ${steps.length - shown.length} earlier step${steps.length - shown.length > 1 ? "s" : ""}</div>`}
       ${shown.map((x) => html`<div class=${"w-step " + x.state}><span class="wi">${x.state === "ok" ? Ic("check", 13) : x.state === "bad" ? Ic("x", 13) : html`<i class="spin"></i>`}</span><b>${x.name}</b><span class="mute">${x.hint}</span></div>`)}</div>`}
     ${live.think && html`<div class="w-think"><button type="button" class="w-tt lnk" aria-expanded=${openR} onClick=${() => setOpenR(!openR)}>${Ic(openR ? "down" : "right", 12)} Reasoning <span class="mute">${words(live.think)} words</span></button>${openR && html`<div class="w-tb" ref=${rb}>${live.think.slice(-1400)}</div>`}</div>`}
@@ -521,11 +520,14 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const [att, setAtt] = useState([]), [tab, setTab] = useState("files"), [open, setOpen] = useState(false), [prev, setPrev] = useState(""), [els, setEls] = useState([]);
   const [engine, setEngine] = useState(pref("engine", "claude")), busyRef = useRef(false), engineNow = useRef("claude"), [mcpAll, setMcpAll] = useState(null), [freeIds, setFreeIds] = useState(null);
   const [split, setSplit] = useState(pref("split", "0") === "1"), [dlg, setDlg] = useState(null), [hintOff, setHintOff] = useState(false), [term, setTerm] = useState(false), [termOn, setTermOn] = useState(false), [cw, setCw] = useState(() => +pref("canvasw", "0") || 0), [rail, setRail] = useState(pref("edrail", "1") === "1"), [ew, setEw] = useState(() => +pref("edw", "200") || 200), dirtyRef = useRef(false), [dirInfo, setDirInfo] = useState({ dir: "", def: "" });
-  const [hints, setHints] = useState([]), [btws, setBtws] = useState([]);              // messages sent into the running answer, not read yet; /btw side answers
+  const [hints, setHints] = useState([]), [btws, setBtws] = useState([]);
+  const [qs, setQs] = useState(() => ({ ...CHAT_QUEUES })), [qPause, setQPause] = useState(false), [qTick, setQTick] = useState(0), qBusy = useRef(false), stopRef = useRef(false);
+  const queue = qs[id] || [], editQ = (f) => setQs((m) => { const n = { ...m, [id]: f(m[id] || []) }; CHAT_QUEUES[id] = n[id]; return n; });
+  const addQueue = (it, front) => editQ((l) => { const x = { ...it, key: Math.random().toString(36).slice(2) }; return front ? [x, ...l] : [...l, x]; });              // messages sent into the running answer, not read yet; /btw side answers
   const [tipN, setTipN] = useState(() => Math.floor(Math.random() * 1000)), nextTip = () => setTipN((n) => n + 1 + Math.floor(Math.random() * 5));
-  useEffect(() => { setHints([]); setBtws([]); nextTip(); }, [id]);
+  useEffect(() => { setHints([]); setBtws([]); setQPause(false); nextTip(); }, [id]);
   const [themes, setThemes] = useState([]), [since, setSince] = useState(0), [act, setAct] = useState(null), [works, setWorks] = useState([]);
-  const end = useRef(), ctl = useRef(), ta = useRef(), sendRef = useRef(), sRef = useRef(null), pendingRef = useRef([]), stick = useRef(true), msgsRef = useRef(), actRef = useRef(null), alive = useRef(true), prevRef = useRef(""), fileIn = useRef(), [stuck, setStuck] = useState(true), [missing, setMissing] = useState(""), [dismissed, setDismissed] = useState(null);
+  const end = useRef(), ctl = useRef(), ta = useRef(), sendRef = useRef(), sRef = useRef(null), stick = useRef(true), msgsRef = useRef(), actRef = useRef(null), alive = useRef(true), prevRef = useRef(""), fileIn = useRef(), [stuck, setStuck] = useState(true), [missing, setMissing] = useState(""), [dismissed, setDismissed] = useState(null);
   useEffect(() => { if (!s) return; if (hist.length && matchMedia("(pointer: coarse)").matches) return;       // a new chat (or any chat with a mouse) opens with the caret in the composer; phones skip old chats so the keyboard does not cover them
     const f = () => ta.current && ta.current.focus({ preventScroll: true }); f(); const r = requestAnimationFrame(f); return () => cancelAnimationFrame(r); }, [!!s]);
   sRef.current = s;
@@ -611,17 +613,16 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     const bw = override === undefined && /^\/btw(?:\s+([\s\S]*))?$/.exec(t0);
     if (bw) { if (!(bw[1] || "").trim()) { toast("Ask something after /btw, for example: /btw what was the file we changed first?"); return false; } setText(""); if (ta.current) ta.current.style.height = "auto"; askBtw(bw[1].trim()); return true; }
     if (busyRef.current) {
-      if (override !== undefined) { pendingRef.current.push(t0); toast("Queued: sent when the answer ends"); return true; }
-      if (/^\//.test(t0)) { toast("Commands wait for the answer to end (/btw works now)"); return false; }
-      if (att.length) { toast("Attachments go with the next message: wait for the answer to end"); return false; }
-      setText(""); if (ta.current) ta.current.style.height = "auto";
-      const queue = (why) => { pendingRef.current.push(t0); toast(why); };
-      if (ownEngine(engineNow.current)) { queue("Queued: sent when the answer ends"); return true; }
-      setHints((l) => [...l, t0]); nextTip();
-      post("chat/hint", { id, text: t0 }).catch((e) => { setHints((l) => l.filter((x) => x !== t0)); queue(e.status === 409 ? "The answer was ending: sent as the next message" : e.message); });
+      const typed = override === undefined, cmd = typed && /^\//.test(t0), atts = typed ? att : [];
+      const clear = () => { if (!typed) return; setText(""); setAtt([]); if (ta.current) ta.current.style.height = "auto"; };
+      // queued: commands, attachments, Alt+Enter, card results and every Free chat message wait and go out one by one when the answer ends
+      if (!typed || cmd || atts.length || opts.queue || engineNow.current === "free") { addQueue({ text: t0, atts, cmd }); clear(); if (!typed) toast("Queued: sent when the answer ends"); return true; }
+      clear(); setHints((l) => [...l, t0]); nextTip();
+      post("chat/hint", { id, text: t0 }).catch((e) => { setHints((l) => l.filter((x) => x !== t0)); addQueue({ text: t0, atts: [], cmd: false }); toast(e.status === 409 ? "The answer was ending: queued as the next message" : e.message); });
       return true;
     }
-    doSend(override, opts); return true;
+    if (override === undefined) setQPause(false);                  // a message you send yourself resumes a queue paused by Stop
+    return doSend(override, opts).then(() => true);
   };
   const askBtw = guard(async (q) => {
     if (ownEngine(engineNow.current)) return toast("/btw works in Claude Code mode");
@@ -634,21 +635,22 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     let t = (override !== undefined ? override : text).trim();
     if (!t || busyRef.current) return;
     if (ownEngine(engine) && /^\/compact\b/.test(t)) return toast(engine === "harness" ? "AIHubness trims its own context: later messages get earlier ones as text, never old tool output." : "Free chat has no compaction: switch to Claude Code, or start a new chat.");
-    const m = override === undefined && /^\/([\w:.-]+)\s*([\s\S]*)$/.exec(t);
+    const m = (override === undefined || opts.cmd) && /^\/([\w:.-]+)\s*([\s\S]*)$/.exec(t);
     if (m) { const ui = UI_CMDS.find((c) => c.name === m[1]); if (m[1] === "workflow" || m[1] === "create-work") { if (!m[2]) return toast("Describe the work after /create-work, for example: /create-work pull data from git, build a dashboard, publish it as a space"); return genWork(m[2]); } if (m[1] === "engine" && m[2]) { const w = m[2].trim().toLowerCase(), e = /^(free|api|light)/.test(w) ? "free" : /^(aihub|harness|hub|mini|agent)/.test(w) ? "harness" : /^(claude|code|cc)/.test(w) ? "claude" : ""; if (!e) return toast("Use /engine claude, /engine aihub or /engine free"); if (busyRef.current) return toast("Wait for the answer to finish first"); setText(""); setEng(e); return toast("Engine: " + ENG_NAME[e]); } if (ui && ui.action !== "send" && !m[2]) return runUi(ui.action); const wk = works.find((x) => "work:" + x.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") === m[1]); if (wk) return runWork(wk, m[2], t); const pk = slash.packages.find((c) => c.name === m[1]); if (pk) t = pk.prompt.replace(/\$ARGUMENTS/g, m[2]); }
     if (mode === "bypass" && engine !== "free" && !(await confirmBox({ title: "Bypass checks?", text: "Bypass checks lets Claude run any tool without asking.", ok: "Continue", danger: true }))) return;
-    const typed = override === undefined, atts = typed ? att : [], draft = text;       // the draft comes back if the server never starts the turn
+    const typed = override === undefined, atts = typed ? att : opts.atts || [], draft = text;       // the draft comes back if the server never starts the turn
     if (typed) { setText(""); setAtt([]); if (ta.current) ta.current.style.height = "auto"; nextTip(); }
     stick.current = true; setStuck(true);
     const row = { k: "user", text: t, files: atts.map((a) => "attachments/" + a.name) };
     setHist((h) => [...h, row]);
+    if (/^\/compact\b/.test(t)) actRef.pendingCompact = true;
     await follow((on, sig) => stream("chat", { id, text: t, model, effort: opts.effort !== undefined ? opts.effort : effort, mode, engine, attachments: atts.map((a) => ({ name: a.name, data: a.data })) }, on, sig), Date.now(),
-      { fail: () => { setHist((h) => h.filter((x) => x !== row)); if (typed) { setText((c) => c || draft); setAtt((a) => (a.length ? a : atts)); } } });
+      { fail: () => { setHist((h) => h.filter((x) => x !== row)); if (typed) { setText((c) => c || draft); setAtt((a) => (a.length ? a : atts)); } else if (opts.queued) { addQueue({ text: t, atts, cmd: opts.cmd }, true); setQPause(true); } } });
   });
   // Follow a turn that runs on the server. Leaving the chat only closes this listener: the answer keeps running there and is saved.
   const setActK = (a) => { const p = actRef.current; if (p && p.k === a.k && p.name === a.name) return; actRef.current = a; setAct(a); };      // only a change of kind re-renders
   const follow = async (open, t0, hooks) => {
-    busyRef.current = true; setBusy(true); onBusy && onBusy(id, true); setTimeout(refresh, 1200); setPop(null); setSince(t0 || Date.now()); actRef.current = null; setActK({ k: "think" }); setLive({ text: "", think: "" });
+    busyRef.current = true; setBusy(true); onBusy && onBusy(id, true); setTimeout(refresh, 1200); setPop(null); setSince(t0 || Date.now()); actRef.current = null; setActK({ k: actRef.pendingCompact ? "compact" : "think" }); actRef.pendingCompact = false; setLive({ text: "", think: "" });
     if (ctl.current) ctl.current.abort();
     const mine = (ctl.current = new AbortController());
     let lastText = "", got = false;
@@ -661,15 +663,19 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
         if (ev.k === "delta") { setActK({ k: "write" }); buf.text += ev.text; if (!buf.raf) buf.raf = requestAnimationFrame(flush); }
         else if (ev.k === "think") { setActK({ k: "think" }); buf.think += ev.text; if (!buf.raf) buf.raf = requestAnimationFrame(flush); }
         else if (ev.k === "ctx") setCtx(ev.used);
+        else if (ev.k === "status") setActK({ k: ev.status === "compacting" ? "compact" : "think" });        // Claude Code is summarising the conversation
+        else if (ev.k === "task") { if (ev.state !== "run") setHist((h) => [...h, ev]); }                // a background agent ended
         else if (ev.k === "engine") { if (ENG_NAME[ev.engine]) setEngine(ev.engine); }          // free chat -> AIHubness -> Claude Code handed the message on
+        else if (ev.k === "msg" && ev.parent) setHist((h) => [...h, ev]);                                  // a sub-agent's step: it shows in its agent card
         else if (ev.k === "msg") { drop(); setLive({ text: "", think: "" }); setHist((h) => [...h, ev]); lastText = ev.blocks.filter((b) => b.type === "text").map((b) => b.text).join("\n"); const tl = ev.blocks.filter((b) => b.type === "tool").pop(); if (tl) setActK({ k: "tool", name: tl.name, hint: toolHint(tl) }); }
         else if (ev.k === "files") {                                           // a report or page was made: show it on the canvas
           setHist((h) => [...h, ev]); refreshFiles();
           const f = ev.items.find((x) => /\.(html?|svg)$/i.test(x.path)) || ev.items.find((x) => /\.md$/i.test(x.path)); if (f && engineNow.current === "free" && !dirtyRef.current) { setPrev(f.path); setTab("preview"); setOpen(true); }
         }
-        else if (ev.k === "tool_result" || ev.k === "result" || ev.k === "compact" || ev.k === "note" || ev.k === "perm" || ev.k === "perm_answer") setHist((h) => [...h, ev]);
+        else if (ev.k === "compact") { setHist((h) => [...h, ev]); if (actRef.current && actRef.current.k === "compact") setActK({ k: "think" }); }
+        else if (ev.k === "tool_result" || ev.k === "result" || ev.k === "note" || ev.k === "perm" || ev.k === "perm_answer") setHist((h) => [...h, ev]);
         else if (ev.k === "user") { setHist((h) => [...h, ev]); setHints((l) => { const i = l.indexOf(ev.text); return i < 0 ? l.slice(1) : l.filter((_, j) => j !== i); }); }       // Claude read a message sent mid-answer
-        else if (ev.k === "hint_lost") { setHints((l) => l.filter((x) => x !== ev.text)); setText((c) => c || ev.text); toast("Claude did not read your last message: it is back in the box"); }
+        else if (ev.k === "hint_lost") { setHints((l) => l.filter((x) => x !== ev.text)); addQueue({ text: ev.text, atts: [], cmd: false }, true); toast("Your message came too late for this answer: it is first in the queue"); }
         else if (ev.k === "error") { setHist((h) => [...h, ev]); if (ev.auth) setSignin(true); }
         else if (ev.k === "file") {
           refreshFiles();
@@ -683,8 +689,18 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     api("sessions/get?id=" + id).then((d) => setHist(d.history)).catch(() => {});             // same rows as the saved history, so delete-by-position lines up
     refreshFiles();
     const o = lastText.match(/```openui\n([\s\S]*?)```/); if (o) showEl({ lang: "openui", code: o[1] });
-    const q = pendingRef.current.splice(0); if (q.length) setTimeout(() => sendRef.current(q.join("\n\n")), 0);      // results of cards that finished while the answer was still running
+    if (stopRef.current) { stopRef.current = false; if (queueRef.current.length) setQPause(true); }    // after Stop the queue waits for you
   };
+  const queueRef = useRef([]); queueRef.current = queue;
+  // The queue drains one message per answer: the next goes out when the previous answer has ended (also a command that answers at once).
+  useEffect(() => {
+    if (busy || qBusy.current || qPause || !queue.length) return;
+    const nx = queue[0]; qBusy.current = true; editQ((l) => l.filter((x) => x.key !== nx.key));
+    Promise.resolve(sendRef.current(nx.text, { atts: nx.atts, cmd: nx.cmd, queued: true })).finally(() => { qBusy.current = false; setQTick((n) => n + 1); });
+  }, [busy, queue, qPause, qTick]);
+  const steerQ = (x) => { editQ((l) => l.filter((y) => y.key !== x.key)); setHints((l) => [...l, x.text]); post("chat/hint", { id, text: x.text }).catch((e) => { setHints((l) => l.filter((y) => y !== x.text)); addQueue(x, true); toast(e.status === 409 ? "The answer was ending: it stays queued" : e.message); }); };
+  const editQItem = (x) => { editQ((l) => l.filter((y) => y.key !== x.key)); setText((c) => (c ? c + "\n" : "") + x.text); if (x.atts && x.atts.length) setAtt((a) => [...a, ...x.atts]); ta.current && ta.current.focus(); };
+  const stopAgent = guard(async (aid) => { const r = await post("chat/agent_stop", { id, agent: aid }); if (!r.stopped) toast("That agent already ended"); });
   sendRef.current = send; busyRef.current = busy; engineNow.current = engine; prevRef.current = prev;
   const answerNow = guard(async () => {                                   // stop the harness and ask for a short direct answer in the same Claude session
     await post("chat/stop", { id });
@@ -692,7 +708,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     if (busyRef.current) return toast("Still stopping… try Answer now again in a moment");
     await sendRef.current(DIRECT_PROMPT, { effort: "low" });
   });
-  const stop = guard(async () => { await post("chat/stop", { id }); });                // the stream then ends by itself with `done`
+  const stop = guard(async () => { stopRef.current = true; await post("chat/stop", { id }); });                // the stream then ends by itself with `done`
   const permit = guard(async (ask, answer) => { await post("chat/permit", { id, ask, answer }); });     // AIHubness waits on this card
   const pick = (fl) => {
     fl = [...fl]; const have = att.reduce((n, a) => n + (a.size || 0), 0), add = fl.reduce((n, f) => n + f.size, 0);
@@ -702,7 +718,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const onKey = (e) => {
     if (menuItems.length) { if (e.key === "ArrowDown") { e.preventDefault(); setSidx((i) => (i + 1) % menuItems.length); return; } if (e.key === "ArrowUp") { e.preventDefault(); setSidx((i) => (i + menuItems.length - 1) % menuItems.length); return; }
       if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) { e.preventDefault(); pickSlash(menuItems[sidx]); return; } if (e.key === "Escape") { e.preventDefault(); setDismissed(text); return; } }
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(undefined, { queue: e.altKey }); }
   };
   const delMsg = guard(async (i) => {
     if (busy) return;
@@ -725,12 +741,15 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     const v = await ask({ title: "Rename chat", fields: [{ name: "title", label: "Name", value: s.title, required: true, max: 120 }], submit: "Rename" });
     if (!v) return; const r = await post("sessions/update", { id, title: v.title.trim() }); setS(r.session); refresh();
   });
-  const { results, steps } = useMemo(() => {                            // only changes when the history does, not on every streamed token
+  const { results, steps, kids, tasks, turnAgents } = useMemo(() => {                            // only changes when the history does, not on every streamed token
     const results = Object.fromEntries(hist.filter((e) => e.k === "tool_result").map((e) => [e.id, e]));
     const lastUser = hist.map((e) => (e.k === "user" && !e.hint ? "user" : "")).lastIndexOf("user");       // a message sent mid-answer is part of the same turn
-    const steps = hist.slice(lastUser + 1).filter((e) => e.k === "msg").flatMap((e) => e.blocks.filter((b) => b.type === "tool" && b.name !== "AskUserQuestion").map((b) => ({ name: b.name, hint: toolHint(b), state: results[b.id] ? (results[b.id].error ? "bad" : "ok") : "run" })));
-    return { results, steps };
-  }, [hist]);
+    const steps = hist.slice(lastUser + 1).filter((e) => e.k === "msg" && !e.parent).flatMap((e) => e.blocks.filter((b) => b.type === "tool" && b.name !== "AskUserQuestion" && !AGENT_TOOLS.has(b.name)).map((b) => ({ name: b.name, hint: toolHint(b), state: results[b.id] ? (results[b.id].error ? "bad" : "ok") : "run" })));
+    const kids = {}, tasks = {};
+    for (const e of hist) { if (e.parent) (kids[e.parent] = kids[e.parent] || []).push(e); if (e.k === "task" && e.id) tasks[e.id] = e; }
+    const turnAgents = hist.slice(lastUser + 1).filter((e) => e.k === "msg" && !e.parent).flatMap((e) => e.blocks.filter((b) => b.type === "tool" && AGENT_TOOLS.has(b.name))).map((b) => agentOf(b, results, kids, tasks, busy));
+    return { results, steps, kids, tasks, turnAgents };
+  }, [hist, busy]);
   const u = s ? s.usage : {}, tot = (u.input || 0) + (u.cache_read || 0) + (u.cache_write || 0);
   const refreshMem = guard(async () => {
     if (!(await confirmBox({ title: "Reload memory?", text: "Reload soul and notes into this chat? It starts a fresh Claude session and the next turn rewrites the prompt cache.", ok: "Reload" }))) return;
@@ -776,6 +795,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const mdl = pickList.find((m) => m.id === model) || (model ? { id: model, label: model, group: "picker", kind: "chat", note: "Model of this chat (not in your settings list)." } : pickList[0]);
   const lastCompact = [...hist].reverse().find((e) => e.k === "compact");
   const canPrev = (p) => /\.(html?|svg|png|jpe?g|gif|webp|pdf|md|markdown|txt|docx|xlsx|pptx|drawio|dio|ipynb)$/i.test(p || ""), fver = (files.find((f) => f.path === prev) || {}).mtime || 0;
+  const fsig = files.length + ":" + files.reduce((m, f) => Math.max(m, f.mtime || 0), 0);                // changes when any file of the folder does
   const leaveOk = async () => { if (!dirtyRef.current) return true; if (!(await discard(baseName(prevRef.current)))) return false; dirtyRef.current = false; return true; };
   const changeTab = async (t) => { if (t !== tab && (tab === "edit" || (tab === "preview" && isNb(prev))) && !(await leaveOk())) return; setTab(t); };
   const pickFile = async (f) => { if (!(await leaveOk())) return; setPrev(f.path); setTab(canPrev(f.path) ? "preview" : "edit"); };
@@ -795,13 +815,15 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const openCode = guard(async (path) => { await post("files/vscode", { id, path: path || "" }); toast("Opening in VS Code"); });
   const openDir = guard(async (path) => { await post("files/reveal", { id, path: path || "" }); toast(path ? "Showing it in its folder" : "Opening the folder"); });
   const switchTo = async (f) => { if (f.path === prev) return; if (dirtyRef.current && !(await discard(baseName(prev)))) return; dirtyRef.current = false; setPrev(f.path); };
-  const editEl = prev && html`<div class="edlay">${rail && html`<div class="edfiles" style=${"width:" + ew + "px"}><${FileTree} files=${files} sel=${prev} src=${src} onPick=${switchTo}/></div><${Grip} cls="ed-grip" value=${() => ew} onChange=${setEw} onDone=${(v) => setPref("edw", String(v))} min=${120} max=${420} sign=${1} reset=${() => { setEw(200); setPref("edw", "200"); }}/>`}<${Editor} key=${prev} id=${id} path=${prev} ver=${fver} onSaved=${refreshFiles} dirtyRef=${dirtyRef}/></div>`, diffEl = prev && html`<${DiffView} key=${prev} id=${id} path=${prev} ver=${fver}/>`;
+  const editEl = prev && html`<div class="edlay">${rail && html`<div class="edfiles" style=${"width:" + ew + "px"}><${FileTree} files=${files} sel=${prev} src=${src} onPick=${switchTo}/></div><${Grip} cls="ed-grip" value=${() => ew} onChange=${setEw} onDone=${(v) => setPref("edw", String(v))} min=${120} max=${420} sign=${1} reset=${() => { setEw(200); setPref("edw", "200"); }}/>`}<${Editor} key=${prev} id=${id} path=${prev} ver=${fver} onSaved=${refreshFiles} dirtyRef=${dirtyRef}/></div>`, diffEl = html`<${DiffView} key=${prev || "-"} id=${id} path=${prev} ver=${fver} rev=${fsig} api=${api} put=${put} onPick=${(p) => switchTo({ path: p })} onSaved=${refreshFiles}/>`;
+  const openDiff = (p) => { setPref("diffbase", "git"); setPrev(p); setTab("diff"); };
   // the message list is rebuilt only when the history, the busy state, the edit box or the folder signature change, not for every streamed token
-  const histEl = useMemo(() => hist.map((e, i) => e.k === "user" ? html`<div class="msg user">${edit && edit.i === i ? null : acts(e, i, true)}${edit && edit.i === i ? html`<div class="bub editing"><textarea rows="3" value=${edit.text} autofocus onInput=${(x) => setEdit({ ...edit, text: x.target.value })} onKeyDown=${(x) => { if (x.key === "Escape") setEdit(null); else if (x.key === "Enter" && (x.metaKey || x.ctrlKey)) saveEdit(); }}></textarea>
+  const histEl = useMemo(() => hist.map((e, i) => e.parent || e.k === "task" ? null : e.k === "user" ? html`<div class="msg user">${edit && edit.i === i ? null : acts(e, i, true)}${edit && edit.i === i ? html`<div class="bub editing"><textarea rows="3" value=${edit.text} autofocus onInput=${(x) => setEdit({ ...edit, text: x.target.value })} onKeyDown=${(x) => { if (x.key === "Escape") setEdit(null); else if (x.key === "Enter" && (x.metaKey || x.ctrlKey)) saveEdit(); }}></textarea>
             <div class="row" style="justify-content:flex-end;gap:8px;margin-top:6px"><button class="btn" onClick=${() => setEdit(null)}>Cancel</button><button class="btn acc" disabled=${!edit.text.trim()} onClick=${saveEdit}>Resend</button></div></div>` : html`<div class="bub">${e.hint && html`<div class="htag">${Ic("bolt", 11)} sent while Claude was working</div>`}${e.text}${(e.files || []).map((f) => html`<div class="chip" style="margin-top:6px">${Ic("clip", 12)} ${f.split("/").pop()}</div>`)}</div>`}</div>`
           : e.k === "msg" ? html`<div class="msg bot"><div class="body">${acts(e, i, true)}${cleanBlocks(e.blocks, hist, i).map((b) => b.type === "text" ? html`<${Md} text=${b.text} onRender=${showEl} onSend=${(t) => sendRef.current(t)}/>`
               : b.type === "thinking" ? html`<details class="thinkd"><summary>${Ic("sparkles", 13)} <b>Reasoning</b> <span class="mute small">${words(b.text)} words</span></summary><div class="thinkb">${b.text}</div></details>`
               : b.name === "AskUserQuestion" && b.input && b.input.questions ? html`<${AskCard} spec=${b.input} onSend=${(t) => sendRef.current(t)} locked=${busy || hist.slice(i + 1).some((x) => x.k === "user")}/>`
+              : AGENT_TOOLS.has(b.name) ? html`<${AgentCard} a=${agentOf(b, results, kids, tasks, busy)} results=${results} onSend=${(t) => sendRef.current(t)}/>`
               : html`<${ToolRow} b=${b} res=${results[b.id]} hint=${toolHint(b)}/>`)}</div></div>`
           : e.k === "files" ? html`<div class="msg"><div class="fcard"><div class="fc-h">${Ic("folder", 14)}<b>${e.items.some((x) => x.new) ? "Files created" : "Files changed"}</b><span class="mute small">${e.items.length} in this chat's folder</span></div>
               ${e.items.map((f) => { const open = /\.(html?|svg|png|jpe?g|gif|webp|pdf|md|txt|drawio|dio|ipynb)$/i.test(f.path), img = /\.(png|jpe?g|gif|webp|svg)$/i.test(f.path);
@@ -845,18 +867,23 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
         ${histEl}
         ${gen && html`<${GenBar} gen=${gen}/>`}
         ${live.text && html`<div class="msg bot"><div class="body"><${Md} live=${true} text=${live.text} onRender=${showEl}/></div></div>`}
-        ${busy && html`<${Working} act=${act} since=${since} live=${live} steps=${steps} ctx=${ctx} win=${win} free=${engine === "free"} onStop=${stop} onDirect=${answerNow}/>`}
+        ${busy && html`<${Working} act=${act} since=${since} live=${live} steps=${steps} ctx=${ctx} win=${win} free=${engine === "free"} onStop=${stop} onDirect=${answerNow} agents=${turnAgents} onStopAgent=${engine === "harness" ? stopAgent : null}/>`}
         <div ref=${end}></div>
       </div>${!stuck && (hist.length > 0 || busy) && html`<div class="jumpw"><button class="jump" onClick=${jump}>${Ic("down", 14)} Jump to latest</button></div>`}</div>
       ${pub && html`<${PublishSteps} r=${pub} boot=${boot} close=${() => setPub(null)}/>`}
       <div class="composer">
         ${btws.map((b) => html`<div class="btw" key=${b.key}><div class="btwq"><span class="btwk">${Ic("chat", 12)} By the way</span><span>${b.q}</span><em>not added to the chat</em><button class="ibtn" title="Dismiss" aria-label="Dismiss" onClick=${() => setBtws((l) => l.filter((x) => x.key !== b.key))}>${Ic("x", 13)}</button></div>
           <div class="btwa">${b.busy ? html`<span class="shine">Thinking aside…</span>` : b.err ? html`<span class="err">${b.err}</span>` : html`<${Md} text=${b.a}/>`}</div></div>`)}
-        ${hints.length > 0 && html`<div class="hints">${hints.map((t) => html`<div class="hintq" title="Claude reads it at its next step"><span class="hintl">${Ic("clock", 11)} waiting for Claude's next step</span><span class="hintt">${t}</span></div>`)}</div>`}
+        ${queue.length > 0 && html`<div class="mqueue" role="list" aria-label="Queued messages"><div class="mq-h">${Ic("list", 12)}<b>Queued</b><span class="mute small grow">${qPause ? "paused after Stop" : busy ? "sent one by one when the answer ends" : "sending…"}</span>
+            ${qPause && html`<button class="btn sm" onClick=${() => setQPause(false)}>${Ic("play", 12)} Resume</button>`}<button class="lnk small" onClick=${() => editQ(() => [])}>Clear</button></div>
+          ${queue.map((x, n) => html`<div class="mq-r" role="listitem" key=${x.key}><span class="mq-n">${n + 1}</span><span class="mq-t" title=${x.text}>${x.text}</span>${x.atts && x.atts.length > 0 && html`<span class="chip">${Ic("clip", 11)} ${x.atts.length}</span>`}
+            ${busy && engine !== "free" && !x.cmd && !(x.atts && x.atts.length) && html`<button class="ibtn" title="Send it into the running answer now (read at its next step)" aria-label="Send into the running answer now" onClick=${() => steerQ(x)}>${Ic("bolt", 13)}</button>`}
+            <button class="ibtn" title="Edit: back into the message box" aria-label="Edit queued message" onClick=${() => editQItem(x)}>${Ic("edit", 13)}</button><button class="ibtn" title="Remove from the queue" aria-label="Remove queued message" onClick=${() => editQ((l) => l.filter((y) => y.key !== x.key))}>${Ic("x", 13)}</button></div>`)}</div>`}
+        ${hints.length > 0 && html`<div class="hints">${hints.map((t) => html`<div class="hintq" title="Read at the next step of the running answer"><span class="hintl">${Ic("clock", 11)} waiting for ${engine === "harness" ? "AIHubness" : "Claude"}'s next step</span><span class="hintt">${t}</span></div>`)}</div>`}
         <div class=${"box" + (busy ? " busy" : "")} onDragOver=${(e) => e.preventDefault()} onDrop=${(e) => { e.preventDefault(); pick(e.dataTransfer.files); }}>
           ${(sm || mm) && html`<${SlashMenu} items=${menuItems} idx=${sidx} pick=${pickSlash} at=${!!mm}/>`}
           ${att.length ? html`<div>${att.map((a, i) => html`<span class="chip">${a.type.startsWith("image/") ? html`<img src=${a.url} height="16"/>` : Ic("file", 12)} ${a.name} <button type="button" class="chipx" aria-label=${"Remove " + a.name} onClick=${() => setAtt(att.filter((_, j) => j !== i))}>${Ic("x", 12)}</button></span>`)}</div>` : ""}
-          <textarea ref=${ta} rows="1" placeholder=${ownEngine(engine) ? (busy ? "Queue a message for when the answer ends…" : engine === "harness" ? "Ask AIHubness…  (files and commands in the working folder, light on tokens)" : "Ask the model directly…  (no tools, no files)") : busy ? tipOf(BUSY_TIPS, tipN) : hist.length ? "Message Claude…   @ for files, chats, notes, Spaces · Tip: " + tipOf(TIPS, tipN) : "Message Claude…   / for commands, @ for files, chats, notes and Spaces"} value=${text} onInput=${(e) => { setText(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 240) + "px"; }}
+          <textarea ref=${ta} rows="1" placeholder=${ownEngine(engine) ? (busy ? (engine === "harness" ? "Tell AIHubness while it works (read at its next step) · Alt+Enter queues it for after…" : "Queue a message for when the answer ends…") : engine === "harness" ? "Ask AIHubness…  (files and commands in the working folder, light on tokens)" : "Ask the model directly…  (no tools, no files)") : busy ? tipOf(BUSY_TIPS, tipN) : hist.length ? "Message Claude…   @ for files, chats, notes, Spaces · Tip: " + tipOf(TIPS, tipN) : "Message Claude…   / for commands, @ for files, chats, notes and Spaces"} value=${text} onInput=${(e) => { setText(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 240) + "px"; }}
             onPaste=${(e) => { const f = [...e.clipboardData.files]; if (f.length) { e.preventDefault(); pick(f); } }} onKeyDown=${onKey}></textarea>
           <div class="tools">
             <button class="ibtn" title="Attach files" aria-label="Attach files" onClick=${() => fileIn.current && fileIn.current.click()}>${Ic("clip", 17)}</button><input type="file" multiple hidden ref=${fileIn} onChange=${(e) => { pick(e.target.files); e.target.value = ""; }}/>
@@ -879,7 +906,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     </div>
     <div class=${"canvas" + (open ? " open" : "") + (split && (tab === "edit" || tab === "diff") ? " wide" : "")} style=${cw ? "--cw:" + cw + "px" : ""}>
       ${open && html`<${Grip} cls="cv-grip" value=${() => document.querySelector(".canvas").getBoundingClientRect().width} onChange=${setCw} onDone=${(v) => setPref("canvasw", String(Math.round(v)))} min=${360} max=${() => Math.max(420, innerWidth - 272 - 320)} sign=${-1} reset=${() => { setCw(0); setPref("canvasw", "0"); }}/>`}
-      <div class="ctabs"><${Seg} small value=${tab} onChange=${changeTab} items=${[{ id: "files", label: "Files", icon: "folder" }, { id: "preview", label: "Preview", icon: "eye" }, { id: "edit", label: "Edit", icon: "edit" }, { id: "diff", label: "Diff", icon: "layers" }, { id: "elements", label: "Elements", icon: "grid" }]}/><button class="ibtn cv-x" title="Close the canvas" aria-label="Close the canvas" onClick=${() => setOpen(false)}>${Ic("x", 16)}</button></div>
+      <div class="ctabs"><${Seg} small value=${tab} onChange=${changeTab} items=${[{ id: "files", label: "Files", icon: "folder" }, { id: "preview", label: "Preview", icon: "eye" }, { id: "edit", label: "Edit", icon: "edit" }, { id: "diff", label: "Diff", icon: "layers" }, { id: "git", label: "Git", icon: "branch" }, { id: "elements", label: "Elements", icon: "grid" }]}/><button class="ibtn cv-x" title="Close the canvas" aria-label="Close the canvas" onClick=${() => setOpen(false)}>${Ic("x", 16)}</button></div>
       ${(tab === "preview" || tab === "edit" || tab === "diff") && html`<div class="fbar"><span class="mono t" title=${prev}>${prev || "No file selected"}</span>${prev && canPrev(prev) && html`<a class="small" href=${src(prev)} target="_blank" rel="noopener">Open ${Ic("link", 12)}</a>`}${prev && !/\.(exe|dll|zip|gz|tar|bin)$/i.test(prev) && html`<button class="btn" title="Publish this file as a Space on the hub" onClick=${() => share(prev, false)}>${Ic("upload", 13)} Share</button>`}${/(^|\/)index\.html?$/i.test(prev || "") && html`<button class="btn" title="Publish the whole folder as a web page Space" onClick=${() => share(prev, true)}>${Ic("folder", 13)} Share bundle</button>`}
         ${tab === "edit" && html`<button class=${"ibtn" + (rail ? " on" : "")} style="width:26px;height:26px" title="Show the file list beside the editor" aria-label="Show the file list beside the editor" onClick=${() => { setRail(!rail); setPref("edrail", rail ? "0" : "1"); }}>${Ic("folder", 14)}</button>`}
         ${prev && html`<button class="btn" title="Open this file, in the project folder, in VS Code" onClick=${() => openCode(prev)}>${Ic("code", 13)} VS Code</button><button class="btn" title="Show this file in its folder (Finder / Explorer)" onClick=${() => openDir(prev)}>${Ic("folder", 13)} Open folder</button>`}
@@ -888,7 +915,9 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
         ${tab === "files" && html`<div class="fdir"><span class="mono t" title=${dirInfo.dir}>${dirInfo.dir}</span><button class="btn" title="Open the project folder in VS Code" onClick=${() => openCode("")}>${Ic("code", 13)} VS Code</button><button class="btn" title="Open the project folder in Finder / Explorer" onClick=${() => openDir("")}>${Ic("folder", 13)} Open folder</button><button class="btn" onClick=${() => setDlg("dir")}>${Ic("folder", 13)} Change</button></div>
           ${files.length ? html`<${FileTree} files=${files} sel=${prev} src=${src} onPick=${pickFile}/>` : html`<div class="empty"><div>${Ic("folder", 26)}<div>No files yet.<br/>Ask Claude to build something.</div></div></div>`}`}
         ${tab === "preview" && previewEl}
-        ${(tab === "edit" || tab === "diff") && (!prev ? noFile : split && canPrev(prev) ? html`<div class="split"><div class="pane">${previewEl}</div><div class="pane">${tab === "edit" ? editEl : diffEl}</div></div>` : tab === "edit" ? editEl : diffEl)}
+        ${tab === "diff" && !prev && diffEl}
+        ${tab === "git" && html`<${GitView} id=${id} api=${api} rev=${fsig} file=${prev} onOpenDiff=${openDiff}/>`}
+        ${(tab === "edit" || (tab === "diff" && prev)) && (!prev ? noFile : split && canPrev(prev) ? html`<div class="split"><div class="pane">${previewEl}</div><div class="pane">${tab === "edit" ? editEl : diffEl}</div></div>` : tab === "edit" ? editEl : diffEl)}
         ${tab === "elements" && (els.length ? els.map((e, i) => html`<${Element} key=${e.id} e=${e}/>`) : html`<div class="empty"><div>${Ic("layers", 26)}<div>Use Render on an html, svg or openui block<br/>to see it here.</div></div></div>`)}
       </div>
     </div>
