@@ -237,7 +237,7 @@ export function FormBlock({ spec, onSend, disabled }) {
   const submit = (e) => { e.preventDefault(); if (!ok || done || disabled || !onSend) return; if (onSend("Form " + (spec.title ? "“" + spec.title + "” " : "") + "response:\n```json\n" + JSON.stringify(v, null, 2) + "\n```") !== false) { setDone(true); setOpen(false); } };
   return html`<form class=${"fb" + (done ? " done" : "") + (!done && !disabled ? " live" : "") + (open ? "" : " shut")} onSubmit=${submit}>
     <button type="button" class="bk-head fb-toggle" aria-expanded=${open} disabled=${!done} onClick=${() => setOpen((o) => !o)}><span class="bk-title">${Ic("form", 14)}<span>${spec.title || "Form"}</span></span>
-      <span class="fb-end">${done ? html`<span class="tag good">${Ic("check", 12)} sent</span>` : !disabled && html`<span class="ask-wait"><i></i>Waiting for you</span>`}${done && html`<span class="chev">${Ic("down", 14)}</span>`}</span></button>
+      <span class="fb-end">${done ? html`<span class="tag good">${Ic("check", 12)} sent</span>` : !disabled && html`<span class="ask-wait">Waiting for you</span>`}${done && html`<span class="chev">${Ic("down", 14)}</span>`}</span></button>
     ${open && html`<div class="fb-body">${spec.description && html`<p class="mute small fb-d">${spec.description}</p>`}
     <div class="fb-grid">${fields.map((f) => { const set = (x) => setV((c) => ({ ...c, [f.name]: x })); const dis = done || disabled;
       return html`<label class=${"fb-f" + (f.type === "textarea" ? " wide" : "")}><span>${f.label || f.name}${f.required ? " *" : ""}</span>
@@ -264,7 +264,7 @@ export function AskCard({ spec, onSend, locked }) {
   const keyTabs = (e) => { if (e.key === "ArrowRight") setStep(Math.min(cur + 1, qs.length - 1)); else if (e.key === "ArrowLeft") setStep(Math.max(cur - 1, 0)); };
   return html`<div class=${"ask" + (sent ? " sent" : "") + (waiting ? " live" : "") + (open ? "" : " shut")}>
     <button type="button" class="bk-head ask-top" aria-expanded=${open} onClick=${() => setOpen((o) => !o)}><span class="bk-title">${Ic("chat", 14)}<span>${multi ? qs.length + " questions" : "A question"}</span></span>
-      <span class="fb-end">${sent ? html`<span class="tag good">${Ic("check", 12)} answered</span>` : waiting ? html`<span class="ask-wait"><i></i>Waiting for you</span>` : null}<span class="chev">${Ic("down", 14)}</span></span></button>
+      <span class="fb-end">${sent ? html`<span class="tag good">${Ic("check", 12)} answered</span>` : waiting ? html`<span class="ask-wait">Waiting for you</span>` : null}<span class="chev">${Ic("down", 14)}</span></span></button>
     ${open && sent && html`<ul class="asum">${qs.map((x, i) => html`<li><span class="mute small">${x.header || x.question}</span><b>${final[i].join(", ") || "—"}</b></li>`)}</ul>`}
     ${open && !sent && html`<div>
       ${multi && html`<div class="atabs" role="tablist" onKeyDown=${keyTabs}>${qs.map((x, i) => html`<button type="button" role="tab" aria-selected=${i === cur} class=${"atab" + (i === cur ? " on" : "") + (final[i].length ? " ok" : "")} onClick=${() => setStep(i)}>

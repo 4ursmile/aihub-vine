@@ -384,7 +384,7 @@ PALETTES = ("blue", "indigo", "purple", "pink", "red", "orange", "claude", "gree
 
 
 def brand(h, q, b):
-    """Name, accent palette and logo of the signed-in hub (its public /meta), cached 5 minutes. Nothing here is secret; no
+    """Name, accent palette and announcement banner of the signed-in hub (its public /meta), cached 5 minutes. Nothing here is secret; no
     login is sent. An unreachable hub just gives the defaults."""
     if BRAND["hub"] and time.time() - BRAND["at"] < 300:            # cache first: no CLI process for a repeat call (login/logout reset it)
         return BRAND["doc"]
@@ -400,7 +400,7 @@ def brand(h, q, b):
         try:
             with urllib.request.urlopen(urllib.request.Request(hub + "/api/v1/meta", headers={"Accept": "application/json"}), timeout=6, context=ctx) as r:
                 m = json.loads(r.read(1 << 20).decode("utf-8", "replace"))
-            doc = {"name": str(m.get("name") or "")[:40], "theme": m.get("theme") if m.get("theme") in PALETTES else "blue"}
+            doc = {"name": str(m.get("name") or "")[:40], "theme": m.get("theme") if m.get("theme") in PALETTES else "blue", "announcement": str(m.get("announcement") or "")[:2000]}
             break
         except ssl.SSLError:
             continue

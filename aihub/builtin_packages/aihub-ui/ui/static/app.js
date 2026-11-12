@@ -41,6 +41,27 @@ function applyBrand(b) {
   else ["--accent", "--accent2", "--accentbg", "--on"].forEach((k) => st.removeProperty(k));       // the built-in palette already is Claude orange
 }
 
+// The hub's announcement banner (admin-written HTML from a remote hub): re-cleaned here with a tag allowlist, links http/https/mailto only.
+const NOTE_TAGS = new Set(["A", "B", "STRONG", "I", "EM", "U", "S", "BR", "SPAN", "CODE", "SMALL", "MARK"]);
+function safeNote(src) {
+  const doc = new DOMParser().parseFromString("<body>" + String(src || "") + "</body>", "text/html");
+  const walk = (n) => { [...n.childNodes].forEach((c) => {
+    if (c.nodeType === 3) return;
+    if (c.nodeType !== 1 || !NOTE_TAGS.has(c.tagName)) { c.remove(); return; }
+    const href = c.tagName === "A" ? c.getAttribute("href") || "" : "";
+    [...c.attributes].forEach((a) => c.removeAttribute(a.name));
+    if (href && /^(https?:|mailto:)/i.test(href.trim())) { c.setAttribute("href", href.trim()); c.setAttribute("target", "_blank"); c.setAttribute("rel", "noopener noreferrer"); }
+    walk(c); }); };
+  walk(doc.body); return doc.body.innerHTML;
+}
+function HubNote({ text }) {
+  const key = "hub_note_off", [off, setOff] = useState(() => { try { return localStorage.getItem(key); } catch (e) { return null; } });
+  const clean = useMemo(() => safeNote(text), [text]);
+  if (!clean.trim() || off === clean) return null;
+  const hide = () => { setOff(clean); try { localStorage.setItem(key, clean); } catch (e) {} };
+  return html`<div class="hubnote" role="status">${Ic("info", 16)}<span class="grow" dangerouslySetInnerHTML=${{ __html: clean }}></span><button type="button" class="ibtn" title="Dismiss" aria-label="Dismiss announcement" onClick=${hide}>${Ic("x", 14)}</button></div>`;
+}
+
 async function api(path, { method = "GET", body, signal } = {}) {
   const r = await fetch("/api/" + path, { method, signal, headers: method === "GET" ? {} : { "Content-Type": "application/json", "X-AIHub-UI": "1" }, body: body === undefined ? undefined : JSON.stringify(body) });
   const d = await r.json().catch(() => ({}));
@@ -396,11 +417,13 @@ let elSeq = 0;
 const discard = (name) => confirmBox({ title: "Discard unsaved changes?", text: name ? "Unsaved changes to " + name + " will be lost." : "Unsaved changes will be lost.", ok: "Discard", danger: true });
 const winOf = (models, id) => (models.find((m) => m.id === id) || models[0] || {}).window || 200000;
 const DIRECT_PROMPT = "Stop using tools and stop exploring. Answer my last question directly and concisely right now, using only what you already know or have found so far.";
+// Status words shown (and swept by the light) while the model thinks or writes, like Claude Code's; one is picked at random and changes every few seconds.
+const VERBS = ["Thinking", "Pondering", "Cogitating", "Mulling", "Musing", "Reasoning", "Ruminating", "Noodling", "Brewing", "Percolating", "Untangling", "Connecting dots"];
 const words = (t) => (String(t).trim().match(/\S+/g) || []).length;
 const fmtT = (sec) => (sec < 60 ? sec + "s" : Math.floor(sec / 60) + "m " + (sec % 60) + "s");
 // What the assistant is doing right now: phase, a live step list (tools and their results), reasoning as it streams, counters, and the Stop / Answer now buttons.
 function Working({ act, since, live, steps, ctx, win, free, onStop, onDirect, agents, onStopAgent }) {
-  const [n, setN] = useState(0), [openR, setOpenR] = useState(true), rb = useRef(), w0 = useRef(0);
+  const [n, setN] = useState(0), [openR, setOpenR] = useState(false), rb = useRef(), w0 = useRef(0), vi = useRef(Math.floor(Math.random() * VERBS.length));
   useEffect(() => { const t = setInterval(() => setN((x) => x + 1), 1000); return () => clearInterval(t); }, []);
   useEffect(() => { if (rb.current) rb.current.scrollTop = rb.current.scrollHeight; }, [live.think.length]);
   const sec = Math.max(0, Math.round((Date.now() - since) / 1000)), writing = live.text.length > 0;
@@ -409,22 +432,21 @@ function Working({ act, since, live, steps, ctx, win, free, onStop, onDirect, ag
   const cpt = useRef(0), compacting = !!(act && act.k === "compact");
   if (!compacting) cpt.current = 0; else if (!cpt.current) cpt.current = Date.now();
   const phase = compacting ? "compact" : writing ? "write" : act && act.k === "tool" ? "tool" : "think";
-  const label = phase === "compact" ? "Compacting the conversation" : phase === "write" ? "Writing the answer" : phase === "tool" ? "Running " + act.name : live.think ? "Reasoning" : "Thinking";
+  const verb = VERBS[(vi.current + Math.floor(sec / 5)) % VERBS.length];
+  const label = phase === "compact" ? "Compacting the conversation" : phase === "tool" ? "Running " + act.name : phase === "write" ? "Writing" : verb;
+  const tokens = (live.think.length + live.text.length) / 4, tail = String(live.think || "").trim().split(/\n+/).pop().slice(-160);
   const csec = compacting ? Math.max(0, Math.round((Date.now() - cpt.current) / 1000)) : 0, cpct = Math.min(95, Math.round(100 * (1 - Math.exp(-csec / 25))));   // no real progress is reported: an easing estimate
-  const done = steps.filter((x) => x.state !== "run").length, shown = steps.slice(-6), pct = win ? Math.min(100, Math.round((ctx / win) * 100)) : 0;
-  return html`<div class=${"work2 p-" + phase}><i class="wbar"></i>
-    <div class="w-head"><span class="spark lgk">${Ic("logo", 20, "lgm lg-think")}</span><b class="shine">${label}…</b><span class="w-time">${fmtT(sec)}</span><span class="grow"></span>
+  const shown = steps.slice(-6);
+  return html`<div class=${"work2 p-" + phase}>
+    <div class="w-head"><span class="spark lgk">${Ic("logo", 20, "lgm lg-think")}</span><b class="shine">${label}…</b>
+      <span class="w-time">${fmtT(sec)}${tokens >= 1 ? " · " + num(tokens) + " tokens" : ""}${speed ? " · ~" + num(speed) + " tok/s" : ""}</span><span class="grow"></span>
       ${(!free || steps.length > 0) && html`<button class="btn sm" title="Stop what it is doing and get a short answer from what it has so far" onClick=${onDirect}>${Ic("zap", 13)} Answer now</button>`}<button class="btn sm" onClick=${onStop}>${Ic("stop", 12)} Stop</button></div>
-    <div class="w-phases"><span class=${"ph" + (phase === "think" ? " on" : live.think || steps.length || writing ? " done" : "")}>${Ic("sparkles", 12)} Reasoning</span>
-      ${(!free || steps.length > 0) && html`<span class=${"ph" + (phase === "tool" ? " on" : steps.length ? " done" : "")}>${Ic("terminal", 12)} Tools${steps.length ? " · " + steps.length : ""}</span>`}
-      <span class=${"ph" + (phase === "write" ? " on" : "")}>${Ic("edit", 12)} Answer</span></div>
     ${compacting && html`<div class="w-compact" role="status" aria-live="polite"><div class="row small"><span class="grow">Summarising ${ctx ? "~" + num(ctx) + " tokens of " : ""}older turns so the chat fits the context window</span><b>${fmtT(csec)}</b></div>
       <div class="ccbar"><i style=${"width:" + cpct + "%"}></i></div><div class="mute small">${csec < 10 ? "Reading the conversation" : csec < 40 ? "Writing the summary" : "Almost there"}… the answer continues after it.</div></div>`}
     ${agents && agents.length > 0 && html`<${AgentsBar} agents=${agents} onStop=${onStopAgent}/>`}
     ${shown.length > 0 && html`<div class="w-steps">${steps.length > shown.length && html`<div class="mute small">+ ${steps.length - shown.length} earlier step${steps.length - shown.length > 1 ? "s" : ""}</div>`}
       ${shown.map((x) => html`<div class=${"w-step " + x.state}><span class="wi">${x.state === "ok" ? Ic("check", 13) : x.state === "bad" ? Ic("x", 13) : html`<i class="spin"></i>`}</span><b>${x.name}</b><span class="mute">${x.hint}</span></div>`)}</div>`}
-    ${live.think && html`<div class="w-think"><button type="button" class="w-tt lnk" aria-expanded=${openR} onClick=${() => setOpenR(!openR)}>${Ic(openR ? "down" : "right", 12)} Reasoning <span class="mute">${words(live.think)} words</span></button>${openR && html`<div class="w-tb" ref=${rb}>${live.think.slice(-1400)}</div>`}</div>`}
-    <div class="w-stats"><span>${Ic("clock", 12)} ${fmtT(sec)}</span>${(!free || steps.length > 0) && html`<span>${Ic("terminal", 12)} ${done}/${steps.length} step${steps.length === 1 ? "" : "s"}</span>`}${live.think && html`<span>${Ic("sparkles", 12)} ${num(live.think.length / 4)} reasoning tokens (est.)</span>`}${writing && html`<span>${Ic("edit", 12)} ${num(live.text.length / 4)} tokens written (est.)${speed ? " · ~" + num(speed) + " tok/s" : ""}</span>`}${ctx > 0 && html`<span>${Ic("layers", 12)} context ${num(ctx)}${win ? " · " + pct + "%" : ""}</span>`}</div></div>`;
+    ${live.think && html`<div class=${"w-think" + (openR ? " open" : "")}><button type="button" class="w-tt" aria-expanded=${openR} title=${openR ? "Hide the reasoning" : "Show the reasoning"} onClick=${() => setOpenR(!openR)}>${Ic(openR ? "down" : "right", 12)}<span class="w-tl">${openR ? "Reasoning" : tail}</span><span class="mute">${words(live.think)} words</span></button>${openR && html`<div class="w-tb" ref=${rb}>${live.think.slice(-4000)}</div>`}</div>`}</div>`;
 }
 // /create-work (/workflow) in a chat: Claude designs the work, which takes a minute; this shows it is on its way
 function GenBar({ gen }) {
@@ -2107,7 +2129,7 @@ function App() {
         <h6><span></span><button class="linkbtn" onClick=${newFolder}>${Ic("folder", 14)} New project</button></h6></div>
       <div class="acct item" role="button" tabindex="0" aria-label="Account and settings" onClick=${() => go(c.signed_in ? "settings" : "settings/login")} onKeyDown=${(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(c.signed_in ? "settings" : "settings/login"); } }}><div class="av">${(c.username || "?")[0].toUpperCase()}</div><div class="grow"><b>${c.signed_in ? c.username : "Sign in"}</b><div class="mute small">${c.hub_configured ? c.hub.replace(/^https?:\/\//, "") : "local only"}</div></div>${Ic("sliders", 16)}</div>
     </aside>${imp && html`<${ImportLazy} get=${api} post=${post} close=${() => setImp(false)} extra=${impExtra} done=${async (n) => { setImp(false); await reloadSess(); go("chat/" + n.id); }}/>`}${spotOpen && html`<${Spotlight} close=${() => setSpotOpen(false)} go=${go} sessions=${sortChats(sess.sessions, "recent")} nav=${NAV} hub=${boot.context.hub_configured ? boot.context.hub : ""} importLink=${importLink} projects=${sess.folders} dirs=${sess.folder_dirs || {}} newChat=${newChat} newChatIn=${newChatIn}/>`}
-    <main class="main">${!(page === "chat" && arg) && html`<button class="ibtn burger fab" title="Chats and pages" aria-label="Chats and pages" onClick=${openSide}>${Ic("menu", 18)}</button>`}<${AlertBar} alerts=${alerts}/>${page === "chat" && arg ? html`<${Chat} key=${arg} id=${arg} onBusy=${markBusy} onImport=${() => setImp(true)} onMenu=${openSide} onIncog=${markIncog} boot=${boot} refresh=${reloadSess} newChat=${() => newChat()} prefs=${prefs} savePrefs=${savePrefs} slash=${slash}/>`
+    <main class="main">${!(page === "chat" && arg) && html`<button class="ibtn burger fab" title="Chats and pages" aria-label="Chats and pages" onClick=${openSide}>${Ic("menu", 18)}</button>`}<${HubNote} text=${brand.announcement}/><${AlertBar} alerts=${alerts}/>${page === "chat" && arg ? html`<${Chat} key=${arg} id=${arg} onBusy=${markBusy} onImport=${() => setImp(true)} onMenu=${openSide} onIncog=${markIncog} boot=${boot} refresh=${reloadSess} newChat=${() => newChat()} prefs=${prefs} savePrefs=${savePrefs} slash=${slash}/>`
       : page === "packages" ? html`<${Packages} key=${route} focus=${route.startsWith("packages/find/") ? decodeURIComponent(route.slice(14)) : ""}/>` : page === "services" ? html`<${Services}/>` : page === "mcp" ? html`<${Mcp}/>`
       : page === "works" ? html`<${Works} boot=${boot} openId=${arg}/>` : page === "knowledge" ? html`<${Knowledge} key=${route} focus=${arg}/>` : page === "usage" ? html`<${UsagePage} api=${api} prefs=${prefs} savePrefs=${savePrefs}/>` : page === "settings" || page === "vault" ? html`<${Settings} boot=${boot} reload=${reloadBoot} prefs=${prefs} savePrefs=${savePrefs} focus=${arg}/>`
       : html`<div class="hello"><div><span class="herologo">${Logo(44)}</span><h1>${hubName}</h1><p>Chat with Claude Code, manage packages, services, MCP servers and logins.</p><button class="btn acc" onClick=${() => newChat()}>${Ic("plus", 14)} New chat</button></div></div>`}</main>
