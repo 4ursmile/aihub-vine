@@ -43,6 +43,63 @@ class JError(Exception):
         self.status = status
 
 
+# ---------- address normalising
+
+_UI_ROUTES = ("lab", "tree", "notebooks", "doc", "edit", "files", "terminals", "consoles", "api", "login", "logout", "voila", "rstudio", "nbclassic", "retro")
+
+
+def normalize_url(raw, kind="server"):
+    """Whatever the user pasted from the browser bar -> {url, token, user, hub, kind, notes}.
+    `https://host/user/alice/lab/tree/x.ipynb?token=abc` -> url https://host/user/alice, token abc, user alice, hub https://host.
+    A missing scheme gets https:// (http:// for localhost / IPs). Never raises: an unusable text comes back unchanged."""
+    t = str(raw or "").strip().strip("<>\"'")
+    out = {"url": t.rstrip("/"), "token": "", "user": "", "hub": "", "kind": kind, "notes": []}
+    if not t:
+        return out
+    if not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", t):
+        local = re.match(r"^(localhost|127\.|0\.0\.0\.0|\[::1\]|\d+\.\d+\.\d+\.\d+)", t)
+        t = ("http://" if local else "https://") + t.lstrip("/")
+        out["notes"].append("Added " + t.split("//")[0] + "//")
+    try:
+        u = urllib.parse.urlsplit(t)
+    except ValueError:
+        return out
+    if u.scheme not in ("http", "https") or not u.netloc:
+        return out
+    q = urllib.parse.parse_qs(u.query)
+    tok = (q.get("token") or [""])[0].strip()
+    if tok:
+        out["token"] = tok
+        out["notes"].append("Took the token from the address")
+    parts = [x for x in u.path.split("/") if x]
+    m = next((i for i, x in enumerate(parts) if x == "user" and i + 1 < len(parts)), -1)
+    if m >= 0:                                                      # JupyterHub single-user server: .../user/<name>/...
+        out["user"] = urllib.parse.unquote(parts[m + 1])
+        out["hub"] = "%s://%s%s" % (u.scheme, u.netloc, "".join("/" + x for x in parts[:m]))
+        keep = parts[:m + 2]
+    else:
+        h = next((i for i, x in enumerate(parts) if x == "hub"), -1)
+        cut = next((i for i, x in enumerate(parts) if x in _UI_ROUTES), len(parts))
+        keep = parts[:h] if h >= 0 else parts[:cut]
+        if h >= 0:
+            out["hub"] = "%s://%s%s" % (u.scheme, u.netloc, "".join("/" + x for x in keep))
+    url = "%s://%s%s" % (u.scheme, u.netloc, "".join("/" + x for x in keep))
+    if url != out["url"] and url + "/" != t:
+        out["notes"].append("Using " + url)
+    out["url"] = url
+    if out["user"] and kind == "hub":
+        out["url"] = out["hub"]
+    return out
+
+
+def login_hint(base):
+    """Where the user makes an API token for the server at BASE (a JupyterHub token page when the address is a /user/<name>/ one)."""
+    n = normalize_url(base)
+    if n["hub"]:
+        return n["hub"] + "/hub/token"
+    return ""
+
+
 # ---------- saved servers
 
 def _path():
@@ -96,7 +153,11 @@ def save(box, b):
         raise ValueError("Unknown server type.")
     url = str(b.get("url") or "").strip().rstrip("/")
     user = str(b.get("user") or "").strip()[:80]
+    pasted_token = ""
     if kind != "local":
+        n = normalize_url(url, kind)
+        url, pasted_token = n["url"], n["token"]
+        user = user or n["user"]
         if not re.match(r"^https?://[^\s/]+", url):
             raise ValueError("The address must start with http:// or https://")
         if kind == "hub" and not user:
@@ -117,7 +178,7 @@ def save(box, b):
             d["servers"].append(cur)
         cur.update(name=name, kind=kind, url=url, user=user, env=env, verify=b.get("verify", True) is not False,
                    kernel=str(b.get("kernel") or "").strip()[:80], root=str(b.get("root") or "").strip()[:500])
-        tok = str(b.get("token") or "").strip()
+        tok = str(b.get("token") or "").strip() or pasted_token
         if tok:
             box.put(SECRET + cur["id"], tok)
         elif b.get("clear_token"):
@@ -214,7 +275,9 @@ def http(c, method, path, body=None, timeout=30, absolute=False):
     except urllib.error.HTTPError as e:
         raw = e.read() or b""
         if 300 <= e.code < 400:
-            raise JError("The server redirected to a login page: the address or the token is wrong.", 401)
+            tp = login_hint(c.base)
+            raise JError("The server asked for a login instead of answering (%s): the token is missing or wrong.%s" % (
+                (e.headers.get("Location") or "redirect")[:120], (" Make one at %s (Request new API token) and paste it in Token." % tp) if tp else " Paste the token from the URL Jupyter printed (?token=...)."), 401)
         msg = ""
         try:
             j = json.loads(raw.decode("utf-8", "replace"))
@@ -417,7 +480,7 @@ def new_item(c, folder, kind, name):
 
 # ---------- websocket channels (kernel and terminal)
 
-KEEP = {"stream", "display_data", "update_display_data", "execute_result", "error", "clear_output", "execute_input", "execute_reply", "status", "input_request"}
+KEEP = {"stream", "display_data", "update_display_data", "execute_result", "error", "clear_output", "execute_input", "execute_reply", "status", "input_request", "complete_reply", "inspect_reply"}
 MAX_BUF = 24 * 1024 * 1024
 
 
@@ -566,6 +629,117 @@ def execute(c, kid, code, stdin=True, expr=None, silent=False, mid=None):
     mid, raw = _msg(ch.session, "execute_request", {"code": code, "silent": silent, "store_history": not silent, "user_expressions": expr or {}, "allow_stdin": stdin, "stop_on_error": True}, mid)
     ch.send(raw)
     return mid
+
+
+def complete(c, kid, code, pos, wait=2.5):
+    """Ask the kernel for completions at POS (it knows the live objects: DataFrame columns, module members ...). Costs no model tokens."""
+    ch = channel(c, "k", kid)
+    _, base, _ = ch.read(1 << 60, 0)
+    mid, raw = _msg(ch.session, "complete_request", {"code": code, "cursor_pos": max(0, min(int(pos), len(code)))})
+    ch.send(raw)
+    end, after = time.time() + wait, base
+    while time.time() < end:
+        items, after, closed = ch.read(after, min(0.4, max(0.05, end - time.time())))
+        for _, e in items:
+            if isinstance(e, dict) and e.get("t") == "complete_reply" and e.get("p") == mid:
+                r = e["c"]
+                types = ((r.get("metadata") or {}).get("_jupyter_types_experimental")) or []
+                kinds = {t.get("text"): t.get("type") for t in types if isinstance(t, dict)}
+                ms = [m for m in (r.get("matches") or []) if isinstance(m, str)][:60]
+                return {"matches": [{"t": m, "k": kinds.get(m, "")} for m in ms], "start": r.get("cursor_start", pos), "end": r.get("cursor_end", pos)}
+        if closed:
+            break
+    return {"matches": [], "start": pos, "end": pos}
+
+
+_NS_EXPR = ("'\\n'.join(k + ': ' + type(v).__name__ + (' cols=' + ', '.join(str(a) + ':' + str(t) for a, t in list(v.dtypes.items())[:14]) + ' rows=' + str(len(v)) "
+            "if hasattr(v, 'dtypes') and hasattr(v, 'columns') else ' shape=' + str(v.shape) if hasattr(v, 'shape') else ' len=' + str(len(v)) "
+            "if isinstance(v, (list, dict, set, tuple)) else ' = ' + repr(v)[:40] if isinstance(v, (int, float, bool, str)) else '') "
+            "for k, v in list(globals().items())[-60:] if not k.startswith('_') and not callable(v) and type(v).__name__ != 'module')[:1500]")
+_ns_cache = {}
+
+
+def namespace(c, kid, wait=0.9, ttl=20):
+    """A few lines about the live variables of the kernel (DataFrame columns and dtypes, shapes, small values): what makes a suggestion fit the real data.
+    Silent, never interrupts, skipped (cached text or nothing) when the kernel is busy. Costs no model tokens."""
+    hit = _ns_cache.get(kid)
+    if hit and time.time() - hit[0] < ttl:
+        return hit[1]
+    try:
+        ch = channel(c, "k", kid)
+        _, base, _ = ch.read(1 << 60, 0)
+        mid = execute(c, kid, "", stdin=False, expr={"ns": _NS_EXPR}, silent=True)
+        end, after, text = time.time() + wait, base, ""
+        while time.time() < end:
+            items, after, closed = ch.read(after, min(0.3, max(0.05, end - time.time())))
+            done = False
+            for _, e in items:
+                if isinstance(e, dict) and e.get("t") == "execute_reply" and e.get("p") == mid:
+                    d = ((e.get("c") or {}).get("user_expressions") or {}).get("ns") or {}
+                    if d.get("status") == "ok":
+                        text = str((d.get("data") or {}).get("text/plain") or "").strip("'\"").replace("\\n", "\n")
+                    done = True
+            if done or closed:
+                break
+        if text or time.time() < end:
+            _ns_cache[kid] = (time.time(), text)
+            if len(_ns_cache) > 40:
+                _ns_cache.pop(next(iter(_ns_cache)))
+        return text
+    except Exception:
+        return ""
+
+
+_SIGKEY = re.compile(r"^(?:Init signature|Signature|Call signature):\s*(.*)$")
+
+
+def parse_inspect(text):
+    """IPython's inspect text -> {sig, doc}: the signature line(s) and the first paragraph of the docstring."""
+    text = ANSI.sub("", text or "")
+    lines, sig, doc, mode = text.splitlines(), [], [], ""
+    for ln in lines:
+        m = _SIGKEY.match(ln)
+        if m and not sig:
+            sig.append(m.group(1)); mode = "sig"; continue
+        if re.match(r"^(Docstring|Init docstring|Class docstring):", ln):
+            mode = "doc"; rest = ln.split(":", 1)[1].strip()
+            if rest and not doc:
+                doc.append(rest)
+            continue
+        if re.match(r"^(Type|File|String form|Source|Call docstring|Subclasses|Length|Namespace|Signature|Init signature):", ln) and mode != "sig":
+            mode = ""; continue
+        if mode == "sig" and ln.startswith((" ", "\t", ")", "]")):
+            sig.append(ln.strip())
+        elif mode == "sig":
+            mode = ""
+        elif mode == "doc":
+            if not ln.strip() and doc:
+                mode = "done"
+            elif ln.strip():
+                doc.append(ln.strip())
+    if not sig and lines:                              # a plain value or module: the first line is the best summary
+        doc = [lines[0]] if not doc else doc
+    return {"sig": " ".join(sig)[:400], "doc": " ".join(doc)[:260]}
+
+
+def inspect(c, kid, code, pos, wait=2.5):
+    """Signature help at POS from the live kernel."""
+    ch = channel(c, "k", kid)
+    _, base, _ = ch.read(1 << 60, 0)
+    mid, raw = _msg(ch.session, "inspect_request", {"code": code, "cursor_pos": max(0, min(int(pos), len(code))), "detail_level": 0})
+    ch.send(raw)
+    end, after = time.time() + wait, base
+    while time.time() < end:
+        items, after, closed = ch.read(after, min(0.4, max(0.05, end - time.time())))
+        for _, e in items:
+            if isinstance(e, dict) and e.get("t") == "inspect_reply" and e.get("p") == mid:
+                r = e["c"]
+                if not r.get("found"):
+                    return {"sig": "", "doc": ""}
+                return parse_inspect((r.get("data") or {}).get("text/plain", ""))
+        if closed:
+            break
+    return {"sig": "", "doc": ""}
 
 
 def reply_input(c, kid, value):

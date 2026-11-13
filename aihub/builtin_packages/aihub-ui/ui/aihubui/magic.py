@@ -191,7 +191,7 @@ def _usage(u):
             "cache_write": int(u.get("cache_creation_input_tokens") or 0)}
 
 
-def _direct(system, prompt, model, extra_env, max_tokens=MAX_OUT):
+def _direct(system, prompt, model, extra_env, max_tokens=MAX_OUT, quick=False):
     """-> (text, model) through the API, or raises LookupError when no key is configured (the caller falls back to claude -p)."""
     from . import freechat
     try:
@@ -201,6 +201,8 @@ def _direct(system, prompt, model, extra_env, max_tokens=MAX_OUT):
     head = dict(head, accept="application/json")
     mid = freechat.resolve_model(model or "sonnet", env)
     body = {"model": mid, "max_tokens": max_tokens, "system": system, "messages": [{"role": "user", "content": prompt}]}
+    if quick:
+        body["thinking"] = {"type": "disabled"}                     # inline suggestions must be instant: no reasoning phase eating the token budget
     req = urllib.request.Request(base + "/v1/messages", data=json.dumps(body).encode("utf-8"), headers=head, method="POST")
     secrets = [v for k, v in head.items() if k in ("x-api-key", "authorization")]
     try:
@@ -251,11 +253,11 @@ def _claude(system, prompt, model):
     return str(m.get("result") or ""), used
 
 
-def ask_model(system, prompt, model="", extra_env=None, engine="auto", max_tokens=MAX_OUT):
+def ask_model(system, prompt, model="", extra_env=None, engine="auto", max_tokens=MAX_OUT, quick=False):
     """-> (text, model, engine)."""
     if engine in ("auto", "api"):
         try:
-            t, m = _direct(system, prompt, model, extra_env, max_tokens)
+            t, m = _direct(system, prompt, model, extra_env, max_tokens, quick)
             return t, m, "api"
         except LookupError:
             if engine == "api":

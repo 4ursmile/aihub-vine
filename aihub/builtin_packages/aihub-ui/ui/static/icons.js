@@ -3,7 +3,9 @@ import { html } from "./vendor/preact-htm.js";
 const P = {
   logo: '<g stroke-width="2.5"><path class="lg-g" opacity="0" d="M4.5 20 10.2 7.6a2 2 0 0 1 3.6 0L19.5 20"/><path class="lg-a" pathLength="1" d="M4.5 20 10.2 7.6a2 2 0 0 1 3.6 0L19.5 20"/><circle class="lg-d" cx="12" cy="15.6" r="1.5" fill="currentColor" stroke="none"/></g>',
   chat: '<path d="M21 11.5a8.4 8.4 0 0 1-12.2 7.5L3 20.5l1.6-5A8.5 8.5 0 1 1 21 11.5z"/>',
+  home: '<path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v10h13V10"/><path d="M10 20v-5h4v5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  save: '<path d="M5 3h11l4 4v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M7 3v6h8V3M7 21v-7h10v7"/>',
   package: '<path d="M21 8v8a2 2 0 0 1-1 1.7l-7 4a2 2 0 0 1-2 0l-7-4A2 2 0 0 1 3 16V8a2 2 0 0 1 1-1.7l7-4a2 2 0 0 1 2 0l7 4A2 2 0 0 1 21 8z"/><path d="M3.3 7 12 12l8.7-5M12 22V12"/>',
   server: '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
   plug: '<path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0V7zM12 17v5"/>',

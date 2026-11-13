@@ -2052,8 +2052,8 @@ function Spotlight({ close, go, sessions, nav, hub, importLink, projects = [], d
 }
 const SORTS = [["recent", "Recent activity"], ["created", "Newest first"], ["oldest", "Oldest first"], ["name", "Name A–Z"]];
 const sortChats = (list, how) => { const l = [...list]; if (how === "created") l.sort((a, b) => (b.created || 0) - (a.created || 0)); else if (how === "oldest") l.sort((a, b) => (a.created || 0) - (b.created || 0)); else if (how === "name") l.sort((a, b) => String(a.title).localeCompare(String(b.title), undefined, { sensitivity: "base", numeric: true })); else l.sort((a, b) => (b.updated || 0) - (a.updated || 0)); return l; };
-const NAV = [["packages", "package", "Packages"], ["services", "server", "Services"], ["mcp", "plug", "MCP servers"], ["knowledge", "book", "Knowledge"], ["usage", "chart", "Usage"], ["notebook", "book", "Notebook"], ["sql", "database", "SQL Studio"], ["works", "flow", "Works"]];
-const TOOLS = ["packages", "services", "mcp", "knowledge", "usage", "notebook"];     // grouped under "Tools" in the sidebar
+const NAV = [["packages", "package", "Packages"], ["services", "server", "Services"], ["mcp", "plug", "MCP servers"], ["knowledge", "book", "Knowledge"], ["usage", "chart", "Usage"], ["sql", "database", "SQL Studio"], ["notebook", "book", "Notebook"], ["works", "flow", "Works"]];
+const TOOLS = ["packages", "services", "mcp", "knowledge", "usage"];     // grouped under "Tools" in the sidebar
 function App() {
   const [sw, setSw] = useState(() => +pref("sidew", "272") || 272), [sbHide, setSbHide] = useState(() => pref("sidehide", "0") === "1");
   const [toolsOpen, setToolsOpen] = useState(() => pref("toolsopen", "0") === "1");

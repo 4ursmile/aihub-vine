@@ -65,6 +65,55 @@ def split(sql):
     return [s.strip() for s in res if re.sub(r"--[^\n]*|/\*.*?\*/", "", s, flags=re.S).strip()]
 
 
+def param_spans(sql):
+    """[(start, end, name)] of `:name` bind parameters outside quotes and comments (`::cast` and `:1` are not parameters)."""
+    res, i, n = [], 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if c in "'\"`":
+            j = i + 1
+            while j < n:
+                if sql[j] == c:
+                    if j + 1 < n and sql[j + 1] == c:
+                        j += 2
+                        continue
+                    break
+                j += 1
+            i = j + 1
+        elif sql.startswith("--", i):
+            j = sql.find("\n", i)
+            i = n if j < 0 else j
+        elif sql.startswith("/*", i):
+            j = sql.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        elif c == ":":
+            if sql.startswith("::", i):
+                i += 2
+                continue
+            m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", sql[i + 1:i + 80])
+            if m and (i == 0 or sql[i - 1] not in ":\\" and not (sql[i - 1].isalnum() or sql[i - 1] == "_")):
+                res.append((i, i + 1 + m.end(), m.group(0)))
+                i += 1 + m.end()
+            else:
+                i += 1
+        else:
+            i += 1
+    return res
+
+
+_SA_BIND = re.compile(r"(?<![:\w\x5c]):(\w+)(?!:)")          # what sqlalchemy.text() takes for a bind parameter (it ignores quotes and comments)
+
+
+def bind_sql(sql, params):
+    """-> (text for sqlalchemy.text(), {name: value}) or None when no parameter of PARAMS is used.
+    Only real parameters stay `:name`; every other colon text() would misread (inside quotes, comments, unknown names) is escaped."""
+    real = {a: n for a, _, n in param_spans(sql) if n in params}
+    if not real:
+        return None
+    text = _SA_BIND.sub(lambda m: m.group(0) if real.get(m.start()) == m.group(1) else "\\" + m.group(0), sql)
+    return text, {n: params[n] for n in real.values()}
+
+
 def main():
     req = json.loads(sys.stdin.read() or "{}")
     try:
@@ -172,11 +221,17 @@ def main():
                 out(ok=False, error="Write a statement first.")
             res = {"columns": [], "rows": [], "rowcount": None, "truncated": False}
             done = 0
+            params = req.get("params") if isinstance(req.get("params"), dict) else {}
             with eng.connect() as cn:
                 for s in stmts:
                     if ro and not ad.is_query(s):
                         out(ok=False, error="This connection is read-only: only SELECT / WITH / SHOW / EXPLAIN style statements run.")
-                    r = cn.exec_driver_sql(s)
+                    if params:
+                        missing = sorted({n for _, _, n in param_spans(s)} - set(params)) if req.get("strict") else []
+                        if missing:
+                            out(ok=False, error="Parameter without a value: " + ", ".join(":" + m for m in missing))
+                    bound = bind_sql(s, params) if params else None
+                    r = cn.execute(sa.text(bound[0]), bound[1]) if bound else cn.exec_driver_sql(s)
                     done += 1
                     if r.returns_rows:
                         rows = r.fetchmany(limit + 1)

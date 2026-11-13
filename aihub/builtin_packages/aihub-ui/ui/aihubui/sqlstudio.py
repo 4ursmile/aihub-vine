@@ -298,6 +298,87 @@ DIGEST_TTL = 180
 AI_ROWS, AI_ROWS_MAX, AI_CELL = 30, 200, 90
 
 
+# ---------- saved SQL files (Studio "Save" / the "SQL file" work node): {id, name, sql, conn, params: [{name, value}]}
+
+NAME_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def detect_params(sql):
+    """The `:name` parameters a statement uses, in order of first use."""
+    from . import sqlrunner
+    seen = []
+    for _, _, n in sqlrunner.param_spans(str(sql or "")):
+        if n not in seen:
+            seen.append(n)
+    return seen
+
+
+def coerce_params(p):
+    """Strings from forms -> numbers when they look like numbers. {name: value}; bad names are dropped."""
+    out = {}
+    for k, v in (p.items() if isinstance(p, dict) else []):
+        if not NAME_OK.match(str(k)):
+            continue
+        if isinstance(v, str):
+            t = v.strip()
+            if re.match(r"^-?\d{1,15}$", t) and not (len(t) > 1 and t.lstrip("-").startswith("0")):
+                v = int(t)
+            elif re.match(r"^-?\d{0,15}\.\d{1,15}$", t):
+                v = float(t)
+        out[str(k)] = v if v is None or isinstance(v, (bool, int, float, str)) else str(v)
+    return out
+
+
+def files():
+    return [f for f in _load().get("files", []) if isinstance(f, dict)]
+
+
+def file_get(ref):
+    """A saved SQL file by id or name (case-insensitive) -> record, or ValueError."""
+    ref, fs = str(ref or "").strip(), files()
+    hit = [f for f in fs if f.get("id") == ref] or [f for f in fs if str(f.get("name", "")).lower() == ref.lower()]
+    if len(hit) == 1:
+        return hit[0]
+    raise ValueError(("Several SQL files are named %r." if len(hit) > 1 else "No saved SQL file %r.") % ref + " Saved: " + (", ".join(f["name"] for f in fs) or "none yet (Save one in SQL Studio)"))
+
+
+def file_save(b):
+    name = str(b.get("name") or "").strip()[:80]
+    if not name:
+        raise ValueError("Give the SQL file a name.")
+    sql = str(b.get("sql") or "")
+    if len(sql) > 500_000:
+        raise ValueError("That SQL is too long to save.")
+    names = detect_params(sql)
+    given = {str(p.get("name")): str(p.get("value", "")) for p in (b.get("params") or []) if isinstance(p, dict) and NAME_OK.match(str(p.get("name") or ""))}
+    params = [{"name": n, "value": given.get(n, "")} for n in names]
+    with _lock:
+        d = _load()
+        fs = d.setdefault("files", [])
+        cur = next((f for f in fs if f.get("id") == str(b.get("id") or "")), None) if b.get("id") else None
+        if not cur:
+            clash = next((f for f in fs if str(f.get("name", "")).lower() == name.lower()), None)
+            if clash:
+                cur = clash                                           # saving under an existing name updates it
+            else:
+                cur = {"id": uuid.uuid4().hex[:8]}
+                fs.append(cur)
+        cur.update(name=name, sql=sql, conn=str(b.get("conn") or ""), params=params, updated=int(time.time()))
+        _save(d)
+        return dict(cur)
+
+
+def file_delete(fid):
+    with _lock:
+        d = _load()
+        n = len(d.get("files", []))
+        d["files"] = [f for f in d.get("files", []) if f.get("id") != fid]
+        if len(d["files"]) == n:
+            return False
+        _save(d)
+        return True
+
+
 def bind(box):
     """The server hands over its secret box once, so tools that run inside chat turns (harnesstools) can reach saved connections."""
     _BOX["box"] = box

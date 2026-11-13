@@ -39,7 +39,7 @@ BOX = None
 ENGINE = None
 ADDR = {"host": "127.0.0.1", "port": 0}
 CSP = ("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; "          # every library is vendored: no CDN for the UI itself
-       "img-src 'self' data: blob: https://tile.openstreetmap.org; font-src 'self'; connect-src 'self'; frame-src 'self'; "
+       "img-src 'self' data: blob: https://tile.openstreetmap.org https://cdn.simpleicons.org; font-src 'self'; connect-src 'self'; frame-src 'self'; "
        "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 PREVIEW_CSP = ("sandbox allow-scripts allow-forms allow-modals allow-popups; default-src 'self' 'unsafe-inline' data: blob:; "
                "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
@@ -2257,7 +2257,45 @@ def sql_run(h, q, b):
     except (TypeError, ValueError):
         limit = 1000
     rid = str(b.get("run") or "")[:40] or None
-    return _sql_call({"action": "query", "sql": need(b, "sql"), "limit": limit}, b, 300, rid)
+    return _sql_call({"action": "query", "sql": need(b, "sql"), "limit": limit, "params": sqlstudio.coerce_params(b.get("params"))}, b, 300, rid)
+
+
+def sql_files(h, q, b):
+    return {"files": sqlstudio.files()}
+
+
+def sql_file_save(h, q, b):
+    try:
+        return {"file": sqlstudio.file_save(need(b, "file", dict))}
+    except ValueError as e:
+        raise Err(str(e))
+
+
+def sql_file_delete(h, q, b):
+    if not sqlstudio.file_delete(need(b, "id")):
+        raise Err("no such SQL file", 404)
+    return {"ok": True}
+
+
+def sql_file_run(h, q, b):
+    """Run a saved SQL file: {file: id|name, params?: {name: value} (override the saved ones), conn?: id|name (override), limit?} -> the sql/run answer plus {file, params}."""
+    try:
+        f = sqlstudio.file_get(need(b, "file"))
+        c = sqlstudio.resolve(str(b.get("conn") or f.get("conn") or ""))
+    except ValueError as e:
+        raise Err(str(e))
+    merged = {p["name"]: p.get("value", "") for p in f.get("params") or []}
+    ov = b.get("params") if isinstance(b.get("params"), dict) else {}
+    unknown = [k for k in ov if k not in merged and k not in sqlstudio.detect_params(f["sql"])]
+    if unknown:
+        raise Err("%s has no parameter %s. It has: %s" % (f["name"], ", ".join(":" + k for k in unknown), ", ".join(":" + k for k in merged) or "none"))
+    merged.update(ov)
+    try:
+        limit = int(b.get("limit") or 1000)
+    except (TypeError, ValueError):
+        limit = 1000
+    r = _sql_call({"action": "query", "sql": f["sql"], "limit": limit, "params": sqlstudio.coerce_params(merged), "strict": True}, {"id": c["id"]}, 300)
+    return dict(r, file=f["name"], conn=c["name"], params=merged)
 
 
 def sql_ai_context(h, q, b):
@@ -2397,6 +2435,17 @@ def jup_k_execute(h, q, b):
     return {"msg": jupyter.execute(_jc(b), need(b, "kid"), str(b.get("code") or ""), mid=mid if re.match(r"^[0-9a-f]{8,40}$", mid) else None)}
 
 
+def jup_k_complete(h, q, b):
+    code = str(b.get("code") or "")[-20000:]
+    pos = int(b.get("pos") or len(code))
+    return jupyter.complete(_jc(b), need(b, "kid"), code, pos)
+
+
+def jup_k_inspect(h, q, b):
+    code = str(b.get("code") or "")[-20000:]
+    return jupyter.inspect(_jc(b), need(b, "kid"), code, int(b.get("pos") or len(code)))
+
+
 def jup_frame(h, q, b):
     return {"id": jupyter.frame_put(str(b.get("html") or ""))}
 
@@ -2444,7 +2493,13 @@ def jup_ai(kind):
         cells = b.get("cells") if isinstance(b.get("cells"), list) else []
         lang, code = str(b.get("lang") or "python"), str(b.get("code") or "")
         if kind == "suggest":
-            return jupyterai.suggest(BOX, str(b.get("prefix") or ""), str(b.get("suffix") or ""), lang, cells)
+            ns = ""
+            if b.get("kid") and b.get("server"):
+                try:
+                    ns = jupyter.namespace(_jc(b), str(b["kid"]))
+                except Exception:
+                    ns = ""
+            return jupyterai.suggest(BOX, str(b.get("prefix") or ""), str(b.get("suffix") or ""), lang, cells, ns)
         if kind == "write":
             return jupyterai.write(BOX, str(b.get("ask") or ""), code, lang, cells, str(b.get("kind") or "code"), str(b.get("conn") or ""))
         return jupyterai.fix(BOX, code, str(b.get("error") or ""), lang, cells, str(b.get("kind") or "code"), str(b.get("conn") or ""))
@@ -3078,11 +3133,13 @@ ROUTES = {
     ("GET", "works/run"): work_run_get, ("GET", "nodes/local"): nodes_local, ("GET", "nodes/starter"): nodes_starter, ("POST", "nodes/save"): nodes_save, ("POST", "nodes/delete"): nodes_delete,
     ("GET", "nodes/export-info"): nodes_export_info, ("POST", "nodes/export"): nodes_export, ("GET", "nodes/packages"): nodes_packages, ("POST", "works/layout"): works_layout, ("GET", "works/mentions"): works_mentions, ("GET", "works/sources"): works_sources, ("GET", "works/hook"): work_hook,
     ("GET", "sql/connections"): sql_connections, ("POST", "sql/save"): sql_save, ("POST", "sql/delete"): sql_delete, ("POST", "sql/test"): sql_test, ("POST", "sql/tables"): sql_tables,
+    ("GET", "sql/files"): sql_files, ("POST", "sql/file/save"): sql_file_save, ("POST", "sql/file/delete"): sql_file_delete, ("POST", "sql/file/run"): sql_file_run,
+    ("POST", "jupyter/normalize"): lambda h, q, b: jupyter.normalize_url(b.get("url"), str(b.get("kind") or "server")),
     ("POST", "sql/columns"): sql_columns, ("POST", "sql/run"): sql_run, ("POST", "sql/cancel"): sql_cancel, ("POST", "sql/ai/context"): sql_ai_context, ("POST", "sql/ai/query"): sql_ai_query, ("POST", "sql/ask"): sql_ask, ("GET", "sql/drivers"): sql_drivers,
     ("GET", "jupyter/servers"): _jx(jup_servers), ("POST", "jupyter/save"): _jx(jup_save), ("POST", "jupyter/delete"): _jx(jup_delete), ("POST", "jupyter/test"): _jx(jup_test), ("POST", "jupyter/local"): _jx(jup_local),
     ("POST", "jupyter/ls"): _jx(jup_ls), ("POST", "jupyter/file/get"): _jx(jup_file_get), ("POST", "jupyter/file/put"): _jx(jup_file_put), ("POST", "jupyter/file/new"): _jx(jup_file_new),
     ("POST", "jupyter/file/rename"): _jx(jup_file_rename), ("POST", "jupyter/file/delete"): _jx(jup_file_delete), ("POST", "jupyter/kernelspecs"): _jx(jup_kernelspecs),
-    ("POST", "jupyter/session"): _jx(jup_session), ("POST", "jupyter/session/end"): _jx(jup_session_end), ("POST", "jupyter/kernel/execute"): _jx(jup_k_execute), ("GET", "jupyter/poll"): _jx(jup_k_poll),
+    ("POST", "jupyter/session"): _jx(jup_session), ("POST", "jupyter/session/end"): _jx(jup_session_end), ("POST", "jupyter/kernel/execute"): _jx(jup_k_execute), ("POST", "jupyter/kernel/complete"): _jx(jup_k_complete), ("POST", "jupyter/kernel/inspect"): _jx(jup_k_inspect), ("GET", "jupyter/poll"): _jx(jup_k_poll),
     ("POST", "jupyter/kernel/op"): _jx(jup_k_op), ("POST", "jupyter/frame"): _jx(jup_frame), ("POST", "jupyter/term/new"): _jx(jup_term_new), ("POST", "jupyter/term/write"): _jx(jup_term_write), ("POST", "jupyter/term/close"): _jx(jup_term_close),
     ("POST", "jupyter/sql/run"): _jx(jup_sql_run), ("POST", "jupyter/ai/suggest"): _jx(jup_ai("suggest")), ("POST", "jupyter/ai/write"): _jx(jup_ai("write")), ("POST", "jupyter/ai/fix"): _jx(jup_ai("fix")),
     ("GET", "jupyter/settings"): _jx(jup_settings), ("POST", "jupyter/settings"): _jx(jup_settings), ("POST", "jupyter/run/start"): _jx(jup_run_start), ("GET", "jupyter/run/status"): _jx(jup_run_status),

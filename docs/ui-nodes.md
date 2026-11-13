@@ -265,6 +265,12 @@ USE hive.sales;
 SELECT order_day, count(*) AS orders FROM orders WHERE order_day = DATE '{{data.day}}' GROUP BY order_day
 ```
 
+## SQL file (`db.sqlfile`) and notebook parameters
+
+**SQL file** runs a query saved in SQL Studio (Save button) on the connection saved with it. `:name` parameters keep the values saved with the file; the node's *Override parameters* (a JSON object, `{{data.x}}` filled in) replaces any of them, e.g. `{"day": "{{data.day}}", "min": 10}`. Values are bound by the driver, never pasted into the text; an override for a name the file does not use is an error that lists the real ones. Output: `text` (table / JSON / CSV), `rows`, `columns`, `row_count`, `params` (the values used). Needs the UI running.
+
+**Jupyter notebook** (`code.notebook`) takes *Parameters* the same way: a JSON object set like papermill, right after the cell tagged `parameters` (else before the first cell).
+
 ## SQL database (`db.sql`, SQLAlchemy)
 
 SQL on any database SQLAlchemy reaches. Group **Data**. The Trino node above stays for Trino without any driver.

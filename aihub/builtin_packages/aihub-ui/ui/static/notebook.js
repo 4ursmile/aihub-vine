@@ -45,14 +45,32 @@ export function CellCode({ value, onChange, lang, autofocus, onKey }) {
   };
   return html`<div class="nb-src syn"><pre aria-hidden="true" dangerouslySetInnerHTML=${{ __html: hl }}></pre><textarea ref=${ta} spellcheck="false" value=${value} onInput=${(e) => onChange(e.target.value)} onKeyDown=${key} aria-label="Cell source"></textarea></div>`;
 }
+// sanitising HTML is the expensive part of showing an output: do it once per distinct text, and reuse the whole rendered output while the output object is unchanged
+const sanCache = new Map();
+function clean(src, cfg) {
+  const k = src.length + ":" + src.slice(0, 80) + src.slice(-80) + (cfg.USE_PROFILES ? "s" : "h");
+  const hit = sanCache.get(k);
+  if (hit && hit.src === src) return hit.out;
+  const out = DOMPurify.sanitize(src, cfg);
+  sanCache.set(k, { src, out });
+  if (sanCache.size > 120) sanCache.delete(sanCache.keys().next().value);
+  return out;
+}
+const outCache = new WeakMap();
 export function Output({ o }) {
+  if (!o || typeof o !== "object") return renderOutput(o || {});
+  let v = outCache.get(o);
+  if (v === undefined) { v = renderOutput(o); outCache.set(o, v); }
+  return v;
+}
+function renderOutput(o) {
   const t = o.output_type, d = o.data || {};
   if (t === "stream") { const s = joinSrc(o.text).replace(ANSI, ""); return html`<pre class=${"nb-o " + (o.name === "stderr" ? "err" : "")}>${s.slice(0, MAX_OUT)}${s.length > MAX_OUT ? "\n…" : ""}</pre>`; }
   if (t === "error") return html`<pre class="nb-o err">${((o.traceback || []).join("\n") || (o.ename + ": " + o.evalue)).replace(ANSI, "").slice(0, MAX_OUT)}</pre>`;
   if (t === "execute_result" || t === "display_data") {
     for (const k of ["image/png", "image/jpeg", "image/gif"]) if (d[k]) return html`<div class="nb-o img"><img alt="output" src=${"data:" + k + ";base64," + joinSrc(d[k]).replace(/\s+/g, "")}/></div>`;
-    if (d["image/svg+xml"]) return html`<div class="nb-o img" dangerouslySetInnerHTML=${{ __html: DOMPurify.sanitize(joinSrc(d["image/svg+xml"]), { USE_PROFILES: { svg: true, svgFilters: true } }) }}></div>`;
-    if (d["text/html"]) return html`<div class="nb-o html" dangerouslySetInnerHTML=${{ __html: DOMPurify.sanitize(joinSrc(d["text/html"]).slice(0, MAX_OUT * 5), { FORBID_TAGS: ["style", "form", "input", "button"] }) }}></div>`;
+    if (d["image/svg+xml"]) return html`<div class="nb-o img" dangerouslySetInnerHTML=${{ __html: clean(joinSrc(d["image/svg+xml"]), { USE_PROFILES: { svg: true, svgFilters: true } }) }}></div>`;
+    if (d["text/html"]) return html`<div class="nb-o html" dangerouslySetInnerHTML=${{ __html: clean(joinSrc(d["text/html"]).slice(0, MAX_OUT * 5), { FORBID_TAGS: ["style", "form", "input", "button"] }) }}></div>`;
     if (d["text/markdown"]) return html`<div class="nb-o"><${Md} text=${joinSrc(d["text/markdown"])}/></div>`;
     if (d["text/plain"]) { const s = joinSrc(d["text/plain"]).replace(ANSI, ""); return html`<pre class="nb-o">${s.slice(0, MAX_OUT)}</pre>`; }
     const kinds = Object.keys(d); return kinds.length ? html`<div class="nb-o mute small">[${kinds.join(", ")}]: shown in Jupyter</div>` : null;

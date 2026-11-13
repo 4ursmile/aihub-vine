@@ -179,6 +179,10 @@ NB_GUIDE = ("Runs a Jupyter notebook that lives on one of the user's Jupyter ser
             "(read back as JSON, its keys become {{data.key}}), else the output of the last cell. Save as (optional) writes the executed notebook, outputs included, to that path on the server. "
             "Needs the UI running. A failing cell stops the run unless Continue after errors is on.")
 
+SQLFILE_GUIDE = ("Runs a SQL file saved in SQL Studio (the Save button there) on the connection saved with it; the password never leaves the UI. "
+                 "The file may use named parameters like `where day = :day`; each keeps the value saved with the file unless Override parameters (a JSON object, {{data.x}} filled in) sets it. "
+                 "Values are bound by the database driver, never pasted into the text. The result is a table, JSON or CSV; rows / columns / row_count are {{data.rows}} etc. Needs the UI running.")
+
 SQL_GUIDE = """Runs SQL on any database SQLAlchemy reaches: PostgreSQL, SQL Server, Oracle, Trino, MySQL, SQLite, DuckDB (or any SQLAlchemy URL).
 * Environment: the box above checks the Python this node runs with and installs what is missing in one click: SQLAlchemy, the DRIVER of your database (psycopg, pymssql / pyodbc, oracledb, trino, pymysql, duckdb-engine) and pandas / polars when you pick them. Or copy the one command it shows. A separate environment (e.g. `data`) keeps them away from the UI's own Python.
 * Login: pick a 'sql' credential set (Settings > Credentials or `aihub work cred add --kind sql`), or fill Host, Port, User, Database here; Password is stored encrypted. Or a full SQLAlchemy URL (secret field). Options = extra URL parameters (key=value&key=value).
@@ -349,6 +353,14 @@ BUILTIN = {
                           {"name": "url", "label": "SQLAlchemy URL (instead of the fields; stored encrypted)", "type": "password", "help": "e.g. postgresql+psycopg://me:pw@db:5432/sales"},
                           {"name": "verify", "label": "Check TLS certificate (Trino: true / false)", "type": "text", "default": ""},
                           {"name": "timeout", "label": "Timeout (seconds)", "type": "number", "default": 600}]},
+    "db.sqlfile": {"title": "SQL file (from SQL Studio)", "kind": "action", "group": "Data", "desc": "Runs a SQL file you saved in SQL Studio, on its saved connection. The file's :name parameters keep their saved values unless this node overrides them.",
+                   "run": ["{python}", "{pkg}/nodes/sql_file.py"], "timeout": 330, "timeout_key": "timeout", "templated": ["params", "file"], "guide": SQLFILE_GUIDE,
+                   "fields": [{"name": "file", "label": "SQL file (saved name)", "type": "text", "default": "", "required": True, "help": "The name you gave it with Save in SQL Studio."},
+                              {"name": "params", "label": "Override parameters (JSON object)", "type": "textarea", "default": "", "help": "e.g. {\"day\": \"{{data.day}}\", \"n\": 10}. Parameters left out keep the value saved with the file."},
+                              {"name": "connection", "label": "Connection (optional)", "type": "text", "default": "", "help": "A saved connection name; empty = the one saved with the file."},
+                              {"name": "output", "label": "Result as", "type": "select", "options": ["table", "json", "csv"], "default": "table"},
+                              {"name": "max_rows", "label": "Max rows", "type": "number", "default": 1000},
+                              {"name": "timeout", "label": "Timeout (seconds)", "type": "number", "default": 300}]},
     "code.notebook": {"title": "Jupyter notebook", "kind": "action", "group": "Code", "desc": "Runs a notebook from your Jupyter server (Notebook page): parameters in, a result variable out. SQL cells and pandas included.",
                       "run": ["{python}", "{pkg}/nodes/notebook_run.py"], "timeout": 700, "timeout_key": "timeout", "templated": ["params", "path"], "guide": NB_GUIDE,
                       "fields": [{"name": "server", "label": "Jupyter server (saved name)", "type": "text", "default": "", "required": True},
@@ -566,6 +578,8 @@ BUILTIN_SCHEMA = {
                [_o("text", "text", "the last result as a table / JSON / CSV, or the file path", "| country | orders |\n|---|---|\n| VN | 12 |"), _o("rows", "json", "the rows (max rows) as objects", '[{"country": "VN", "orders": 12}]'),
                 _o("columns", "json", "column names", '["country", "orders"]'), _o("row_count", "text", "rows of the last result", "12"), _o("path", "path", "the result file (output = path)", ""),
                 _o("written", "json", "Write table: table, rows, from", ""), _o("steps", "json", "each statement: name, seconds, rows", "")]),
+    "db.sqlfile": ([_IN_TEXT], [_o("text", "text", "the result as a table / JSON / CSV", "| n |\n|---|\n| 25 |"), _o("rows", "json", "the rows as objects", '[{"n": 25}]'), _o("columns", "json", "column names", '["n"]'),
+                                _o("row_count", "text", "number of rows", "25"), _o("params", "json", "the parameter values used", '{"day": "2026-01-01"}')]),
     "etl.spark": ([_IN_TEXT], [_o("text", "json", "the `result` dict as JSON", '{"rows": 2}'), _o("<key>", "text", "each key of `result` is {{data.key}}", ""), _o("steps", "json", "name and seconds of each step", "")]),
     "io.request": ([_i("url", "url", "set in the node, may use {{data.x}}", False)], [_o("text", "json", "the answer text", '{"items": []}'), _o("status", "text", "HTTP status code", "200")]),
     "git.read": ([_i("url", "url", "repository URL", True)], [_o("text", "text", "the file text or folder listing", "# README ...")]),

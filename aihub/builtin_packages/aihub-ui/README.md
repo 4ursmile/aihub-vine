@@ -54,9 +54,28 @@ Every library ships in `ui/static/vendor/` (the lazy ones in `vendor/lazy/`, bui
 
 ## Notebook
 
-`#/notebook` (under Tools): Jupyter notebooks on a server you connect. **Servers** can be a JupyterHub (address, user, API token: your server is started when it is not running), any Jupyter Server / Lab (address + token), or **Local**: one click installs `jupyter_server` + `ipykernel` (+ pandas, matplotlib, numpy) into a managed environment and runs it on 127.0.0.1. Tokens are encrypted on this machine and never reach the browser; every call goes through the UI.
+`#/notebook` (under Tools): Jupyter notebooks on a server you connect. **Servers** can be a JupyterHub (address, user, API token: your server is started when it is not running), any Jupyter Server / Lab (address + token), or **Local**: one click installs `jupyter_server` + `ipykernel` (+ pandas, matplotlib, numpy) into a managed environment and runs it on 127.0.0.1. Paste the address exactly as your browser shows it (`https://host/user/you/lab?token=…` is cleaned to `https://host/user/you`, the user and token are picked out; a missing `https://` is added). Setup screens (servers, connections) use the whole page. Tokens are encrypted on this machine and never reach the browser; every call goes through the UI.
 
 - **Workspace**: file browser (new, rename, delete, upload), tabs, a notebook editor with a live kernel (run cell / all, interrupt, restart, switch kernel; the kernel survives a reload), outputs as real tables, figures and interactive HTML (plotly, bokeh in a sandboxed frame), and a remote terminal (xterm.js).
 - **SQL cells**: pick *SQL* as the cell type, choose a SQL Studio connection and optionally a variable: the rows are shown as a table and sent into the kernel as a pandas `DataFrame` (a list of dicts without pandas). Stored in the `.ipynb` as a code cell with `metadata.aihub.sql = {conn, var, limit}`.
 - **AI help**, each with its own model (AI models tab, same list as the chat model picker): inline suggestions as ghost text (Tab accepts), *Ask AI* to write or change a cell (reviewed before it replaces anything; SQL cells use the database schema), *Fix with AI* on a failed cell.
 - **As a node / from chat**: *Use as node* creates a work (Start manual with the notebook's `parameters` as inputs -> *Jupyter notebook* node). The node, the chat tool `notebook` and the CLI `aihubui/nbcli.py` run a notebook headless on a fresh kernel: parameters are set like papermill, SQL cells work, and the variable `result` is read back as JSON. Code: `aihubui/jupyter.py`, `jupyterai.py`, `wsclient.py`, `nodes/notebook_run.py`, `static/jupyter.js`.
+
+### SQL files and parameters
+
+In SQL Studio, `:name` in a statement is a bind parameter (never pasted into the text; `::cast` and quoted text are left alone). A bar above the editor lists them with a value each. **Save** stores the query as a named SQL file (connection + parameter values as defaults). The **SQL file** work node (`db.sqlfile`, `nodes/sql_file.py`) runs a saved file and may override any parameter with a JSON object, e.g. `{"day": "{{data.day}}"}`; the *Jupyter notebook* node overrides notebook parameters the same way. API: `GET sql/files`, `POST sql/file/save|delete|run`. Database icons come from the public Simple Icons host and fall back to the name alone when it is unreachable.
+
+### Notebook editing
+
+- Cells have their own run button in the gutter. Changes are saved automatically about 1.5 s after the last edit (switch off in the status bar).
+- Code intelligence: a completion list as you type, from names in the notebook and from the live kernel (DataFrame columns, methods, modules); Tab on a word opens it. No model tokens. AI inline suggestions (grey text) come on top, cached and with a compact context.
+- The file list has folders and files in separate groups, a New menu (notebook, file, folder), Upload, and a path bar.
+- Find and replace (Ctrl/⌘+F) across all cells with match case and regex; Contents panel lists text-cell headings; Run menu has "selected and below" and "all above".
+- Settings (rail): switch the working server and set the AI help models without leaving the notebook. Servers are added or edited from "Add or edit servers".
+- SQL Studio and SQL cells complete keywords, tables and columns (aliases resolved) and show function signatures; Python cells show call signatures from the live kernel.
+- Inline AI suggestions need token headroom: reasoning models think before answering, so an empty reply meant the budget ran out (fixed: 900 tokens for suggestions).
+- Servers, SQL connections and Drivers are edited in place: a list on the left, a sectioned editor on the right with a sticky Save bar (no separate form page). The burger button no longer overlaps the page header.
+- Code suggestions (Copilot style): fill-in-the-middle prompt with a line or block mode (a comment or a line ending in ":" asks for the next lines), live kernel variables (DataFrame columns and dtypes) as context, replies trimmed to the block, asked also before closing brackets. Alt+\ forces a suggestion.
+- SQL Studio uses the notebook layout (icon rail: Schema, Saved files, History, Settings), an always-visible Parameters bar with "Add parameter", and the Servers/Connections editors share the Settings-panel look.
+- Suggestions: a syntax-tree engine (`codetree.py`) feeds imports, function signatures, classes, variables with inferred types and the enclosing function to the model; whole functions are suggested after a `def` line; replies are cached on disk (`suggest_cache.json`, 7 days) and a longer cached reply answers the same request a few letters later.
+- Performance: output HTML is sanitised once and rendered outputs are reused while unchanged (a keystroke in a long notebook went from ~185 ms to ~16 ms), off-screen cells are skipped by the browser, SQL tabs are saved to storage 400 ms after typing stops.
