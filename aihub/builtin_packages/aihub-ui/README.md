@@ -47,3 +47,7 @@ The chat's system prompt (soul, note index, OpenUI rules) is built once and froz
 **Claude sign-in**: if `settings.json` has an `apiKeyHelper` that needs an OAuth sign-in, chats and Claude nodes check it first and offer Sign in. The key it prints is never stored or shown.
 
 Every library ships in `ui/static/vendor/` (the lazy ones in `vendor/lazy/`, built by `python ui/tools/vendor_libs.py`), so the page works offline and loads nothing from a CDN. Map tiles still come from OpenStreetMap. HTML pages Claude writes in a chat may still use jsDelivr.
+
+## SQL Studio
+
+`#/sql`: a lightweight SQL client in the browser. **Connections** are any SQLAlchemy database (PostgreSQL, MySQL, SQL Server, Oracle, Trino, SQLite, DuckDB, or a full URL); passwords are kept in the encrypted secret box, never in the connections file or the browser. **Studio** has a schema tree, query tabs, history, a sortable result grid with CSV / JSON export and a read-only switch per connection. **Drivers** shows what each Python environment has and installs the extra package a database needs (also ClickHouse, Snowflake, BigQuery, Redshift, Databricks, ...) into the UI's Python or a managed environment. Queries run in a child Python of the connection's environment (`aihubui/sqlrunner.py`).

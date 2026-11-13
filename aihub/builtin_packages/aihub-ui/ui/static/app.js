@@ -6,6 +6,7 @@ import { Md, AskCard, WorkRunCard, setWorkMaker, setBlockSharer, setNodeHost, Ru
 import * as OUI from "./openui.js";
 import { CodeEditor, useHl, langOf, colorize, splitHl, esc, isMac as isMacUI } from "./code.js";
 import { UsagePage, AlertBar, useAlerts } from "./usage.js";
+import { SqlStudioPage } from "./sqlstudio.js";
 import { EnvBox, MagicBar, CodeField, CodeLab, defaultsOf } from "./nodelab.js";
 
 // term.js, slides.js (+ export.js) and space.js load when first needed, not at start
@@ -440,7 +441,7 @@ function Working({ act, since, live, steps, ctx, win, free, onStop, onDirect, ag
   return html`<div class=${"work2 p-" + phase}>
     <div class="w-head"><span class="spark lgk">${Ic("logo", 20, "lgm lg-think")}</span><b class="shine">${label}…</b>
       <span class="w-time">${fmtT(sec)}${tokens >= 1 ? " · " + num(tokens) + " tokens" : ""}${speed ? " · ~" + num(speed) + " tok/s" : ""}</span><span class="grow"></span>
-      ${(!free || steps.length > 0) && html`<button class="btn sm" title="Stop what it is doing and get a short answer from what it has so far" onClick=${onDirect}>${Ic("zap", 13)} Answer now</button>`}<button class="btn sm" onClick=${onStop}>${Ic("stop", 12)} Stop</button></div>
+      ${(!free || steps.length > 0) && html`<button class="btn sm" title="Stop what it is doing and get a short answer from what it has so far" onClick=${onDirect}>${Ic("zap", 13)} Answer now</button>`}</div>
     ${compacting && html`<div class="w-compact" role="status" aria-live="polite"><div class="row small"><span class="grow">Summarising ${ctx ? "~" + num(ctx) + " tokens of " : ""}older turns so the chat fits the context window</span><b>${fmtT(csec)}</b></div>
       <div class="ccbar"><i style=${"width:" + cpct + "%"}></i></div><div class="mute small">${csec < 10 ? "Reading the conversation" : csec < 40 ? "Writing the summary" : "Almost there"}… the answer continues after it.</div></div>`}
     ${agents && agents.length > 0 && html`<${AgentsBar} agents=${agents} onStop=${onStopAgent}/>`}
@@ -2050,9 +2051,11 @@ function Spotlight({ close, go, sessions, nav, hub, importLink, projects = [], d
 }
 const SORTS = [["recent", "Recent activity"], ["created", "Newest first"], ["oldest", "Oldest first"], ["name", "Name A–Z"]];
 const sortChats = (list, how) => { const l = [...list]; if (how === "created") l.sort((a, b) => (b.created || 0) - (a.created || 0)); else if (how === "oldest") l.sort((a, b) => (a.created || 0) - (b.created || 0)); else if (how === "name") l.sort((a, b) => String(a.title).localeCompare(String(b.title), undefined, { sensitivity: "base", numeric: true })); else l.sort((a, b) => (b.updated || 0) - (a.updated || 0)); return l; };
-const NAV = [["packages", "package", "Packages"], ["services", "server", "Services"], ["mcp", "plug", "MCP servers"], ["works", "flow", "Works"], ["knowledge", "book", "Knowledge"], ["usage", "chart", "Usage"]];
+const NAV = [["packages", "package", "Packages"], ["services", "server", "Services"], ["mcp", "plug", "MCP servers"], ["knowledge", "book", "Knowledge"], ["usage", "chart", "Usage"], ["sql", "database", "SQL Studio"], ["works", "flow", "Works"]];
+const TOOLS = ["packages", "services", "mcp", "knowledge", "usage"];     // grouped under "Tools" in the sidebar
 function App() {
   const [sw, setSw] = useState(() => +pref("sidew", "272") || 272), [sbHide, setSbHide] = useState(() => pref("sidehide", "0") === "1");
+  const [toolsOpen, setToolsOpen] = useState(() => pref("toolsopen", "0") === "1");
   const hideSide = (v) => { setSbHide(v); setPref("sidehide", v ? "1" : "0"); };
   const narrow = () => matchMedia("(max-width:860px)").matches;
   const openSide = () => (narrow() ? setDrawer(true) : hideSide(false));          // phones: the drawer; desktop: bring a collapsed sidebar back
@@ -2083,6 +2086,7 @@ function App() {
   useInterval(reloadSess, sess.sessions.some((x) => x.busy || running[x.id]) ? 4000 : null);      // chats answering in the background
   const go = (r) => { setDrawer(false); location.hash = "#/" + r; };
   useEffect(() => { setDrawer(false); }, [route]);
+  useEffect(() => { if (TOOLS.includes(route.split("/")[0])) setToolsOpen(true); }, [route]);
   useEffect(() => { if (!drawer) return; return escPush(() => setDrawer(false)); }, [drawer]);
   const [imp, setImp] = useState(false), [impExtra, setImpExtra] = useState("");
   useEffect(() => { if (imp) OUI.languagePrompt().then(setImpExtra).catch(() => {}); }, [imp]);
@@ -2099,6 +2103,7 @@ function App() {
   if (err) return html`<div class="empty"><div>${Ic("alert", 28)}<h1>AI Hub UI</h1><p>${err}</p><p class="mute">Open the address from <code>~/.aihub/ui/url.txt</code>.</p></div></div>`;
   if (!boot) return html`<div class="empty"><div>${Ic("logo", 34, "lgm lg-think")}<div>Starting…</div></div></div>`;
   const [page, arg] = route.split("/");
+  const inTools = TOOLS.includes(page);
   const groups = [["", sortChats(sess.sessions.filter((s) => !s.folder), sortBy)], ...sess.folders.map((f) => [f, sortChats(sess.sessions.filter((s) => s.folder === f), sortBy)])];
   const move = guard(async (s) => {
     const v = await ask({ title: "Move chat", text: s.title, submit: "Move", fields: [
@@ -2120,7 +2125,10 @@ function App() {
   return html`<div class=${"shell" + (sbHide ? " sbhide" : "")} style=${"--sw:" + sw + "px"}>${drawer && html`<div class="sdback" onClick=${() => setDrawer(false)}></div>`}<aside class=${"side" + (drawer ? " open" : "")}><${Grip} cls="sd-grip" value=${() => sw} onChange=${setSw} onDone=${(v) => setPref("sidew", String(Math.round(v)))} min=${200} max=${460} sign=${1} reset=${() => { setSw(272); setPref("sidew", "272"); }}/>
       <div class="brand"><span class="logo">${Logo(16)}</span><span class="grow">${hubName}</span><button class="ibtn sb-x" title=${"Hide sidebar (" + (MAC ? "⌘B" : "Ctrl+B") + ")"} aria-label="Hide sidebar" onClick=${() => hideSide(true)}>${Ic("sidebar", 17)}</button></div>
       <div class="nav"><div class="srow2"><button class="srow" onClick=${() => { setDrawer(false); newChat(); }}>${Ic("plus", 17)}<span class="grow">New chat</span><kbd>${NEW_KEY}</kbd></button><button class="ibtn" title="New incognito chat (not saved)" aria-label="New incognito chat" onClick=${() => { setDrawer(false); newIncog(); }}>${Ic("incognito", 17)}</button></div><button class="srow" onClick=${() => { setDrawer(false); setSpotOpen(true); }} aria-label="Search chats and pages">${Ic("search", 17)}<span class="grow">Search</span><kbd>${MAC ? "⌘K" : "Ctrl K"}</kbd></button></div>
-      <div class="nav" onClick=${() => setDrawer(false)}>${NAV.map(([k, ic, l]) => html`<a class=${page === k ? "on" : ""} href=${"#/" + k}>${Ic(ic, 17)}${l}</a>`)}</div>
+      <div class="nav" onClick=${(e) => { if (e.target.closest("a")) setDrawer(false); }}>
+        <button class=${"srow tools" + (inTools ? " has" : "")} aria-expanded=${toolsOpen} onClick=${() => { const v = !toolsOpen; setToolsOpen(v); setPref("toolsopen", v ? "1" : "0"); }}>${Ic("sliders", 17)}<span class="grow">Tools</span><i class=${"chev" + (toolsOpen ? " o" : "")}>${Ic("right", 13)}</i></button>
+        ${toolsOpen && html`<div class="nsub">${NAV.filter((n) => TOOLS.includes(n[0])).map(([k, ic, l]) => html`<a class=${page === k ? "on" : ""} href=${"#/" + k}>${Ic(ic, 16)}${l}</a>`)}</div>`}
+        ${NAV.filter((n) => !TOOLS.includes(n[0])).map(([k, ic, l]) => html`<a class=${page === k ? "on" : ""} href=${"#/" + k}>${Ic(ic, 17)}${l}</a>`)}</div>
       <div class="hist">${groups.map(([f, items]) => !!(f || items.length) && html`<h6 class="gh"><button class="gtoggle" aria-expanded=${!folded.includes(f)} title=${folded.includes(f) ? "Expand" : "Collapse"} onClick=${() => fold(f)}><span class=${"chev" + (folded.includes(f) ? " shut" : "")}>${Ic("down", 12)}</span><span class="gname" title=${(sess.folder_dirs || {})[f] ? "Working folder: " + sess.folder_dirs[f] : ""}>${f || "Chats"}</span>${(sess.folder_dirs || {})[f] ? Ic("folder", 12) : ""}<span class="cnt">${items.length}</span></button>
           <span class="hbtns">${!f && html`<button class="ibtn gnew" style="width:28px;height:28px" title="New chat" aria-label="New chat" onClick=${() => { setDrawer(false); newChat(); }}>${Ic("plus", 17)}</button><${Pop} open=${sortPop} setOpen=${setSortPop} up=${false} align="right" button=${html`<button class="ibtn" style="width:28px;height:28px" title=${"Sort: " + (SORTS.find((x) => x[0] === sortBy) || SORTS[0])[1]} aria-label="Sort chats" onClick=${() => setSortPop(!sortPop)}>${Ic("filter", 16)}</button>`}><h5>Sort by</h5>${SORTS.map(([k, l]) => html`<button class=${"opt" + (k === sortBy ? " on" : "")} onClick=${() => chooseSort(k)}><span class="grow"><b>${l}</b></span><span class="ck">${Ic("check", 15)}</span></button>`)}<//>`}
           ${f && html`<button class="ibtn" style="width:28px;height:28px" title="New chat in this project" aria-label=${"New chat in " + f} onClick=${() => newChat(f)}>${Ic("plus", 17)}</button><button class="ibtn" style="width:28px;height:28px" title="Delete project" aria-label=${"Delete project " + f} onClick=${() => delProject(f)}>${Ic("trash", 17)}</button>`}</span></h6>
@@ -2131,7 +2139,7 @@ function App() {
     </aside>${imp && html`<${ImportLazy} get=${api} post=${post} close=${() => setImp(false)} extra=${impExtra} done=${async (n) => { setImp(false); await reloadSess(); go("chat/" + n.id); }}/>`}${spotOpen && html`<${Spotlight} close=${() => setSpotOpen(false)} go=${go} sessions=${sortChats(sess.sessions, "recent")} nav=${NAV} hub=${boot.context.hub_configured ? boot.context.hub : ""} importLink=${importLink} projects=${sess.folders} dirs=${sess.folder_dirs || {}} newChat=${newChat} newChatIn=${newChatIn}/>`}
     <main class="main">${!(page === "chat" && arg) && html`<button class="ibtn burger fab" title="Chats and pages" aria-label="Chats and pages" onClick=${openSide}>${Ic("menu", 18)}</button>`}<${HubNote} text=${brand.announcement}/><${AlertBar} alerts=${alerts}/>${page === "chat" && arg ? html`<${Chat} key=${arg} id=${arg} onBusy=${markBusy} onImport=${() => setImp(true)} onMenu=${openSide} onIncog=${markIncog} boot=${boot} refresh=${reloadSess} newChat=${() => newChat()} prefs=${prefs} savePrefs=${savePrefs} slash=${slash}/>`
       : page === "packages" ? html`<${Packages} key=${route} focus=${route.startsWith("packages/find/") ? decodeURIComponent(route.slice(14)) : ""}/>` : page === "services" ? html`<${Services}/>` : page === "mcp" ? html`<${Mcp}/>`
-      : page === "works" ? html`<${Works} boot=${boot} openId=${arg}/>` : page === "knowledge" ? html`<${Knowledge} key=${route} focus=${arg}/>` : page === "usage" ? html`<${UsagePage} api=${api} prefs=${prefs} savePrefs=${savePrefs}/>` : page === "settings" || page === "vault" ? html`<${Settings} boot=${boot} reload=${reloadBoot} prefs=${prefs} savePrefs=${savePrefs} focus=${arg}/>`
+      : page === "works" ? html`<${Works} boot=${boot} openId=${arg}/>` : page === "knowledge" ? html`<${Knowledge} key=${route} focus=${arg}/>` : page === "sql" ? html`<${SqlStudioPage} key="sql" api=${api} post=${post} arg=${arg}/>` : page === "usage" ? html`<${UsagePage} api=${api} prefs=${prefs} savePrefs=${savePrefs}/>` : page === "settings" || page === "vault" ? html`<${Settings} boot=${boot} reload=${reloadBoot} prefs=${prefs} savePrefs=${savePrefs} focus=${arg}/>`
       : html`<div class="hello"><div><span class="herologo">${Logo(44)}</span><h1>${hubName}</h1><p>Chat with Claude Code, manage packages, services, MCP servers and logins.</p><button class="btn acc" onClick=${() => newChat()}>${Ic("plus", 14)} New chat</button></div></div>`}</main>
     ${html`<div class="toast-live" role="status" aria-live="polite">${msg && html`<div class="toast">${msg}</div>`}</div>`}<${AskHost}/></div>`;
 }

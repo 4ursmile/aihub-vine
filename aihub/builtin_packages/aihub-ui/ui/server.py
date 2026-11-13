@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from aihubui import aihub as A, auth, chat, chatshare, drawioview, freechat, gitinspect, harness, harnesstools, hubusage, magic, mcpclient, nodeenv, officeview, searchidx, selfupdate, sources, spacebundle, store, term, usagereport, workpkg, works as W    # noqa: E402
+from aihubui import aihub as A, auth, chat, chatshare, drawioview, freechat, gitinspect, harness, harnesstools, hubusage, magic, mcpclient, nodeenv, officeview, searchidx, selfupdate, sources, spacebundle, sqlstudio, store, term, usagereport, workpkg, works as W    # noqa: E402
 from aihubui.secretbox import Box, write_private                  # noqa: E402
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -2205,6 +2205,64 @@ def env_list(h, q, b):
     return {"envs": nodeenv.envs(), "dir": nodeenv.envs_dir(), "ui": sys.executable}
 
 
+# ---------- SQL Studio: saved connections, schema browser, queries (in a child Python of the connection's env), drivers
+
+def sql_connections(h, q, b):
+    return {"connections": sqlstudio.connections(), "envs": nodeenv.envs(), "ui": sys.executable}
+
+
+def sql_save(h, q, b):
+    try:
+        return {"connection": sqlstudio.save(BOX, need(b, "connection", dict))}
+    except ValueError as e:
+        raise Err(str(e))
+
+
+def sql_delete(h, q, b):
+    if not sqlstudio.delete(BOX, need(b, "id")):
+        raise Err("no such connection", 404)
+    return {"ok": True}
+
+
+def _sql_call(req, b, timeout, rid=None):
+    try:
+        return sqlstudio.call(BOX, str(b.get("id") or ""), req, timeout, rid)
+    except ValueError as e:
+        raise Err(str(e))
+
+
+def sql_test(h, q, b):
+    return _sql_call({"action": "test", "login": need(b, "connection", dict)}, {}, 40)
+
+
+def sql_tables(h, q, b):
+    return _sql_call({"action": "tables", "schema": str(b.get("schema") or ""), "schema_given": "schema" in b and b.get("schema") is not None}, b, 60)
+
+
+def sql_columns(h, q, b):
+    return _sql_call({"action": "columns", "schema": str(b.get("schema") or ""), "table": need(b, "table")}, b, 60)
+
+
+def sql_run(h, q, b):
+    try:
+        limit = int(b.get("limit") or 1000)
+    except (TypeError, ValueError):
+        limit = 1000
+    rid = str(b.get("run") or "")[:40] or None
+    return _sql_call({"action": "query", "sql": need(b, "sql"), "limit": limit}, b, 300, rid)
+
+
+def sql_cancel(h, q, b):
+    return {"ok": sqlstudio.cancel(str(b.get("run") or ""))}
+
+
+def sql_drivers(h, q, b):
+    try:
+        return dict(sqlstudio.drivers(str(q.get("env") or "")), envs=nodeenv.envs())
+    except ValueError as e:
+        raise Err(str(e))
+
+
 def work_magic(h, q, b):
     """Magic ask: {type, config, ask, field?, context?, model?} -> {config: proposed changes, note, dropped, engine}. Nothing is saved here."""
     spec = _spec_of(b.get("type"))
@@ -2799,6 +2857,8 @@ ROUTES = {
     ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("GET", "works/presets"): presets_list, ("GET", "works/credentials"): credentials_list, ("POST", "works/credentials/save"): credentials_save, ("POST", "works/credentials/delete"): credentials_delete, ("POST", "works/presets/save"): presets_save, ("POST", "works/presets/delete"): presets_delete, ("POST", "nodes/run"): node_run, ("POST", "works/env/check"): env_check, ("POST", "works/env/install"): env_install, ("GET", "works/env/job"): env_job, ("POST", "works/env/cancel"): env_cancel, ("GET", "works/envs"): env_list, ("POST", "works/magic"): work_magic, ("POST", "works/try"): work_try, ("GET", "works/try/status"): work_try_status, ("GET", "works/chatruns"): work_chat_runs, ("GET", "works/active"): work_active, ("GET", "works/files"): work_files, ("POST", "works/open"): work_open, ("POST", "works/rerun"): work_rerun, ("POST", "works/stop"): work_stop, ("GET", "works/log"): work_log, ("GET", "project/info"): project_info, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/generate/start"): work_generate_start, ("GET", "works/generate/status"): work_generate_status, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import,
     ("GET", "works/run"): work_run_get, ("GET", "nodes/local"): nodes_local, ("GET", "nodes/starter"): nodes_starter, ("POST", "nodes/save"): nodes_save, ("POST", "nodes/delete"): nodes_delete,
     ("GET", "nodes/export-info"): nodes_export_info, ("POST", "nodes/export"): nodes_export, ("GET", "nodes/packages"): nodes_packages, ("POST", "works/layout"): works_layout, ("GET", "works/mentions"): works_mentions, ("GET", "works/sources"): works_sources, ("GET", "works/hook"): work_hook,
+    ("GET", "sql/connections"): sql_connections, ("POST", "sql/save"): sql_save, ("POST", "sql/delete"): sql_delete, ("POST", "sql/test"): sql_test, ("POST", "sql/tables"): sql_tables,
+    ("POST", "sql/columns"): sql_columns, ("POST", "sql/run"): sql_run, ("POST", "sql/cancel"): sql_cancel, ("GET", "sql/drivers"): sql_drivers,
     ("GET", "auth"): auth_status, ("POST", "auth/check"): auth_check, ("POST", "auth/login"): auth_login,
     ("GET", "secrets"): secrets_list, ("PUT", "secrets"): secret_put, ("POST", "secrets/remove"): secret_remove,
 }
