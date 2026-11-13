@@ -116,6 +116,43 @@ def main():
                 pass
             tabs.sort(key=lambda t: t["name"].lower())
             out(ok=True, schemas=schemas, schema=sch, tables=tabs[:2000], more=len(tabs) > 2000)
+        if act == "digest":
+            # tables + columns + keys of one schema in ONE process: the data context an AI needs to write correct SQL (capped, time-boxed)
+            insp = sa.inspect(eng)
+            schemas = []
+            try:
+                schemas = [s for s in insp.get_schema_names()][:60]
+            except Exception:
+                pass
+            sch = req.get("schema") or None
+            if sch is None:
+                sch = getattr(insp, "default_schema_name", None)
+            max_t, max_c, budget = int(req.get("max_tables") or 60), int(req.get("max_columns") or 40), float(req.get("budget") or 20)
+            names = [(n, "table") for n in insp.get_table_names(schema=sch)]
+            try:
+                names += [(n, "view") for n in insp.get_view_names(schema=sch)]
+            except Exception:
+                pass
+            names.sort(key=lambda t: t[0].lower())
+            want = str(req.get("table") or "").lower()
+            if want:
+                names = [t for t in names if want in t[0].lower()]
+            tabs = []
+            for n, kind in names[:max_t]:
+                if time.time() - t0 > budget:
+                    break
+                t = {"name": n, "kind": kind, "columns": []}
+                try:
+                    pk = set(insp.get_pk_constraint(n, schema=sch).get("constrained_columns") or [])
+                    cols = insp.get_columns(n, schema=sch)
+                    t["columns"] = [{"name": x["name"], "type": str(x.get("type")), "pk": x["name"] in pk} for x in cols[:max_c]]
+                    t["more_columns"] = max(0, len(cols) - max_c)
+                    fks = insp.get_foreign_keys(n, schema=sch)
+                    t["fks"] = [{"cols": f.get("constrained_columns") or [], "to": (f.get("referred_table") or ""), "to_cols": f.get("referred_columns") or []} for f in fks][:12]
+                except Exception as e:
+                    t["error"] = str(e)[:120]
+                tabs.append(t)
+            out(ok=True, dialect=eng.dialect.name, schemas=schemas, schema=sch, tables=tabs, total=len(names), ms=int((time.time() - t0) * 1000))
         if act == "columns":
             insp = sa.inspect(eng)
             sch, tb = req.get("schema") or None, str(req.get("table") or "")

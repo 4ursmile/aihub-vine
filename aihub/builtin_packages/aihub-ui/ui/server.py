@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from aihubui import aihub as A, auth, chat, chatshare, drawioview, freechat, gitinspect, harness, harnesstools, hubusage, magic, mcpclient, nodeenv, officeview, searchidx, selfupdate, sources, spacebundle, sqlstudio, store, term, usagereport, workpkg, works as W    # noqa: E402
+from aihubui import aihub as A, auth, chat, chatshare, drawioview, freechat, gitinspect, harness, harnesstools, hubusage, jupyter, jupyterai, magic, mcpclient, nodeenv, officeview, searchidx, selfupdate, sources, spacebundle, sqlstudio, store, term, usagereport, workpkg, works as W    # noqa: E402
 from aihubui.secretbox import Box, write_private                  # noqa: E402
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -176,6 +176,9 @@ class H(BaseHTTPRequestHandler):
                 return self._send(403, b"bad host or origin", "text/plain")
             if u.path.startswith("/w/"):
                 return self._workfile(u.path)
+            if u.path.startswith("/nbframe/") and method == "GET":        # a notebook's rich HTML output: sandboxed, no cookie, the random id is the key
+                page = jupyter.FRAMES.get(u.path[9:])
+                return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8", {"Content-Security-Policy": PREVIEW_CSP}) if page else self._send(404, b"gone", "text/plain")
             if u.path.startswith(PUB_PREFIX) and method == "GET":         # vendored public viewer code for sandboxed previews (they carry no cookie)
                 return self._static(u.path, public=True)
             if u.path == "/" and q.get("t"):
@@ -535,9 +538,14 @@ def term_start(h, q, b):
         # A shell in a chat's working folder ("direct work"). The UI is 127.0.0.1 only behind the per-start key, Host/Origin check and X-AIHub-UI header.
         cwd = store.session_dir(need(b, "session"))
         os.makedirs(cwd, exist_ok=True)
-        sh = os.environ.get("COMSPEC", "cmd.exe") if os.name == "nt" else (os.environ.get("SHELL") or "/bin/sh")
+        if os.name == "nt":                                # Windows: PowerShell (pwsh 7 if installed, else Windows PowerShell), cmd.exe only as a last resort
+            sh = shutil.which("pwsh") or shutil.which("powershell") or os.environ.get("COMSPEC", "cmd.exe")
+            argv = [sh] + (["-NoLogo"] if os.path.basename(sh).lower().startswith(("pwsh", "powershell")) else [])
+        else:
+            sh = os.environ.get("SHELL") or "/bin/sh"
+            argv = [sh, "-l"]
         try:
-            t = term.start([sh] + ([] if os.name == "nt" else ["-l"]), dict(os.environ, AIHUB_NO_UPDATE="1"), cwd=cwd, shell=True)
+            t = term.start(argv, dict(os.environ, AIHUB_NO_UPDATE="1"), cwd=cwd, shell=True)
         except (RuntimeError, OSError) as e:
             raise Err(_term_error(e))
         return {"id": t.id, "services": [], "cwd": cwd}
@@ -2252,6 +2260,34 @@ def sql_run(h, q, b):
     return _sql_call({"action": "query", "sql": need(b, "sql"), "limit": limit}, b, 300, rid)
 
 
+def sql_ai_context(h, q, b):
+    """Schemas of the named connections (default all) as model-ready text. {conns?: [ref], schema?, table?} -> {text, connections}"""
+    try:
+        refs = [str(x) for x in b.get("conns")] if isinstance(b.get("conns"), list) else None
+        return {"text": sqlstudio.ai_context(BOX, refs, str(b.get("schema") or ""), str(b.get("table") or "")), "connections": sqlstudio.connections()}
+    except ValueError as e:
+        raise Err(str(e))
+
+
+def sql_ai_query(h, q, b):
+    """Read-only query for an AI / the CLI: {conn, sql, limit?} -> {ok, text, columns, rows, ...}."""
+    try:
+        return sqlstudio.ai_query(BOX, str(b.get("conn") or ""), need(b, "sql"), b.get("limit") or sqlstudio.AI_ROWS)
+    except ValueError as e:
+        raise Err(str(e))
+
+
+def sql_ask(h, q, b):
+    """Magic SQL: {ask, conn?, sql?, error?, others?: [ref], model?} -> {sql, conn, note}. Nothing runs here."""
+    try:
+        return sqlstudio.ask_sql(BOX, str(b.get("ask") or ""), str(b.get("conn") or ""), str(b.get("sql") or ""), str(b.get("error") or ""),
+                                 [str(x) for x in b.get("others")] if isinstance(b.get("others"), list) else None, str(b.get("model") or ""))
+    except ValueError as e:
+        raise Err(str(e))
+    except RuntimeError as e:
+        raise Err("Magic SQL: %s" % e, 502)
+
+
 def sql_cancel(h, q, b):
     return {"ok": sqlstudio.cancel(str(b.get("run") or ""))}
 
@@ -2261,6 +2297,190 @@ def sql_drivers(h, q, b):
         return dict(sqlstudio.drivers(str(q.get("env") or "")), envs=nodeenv.envs())
     except ValueError as e:
         raise Err(str(e))
+
+
+# ---------- Notebook: Jupyter servers (files, kernels, terminals), SQL cells, AI help, running a notebook headless
+
+def _jx(fn):
+    def h(hd, q, b):
+        try:
+            return fn(hd, q, b)
+        except jupyter.JError as e:
+            raise Err(str(e), e.status if e.status in (400, 404, 409) else 502)
+        except ValueError as e:
+            raise Err(str(e))
+        except RuntimeError as e:
+            raise Err("AI: %s" % e, 502)
+    return h
+
+
+def _jc(b, q=None):
+    return jupyter.conn(BOX, str((b or {}).get("server") or (q or {}).get("server") or ""))
+
+
+def jup_servers(h, q, b):
+    return {"servers": jupyter.servers(), "settings": jupyter.settings(), "envs": nodeenv.envs(), "ui": sys.executable}
+
+
+def jup_save(h, q, b):
+    return {"server": jupyter.save(BOX, need(b, "server", dict))}
+
+
+def jup_delete(h, q, b):
+    if not jupyter.delete(BOX, need(b, "id")):
+        raise Err("no such server", 404)
+    return {"ok": True}
+
+
+def jup_test(h, q, b):
+    return dict(jupyter.about(_jc(b)), ok=True)
+
+
+def jup_local(h, q, b):
+    """{server, action: status|setup|start|stop, extras?}"""
+    rec, act = jupyter.get(need(b, "server")), str(b.get("action") or "status")
+    if rec.get("kind") != "local":
+        raise Err("not a local server")
+    if act == "setup":
+        return {"job": jupyter.local_setup(rec, [str(x) for x in b.get("extras") or []])}
+    if act == "start":
+        jupyter.local_start(rec)
+    elif act == "stop":
+        jupyter.local_stop(rec["id"])
+    return jupyter.local_status(rec)
+
+
+def jup_ls(h, q, b):
+    return jupyter.ls(_jc(b), str(b.get("path") or ""))
+
+
+def jup_file_get(h, q, b):
+    return jupyter.read_file(_jc(b), need(b, "path"))
+
+
+def jup_file_put(h, q, b):
+    return jupyter.write_file(_jc(b), need(b, "path"), str(b.get("type") or "file"), b.get("content"), str(b.get("format") or "text"))
+
+
+def jup_file_new(h, q, b):
+    kind = str(b.get("type") or "notebook")
+    if kind not in ("notebook", "file", "directory"):
+        raise Err("bad type")
+    return jupyter.new_item(_jc(b), str(b.get("dir") or ""), kind, str(b.get("name") or ""))
+
+
+def jup_file_rename(h, q, b):
+    return jupyter.rename(_jc(b), need(b, "path"), need(b, "to"))
+
+
+def jup_file_delete(h, q, b):
+    return jupyter.remove(_jc(b), need(b, "path"))
+
+
+def jup_kernelspecs(h, q, b):
+    return jupyter.kernelspecs(_jc(b))
+
+
+def jup_session(h, q, b):
+    c = _jc(b)
+    if b.get("switch"):
+        return jupyter.switch_kernel(c, need(b, "switch"), need(b, "kernel"))
+    return jupyter.session(c, need(b, "path"), str(b.get("kernel") or ""))
+
+
+def jup_session_end(h, q, b):
+    return jupyter.end_session(_jc(b), need(b, "id"))
+
+
+def jup_k_execute(h, q, b):
+    mid = str(b.get("msg") or "")
+    return {"msg": jupyter.execute(_jc(b), need(b, "kid"), str(b.get("code") or ""), mid=mid if re.match(r"^[0-9a-f]{8,40}$", mid) else None)}
+
+
+def jup_frame(h, q, b):
+    return {"id": jupyter.frame_put(str(b.get("html") or ""))}
+
+
+def jup_k_poll(h, q, b):
+    try:
+        after, wait = max(0, int(q.get("after") or 0)), min(20.0, float(q.get("wait") or 0))
+    except ValueError:
+        after, wait = 0, 0
+    return jupyter.poll(_jc(None, q), str(q.get("kind") or "k"), str(q.get("id") or ""), after, wait)
+
+
+def jup_k_op(h, q, b):
+    op = str(b.get("op") or "")
+    if op == "input":
+        jupyter.reply_input(_jc(b), need(b, "kid"), str(b.get("value") or ""))
+        return {"ok": True}
+    if op not in ("interrupt", "restart"):
+        raise Err("bad op")
+    return jupyter.kernel_op(_jc(b), need(b, "kid"), op)
+
+
+def jup_term_new(h, q, b):
+    return jupyter.term_new(_jc(b))
+
+
+def jup_term_write(h, q, b):
+    jupyter.term_write(_jc(b), need(b, "name"), b.get("data"), b.get("rows"), b.get("cols"))
+    return {"ok": True}
+
+
+def jup_term_close(h, q, b):
+    jupyter.term_close(_jc(b), need(b, "name"))
+    return {"ok": True}
+
+
+def jup_sql_run(h, q, b):
+    """A SQL cell: {sql, conn, var?, limit?, server?, kid?} -> the rows; with var the rows are a DataFrame in the kernel."""
+    c = _jc(b) if b.get("var") and b.get("kid") else None
+    return jupyter.run_sql(BOX, str(b.get("conn") or ""), need(b, "sql"), str(b.get("var") or ""), b.get("limit") or 10000, c, str(b.get("kid") or ""))
+
+
+def jup_ai(kind):
+    def h(hd, q, b):
+        cells = b.get("cells") if isinstance(b.get("cells"), list) else []
+        lang, code = str(b.get("lang") or "python"), str(b.get("code") or "")
+        if kind == "suggest":
+            return jupyterai.suggest(BOX, str(b.get("prefix") or ""), str(b.get("suffix") or ""), lang, cells)
+        if kind == "write":
+            return jupyterai.write(BOX, str(b.get("ask") or ""), code, lang, cells, str(b.get("kind") or "code"), str(b.get("conn") or ""))
+        return jupyterai.fix(BOX, code, str(b.get("error") or ""), lang, cells, str(b.get("kind") or "code"), str(b.get("conn") or ""))
+    return h
+
+
+def jup_settings(h, q, b):
+    return {"settings": jupyter.save_settings(b) if b else jupyter.settings()}
+
+
+def jup_run_start(h, q, b):
+    kw = dict(ref=need(b, "server"), path=need(b, "path"), params=b.get("params") if isinstance(b.get("params"), dict) else None, kernel=str(b.get("kernel") or ""),
+              keep_going=bool(b.get("continue")), save_as=str(b.get("save_as") or ""), result_var=str(b.get("result_var") if b.get("result_var") is not None else "result"))
+    try:
+        kw["timeout"] = min(max(int(b.get("timeout") or 600), 5), 3600)
+    except (TypeError, ValueError):
+        kw["timeout"] = 600
+    jupyter.get(kw["ref"])                                        # a bad server name fails here, not in the background
+    return {"id": jupyter.run_start(BOX, **kw)}
+
+
+def jup_run_status(h, q, b):
+    v = jupyter.run_view(str(q.get("id") or ""), q.get("after") or 0)
+    if v is None:
+        raise Err("no such run", 404)
+    return v
+
+
+def jup_run_stop(h, q, b):
+    return {"ok": jupyter.run_stop(str(b.get("id") or ""))}
+
+
+def jup_expose(h, q, b):
+    r = jupyter.expose(BOX, need(b, "server"), need(b, "path"), str(b.get("title") or ""))
+    ENGINE.sync()
+    return r
 
 
 def work_magic(h, q, b):
@@ -2858,7 +3078,15 @@ ROUTES = {
     ("GET", "works/run"): work_run_get, ("GET", "nodes/local"): nodes_local, ("GET", "nodes/starter"): nodes_starter, ("POST", "nodes/save"): nodes_save, ("POST", "nodes/delete"): nodes_delete,
     ("GET", "nodes/export-info"): nodes_export_info, ("POST", "nodes/export"): nodes_export, ("GET", "nodes/packages"): nodes_packages, ("POST", "works/layout"): works_layout, ("GET", "works/mentions"): works_mentions, ("GET", "works/sources"): works_sources, ("GET", "works/hook"): work_hook,
     ("GET", "sql/connections"): sql_connections, ("POST", "sql/save"): sql_save, ("POST", "sql/delete"): sql_delete, ("POST", "sql/test"): sql_test, ("POST", "sql/tables"): sql_tables,
-    ("POST", "sql/columns"): sql_columns, ("POST", "sql/run"): sql_run, ("POST", "sql/cancel"): sql_cancel, ("GET", "sql/drivers"): sql_drivers,
+    ("POST", "sql/columns"): sql_columns, ("POST", "sql/run"): sql_run, ("POST", "sql/cancel"): sql_cancel, ("POST", "sql/ai/context"): sql_ai_context, ("POST", "sql/ai/query"): sql_ai_query, ("POST", "sql/ask"): sql_ask, ("GET", "sql/drivers"): sql_drivers,
+    ("GET", "jupyter/servers"): _jx(jup_servers), ("POST", "jupyter/save"): _jx(jup_save), ("POST", "jupyter/delete"): _jx(jup_delete), ("POST", "jupyter/test"): _jx(jup_test), ("POST", "jupyter/local"): _jx(jup_local),
+    ("POST", "jupyter/ls"): _jx(jup_ls), ("POST", "jupyter/file/get"): _jx(jup_file_get), ("POST", "jupyter/file/put"): _jx(jup_file_put), ("POST", "jupyter/file/new"): _jx(jup_file_new),
+    ("POST", "jupyter/file/rename"): _jx(jup_file_rename), ("POST", "jupyter/file/delete"): _jx(jup_file_delete), ("POST", "jupyter/kernelspecs"): _jx(jup_kernelspecs),
+    ("POST", "jupyter/session"): _jx(jup_session), ("POST", "jupyter/session/end"): _jx(jup_session_end), ("POST", "jupyter/kernel/execute"): _jx(jup_k_execute), ("GET", "jupyter/poll"): _jx(jup_k_poll),
+    ("POST", "jupyter/kernel/op"): _jx(jup_k_op), ("POST", "jupyter/frame"): _jx(jup_frame), ("POST", "jupyter/term/new"): _jx(jup_term_new), ("POST", "jupyter/term/write"): _jx(jup_term_write), ("POST", "jupyter/term/close"): _jx(jup_term_close),
+    ("POST", "jupyter/sql/run"): _jx(jup_sql_run), ("POST", "jupyter/ai/suggest"): _jx(jup_ai("suggest")), ("POST", "jupyter/ai/write"): _jx(jup_ai("write")), ("POST", "jupyter/ai/fix"): _jx(jup_ai("fix")),
+    ("GET", "jupyter/settings"): _jx(jup_settings), ("POST", "jupyter/settings"): _jx(jup_settings), ("POST", "jupyter/run/start"): _jx(jup_run_start), ("GET", "jupyter/run/status"): _jx(jup_run_status),
+    ("POST", "jupyter/run/stop"): _jx(jup_run_stop), ("POST", "jupyter/expose"): _jx(jup_expose),
     ("GET", "auth"): auth_status, ("POST", "auth/check"): auth_check, ("POST", "auth/login"): auth_login,
     ("GET", "secrets"): secrets_list, ("PUT", "secrets"): secret_put, ("POST", "secrets/remove"): secret_remove,
 }
@@ -2881,6 +3109,7 @@ def main():
         TOKEN, fresh = secrets.token_urlsafe(32), True
         write_private(tokf, TOKEN.encode("utf-8"))
     BOX = Box(folder)
+    sqlstudio.bind(BOX)
     ENGINE = W.Engine(BOX)
     store.purge_incognito()                                       # incognito chats never outlive the UI process
     searchidx.warm()                                              # chat search index: brought up to date in the background

@@ -48,7 +48,7 @@ const isNum = (v) => typeof v === "number";
 function csv(cols, rows) { const q = (v) => (v == null ? "" : /[",\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : String(v)); return [cols.map(q).join(","), ...rows.map((r) => r.map(q).join(","))].join("\n"); }
 function download(name, text, type) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); }
 
-function Grid({ res, name }) {
+export function Grid({ res, name }) {
   const [sort, setSort] = useState(null), [page, setPage] = useState(0), [q, setQ] = useState(""), PS = 200;
   useEffect(() => { setSort(null); setPage(0); setQ(""); }, [res]);
   const rows = useMemo(() => {
@@ -206,6 +206,33 @@ function Tree({ conn, env, api, post, onInsert, onOpen }) {
       ${data && !tabs.length && html`<p class="mute small" style="padding:6px 8px">${q ? "No table matches." : "No tables in this schema."}</p>`}${data && data.more && html`<p class="mute small" style="padding:6px 8px">First 2000 shown, filter to narrow.</p>`}</div></div>`;
 }
 
+// Magic SQL: describe what you want, the model writes it with the schemas of this connection (and any others ticked) as context
+function AskAi({ conns, conn, tab, res, post, apply }) {
+  const [q, setQ] = useState(""), [busy, setBusy] = useState(false), [note, setNote] = useState(""), [more, setMore] = useState([]), [pick, setPick] = useState(false);
+  const failed = res && !res.ok && res.error && !res.missing;
+  const go = guard(async (fix) => {
+    if (!conn) return toast("Pick a connection first");
+    const hasSql = !!tab.sql.trim();
+    if (!fix && !q.trim()) return toast("Describe what you want");
+    setBusy(true); setNote("");
+    try {
+      const r = await post("sql/ask", { ask: fix ? "Fix the error." + (q.trim() ? " " + q : "") : q, conn: conn.id, sql: tab.sql, error: fix && failed ? res.error : "", others: more });
+      if (!r.sql) { setNote(r.note || "No SQL came back."); return; }
+      apply(r, fix || (hasSql && /\b(fix|change|add|remove|replace|rewrite|instead|also|only)\b/i.test(q)) ? "fix" : "new");
+      setNote(r.note || ""); setQ("");
+    } finally { setBusy(false); }
+  });
+  const others = conns.filter((c) => !conn || c.id !== conn.id);
+  return html`<div class="sq-ai"><div class="row" style="gap:6px">${Ic("sparkles", 15)}
+      <input class="grow" placeholder=${"Ask AI: " + (tab.sql.trim() ? "change this query, or describe a new one" : "e.g. top 10 customers by revenue last month")} value=${q} disabled=${busy}
+        onInput=${(e) => setQ(e.target.value)} onKeyDown=${(e) => e.key === "Enter" && !e.shiftKey && go(false)} aria-label="Ask AI to write SQL"/>
+      ${others.length > 0 && html`<div class="sq-hw"><button class="btn sm" title="Let the AI also see the schemas of other connections" onClick=${() => setPick(!pick)} aria-expanded=${pick}>${Ic("database", 13)} ${more.length ? "+" + more.length : "Context"}</button>
+        ${pick && html`<div class="sq-hist"><div class="row sq-hh"><b class="grow">Also give the AI the schema of</b></div>${others.map((c) => html`<label class="sq-hi"><span><input type="checkbox" checked=${more.includes(c.id)} onChange=${() => setMore((m) => m.includes(c.id) ? m.filter((x) => x !== c.id) : [...m, c.id])}/> ${c.name}</span></label>`)}</div>`}</div>`}
+      <button class="btn acc" disabled=${busy || !conn} onClick=${() => go(false)}>${busy ? html`<i class="spin"></i>` : Ic("sparkles", 13)} Generate</button>
+      ${failed && html`<button class="btn" disabled=${busy} title="Send the error and the SQL to the AI" onClick=${() => go(true)}>${Ic("bolt", 13)} Fix error</button>`}</div>
+    ${note && html`<div class="mute small sq-ainote">${note} <button class="ibtn sm" aria-label="Dismiss" onClick=${() => setNote("")}>${Ic("x", 11)}</button></div>`}</div>`;
+}
+
 function Studio({ conns, post, api, envs, go, init }) {
   const [tabs, setTabs] = useState(() => { const t = LS.get("tabs", null); return Array.isArray(t) && t.length ? t : [{ id: uid(), name: "Query 1", sql: "", conn: "" }]; });
   const [cur, setCur] = useState(() => { const c = LS.get("cur", ""); return c; });
@@ -216,6 +243,17 @@ function Studio({ conns, post, api, envs, go, init }) {
   useEffect(() => { LS.set("limit", limit); }, [limit]);
   useEffect(() => { if (init && conns.some((c) => c.id === init)) patch({ conn: init }); }, [init]);
   const conn = conns.find((c) => c.id === tab.conn) || null;
+  // SQL handed over from a chat block: a new tab on the connection named in its `-- conn:` line
+  const takeInbox = useCallback(() => {
+    let m = null; try { m = JSON.parse(localStorage.getItem("sqls_inbox") || "null"); localStorage.removeItem("sqls_inbox"); } catch (e) { /* none */ }
+    if (!m || !m.sql || Date.now() - m.at > 60000) return;
+    const cm = m.sql.match(/^\s*--\s*conn:\s*(.+)/i), nm = cm ? cm[1].trim().toLowerCase() : "";
+    const c = nm && conns.find((x) => x.id === nm || x.name.toLowerCase() === nm);
+    const t = { id: uid(), name: "From chat", sql: m.sql.trim() + "\n", conn: c ? c.id : tab.conn };
+    setTabs((ts) => [...ts, t]); setCur(t.id); toast(c ? "Opened on " + c.name : "Opened in a new tab");
+  }, [conns, tab.conn]);
+  useEffect(() => { if (conns.length) takeInbox(); }, [conns.length]);
+  useEffect(() => { addEventListener("sqlstudio:inbox", takeInbox); return () => removeEventListener("sqlstudio:inbox", takeInbox); }, [takeInbox]);
   useEffect(() => { if (!tab.conn && conns.length) patch({ conn: conns[0].id }); }, [conns, tab.id, tab.conn]);
   const patch = (p) => setTabs((ts) => ts.map((t) => (t.id === tab.id ? { ...t, ...p } : t)));
   const addTab = (sql = "", name) => { const t = { id: uid(), name: name || "Query " + (tabs.length + 1), sql, conn: tab.conn }; setTabs((ts) => [...ts, t]); setCur(t.id); };
@@ -233,6 +271,13 @@ function Studio({ conns, post, api, envs, go, init }) {
   });
   const stop = () => post("sql/cancel", { run: runId.current[tab.id] }).catch(() => {});
   const res = results[tab.id], busy = !!running[tab.id];
+  // AI answer: an empty editor is filled; a fix replaces the SQL (the old one goes to History); anything else opens a new tab, nothing is lost
+  const applyAi = (r, mode) => {
+    const cid = r.conn && conns.some((c) => c.id === r.conn) ? r.conn : tab.conn;
+    if (mode === "fix" && tab.sql.trim()) { setHist((h) => { const n = [{ sql: tab.sql, conn: tab.conn, name: (conn && conn.name) || "", at: Date.now() }, ...h].slice(0, 60); LS.set("hist", n); return n; }); patch({ sql: r.sql + "\n", conn: cid }); }
+    else if (!tab.sql.trim()) patch({ sql: r.sql + "\n", conn: cid });
+    else { const t = { id: uid(), name: "AI query", sql: r.sql + "\n", conn: cid }; setTabs((ts) => [...ts, t]); setCur(t.id); }
+  };
   const open = (t, schema) => { const nm = (schema && !/^(main|public|dbo)$/i.test(schema) ? schema + "." : "") + t.name; patch({ sql: "select * from " + nm + " limit 100" }); setTimeout(() => run("select * from " + nm + " limit 100"), 0); };
   if (!conns.length) return html`<div class="sq-pane"><div class="sq-hero">${Ic("database", 34)}<h3>No connection yet</h3><p class="mute">Add a database to start writing SQL.</p><button class="btn acc" onClick=${() => go("connections")}>${Ic("plus", 14)} New connection</button></div></div>`;
   return html`<div class="sq-studio"><${Tree} conn=${tab.conn} env=${conn ? conn.env : ""} api=${api} post=${post} onInsert=${insert} onOpen=${open}/>
@@ -245,6 +290,7 @@ function Studio({ conns, post, api, envs, go, init }) {
           ${showHist && html`<div class="sq-hist"><div class="row sq-hh"><b class="grow">Recent queries</b><button class="btn sm" onClick=${() => { setHist([]); LS.set("hist", []); }}>Clear</button></div>${!hist.length && html`<p class="mute small" style="padding:10px">Nothing yet.</p>`}
             ${hist.map((h) => html`<button class="sq-hi" onClick=${() => { patch({ sql: h.sql, conn: conns.some((c) => c.id === h.conn) ? h.conn : tab.conn }); setShowHist(false); }}><code>${h.sql.replace(/\s+/g, " ").slice(0, 140)}</code><span class="mute small">${h.name} · ${new Date(h.at).toLocaleString()}</span></button>`)}</div>`}</div>
         <button class="btn sm" title="Rename this tab" onClick=${guard(async () => { const n = prompt("Tab name", tab.name); if (n && n.trim()) patch({ name: n.trim().slice(0, 40) }); })}>${Ic("edit", 13)}</button></div>
+      <${AskAi} conns=${conns} conn=${conn} tab=${tab} res=${res} post=${post} apply=${applyAi}/>
       <${Editor} value=${tab.sql} onChange=${(v) => patch({ sql: v })} onRun=${run} ro=${false}/>
       <div class="sq-out">${busy && html`<div class="sq-load"><i class="spin"></i> Running…<button class="btn sm" onClick=${stop}>Stop</button></div>`}
         ${!busy && !res && html`<div class="sq-empty big">${Ic("table", 26)}<div>Results appear here</div><div class="mute small">Double-click a table in the tree to preview it.</div></div>`}

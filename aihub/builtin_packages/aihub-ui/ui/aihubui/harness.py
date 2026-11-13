@@ -94,6 +94,14 @@ def frozen_memory(sess):
     return m
 
 
+NB_RULE = ("# Notebooks\nWhen the notebook tool is listed, the user has Jupyter servers (Notebook page). notebook servers / ls to find a notebook, notebook run to execute it "
+           "(params object optional) and answer from its real cell outputs and the `result` variable. A failed run names the cell: read the error, fix the cause or tell the user.")
+SQL_RULE = ("# SQL\nWhen the sql tool is listed, the user has databases in SQL Studio. For a data question: sql schema first (all connections, or one), then sql query "
+            "(read-only; check column names against the schema, start small), and answer from the real rows. A question may span connections: query each. "
+            "Whenever you write SQL the user may want to keep, put it in a ```sql block whose first line is `-- conn: <connection name>`: the block gets an "
+            "\"Open in SQL Studio\" button. Statements that change data are never run by you: give them in such a block.")
+
+
 def system_text(sess, cwd, mode, mcp_on):
     soul = sess.get("soul")
     if soul is None:
@@ -110,6 +118,8 @@ def system_text(sess, cwd, mode, mcp_on):
         parts.append(UNATTENDED if sess.get("work") else APPROVAL)
     if mcp_on:
         parts.append(MCP_NOTE)
+    parts.append(SQL_RULE)
+    parts.append(NB_RULE)
     parts.append("# Answer format\n" + freechat.FREE_HELP.split("\n", 1)[1])
     if mem:
         parts.append("# Memory (your notes from earlier chats)\n" + mem)

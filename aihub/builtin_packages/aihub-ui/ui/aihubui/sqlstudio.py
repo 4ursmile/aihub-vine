@@ -191,7 +191,7 @@ def call(box, cid, req, timeout=120, rid=None):
         fields = f
     else:
         fields = conn_fields(box, c)
-        req["readonly"] = bool(c.get("readonly")) if req.get("action") == "query" else False
+        req["readonly"] = (bool(c.get("readonly")) or bool(req.pop("force_ro", False))) if req.get("action") == "query" else False
     try:
         py = _python(env)
     except ValueError as e:                                         # a managed env that is not created yet: installing creates it
@@ -286,3 +286,157 @@ def drivers(env):
         vers = [mods.get(m) for m, _ in d["mods"] if mods.get(m)]
         res["drivers"].append(dict(d, installed=ok, version=vers[0] if vers else "", pips=d.get("pips") or [m[1] for m in d["mods"]]))
     return res
+
+
+# ---------- AI access: schema context across connections + guarded queries (chat tool, CLI, "Ask AI" in the studio)
+# The model never sees a password or URL: it addresses a connection by name / id and the server runs the statement. What the AI runs is
+# ALWAYS read-only (SELECT / WITH / SHOW / EXPLAIN...); a statement that changes data is handed back as SQL for the user to run in the studio.
+
+_BOX = {"box": None}
+_digests = {}                                  # (connection id, schema) -> (time, digest)
+DIGEST_TTL = 180
+AI_ROWS, AI_ROWS_MAX, AI_CELL = 30, 200, 90
+
+
+def bind(box):
+    """The server hands over its secret box once, so tools that run inside chat turns (harnesstools) can reach saved connections."""
+    _BOX["box"] = box
+
+
+def resolve(ref):
+    """A connection by id, exact name or unique name prefix (case-insensitive) -> its record, or raises ValueError listing what exists."""
+    cons = _load()["connections"]
+    ref = str(ref or "").strip()
+    if not ref and len(cons) == 1:
+        return cons[0]
+    low = ref.lower()
+    hit = [c for c in cons if c.get("id") == ref] or [c for c in cons if str(c.get("name", "")).lower() == low] \
+        or ([c for c in cons if str(c.get("name", "")).lower().startswith(low)] if low else [])
+    if len(hit) == 1:
+        return hit[0]
+    names = ", ".join("%s (%s)" % (c.get("name"), c.get("id")) for c in cons) or "none saved yet"
+    raise ValueError(("Several connections match %r. " if len(hit) > 1 else "No connection %r. ") % ref + "Available: " + names)
+
+
+def digest(box, cid, schema="", table="", fresh=False):
+    """Tables, columns, keys of one connection (cached a few minutes). -> the runner's answer dict."""
+    key = (cid, schema, table)
+    hit = _digests.get(key)
+    if hit and not fresh and time.time() - hit[0] < DIGEST_TTL:
+        return hit[1]
+    r = call(box, cid, {"action": "digest", "schema": schema, "table": table}, 60)
+    if r.get("ok"):
+        _digests[key] = (time.time(), r)
+    return r
+
+
+def _fmt_digest(c, r, tables_only=False):
+    head = "## %s  [id %s · %s%s]" % (c.get("name"), c.get("id"), c.get("driver"), " · read-only" if c.get("readonly") else "")
+    if not r.get("ok"):
+        return head + "\n(schema unavailable: %s)" % str(r.get("error") or "unknown error")[:200]
+    L = [head + (" schema %s" % r["schema"] if r.get("schema") else "")]
+    if len(r.get("schemas") or []) > 1:
+        L.append("other schemas: " + ", ".join(s for s in r["schemas"] if s != r.get("schema"))[:300])
+    for t in r.get("tables") or []:
+        if tables_only:
+            L.append("- " + t["name"] + (" (view)" if t["kind"] == "view" else ""))
+            continue
+        cols = ", ".join("%s %s%s" % (x["name"], x["type"], " pk" if x["pk"] else "") for x in t.get("columns") or [])
+        fk = "; ".join("%s -> %s(%s)" % (",".join(f["cols"]), f["to"], ",".join(f["to_cols"])) for f in t.get("fks") or [])
+        L.append("- %s%s: %s%s%s" % (t["name"], " (view)" if t["kind"] == "view" else "", cols, " …+%d" % t["more_columns"] if t.get("more_columns") else "",
+                                      " | fk: " + fk if fk else ""))
+    if r.get("total", 0) > len(r.get("tables") or []):
+        L.append("(%d of %d tables shown; ask for one with the table filter)" % (len(r["tables"]), r["total"]))
+    return "\n".join(L)
+
+
+def ai_context(box, refs=None, schema="", table="", budget=24000):
+    """Text for a model: every named connection (default: all saved) with its tables and columns. Connections are read in parallel."""
+    cons = [resolve(r) for r in refs] if refs else list(_load()["connections"])
+    if not cons:
+        return "No SQL connections are saved yet. The user adds one in SQL Studio (Connections tab)."
+    res = {}
+
+    def one(c):
+        try:
+            res[c["id"]] = digest(box, c["id"], schema if len(cons) == 1 else "", table)
+        except Exception as e:                                       # one broken connection never hides the others
+            res[c["id"]] = {"ok": False, "error": str(e)}
+    ths = [threading.Thread(target=one, args=(c,), daemon=True) for c in cons]
+    for t in ths:
+        t.start()
+    for t in ths:
+        t.join(75)
+    # fair share of the budget: a huge database cannot push the others out
+    share = max(2500, budget // len(cons))
+    out = []
+    for c in cons:
+        txt = _fmt_digest(c, res.get(c["id"]) or {"ok": False, "error": "timed out"})
+        if len(txt) > share:
+            txt = _fmt_digest(c, res.get(c["id"]) or {}, tables_only=True)
+            if len(txt) > share:
+                txt = txt[:share] + "\n…[cut]"
+            txt += "\n(columns left out: ask for one table to see them)"
+        out.append(txt)
+    return "\n\n".join(out)
+
+
+def _cell(v):
+    s = "NULL" if v is None else str(v).replace("\n", " ")
+    return s if len(s) <= AI_CELL else s[:AI_CELL] + "…"
+
+
+def ai_query(box, ref, sql, limit=AI_ROWS):
+    """Run SQL for the AI, read-only. -> {ok, text, columns, rows, truncated, ms, conn} (text = a compact table for the model)."""
+    c = resolve(ref)
+    limit = max(1, min(int(limit or AI_ROWS), AI_ROWS_MAX))
+    r = call(box, c["id"], {"action": "query", "sql": sql, "limit": limit, "force_ro": True}, 120)
+    r["conn"] = {"id": c["id"], "name": c.get("name")}
+    if not r.get("ok"):
+        r["text"] = "ERROR: " + str(r.get("error") or "failed") + ((" (install: %s)" % r["command"]) if r.get("command") else "")
+        return r
+    cols, rows = r.get("columns") or [], r.get("rows") or []
+    if not cols:
+        r["text"] = "OK, no rows returned (%s ms)" % r.get("ms")
+        return r
+    L = [" | ".join(cols)] + [" | ".join(_cell(v) for v in row) for row in rows]
+    L.append("(%d row%s%s, %s ms, connection %s)" % (len(rows), "" if len(rows) == 1 else "s", "; more rows exist, narrow the query or raise limit" if r.get("truncated") else "", r.get("ms"), c.get("name")))
+    r["text"] = "\n".join(L)
+    return r
+
+
+ASK_SYSTEM = """You write SQL for the user inside SQL Studio. You get the saved database connections with their tables and columns, the connection the editor
+is on, the SQL now in the editor and, when it failed, its error. Reply with ONE ```sql block holding the complete statement(s) and then at most two
+short sentences (assumptions, what to check). Rules:
+- Use only tables and columns that appear in the schema; match the dialect of the connection (limit/top/fetch first, quoting, date functions).
+- Prefer a read-only SELECT. Never invent credentials. Put a limit on exploratory queries.
+- The SQL runs on ONE connection. If the question belongs to another connection, start the block with the comment `-- conn: <connection name>`.
+- When asked to fix, change the existing SQL as little as needed. When asked to explain, answer in prose and add no block."""
+FENCE = re.compile(r"```[ \t]*(?:sql|[a-z]*sql)?[ \t]*\n(.*?)\n?[ \t]*```", re.S | re.I)
+
+
+def ask_sql(box, ask, conn="", sql="", error="", others=None, model=""):
+    """Magic SQL: -> {sql, conn (id the SQL is for), note, engine}. `others` = more connection refs whose schemas the model may use."""
+    from . import magic
+    cur = resolve(conn) if conn else None
+    refs = ([cur["id"]] if cur else []) + [resolve(o)["id"] for o in (others or []) if not cur or resolve(o)["id"] != cur["id"]]
+    ctx = ai_context(box, refs or None, budget=20000)
+    prompt = "# Schemas\n%s\n\n# Editor is on: %s\n" % (ctx, ("%s (%s)" % (cur["name"], cur["driver"])) if cur else "no connection")
+    if sql.strip():
+        prompt += "\n# SQL in the editor\n```sql\n%s\n```\n" % sql[:8000]
+    if error:
+        prompt += "\n# It failed with\n%s\n" % error[:1500]
+    prompt += "\n# Request\n" + (ask.strip() or ("Fix the error." if error else "Improve this SQL."))
+    text, used, how = magic.ask_model(ASK_SYSTEM, prompt, model, box.get_all() if box else None, "auto", 4000)
+    m = FENCE.search(text)
+    code = (m.group(1) if m else "").strip()
+    target = ""
+    cm = re.match(r"--\s*conn:\s*(.+)", code)
+    if cm:
+        try:
+            target = resolve(cm.group(1).strip())["id"]
+        except ValueError:
+            target = ""
+        code = code[cm.end():].lstrip("\n")
+    note = (FENCE.sub("", text) if m else text).strip()[:600]
+    return {"sql": code, "conn": target or (cur["id"] if cur else ""), "note": note, "engine": how, "model": used}

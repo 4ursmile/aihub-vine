@@ -921,3 +921,30 @@ button.dl.gap:hover{color:var(--ink);background:var(--soft2)}
 .sq-hint{margin:14px;padding:16px;border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line));background:color-mix(in srgb,var(--accent) 6%,var(--surface));border-radius:14px;display:grid;gap:12px;max-width:640px}.sq-hint.small{margin:6px 0;padding:11px;gap:9px}
 .sq-hh2{display:flex;gap:11px;align-items:flex-start}.sq-hh2>.ic{color:var(--accent2);margin-top:2px}
 .sq-cmd{display:block;font-size:11.5px;padding:7px 10px;background:var(--soft2);border-radius:8px;overflow-wrap:anywhere;user-select:all;color:var(--ink2)}
+
+/* SQL Studio: Ask AI bar */
+.sq-ai{padding:8px 12px;border-bottom:1px solid var(--line,rgba(128,128,128,.25))}
+.sq-ai input{min-width:0}
+.sq-ainote{margin-top:6px;display:flex;gap:6px;align-items:flex-start}
+
+/* ---------- Notebook (Jupyter servers): jupyter.js */
+.nbjp .nbj-ws{min-height:0}.nbj-stage{flex:1;min-height:0;position:relative;display:flex;flex-direction:column}.nbj-tab{flex:1;min-height:0;display:flex;flex-direction:column}.nbj-tab[hidden],.nbj-termbox[hidden]{display:none}
+.nbj-tab>.nb{flex:1;min-height:0}.nbj-bar{display:flex;align-items:center;gap:6px;padding:8px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.nbj-ghost{opacity:.42}.nb-src>pre .nbj-ghost{font-style:normal}
+.nbj-frame{width:100%;height:440px;border:1px solid var(--line);border-radius:8px;background:#fff;resize:vertical}
+.nbj-sqlbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:5px 10px;margin-bottom:4px;border:1px solid var(--line);border-radius:8px;background:color-mix(in srgb,var(--accent) 7%,var(--soft));font-size:12px}
+.nbj-sqlbar select,.nbj-sqlbar input{font-size:12px;height:26px;padding:0 6px}.nbj-var{width:84px;font-family:var(--mono)}
+.nb-cell.sql .nb-src{border-left:3px solid var(--accent)}
+.nbj-ai{margin-top:6px;padding:8px;border:1px solid var(--line2);border-radius:10px;background:var(--surface);display:flex;flex-direction:column;gap:8px}
+.nbj-ai input{min-width:0}.nbj-prop pre{margin:0 0 6px;padding:8px 10px;max-height:260px;overflow:auto;font:12px/1.5 var(--mono);background:var(--soft);border-radius:8px;white-space:pre-wrap}
+.nbj-bad{color:var(--bad)}
+.nbj-sets{display:flex;flex-direction:column;gap:10px;max-width:820px}.nbj-set{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface);flex-wrap:wrap}
+.nbj-crumbs{display:flex;flex-wrap:wrap;gap:2px;font-size:12px;align-items:center}.nbj-crumbs button{padding:1px 4px;border-radius:5px;color:var(--mute)}.nbj-crumbs button:hover{color:var(--ink);background:var(--soft2)}.nbj-crumbs span{color:var(--mute)}
+.nbj-f .ibtn{opacity:0}.nbj-f:hover .ibtn{opacity:1}.nbj-f.on{background:var(--soft2)}
+.nbj-img{padding:16px;overflow:auto;flex:1}.nbj-img img{max-width:100%;background:#fff}
+.nbj-local{margin-top:8px;display:flex;flex-direction:column}
+.nbj-termbox{height:300px;border-top:1px solid var(--line);display:flex;flex-direction:column;min-height:0}.nbj-termw{display:flex;flex-direction:column;flex:1;min-height:0}.nbj-termh{padding:4px 10px;border-bottom:1px solid var(--line)}
+.nbj-term{flex:1;min-height:0;background:#1c1c1e;padding:4px 6px}
+.nb-o.html{overflow:auto}.nb-o.html table{width:max-content;max-width:none}.nb-o.html th{position:sticky;top:0;background:var(--soft);text-align:right;font-weight:600}
+.nb-o.html tbody tr:nth-child(even){background:var(--soft2)}.nb-o.html tbody tr:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.nb-o.html td,.nb-o.html th{white-space:nowrap}

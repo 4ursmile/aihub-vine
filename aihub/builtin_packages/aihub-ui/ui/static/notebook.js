@@ -33,9 +33,9 @@ export function serializeNotebook(nb, cells) {
   }) };
   return JSON.stringify(out, null, 1) + "\n";
 }
-const cellsOf = (nb) => nb.cells.map((c) => ({ key: c.id || newId(), type: c.cell_type === "markdown" || c.cell_type === "raw" ? c.cell_type : "code", src: joinSrc(c.source), outputs: c.outputs || [], raw: c }));
+export const cellsOf = (nb) => nb.cells.map((c) => ({ key: c.id || newId(), type: c.cell_type === "markdown" || c.cell_type === "raw" ? c.cell_type : "code", src: joinSrc(c.source), outputs: c.outputs || [], raw: c }));
 
-function CellCode({ value, onChange, lang, autofocus, onKey }) {
+export function CellCode({ value, onChange, lang, autofocus, onKey }) {
   const h = useHl(), ta = useRef();
   useEffect(() => { if (autofocus && ta.current) ta.current.focus(); }, []);
   const hl = useMemo(() => colorize(h, lang, value) + "\n", [h, lang, value]);
@@ -45,7 +45,7 @@ function CellCode({ value, onChange, lang, autofocus, onKey }) {
   };
   return html`<div class="nb-src syn"><pre aria-hidden="true" dangerouslySetInnerHTML=${{ __html: hl }}></pre><textarea ref=${ta} spellcheck="false" value=${value} onInput=${(e) => onChange(e.target.value)} onKeyDown=${key} aria-label="Cell source"></textarea></div>`;
 }
-function Output({ o }) {
+export function Output({ o }) {
   const t = o.output_type, d = o.data || {};
   if (t === "stream") { const s = joinSrc(o.text).replace(ANSI, ""); return html`<pre class=${"nb-o " + (o.name === "stderr" ? "err" : "")}>${s.slice(0, MAX_OUT)}${s.length > MAX_OUT ? "\n…" : ""}</pre>`; }
   if (t === "error") return html`<pre class="nb-o err">${((o.traceback || []).join("\n") || (o.ename + ": " + o.evalue)).replace(ANSI, "").slice(0, MAX_OUT)}</pre>`;

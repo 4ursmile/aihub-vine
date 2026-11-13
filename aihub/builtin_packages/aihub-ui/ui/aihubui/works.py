@@ -173,6 +173,12 @@ FROM orders
 GROUP BY country
 ORDER BY orders DESC
 """
+NB_GUIDE = ("Runs a Jupyter notebook that lives on one of the user's Jupyter servers (Notebook page: JupyterHub, Jupyter Server or the local one the UI installs). "
+            "Server = its saved name. Parameters (a JSON object, {{data.x}} filled in) are set like papermill: right after the cell tagged `parameters`, else before the first cell. "
+            "Every code cell runs in order on a fresh kernel; SQL cells run through SQL Studio and may fill a pandas DataFrame. The node's output is the variable named in Result variable "
+            "(read back as JSON, its keys become {{data.key}}), else the output of the last cell. Save as (optional) writes the executed notebook, outputs included, to that path on the server. "
+            "Needs the UI running. A failing cell stops the run unless Continue after errors is on.")
+
 SQL_GUIDE = """Runs SQL on any database SQLAlchemy reaches: PostgreSQL, SQL Server, Oracle, Trino, MySQL, SQLite, DuckDB (or any SQLAlchemy URL).
 * Environment: the box above checks the Python this node runs with and installs what is missing in one click: SQLAlchemy, the DRIVER of your database (psycopg, pymssql / pyodbc, oracledb, trino, pymysql, duckdb-engine) and pandas / polars when you pick them. Or copy the one command it shows. A separate environment (e.g. `data`) keeps them away from the UI's own Python.
 * Login: pick a 'sql' credential set (Settings > Credentials or `aihub work cred add --kind sql`), or fill Host, Port, User, Database here; Password is stored encrypted. Or a full SQLAlchemy URL (secret field). Options = extra URL parameters (key=value&key=value).
@@ -343,6 +349,16 @@ BUILTIN = {
                           {"name": "url", "label": "SQLAlchemy URL (instead of the fields; stored encrypted)", "type": "password", "help": "e.g. postgresql+psycopg://me:pw@db:5432/sales"},
                           {"name": "verify", "label": "Check TLS certificate (Trino: true / false)", "type": "text", "default": ""},
                           {"name": "timeout", "label": "Timeout (seconds)", "type": "number", "default": 600}]},
+    "code.notebook": {"title": "Jupyter notebook", "kind": "action", "group": "Code", "desc": "Runs a notebook from your Jupyter server (Notebook page): parameters in, a result variable out. SQL cells and pandas included.",
+                      "run": ["{python}", "{pkg}/nodes/notebook_run.py"], "timeout": 700, "timeout_key": "timeout", "templated": ["params", "path"], "guide": NB_GUIDE,
+                      "fields": [{"name": "server", "label": "Jupyter server (saved name)", "type": "text", "default": "", "required": True},
+                                 {"name": "path", "label": "Notebook path on the server", "type": "text", "default": "", "required": True, "help": "e.g. reports/daily.ipynb"},
+                                 {"name": "params", "label": "Parameters (JSON object)", "type": "textarea", "default": "", "help": "e.g. {\"day\": \"{{data.day}}\", \"n\": {{data.n}}}"},
+                                 {"name": "result_var", "label": "Result variable", "type": "text", "default": "result", "help": "Read back as JSON when it exists. Empty = use the last cell's output."},
+                                 {"name": "kernel", "label": "Kernel (optional)", "type": "text", "default": "", "help": "Kernel name such as python3; empty = the notebook's own."},
+                                 {"name": "save_as", "label": "Save executed copy as (optional)", "type": "text", "default": ""},
+                                 {"name": "continue", "label": "Continue after errors", "type": "checkbox", "default": False},
+                                 {"name": "timeout", "label": "Timeout (seconds)", "type": "number", "default": 600}]},
     "db.trino": {"title": "Trino SQL (no driver)", "kind": "action", "group": "Data", "desc": "Runs SQL on Trino / Presto over its HTTP protocol, nothing to install (for SQLAlchemy, pandas or polars use SQL database with Database = trino): several statements in one session (ETL steps), the last result as a table, JSON, CSV or a file. Uses a 'trino' credential set.",
                  "run": ["{python}", "{pkg}/nodes/trino_query.py"], "timeout": 600, "timeout_key": "timeout", "templated": ["sql"], "guide": TRINO_GUIDE,
                  "fields": [{"name": "sql", "label": "SQL (statements separated by ;)", "type": "code", "lang": "sql", "required": True, "default": TRINO_SAMPLE},

@@ -8,6 +8,7 @@ Claude's own login and settings.json (model, env, hooks, MCP, skills, agents) ap
 import hashlib
 import json
 import os
+import sys
 import re
 import signal
 import subprocess
@@ -42,7 +43,10 @@ Files the user attaches are saved under attachments/. Keep answers short; do not
 When the user asks you to build a workflow / work / automation (a flow of nodes that runs on a schedule, a message or a click), FIRST read the Works guide (the rules of a run and every installed node type
 with its fields), then answer with a short explanation and ONE ```workflow block (not ```json) holding the JSON {"title","description","nodes":[{"id","type","label","x","y","config"}],"edges":[{"from","to"}]}; the page shows a
 button that saves it in Works (switched off) and opens it. Use only node types and field names from the guide, one Start node, required fields filled, secret fields empty (credential sets carry logins).
-Without the guide: tell the user to type /create-work <description>."""
+Without the guide: tell the user to type /create-work <description>.
+SQL: the user's databases live in SQL Studio. To look at data run `{SQL_CLI} connections`, `{SQL_CLI} schema [CONN] [--table T]` and `{SQL_CLI} query CONN "SELECT ..." [--limit N]` (read-only, any connection by name; check columns in the schema first,
+start small, answer from the real rows). SQL worth keeping goes in a ```sql block whose first line is `-- conn: <connection name>`: the page adds an "Open in SQL Studio" button. Never run statements that change data; give them in such a block.
+Notebooks: the user's Jupyter servers live on the Notebook page. `{NB_CLI} servers`, `{NB_CLI} ls SERVER [FOLDER]` and `{NB_CLI} run SERVER PATH [--param k=v ...] [--timeout S]` run a notebook on a fresh kernel and print every cell's output and its `result` variable; answer from those real outputs."""
 
 GUIDES = {
     "diagrams": """# Diagrams in AI Hub UI answers
@@ -125,7 +129,7 @@ def build_system(extra="", soul=None):
     line, extra = _lazy_extra(extra or "")
     g = {k: _guide(k, v) or "(not available)" for k, v in GUIDES.items()}
     parts = [CANVAS_HELP.replace("{WORKS_GUIDE}", os.path.join(HOME(), "ui", "works-guide.md")).replace("{G_DIAGRAMS}", g["diagrams"])
-             .replace("{G_DOCS}", g["documents"]).replace("{G_EXTRA}", line)]
+             .replace("{SQL_CLI}", "%s %s" % (sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "sqlcli.py"))).replace("{NB_CLI}", "%s %s" % (sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "nbcli.py"))).replace("{G_DOCS}", g["documents"]).replace("{G_EXTRA}", line)]
     try:
         if soul is None:
             with open(os.path.join(HOME(), "knowledge", "soul.md"), encoding="utf-8") as f:

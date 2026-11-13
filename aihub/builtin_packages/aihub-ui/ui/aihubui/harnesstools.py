@@ -6,6 +6,7 @@ are many hits, command output keeps head + tail with repeated lines folded and t
 open. File tools stay inside the chat's working folder (and the folder of saved outputs). `run` follows the chat's permission mode."""
 import base64
 import fnmatch
+import json
 import mimetypes
 import os
 import re
@@ -67,10 +68,26 @@ SPECS = [
      "input_schema": {"type": "object", "properties": {"cmd": {"type": "string"}, "timeout": {"type": "integer", "description": "seconds, default 120, max 600"}}, "required": ["cmd"]}},
     {"name": "digest", "description": "Answer a question about a big file or saved output with a small fast model, without reading it all yourself.",
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "question": {"type": "string"}}, "required": ["path", "question"]}},
+    {"name": "sql", "description": "Work with the user's saved SQL Studio databases. connections: list them. schema: tables + columns of one or all connections (optional table filter). "
+                                    "query: run a READ-ONLY statement on a connection, rows come back as a table. Writes are refused: give the SQL in a ```sql block instead.",
+     "input_schema": {"type": "object", "properties": {"action": {"type": "string", "enum": ["connections", "schema", "query"]}, "conn": {"type": "string", "description": "connection name or id"},
+                                                       "sql": {"type": "string"}, "table": {"type": "string", "description": "schema: only tables whose name contains this"},
+                                                       "limit": {"type": "integer", "description": "query: max rows, default 30, max 200"}}, "required": ["action"]}},
+    {"name": "notebook", "description": "Use the user's Jupyter servers (Notebook page). servers: list them. ls: files in a folder of a server. run: execute a notebook top to bottom on a fresh kernel "
+                                        "(optional params object, set like papermill) and get each cell's output plus the value of the variable `result`; SQL cells and pandas work. status: poll a run that was still going.",
+     "input_schema": {"type": "object", "properties": {"action": {"type": "string", "enum": ["servers", "ls", "run", "status"]}, "server": {"type": "string", "description": "server name or id"},
+                                                       "path": {"type": "string", "description": "ls: folder; run: notebook path such as reports/daily.ipynb"}, "params": {"type": "object"},
+                                                       "timeout": {"type": "integer", "description": "run: seconds, default 300, max 600"}, "id": {"type": "string", "description": "status: run id"}}, "required": ["action"]}},
     {"name": "memory", "description": "Your notes kept across chats. add: save a durable fact; remove: drop note n; list: show them.",
      "input_schema": {"type": "object", "properties": {"action": {"type": "string", "enum": ["add", "remove", "list"]}, "text": {"type": "string"}, "n": {"type": "integer"}},
                       "required": ["action"]}},
 ]
+
+def sqlstudio_box():
+    from . import sqlstudio
+    return sqlstudio._BOX["box"]
+
+
 CHANGES = {"edit", "write", "run"}
 
 
@@ -196,7 +213,19 @@ class Tools:
         self.n_out = 0
 
     def specs(self):
-        drop = CHANGES if self.mode in READ_ONLY else set()
+        drop = set(CHANGES) if self.mode in READ_ONLY else set()
+        try:
+            from . import sqlstudio
+            if not sqlstudio.connections():
+                drop.add("sql")                                          # no saved database: do not spend tokens on the tool
+        except Exception:
+            drop.add("sql")
+        try:
+            from . import jupyter
+            if not jupyter.servers():
+                drop.add("notebook")
+        except Exception:
+            drop.add("notebook")
         return [s for s in SPECS if s["name"] not in drop]
 
     def check(self, name, a):
@@ -314,6 +343,60 @@ class Tools:
             return str(e), True
         except OSError as e:
             return "%s: %s" % (type(e).__name__, e), True
+
+    def t_sql(self, a):
+        from . import sqlstudio
+        box, act = sqlstudio._BOX["box"], str(a.get("action") or "")
+        if box is None:
+            return "SQL Studio is not available in this process", True
+        try:
+            if act == "connections":
+                return "\n".join("%s  id=%s  %s%s" % (c["name"], c["id"], c["driver"], "  read-only" if c.get("readonly") else "") for c in sqlstudio.connections()) or "none saved", False
+            if act == "schema":
+                return self.clip(sqlstudio.ai_context(box, [a["conn"]] if a.get("conn") else None, table=str(a.get("table") or "")), "sql"), False
+            if act == "query":
+                r = sqlstudio.ai_query(box, a.get("conn"), str(a.get("sql") or ""), a.get("limit") or sqlstudio.AI_ROWS)
+                return self.clip(r["text"], "sql"), not r.get("ok")
+        except ValueError as e:
+            return str(e), True
+        return "unknown action %r (connections, schema, query)" % act, True
+
+    def t_notebook(self, a):
+        import time
+        from . import jupyter
+        box, act = sqlstudio_box(), str(a.get("action") or "")
+        try:
+            if act == "servers":
+                return "\n".join("%s  id=%s  %s" % (x["name"], x["id"], x["kind"]) for x in jupyter.servers()) or "none saved", False
+            if act == "ls":
+                r = jupyter.ls(jupyter.conn(box, a.get("server")), str(a.get("path") or ""))
+                return "\n".join(("%s/" if i["type"] == "directory" else "%s") % i["path"] for i in r["items"][:200]) or "(empty)", False
+            if act == "run":
+                jid = jupyter.run_start(box, ref=str(a.get("server") or ""), path=str(a.get("path") or ""), params=a.get("params") if isinstance(a.get("params"), dict) else None,
+                                        timeout=min(int(a.get("timeout") or 300), 600))
+            elif act == "status":
+                jid = str(a.get("id") or "")
+            else:
+                return "unknown action %r (servers, ls, run, status)" % act, True
+            end = time.time() + min(int(a.get("timeout") or 300), 600) + 15
+            while time.time() < end:
+                v = jupyter.run_view(jid)
+                if v is None:
+                    return "no such run", True
+                if v["state"] == "error":
+                    return v["error"], True
+                if v["state"] == "done":
+                    r = v["result"]
+                    head = "%s: %d cells in %ss%s" % ("OK" if r["ok"] else "FAILED", r["ran"], r["seconds"], ("; " + r["error"]) if r["error"] else "")
+                    res = ("\nresult = " + json.dumps(r["result"], default=str)[:3000]) if r.get("result") is not None else ""
+                    return self.clip(head + res + "\n\n" + r["text"], "notebook"), not r["ok"]
+                if self.state.get("cancel") is not None and self.state["cancel"].is_set():
+                    jupyter.run_stop(jid)
+                    return "stopped", True
+                time.sleep(1)
+            return "Still running (run id %s): call notebook status with this id later." % jid, False
+        except (ValueError, jupyter.JError) as e:
+            return str(e), True
 
     def t_read(self, a):
         p = self._path(a.get("path"))

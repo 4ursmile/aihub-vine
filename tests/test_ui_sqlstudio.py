@@ -77,6 +77,57 @@ class SqlStudioTest(unittest.TestCase):
         r = sqlstudio.call(self.box, ro["id"], {"action": "query", "sql": "delete from t"})
         self.assertFalse(r["ok"])
 
+    def test_resolve_by_name_id_and_prefix(self):
+        a = sqlstudio.save(self.box, {"name": "Sales DB", "driver": "sqlite"})
+        b = sqlstudio.save(self.box, {"name": "Stock", "driver": "sqlite"})
+        self.assertEqual(sqlstudio.resolve("sales db")["id"], a["id"])
+        self.assertEqual(sqlstudio.resolve(b["id"])["id"], b["id"])
+        self.assertEqual(sqlstudio.resolve("sto")["id"], b["id"])
+        with self.assertRaises(ValueError):
+            sqlstudio.resolve("s")                                   # ambiguous: lists what exists
+        with self.assertRaises(ValueError):
+            sqlstudio.resolve("")
+
+    @unittest.skipUnless(have_sqlalchemy(), "sqlalchemy not installed for this Python")
+    def test_ai_context_across_connections_and_readonly_query(self):
+        import sqlite3
+        ids = []
+        for n, ddl in (("one", "create table cust(id integer primary key, name text)"), ("two", "create table orders(id integer, cust_id integer references cust(id))")):
+            db = os.path.join(self.tmp, n + ".db")
+            con = sqlite3.connect(db)
+            con.execute(ddl)
+            con.execute("insert into %s values (1, 1)" % ("cust" if n == "one" else "orders"))
+            con.commit()
+            con.close()
+            ids.append(sqlstudio.save(self.box, {"name": n, "driver": "sqlite", "database": db})["id"])
+        text = sqlstudio.ai_context(self.box)
+        self.assertIn("## one", text)
+        self.assertIn("## two", text)
+        self.assertIn("cust", text)
+        self.assertIn("orders", text)
+        r = sqlstudio.ai_query(self.box, "one", "select * from cust")
+        self.assertTrue(r["ok"])
+        self.assertIn("id | name", r["text"])
+        r = sqlstudio.ai_query(self.box, "one", "delete from cust")          # the AI never writes, even on a writable connection
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["text"].startswith("ERROR"))
+        self.assertTrue(sqlstudio.ai_query(self.box, "one", "select count(*) from cust")["ok"])
+
+    def test_ask_sql_parses_the_model_answer(self):
+        from aihubui import magic
+        sqlstudio.save(self.box, {"name": "one", "driver": "sqlite"})
+        sqlstudio.save(self.box, {"name": "two", "driver": "sqlite"})
+        old, oldc = magic.ask_model, sqlstudio.ai_context
+        magic.ask_model = lambda *a, **k: ("```sql\n-- conn: two\nselect 1\n```\nAssumes two.", "m", "direct")
+        sqlstudio.ai_context = lambda *a, **k: "schema"
+        try:
+            r = sqlstudio.ask_sql(self.box, "count", conn="one")
+        finally:
+            magic.ask_model, sqlstudio.ai_context = old, oldc
+        self.assertEqual(r["sql"], "select 1")
+        self.assertEqual(r["conn"], sqlstudio.resolve("two")["id"])
+        self.assertIn("Assumes", r["note"])
+
 
 if __name__ == "__main__":
     unittest.main()
