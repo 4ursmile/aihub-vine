@@ -267,7 +267,10 @@ def http(c, method, path, body=None, timeout=30, absolute=False):
     if data is not None:
         h["Content-Type"] = "application/json"
     rq = urllib.request.Request(url, data=data, headers=h, method=method)
-    op = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=c.ctx()))
+    hs = [_NoRedirect, urllib.request.HTTPSHandler(context=c.ctx())]
+    if (urllib.parse.urlparse(url).hostname or "") in ("127.0.0.1", "localhost", "::1"):
+        hs.append(urllib.request.ProxyHandler({}))   # a system / corporate proxy (Windows registry, HTTP_PROXY) cannot reach our loopback server
+    op = urllib.request.build_opener(*hs)
     try:
         with op.open(rq, timeout=timeout) as r:
             raw = r.read()
@@ -347,7 +350,7 @@ def local_start(rec):
         p = subprocess.Popen(argv, stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, cwd=root, env=env, start_new_session=True)
     lc = {"p": p, "port": port, "token": token}
     c = Conn(rec, "http://127.0.0.1:%d/" % port, token, True)
-    end = time.time() + 60
+    end, last = time.time() + 60, ""
     while time.time() < end:
         if p.poll() is not None:
             break
@@ -355,8 +358,11 @@ def local_start(rec):
             http(c, "GET", "status", timeout=3)
             LOCAL[rec["id"]] = lc
             return lc
-        except JError:
+        except JError as e:
+            last = str(e)
             time.sleep(0.5)
+    why = ("It exited (code %s). " % p.returncode) if p.poll() is not None else \
+        ("It runs but did not answer on port %d within 60 s (%s), so it was stopped. " % (port, last[:200] or "no answer"))
     try:
         p.terminate()
     except OSError:
@@ -365,7 +371,7 @@ def local_start(rec):
         tail = open(log, encoding="utf-8", errors="replace").read()[-600:]
     except OSError:
         tail = ""
-    raise JError("The local Jupyter server did not start. " + tail)
+    raise JError("The local Jupyter server did not start. " + why + "Log: " + tail)
 
 
 def local_stop(sid):

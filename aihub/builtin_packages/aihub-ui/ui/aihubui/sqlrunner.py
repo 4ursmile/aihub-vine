@@ -135,6 +135,26 @@ def first_schema(schemas):
     return schemas[0] if schemas else None
 
 
+def user_schemas(schemas):
+    return [s for s in schemas if str(s).lower() not in SYSTEM_SCHEMAS]
+
+
+def list_schemas(eng, insp):
+    """Databases / schemas of the login, real ones first. MySQL-protocol servers (Doris / StarRocks) that reject SHOW SCHEMAS: SHOW DATABASES."""
+    names = []
+    try:
+        names = [str(s) for s in insp.get_schema_names()]
+    except Exception:
+        pass
+    if not names and eng.dialect.name == "mysql":
+        try:
+            with eng.connect() as cn:
+                names = [str(r[0]) for r in cn.exec_driver_sql("SHOW DATABASES").fetchall()]
+        except Exception:
+            pass
+    return user_schemas(names) + [s for s in names if s not in user_schemas(names)]
+
+
 def mysql_catalogs(eng):
     """Doris / StarRocks catalogs over the MySQL protocol: [names], or None on plain MySQL (no SHOW CATALOGS)."""
     try:
@@ -148,19 +168,27 @@ def mysql_catalogs(eng):
         return None
 
 
-def use_catalog(sa, eng, cat):
-    """Every new connection of ENG switches to catalog CAT first (Doris: SWITCH, StarRocks: SET CATALOG)."""
-    q = "`%s`" % cat.replace("`", "``")
+def use_catalog(sa, eng, cat, db=""):
+    """Every new connection of ENG switches to catalog CAT first (Doris: SWITCH, StarRocks: SET CATALOG), then to database DB (USE)."""
+    bq = lambda n: "`%s`" % n.replace("`", "``")
 
     @sa.event.listens_for(eng, "connect")
     def _switch(dbapi_con, _rec):
         cur = dbapi_con.cursor()
         try:
-            cur.execute("SWITCH " + q)
-        except Exception:
-            cur.execute("SET CATALOG " + q)
+            if cat:
+                try:
+                    cur.execute("SWITCH " + bq(cat))
+                except Exception:
+                    cur.execute("SET CATALOG " + bq(cat))
+            if db:
+                cur.execute("USE " + bq(db))
         finally:
             cur.close()
+
+
+NODB_HINT = (" Pick a database in the Schema panel (queries run in it), write the table as database.table, or set Database on the connection"
+             " (Doris / StarRocks external catalog: catalog.database).")
 
 
 def main():
@@ -175,7 +203,7 @@ def main():
         import mongorunner
         mongorunner.handle(act, req, c, out, ad)
     cat = str(req.get("catalog") or "").strip()
-    if cat and str(c.get("driver") or "") == "trino" and not str(c.get("url") or "").strip():
+    if cat and act != "query" and str(c.get("driver") or "") == "trino" and not str(c.get("url") or "").strip():
         c = dict(c, database=cat)                                         # Trino: one connection per catalog, picked in the tree
     try:
         eng = ad.engine(c)
@@ -190,8 +218,11 @@ def main():
     except Exception as e:
         out(ok=False, error=str(e)[:600])
     sa = ad.need("sqlalchemy")
-    if cat and eng.dialect.name == "mysql":
-        use_catalog(sa, eng, cat)
+    if eng.dialect.name == "mysql":
+        # the Schema panel's pick: a login without a database (Doris / StarRocks / MySQL) fails "No database selected" on plain table names
+        use_db = str(req.get("schema") or "").strip() if act == "query" and not eng.url.database else ""
+        if cat or use_db:
+            use_catalog(sa, eng, cat, use_db)
     t0 = time.time()
     try:
         if act == "test":
@@ -222,17 +253,22 @@ def main():
                 elif catalogs and not cur:
                     cur = "internal" if "internal" in catalogs else "default_catalog" if "default_catalog" in catalogs else catalogs[0]
             insp = sa.inspect(eng)
-            schemas = []
-            try:
-                schemas = [s for s in insp.get_schema_names()][:300]
-            except Exception:
-                pass
+            schemas = list_schemas(eng, insp)[:300]
             sch = req.get("schema") or None
             if sch is None and not req.get("schema_given"):
                 sch = getattr(insp, "default_schema_name", None)
             if sch is None and eng.dialect.name == "mysql":
-                sch = first_schema(schemas)
-            tabs = [{"name": n, "kind": "table"} for n in insp.get_table_names(schema=sch)]
+                if not req.get("schema_given") and len(user_schemas(schemas)) == 1:
+                    sch = user_schemas(schemas)[0]                        # one real database: open it
+                else:
+                    out(ok=True, schemas=schemas, schema=None, tables=[], more=False, catalogs=catalogs, catalog=cur, pick=True)
+            try:
+                tabs = [{"name": n, "kind": "table"} for n in insp.get_table_names(schema=sch)]
+            except Exception as e:
+                if not schemas:
+                    raise
+                out(ok=True, schemas=schemas, schema=sch, tables=[], more=False, catalogs=catalogs, catalog=cur,
+                    note=str(getattr(e, "orig", None) or e)[:300])
             try:
                 tabs += [{"name": n, "kind": "view"} for n in insp.get_view_names(schema=sch)]
             except Exception:
@@ -242,11 +278,7 @@ def main():
         if act == "digest":
             # tables + columns + keys of one schema in ONE process: the data context an AI needs to write correct SQL (capped, time-boxed)
             insp = sa.inspect(eng)
-            schemas = []
-            try:
-                schemas = [s for s in insp.get_schema_names()][:60]
-            except Exception:
-                pass
+            schemas = list_schemas(eng, insp)[:60]
             sch = req.get("schema") or None
             if sch is None:
                 sch = getattr(insp, "default_schema_name", None)
@@ -323,6 +355,8 @@ def main():
         raise
     except Exception as e:
         msg = str(getattr(e, "orig", None) or e)
+        if "No database selected" in msg:
+            msg += NODB_HINT
         out(ok=False, error=msg[:1500], ms=int((time.time() - t0) * 1000))
 
 

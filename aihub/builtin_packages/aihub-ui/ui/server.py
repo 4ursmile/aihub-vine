@@ -2278,7 +2278,8 @@ def sql_run(h, q, b):
     except (TypeError, ValueError):
         limit = 1000
     rid = str(b.get("run") or "")[:40] or None
-    return _sql_call({"action": "query", "sql": need(b, "sql"), "limit": limit, "params": sqlstudio.coerce_params(b.get("params"))}, b, 300, rid)
+    return _sql_call({"action": "query", "sql": need(b, "sql"), "limit": limit, "params": sqlstudio.coerce_params(b.get("params")),
+                                "catalog": str(b.get("catalog") or "")[:200], "schema": str(b.get("schema") or "")[:200]}, b, 300, rid)
 
 
 def sql_files(h, q, b):

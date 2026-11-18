@@ -218,9 +218,9 @@ function Drivers({ api, post, envs, ui, onUseUrl, reloadEnvs }) {
 }
 
 // ---------- studio
-function Tree({ conn, nodb, env, api, post, onInsert, onOpen, head }) {
+function Tree({ conn, nodb, env, api, post, onInsert, onOpen, onScope, head }) {
   const [data, setData] = useState(null), [err, setErr] = useState(null), [schema, setSchema] = useState(null), [catalog, setCatalog] = useState(""), [open, setOpen] = useState({}), [cols, setCols] = useState({}), [q, setQ] = useState(""), [busy, setBusy] = useState(false);
-  const load = (sch, cat) => { if (sch == null) forgetSchema(conn); setBusy(true); setErr(null); const c = cat == null ? catalog : cat; post("sql/tables", { id: conn, schema: sch == null ? undefined : sch, catalog: c || undefined }).then((r) => { if (!r.ok) setErr(r); else { setData(r); setSchema(r.schema); setCatalog(r.catalog || ""); } }).catch((e) => setErr({ error: e.message })).finally(() => setBusy(false)); };
+  const load = (sch, cat) => { if (sch == null) forgetSchema(conn); setBusy(true); setErr(null); const c = cat == null ? catalog : cat; post("sql/tables", { id: conn, schema: sch == null ? undefined : sch, catalog: c || undefined }).then((r) => { if (!r.ok) setErr(r); else { setData(r); setSchema(r.schema); setCatalog(r.catalog || ""); if (onScope) onScope(conn, { catalog: r.catalog || "", schema: r.schema || "" }); } }).catch((e) => setErr({ error: e.message })).finally(() => setBusy(false)); };
   useEffect(() => { setData(null); setOpen({}); setCols({}); setQ(""); setCatalog(""); if (conn) load(undefined, ""); }, [conn]);
   const pickCatalog = (c) => { setOpen({}); setCols({}); setSchema(null); load(undefined, c); };
   const qual = (n) => (data && data.catalogs && catalog ? [catalog, schema, n].filter(Boolean).join(".") : schema && nodb ? schema + "." + n : n);
@@ -228,13 +228,16 @@ function Tree({ conn, nodb, env, api, post, onInsert, onOpen, head }) {
   const tabs = (data ? data.tables : []).filter((t) => !q.trim() || t.name.toLowerCase().includes(q.toLowerCase()));
   return html`<div class="sq-tree"><div class="nbj-ph"><b>Schema</b><button class="ibtn sm" title="Refresh" aria-label="Refresh" onClick=${() => load(schema)}>${busy ? html`<i class="spin"></i>` : Ic("refresh", 14)}</button>${head}</div>
     ${data && data.catalogs && html`<select class="sq-sel" value=${catalog} onChange=${(e) => pickCatalog(e.target.value)} aria-label="Catalog"><option value="">Pick a catalog (${data.catalogs.length})</option>${data.catalogs.map((s) => html`<option value=${s}>${s}</option>`)}</select>`}
-    ${data && data.schemas.length > 1 && html`<select class="sq-sel" value=${schema || ""} onChange=${(e) => load(e.target.value)} aria-label="Schema">${!schema && html`<option value="">Pick a schema / database</option>`}${data.schemas.map((s) => html`<option value=${s}>${s}</option>`)}</select>`}
-    <input class="sq-find" placeholder="Filter tables" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Filter tables"/>
+    ${data && data.schemas.length > 1 && schema && html`<select class="sq-sel" value=${schema || ""} onChange=${(e) => load(e.target.value)} aria-label="Schema">${!schema && html`<option value="">Pick a schema / database</option>`}${data.schemas.map((s) => html`<option value=${s}>${s}</option>`)}</select>`}
+    <input class="sq-find" placeholder=${data && !schema && data.schemas.length ? "Filter databases" : "Filter tables"} value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Filter tables"/>
     <div class="sq-tl">${err && (err.missing ? html`<${MissingHint} info=${err} env=${env} api=${api} post=${post} small=${true} onDone=${() => load()}/>` : html`<div class="sq-test bad small">${Ic("alert", 13)} <span>${err.error}</span></div>`)}
+      ${data && !schema && data.schemas.length > 0 && !(data.catalogs && !catalog) && html`<p class="mute small" style="padding:2px 8px">Databases (${data.schemas.length}): pick one to see its tables</p>
+        ${data.schemas.filter((s) => !q.trim() || s.toLowerCase().includes(q.toLowerCase())).map((s) => html`<div key=${"db:" + s} class="sq-tr" onClick=${() => load(s)} title="Open this database"><i class="sq-chev">${Ic("right", 11)}</i>${Ic("database", 13)}<span class="sq-ell grow">${s}</span></div>`)}`}
+      ${data && data.note && html`<div class="sq-test bad small">${Ic("alert", 13)} <span>${data.note}</span></div>`}
       ${tabs.map((t) => html`<div key=${t.name}><div class="sq-tr" onClick=${() => toggle(t)} onDblClick=${() => onOpen(t, schema, data && data.catalogs ? catalog : "")} title="Click: columns · Double-click: the first 100 rows"><i class=${"sq-chev" + (open[t.name] ? " o" : "")}>${Ic("right", 11)}</i>${Ic(t.kind === "view" ? "eye" : "table", 13)}<span class="sq-ell grow">${t.name}</span>
           <button class="ibtn sm" title="Insert name" aria-label="Insert name" onClick=${(e) => { e.stopPropagation(); onInsert(qual(t.name)); }}>${Ic("plus", 12)}</button></div>
         ${open[t.name] && html`<div class="sq-cl">${(cols[t.name] || []).map((c) => html`<div class="sq-co" key=${c.name} onClick=${() => onInsert(c.name)}><span class=${"sq-pk" + (c.pk ? " on" : "")}>${c.pk ? Ic("key", 10) : ""}</span><span class="sq-ell grow">${c.name}</span><em>${c.type}</em></div>`)}${!cols[t.name] && html`<div class="mute small" style="padding:2px 8px"><i class="spin"></i></div>`}</div>`}</div>`)}
-      ${data && !tabs.length && html`<p class="mute small" style="padding:6px 8px">${data.catalogs && !catalog ? "Pick a catalog above to browse its schemas and tables." : q ? "No table matches." : "No tables in this schema."}</p>`}${data && data.more && html`<p class="mute small" style="padding:6px 8px">First 2000 shown, filter to narrow.</p>`}</div></div>`;
+      ${data && !tabs.length && !(!schema && data.schemas.length) && html`<p class="mute small" style="padding:6px 8px">${data.catalogs && !catalog ? "Pick a catalog above to browse its schemas and tables." : q ? "No table matches." : "No tables in this schema."}</p>`}${data && data.more && html`<p class="mute small" style="padding:6px 8px">First 2000 shown, filter to narrow.</p>`}</div></div>`;
 }
 
 // Magic SQL: describe what you want, the model writes it with the schemas of this connection (and any others ticked) as context
@@ -278,7 +281,7 @@ function Studio({ conns, post, api, envs, go, init }) {
   const [files, setFiles] = useState([]), [panel, setPanelS] = useState(() => LS.get("panel", "schema")), setPanel = (v) => { setPanelS(v); LS.set("panel", v); };
   const loadFiles = useCallback(() => api("sql/files").then((r) => setFiles(r.files || [])).catch(() => {}), []);
   useEffect(() => { loadFiles(); }, []);
-  const runId = useRef({}), tab = tabs.find((t) => t.id === cur) || tabs[0];
+  const runId = useRef({}), scope = useRef({}), tab = tabs.find((t) => t.id === cur) || tabs[0];
   useEffect(() => { const w = setTimeout(() => LS.set("tabs", tabs.map((t) => ({ id: t.id, name: t.name, sql: t.sql, conn: t.conn, params: t.params || {}, file: t.file || "", viz: t.viz || undefined }))), 400); return () => clearTimeout(w); }, [tabs]);       // not on every keystroke
   useEffect(() => { LS.set("cur", tab.id); }, [tab.id]);
   useEffect(() => { LS.set("limit", limit); }, [limit]);
@@ -306,7 +309,7 @@ function Studio({ conns, post, api, envs, go, init }) {
     if (!sql) return toast("Write a statement first");
     const rid = uid(); runId.current[id] = rid; setRunning((r) => ({ ...r, [id]: true })); setResults((r) => ({ ...r, [id]: null }));
     setHist((h) => { const n = [{ sql, conn: conn.id, name: conn.name, at: Date.now() }, ...h.filter((x) => x.sql !== sql)].slice(0, 60); LS.set("hist", n); return n; });
-    try { const r = await post("sql/run", { id: conn.id, sql, limit, run: rid, params: usedParams(sel != null ? sel : tab.sql) }); setResults((x) => ({ ...x, [id]: r })); }
+    try { const r = await post("sql/run", { id: conn.id, sql, limit, run: rid, params: usedParams(sel != null ? sel : tab.sql), ...(scope.current[conn.id] || {}) }); setResults((x) => ({ ...x, [id]: r })); }
     catch (e) { setResults((x) => ({ ...x, [id]: { ok: false, error: e.message } })); }
     finally { setRunning((r) => ({ ...r, [id]: false })); }
   });
@@ -348,7 +351,7 @@ function Studio({ conns, post, api, envs, go, init }) {
   const close = html`<span class="grow"></span><button class="ibtn sm" title="Close panel" aria-label="Close panel" onClick=${() => setPanel("")}>${Ic("x", 14)}</button>`;
   return html`<div class=${"nbj-ws2 sqw" + (panel ? "" : " nopanel")}>
     <div class="nbj-rail">${rail("schema", "database", "Schema")}${rail("files", "file", "Saved SQL files")}${rail("hist", "clock", "History")}<span class="nbj-rsep"></span>${rail("set", "sliders", "Settings: connection and rows")}</div>
-    ${panel === "schema" && html`<aside class="nbj-panel" aria-label="Schema"><${Tree} conn=${tab.conn} nodb=${!(conn && conn.database)} env=${conn ? conn.env : ""} api=${api} post=${post} onInsert=${insert} onOpen=${open} head=${close}/></aside>`}
+    ${panel === "schema" && html`<aside class="nbj-panel" aria-label="Schema"><${Tree} conn=${tab.conn} nodb=${!(conn && conn.database)} env=${conn ? conn.env : ""} api=${api} post=${post} onInsert=${insert} onOpen=${open} onScope=${(id, sc) => { scope.current[id] = sc; }} head=${close}/></aside>`}
     ${panel === "files" && html`<aside class="nbj-panel" aria-label="Saved SQL files"><div class="nbj-ph"><b>Files</b>${close}</div>
       <div class="nbj-list">${!files.length && html`<p class="mute small" style="padding:10px 8px">Nothing saved yet. Write a query, add :parameters if you like, and press Save.</p>`}
         ${files.map((f) => html`<div class="nbj-srow sqf" key=${f.id}><button class="sqf-o" onClick=${() => openFile(f)}><span class="nbj-fn"><span class="sq-ell">${f.name}</span><small>${(f.params || []).length ? (f.params || []).map((q) => ":" + q.name).join(" ") + " · " : ""}${(conns.find((c) => c.id === f.conn) || {}).name || "no connection"}</small></span></button><button class="ibtn sm" aria-label="Delete" onClick=${() => delFile(f)}>${Ic("trash", 12)}</button></div>`)}</div></aside>`}
