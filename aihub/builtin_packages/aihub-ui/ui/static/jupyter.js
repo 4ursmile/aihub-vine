@@ -4,7 +4,7 @@
 // Data: /api/jupyter/* (server.py -> aihubui/jupyter.py). Tokens never reach the browser.
 import { html, useState, useEffect, useRef, useMemo, useCallback } from "./vendor/preact-htm.js";
 import { Ic } from "./icons.js";
-import { toast, guard, Seg, Modal, Switch, Pop, confirmBox, ask } from "./ui.js";
+import { toast, guard, escPush, Seg, Modal, Switch, Pop, confirmBox, ask } from "./ui.js";
 import { Output, serializeNotebook, parseNotebook, cellsOf } from "./notebook.js";
 import { Grid } from "./sqlstudio.js";
 import { DataView, frameFromHtml, frameFromResource } from "./dataviz.js";
@@ -34,6 +34,34 @@ const withViz = (c, k, spec) => {
   raw.metadata = md; return raw;
 };
 const frameOf = (o) => { if (o.output_type !== "display_data" && o.output_type !== "execute_result") return null; const d = o.data || {}; return (d["application/vnd.dataresource+json"] && frameFromResource(d["application/vnd.dataresource+json"])) || frameFromHtml(join(d["text/html"])); };
+// output view per cell, in the standard nbformat fields so Jupyter shows the same: metadata.jupyter.outputs_hidden (+ collapsed) and metadata.scrolled
+const metaOf = (c) => (c.raw && c.raw.metadata) || {};
+const hiddenOf = (c) => !!((metaOf(c).jupyter || {}).outputs_hidden || metaOf(c).collapsed === true);
+const scrollOf = (c) => metaOf(c).scrolled !== false;                       // default: a long output scrolls in its own box
+const withMeta = (c, f) => { const raw = { ...(c.raw || {}) }; raw.metadata = f({ ...(raw.metadata || {}) }); return raw; };
+const withHidden = (c, on) => withMeta(c, (m) => { const j = { ...(m.jupyter || {}) }; if (on) { j.outputs_hidden = true; m.collapsed = true; } else { delete j.outputs_hidden; delete m.collapsed; } if (Object.keys(j).length) m.jupyter = j; else delete m.jupyter; return m; });
+const withScroll = (c, on) => withMeta(c, (m) => ({ ...m, scrolled: !!on }));
+const hasOut = (c) => c.type === "code" && (c.outputs.length > 0 || !!c.sqlres);
+// the output area of one cell: scrolls in a box (and follows a running cell's new output while you are at the bottom) or shows everything
+function OutBox({ scroll, running, children }) {
+  const r = useRef(), stick = useRef(true);
+  useEffect(() => { if (running) stick.current = true; }, [running]);
+  useEffect(() => { const el = r.current; if (el && scroll && running && stick.current) el.scrollTop = el.scrollHeight; });
+  return html`<div ref=${r} class=${"nb-outs " + (scroll ? "scroll" : "full")} onScroll=${(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24; }}>${children}</div>`;
+}
+// right-click menu at the pointer: items = [label, icon, hint, disabled, fn] or "-" for a separator. Closes on Esc, outside click, scroll, resize.
+function CtxMenu({ at, items, close }) {
+  const r = useRef(), [pos, setPos] = useState({ left: at.x, top: at.y });
+  useEffect(() => { const el = r.current; if (!el) return; const b = el.getBoundingClientRect(); setPos({ left: Math.max(4, Math.min(at.x, innerWidth - b.width - 4)), top: Math.max(4, at.y + b.height > innerHeight - 4 ? at.y - b.height : at.y) }); const f = el.querySelector(".opt:not(:disabled)"); if (f) f.focus(); }, [at]);
+  useEffect(() => {
+    const off = (e) => { if (r.current && !r.current.contains(e.target)) close(); }, pop = escPush(close), gone = () => close();
+    addEventListener("pointerdown", off, true); addEventListener("resize", gone); addEventListener("blur", gone); document.addEventListener("scroll", gone, true);
+    return () => { pop(); removeEventListener("pointerdown", off, true); removeEventListener("resize", gone); removeEventListener("blur", gone); document.removeEventListener("scroll", gone, true); };
+  }, []);
+  const nav = (e) => { if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return; e.preventDefault(); const bs = [...r.current.querySelectorAll(".opt:not(:disabled)")], i = bs.indexOf(document.activeElement); const n = bs[(i + (e.key === "ArrowDown" ? 1 : -1) + bs.length) % bs.length]; if (n) n.focus(); };
+  return html`<div ref=${r} class="nbj-ctx optlist" role="menu" style=${pos} onKeyDown=${nav} onContextMenu=${(e) => e.preventDefault()}>${items.filter(Boolean).map((it, k) => it === "-" ? html`<div key=${k} class="nbj-ctxsep" role="separator"></div>`
+    : html`<button key=${k} class=${"opt" + (it[5] ? " bad" : "")} role="menuitem" disabled=${it[3]} onClick=${() => { close(); it[4](); }}><span class="oi">${Ic(it[1], 14)}</span><span class="grow">${it[0]}</span>${it[2] && html`<kbd>${it[2]}</kbd>`}</button>`)}</div>`;
+}
 const withSql = (c, sql) => { const raw = { ...(c.raw || {}) }, md = { ...(raw.metadata || {}) }, ai = { ...(md.aihub || {}) }; if (sql) ai.sql = sql; else delete ai.sql; if (Object.keys(ai).length) md.aihub = ai; else delete md.aihub; raw.metadata = md; return raw; };
 
 // kernel output event -> the cell's nbformat outputs (same rules as the server's Fold)
@@ -200,7 +228,7 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
     if (!c.src.trim()) return true;
     const sql = sqlOf(c);
     setRun((r) => ({ ...r, [key]: 1 }));
-    upd(key, (x) => ({ outputs: [], sqlres: null, cleared: false, raw: { ...(x.raw || {}), execution_count: null } }));
+    upd(key, (x) => ({ outputs: [], sqlres: null, cleared: false, raw: { ...(hiddenOf(x) ? withHidden(x, false) : x.raw || {}), execution_count: null } }));   // running shows the output again
     try {
       if (sql) {
         if (!sql.conn) { toast("Pick a SQL connection for this cell"); return false; }
@@ -233,6 +261,40 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
     if (cellsRef.current === snap) setDirty(false);                      // edited while saving: stay dirty, the next round saves it
   };
   const save = guard(async () => { await persist(); toast("Saved " + path.split("/").pop()); });
+  const clearOut = (key) => upd(key, { outputs: [], sqlres: null, cleared: true });
+  const allOut = (f) => { setDirty(true); setCells((cs) => cs.map((c) => (c.type === "code" ? { ...c, ...f(c) } : c))); };
+  const clearAll = guard(async () => { if (await confirmBox({ title: "Clear all outputs?", text: "Every cell's output is removed (a smaller file, clean diffs). Variables in the kernel stay; outputs come back when cells run again.", ok: "Clear" })) allOut(() => ({ outputs: [], sqlres: null, cleared: true })); });
+  const [outMenu, setOutMenu] = useState(false), [ctx, setCtx] = useState(null);
+  const openCtx = (c) => (e) => {                                          // right-click on a cell; the editor (copy / paste) and Shift+right-click keep the browser's menu
+    if (e.shiftKey || e.target.closest("textarea,input,select,a,.nbj-ctx")) return;
+    e.preventDefault(); setSel(c.key); setCtx({ key: c.key, at: { x: e.clientX, y: e.clientY } });
+  };
+  const ctxItems = (key) => {
+    const cs = cellsRef.current, i = cs.findIndex((x) => x.key === key), c = cs[i]; if (!c) return [];
+    const code = c.type === "code", out = hasOut(c), any = cs.some(hasOut), mod = /Mac/.test(navigator.platform) ? "⌘" : "Ctrl";
+    const asType = (t) => upd(c.key, (x) => (t === "sql" ? { type: "code", raw: withSql(x, { conn: (conns[0] || {}).name || "", var: "df", limit: 10000 }) } : { type: t, raw: sqlOf(x) ? withSql(x, null) : x.raw }));
+    return [
+      code && ["Run cell", "play", mod + "+Enter", !!run[c.key], () => runCell(c.key)],
+      code && ["Run this and below", "down", "", busy, () => runMany(cs.slice(i).filter((x) => x.type === "code").map((x) => x.key))],
+      code && "-",
+      code && ["Clear output", "x", "", !out, () => clearOut(c.key)],
+      code && [hiddenOf(c) ? "Show output" : "Hide output", "eye", "", !out, () => upd(c.key, (x) => ({ raw: withHidden(x, !hiddenOf(x)) }))],
+      code && [scrollOf(c) ? "Expand output (full height)" : "Scroll output in a box", scrollOf(c) ? "expand" : "shrink", "", !out, () => upd(c.key, (x) => ({ raw: withScroll(x, !scrollOf(x)) }))],
+      code && ["Clear all outputs", "trash", "", !any, clearAll],
+      "-",
+      ["Insert code cell above", "up", "", false, () => focusCell(insert(i, "code").key)],
+      ["Insert code cell below", "plus", "", false, () => focusCell(insert(i + 1, "code").key)],
+      ["Insert text cell below", "note", "", false, () => insert(i + 1, "markdown")],
+      ["Ask AI about this cell", "sparkles", "", false, () => setAiOpen(c.key)],
+      "-",
+      c.type !== "code" || sqlOf(c) ? ["Convert to code", "code", "", false, () => asType("code")] : ["Convert to text", "note", "", false, () => asType("markdown")],
+      code && !sqlOf(c) && ["Convert to SQL", "database", "", false, () => asType("sql")],
+      ["Move up", "up", "", !i, () => move(i, -1)],
+      ["Move down", "down", "", i === cs.length - 1, () => move(i, 1)],
+      "-",
+      ["Delete cell", "trash", "", false, () => remove(c.key), true],
+    ];
+  };
   const [addMenu, setAddMenu] = useState(false), [runMenu, setRunMenu] = useState(false), [fnd, setFnd] = useState(null), [ai, setAi] = useState({ s: "", m: "" }), findIn = useRef();
   const findRe = (global = true) => { if (!fnd || !fnd.q) return null; try { return new RegExp(fnd.rx ? fnd.q : fnd.q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), (global ? "g" : "") + (fnd.cs ? "" : "i") + "m"); } catch (e) { return null; } };
   const matches = useMemo(() => {
@@ -247,7 +309,7 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
   const marksOf = (k) => (fnd && matches.length ? matches.filter((m) => m.key === k).map((m) => [m.start, m.end, m === matches[fnd.i]]) : null);
   useEffect(() => { if (onOutline && cells) onOutline(path, cells.flatMap((c, n) => (c.type === "markdown" ? c.src.split("\n").filter((l) => /^#{1,6}\s+\S/.test(l)).map((l) => ({ key: c.key, level: /^#+/.exec(l)[0].length, text: l.replace(/^#+\s+/, "").replace(/[*_`]/g, "").trim() })) : []))); }, [cells]);
   const addAfter = (t) => { const cs = cellsRef.current, i = cs.findIndex((c) => c.key === sel), at = i < 0 ? cs.length : i + 1; const c = insert(at, t === "ai" ? "code" : t); if (t === "ai") setAiOpen(c.key); };
-  useEffect(() => { if (!jump || jump.path !== path) return; setSel(jump.key); requestAnimationFrame(() => { const el = document.getElementById("nbc-" + jump.key); if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); }); }, [jump]);
+  useEffect(() => { if (!jump || jump.path !== path) return; requestAnimationFrame(() => { const el = document.getElementById("nbc-" + jump.key); if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); }); }, [jump]);
   const saving = useRef(false), [auto, setAuto] = useState(() => LS.get("auto", true)), [busySave, setBusySave] = useState(false), [saveErr, setSaveErr] = useState("");
   const persistRef = useRef(persist); persistRef.current = persist;
   const flush = async () => { if (saving.current) return; saving.current = true; setBusySave(true); try { await persistRef.current(); setSaveErr(""); } catch (e) { setSaveErr(e.message); } saving.current = false; setBusySave(false); };
@@ -287,6 +349,17 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
       <div class="nbj-split"><button class="btn sm ghost" disabled=${busy} title="Run every code cell" onClick=${() => runMany(cells.filter((c) => c.type === "code").map((c) => c.key))}>${Ic("play", 13)} Run all</button>
         <${Pop} open=${runMenu} setOpen=${setRunMenu} up=${false} width=${250} button=${html`<button class="btn sm ghost nbj-caret" aria-label="More run options" onClick=${() => setRunMenu(!runMenu)}>${Ic("down", 12)}</button>`}>
           <div class="optlist">${[["Run selected cell", "play", "Shift+Enter", !sel || busy, () => sel && runCell(sel)], ["Run selected and below", "down", "From the selected cell to the end", !sel || busy, () => runMany(cells.slice(cells.findIndex((c) => c.key === sel)).filter((c) => c.type === "code").map((c) => c.key))], ["Run all above", "up", "Every cell before the selected one", !sel || busy, () => runMany(cells.slice(0, cells.findIndex((c) => c.key === sel)).filter((c) => c.type === "code").map((c) => c.key))], ["Interrupt execution", "stop", "", !busy, interrupt], ["Restart session", "refresh", "Clears all variables", false, () => restart(false)], ["Restart and run all", "refresh", "Fresh kernel, every cell", false, () => restart(true)]].map(([n, i, d, off, f]) => html`<button class="opt" disabled=${off} onClick=${() => { setRunMenu(false); f(); }}><span class="oi">${Ic(i, 16)}</span><span class="grow"><b>${n}</b><span class="d">${d}</span></span></button>`)}</div><//></div>
+      <${Pop} open=${outMenu} setOpen=${setOutMenu} up=${false} width=${260} button=${html`<button class="btn sm ghost" title="Clear, hide or scroll cell outputs" onClick=${() => setOutMenu(!outMenu)}>${Ic("list", 13)} Output ${Ic("down", 11)}</button>`}>
+        <div class="optlist">${(() => { const s = cells.find((c) => c.key === sel), so = s && hasOut(s), any = cells.some(hasOut); return [
+          ["Clear selected cell's output", "x", "", !so, () => clearOut(sel)],
+          ["Clear all outputs", "trash", "Every code cell", !any, clearAll],
+          [s && hiddenOf(s) ? "Show selected output" : "Hide selected output", "eye", "Keeps it, just folded away", !so, () => upd(sel, (x) => ({ raw: withHidden(x, !hiddenOf(x)) }))],
+          [s && scrollOf(s) ? "Expand selected output" : "Scroll selected output", s && scrollOf(s) ? "expand" : "shrink", s && scrollOf(s) ? "Show it at full height" : "Long output scrolls in a box", !so, () => upd(sel, (x) => ({ raw: withScroll(x, !scrollOf(x)) }))],
+          ["Hide all outputs", "eye", "", !any, () => allOut((c) => ({ raw: withHidden(c, true) }))],
+          ["Show all outputs", "eye", "", !cells.some(hiddenOf), () => allOut((c) => ({ raw: withHidden(c, false) }))],
+          ["Scroll all long outputs", "shrink", "Each output in a box with its own scroll", false, () => allOut((c) => ({ raw: withScroll(c, true) }))],
+          ["Expand all outputs", "expand", "Full height, the page scrolls", false, () => allOut((c) => ({ raw: withScroll(c, false) }))],
+        ].map(([n, i, d, off, f]) => html`<button class="opt" disabled=${off} onClick=${() => { setOutMenu(false); f(); }}><span class="oi">${Ic(i, 16)}</span><span class="grow"><b>${n}</b>${d && html`<span class="d">${d}</span>`}</span></button>`); })()}</div><//>
       ${busy && html`<button class="btn sm bad" onClick=${interrupt}>${Ic("stop", 12)} Interrupt</button>`}<span class="grow"></span>
       <select class="sq-conn" value=${kern.k.name} onChange=${(e) => kern.switchTo(e.target.value)} aria-label="Kernel" disabled=${!kern.specs.length}>${!kern.specs.length && html`<option value="">Kernel…</option>`}${kern.specs.map((s) => html`<option value=${s.name}>${s.display}</option>`)}</select>${stateTag}
       <button class="btn sm ghost" title="Find and replace (Ctrl/Cmd+F)" onClick=${openFind}>${Ic("search", 13)} Find</button><button class="btn sm ghost" title="Create a work that runs this notebook; chat can run it too" onClick=${() => onExpose(path)}>${Ic("flow", 13)} Use as node</button>
@@ -301,14 +374,14 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
       <span class="grow"></span><button class="ibtn sm" title="Close (Esc)" aria-label="Close find" onClick=${() => setFnd(null)}>${Ic("x", 14)}</button></div>`}
     <div class="nb-cells">${!cells.length ? html`<div class="nbj-emptynb"><p class="mute">This notebook has no cells yet.</p>${adder(0)}</div>` : adder(0)}${cells.map((c, i) => {
       const sql = sqlOf(c), failed = !!errText(c), running = !!run[c.key], ec = c.raw && c.raw.execution_count;
-      return html`<div key=${c.key} id=${"nbc-" + c.key} class=${"nb-cell " + c.type + (sql ? " sql" : "") + (sel === c.key ? " sel" : "")} onPointerDown=${() => setSel(c.key)}>
+      return html`<div key=${c.key} id=${"nbc-" + c.key} class=${"nb-cell " + c.type + (sql ? " sql" : "") + (sel === c.key ? " sel" : "")} onPointerDown=${() => setSel(c.key)} onContextMenu=${openCtx(c)}>
         <div class="nb-gut">${c.type === "code" ? html`<button class=${"nbj-run" + (running ? " busy" : "")} title=${running ? "Running…" : "Run cell (Shift+Enter)"} aria-label="Run cell" disabled=${running} onClick=${(e) => { e.stopPropagation(); runCell(c.key); }}>${running ? html`<i class="spin"></i>` : Ic("play", 13)}</button><span class="mono nbj-n">${running ? "*" : sql ? "sql" : ec ? "[" + ec + "]" : ""}</span>` : ""}</div>
         <div class="nb-body">
           <div class="nb-tools">            <button class="ibtn sm" title="Add a code cell below" aria-label="Add cell below" onClick=${() => { const nc = insert(i + 1, "code"); focusCell(nc.key); }}>${Ic("plus", 13)}</button>
             <button class="ibtn sm" title="Ask AI" aria-label="Ask AI" onClick=${() => setAiOpen(aiOpen === c.key ? null : c.key)}>${Ic("sparkles", 13)}</button>
             <select aria-label="Cell type" value=${sql ? "sql" : c.type} onChange=${(e) => { const t = e.target.value; upd(c.key, (x) => (t === "sql" ? { type: "code", raw: withSql(x, { conn: (conns[0] || {}).name || "", var: "df", limit: 10000 }) } : { type: t, raw: sqlOf(x) ? withSql(x, null) : x.raw })); }}><option value="code">Code</option><option value="sql">SQL</option><option value="markdown">Markdown</option><option value="raw">Raw</option></select>
             <button class="ibtn sm" aria-label="Move up" disabled=${!i} onClick=${() => move(i, -1)}>${Ic("up", 13)}</button><button class="ibtn sm" aria-label="Move down" disabled=${i === cells.length - 1} onClick=${() => move(i, 1)}>${Ic("down", 13)}</button>
-            ${c.type === "code" && (c.outputs.length > 0 || c.sqlres) && html`<button class="ibtn sm" title="Clear output" aria-label="Clear output" onClick=${() => upd(c.key, { outputs: [], sqlres: null, cleared: true })}>${Ic("x", 13)}</button>`}
+            ${hasOut(c) && html`<button class="ibtn sm" title="Clear output" aria-label="Clear output" onClick=${() => clearOut(c.key)}>${Ic("x", 13)}</button>`}
             <button class="ibtn sm bad" aria-label="Delete cell" onClick=${() => remove(c.key)}>${Ic("trash", 13)}</button></div>
           ${sql && html`<div class="nbj-sqlbar">${Ic("database", 13)}<b>SQL</b>
             <select value=${sql.conn} onChange=${(e) => upd(c.key, (x) => ({ raw: withSql(x, { ...sql, conn: e.target.value }) }))} aria-label="Connection"><option value="">Connection…</option>${conns.map((q) => html`<option value=${q.name}>${q.name}</option>`)}</select>
@@ -322,15 +395,18 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
                 complete=${sql ? sqlComplete(post, (conns.find((q) => q.name === sql.conn) || {}).id || "") : kern.k.id && kern.k.state !== "dead" ? (code, pos) => kern.complete(code, pos) : null}
                 signature=${c.type !== "code" ? null : sql ? sqlSignature : kern.k.id && kern.k.state !== "dead" ? (code, pos) => kern.signature(code, pos) : null} suggest=${(prefix, suffix) => post("jupyter/ai/suggest", { prefix, suffix, lang, cells: ctxFor(c.key)(), ...kern.live() }).then((r) => r.text || "")}/>`}
           ${aiOpen === c.key && html`<${AiBar} c=${c} sql=${sql ? { ...sql, conn: (conns.find((q) => q.name === sql.conn) || {}).id || sql.conn } : null} conns=${conns} post=${post} ctx=${ctxFor(c.key)} lang=${lang} apply=${aiApply(c, i)} close=${() => setAiOpen(null)} failed=${failed}/>`}
-          ${c.type === "code" && (c.outputs.length > 0 || c.sqlres) && html`<div class="nb-outs">
+          ${hasOut(c) && hiddenOf(c) && html`<button class="nbj-ohid" title="Show this cell's output" onClick=${() => upd(c.key, (x) => ({ raw: withHidden(x, false) }))}>${Ic("eye", 12)} Output hidden${c.outputs.length > 1 ? " (" + c.outputs.length + ")" : ""} · show</button>`}
+          ${hasOut(c) && !hiddenOf(c) && html`<div class="nbj-ow">
+          <${OutBox} scroll=${scrollOf(c)} running=${running}>
             ${c.sqlres && c.sqlres.ok && c.sqlres.columns && c.sqlres.columns.length ? html`<${DataView} res=${c.sqlres} spec=${vizOf(c, "sql")} onSpec=${(s) => upd(c.key, (x) => ({ raw: withViz(x, "sql", s) }))} table=${html`<${Grid} res=${c.sqlres} name=${(sql && sql.conn) || "result"}/>`}/>${c.sqlres.assigned && html`<div class=${"small " + (c.sqlres.assigned.ok ? "mute" : "nbj-bad")}>${c.sqlres.assigned.ok ? "Also in the kernel as DataFrame " : "Could not assign "}<code>${c.sqlres.assigned.var}</code>${c.sqlres.assigned.error ? ": " + c.sqlres.assigned.error : ""}</div>`}`
               : c.sqlres && !c.sqlres.ok ? html`<pre class="nb-o err">${c.sqlres.error}</pre>`
               : c.outputs.map((o, j) => html`<${Out} key=${j} o=${o} post=${post} viz=${vizOf(c, String(j))} onViz=${(s) => upd(c.key, (x) => ({ raw: withViz(x, String(j), s) }))}/>`)}
-            ${failed && !aiOpen && html`<div><button class="btn sm" onClick=${() => setAiOpen(c.key)}>${Ic("bolt", 12)} Fix with AI</button></div>`}</div>`}
+            ${failed && !aiOpen && html`<div><button class="btn sm" onClick=${() => setAiOpen(c.key)}>${Ic("bolt", 12)} Fix with AI</button></div>`}<//></div>`}
         </div></div>${adder(i + 1)}`; })}</div>
+    ${ctx && html`<${CtxMenu} at=${ctx.at} items=${ctxItems(ctx.key)} close=${() => setCtx(null)}/>`}
     <div class="ebar"><span class=${saveErr ? "nbj-bad" : ""} title=${saveErr}><i class=${"dot " + (saveErr ? "dead" : dirty ? "busy" : "idle")}></i>${saveErr ? "Auto-save failed" : busySave ? "Saving…" : dirty ? (auto ? "Saving soon" : "Unsaved changes") : "Saved"}</span><label class="nbj-auto" title="Save changes automatically"><input type="checkbox" checked=${auto} onChange=${(e) => { setAuto(e.target.checked); LS.set("auto", e.target.checked); }}/> Auto-save</label><span>${cells.length} cell${cells.length === 1 ? "" : "s"}</span><span>${lang}</span><span class="grow"></span>
       ${settings.suggest.on && ai.s && html`<span class=${ai.s === "err" ? "nbj-bad" : ""} title=${ai.m || "AI suggestions"}>${ai.s === "busy" ? html`<i class="spin"></i> AI thinking…` : ai.s === "err" ? "AI suggestions failed: " + ai.m.slice(0, 60) : ai.s === "none" ? "AI: no suggestion" : "AI ready"}</span>`}
-      <span class="hint"><kbd>Shift</kbd>+<kbd>Enter</kbd> run · <kbd>${/Mac/.test(navigator.platform) ? "⌘" : "Ctrl"}</kbd>+<kbd>S</kbd> save${settings.suggest.on ? html` · <kbd>Tab</kbd> accept` : ""}</span>
+      <span class="hint"><kbd>Shift</kbd>+<kbd>Enter</kbd> run · right-click a cell for options · <kbd>${/Mac/.test(navigator.platform) ? "⌘" : "Ctrl"}</kbd>+<kbd>S</kbd> save${settings.suggest.on ? html` · <kbd>Tab</kbd> accept` : ""}</span>
       <span title=${kern.k.err || ""}><i class=${"dot " + (st === "idle" ? "idle" : st === "busy" || st === "starting" ? "busy" : "dead")}></i>${kern.k.name || "No kernel"}</span></div></div>`;
 }
 
