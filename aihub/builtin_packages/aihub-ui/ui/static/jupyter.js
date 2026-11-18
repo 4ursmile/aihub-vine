@@ -410,12 +410,12 @@ function RemoteTerm({ server, post, api, close }) {
 }
 
 // ---------- workspace: file panel + tabs
-function Workspace({ server, servers, conns, settings, models, post, api, go, use, setSettings, onManage }) {
+function Workspace({ server, servers, conns, settings, models, post, api, go, use, setSettings, onManage, onLive }) {
   const sid = server.id;
   const [dir, setDir] = useState(LS.get("dir_" + sid, "")), [kids, setKids] = useState({}), [exp, setExp] = useState(() => LS.get("exp_" + sid, [])), [err, setErr] = useState(""), [loading, setLoading] = useState({});
   const [tabs, setTabs] = useState(() => LS.get("tabs_" + sid, [])), [cur, setCur] = useState(() => LS.get("cur_" + sid, "")), [panel, setPanel] = useState(() => LS.get("panel", "files")), [outline, setOutline] = useState({}), [jump, setJump] = useState(null);
   const [term, setTerm] = useState(false), [termOn, setTermOn] = useState(false), [q, setQ] = useState(""), [newMenu, setNewMenu] = useState(false), dirties = useRef({}), fileIn = useRef();
-  const loadDir = (d) => { setLoading((l) => ({ ...l, [d]: 1 })); return post("jupyter/ls", { server: sid, path: d }).then((r) => { setKids((k) => ({ ...k, [r.path || ""]: r.items })); setErr(""); }).catch((e) => { setErr(e.message); setKids((k) => ({ ...k, [d]: k[d] || [] })); }).finally(() => setLoading((l) => { const n = { ...l }; delete n[d]; return n; })); };
+  const loadDir = (d) => { setLoading((l) => ({ ...l, [d]: 1 })); return post("jupyter/ls", { server: sid, path: d }).then((r) => { setKids((k) => ({ ...k, [r.path || ""]: r.items })); setErr(""); if (!d && server.kind === "local" && !server.running && onLive) onLive(); }).catch((e) => { setErr(e.message); setKids((k) => ({ ...k, [d]: k[d] || [] })); }).finally(() => setLoading((l) => { const n = { ...l }; delete n[d]; return n; })); };
   const refresh = () => { const ds = new Set(["", ...exp]); ds.forEach((d) => loadDir(d)); };
   useEffect(() => { setKids({}); setErr(""); setDir(LS.get("dir_" + sid, "")); const e = LS.get("exp_" + sid, []); setExp(e); ["", ...e].forEach((d) => loadDir(d)); setTabs(LS.get("tabs_" + sid, [])); setCur(LS.get("cur_" + sid, "")); setTermOn(false); setTerm(false); }, [sid]);
   useEffect(() => { LS.set("tabs_" + sid, tabs); LS.set("cur_" + sid, cur); }, [tabs, cur, sid]);
@@ -612,5 +612,5 @@ export function JupyterPage({ api, post, boot, arg }) {
     ${!loaded ? html`<div class="sq-pane"><p class="mute">Loading…</p></div>`
     : view === "servers" || (view === "work" && !server) ? html`<${Servers} servers=${d.servers} post=${post} api=${api} reload=${reload} use=${use} edit=${edit} setEdit=${setEdit}/>`
     : view === "ai" ? html`<div class="sq-pane"><h2 style="margin:0 0 4px">AI models</h2><p class="mute small" style="margin:0 0 14px">Pick a model for each kind of help. They are used for every notebook.</p><${AiSettings} settings=${d.settings} models=${models} post=${post} setSettings=${(s) => setD((x) => ({ ...x, settings: s }))}/></div>`
-    : html`<${Workspace} key=${server.id} server=${server} conns=${conns} settings=${d.settings} models=${models} post=${post} api=${api} go=${go} servers=${d.servers} use=${use} setSettings=${(x) => setD((y) => ({ ...y, settings: x }))} onManage=${() => go("servers")}/>`}</div>`;
+    : html`<${Workspace} key=${server.id} server=${server} conns=${conns} settings=${d.settings} models=${models} post=${post} api=${api} go=${go} servers=${d.servers} use=${use} setSettings=${(x) => setD((y) => ({ ...y, settings: x }))} onManage=${() => go("servers")} onLive=${reload}/>`}</div>`;
 }

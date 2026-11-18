@@ -29,35 +29,76 @@ export async function sqlSignature(nameEnd, pos) {                  // NAMEEND =
 
 const tablesCache = new Map(), colsCache = new Map(), colsWait = new Map();
 const NOT_ALIAS = new Set(["on", "where", "left", "right", "inner", "outer", "full", "cross", "join", "group", "order", "having", "limit", "union", "natural", "using", "offset", "set", "values", "select", "fetch", "except", "intersect", "window", "when"]);
+const NONE = { catalog: "", catalogs: [], schema: "", schemas: [], tables: [] };
 
-function getTables(post, conn) {
-  if (!tablesCache.has(conn)) {
-    const p = post("sql/tables", { id: conn }).then((r) => (r.ok ? { schema: r.schema || "", schemas: r.schemas || [], tables: (r.tables || []).map((t) => t.name) } : { schema: "", schemas: [], tables: [] })).catch(() => { tablesCache.delete(conn); return { schema: "", schemas: [], tables: [] }; });
-    tablesCache.set(conn, p);
+// tables of one place: CATALOG / SCHEMA undefined = the connection's default. -> { catalog, catalogs, schema, schemas, tables }
+function tablesOf(post, conn, catalog, schema) {
+  const k = conn + "\u0001" + (catalog == null ? "\u0002" : catalog) + "\u0001" + (schema == null ? "\u0002" : schema);
+  if (!tablesCache.has(k)) {
+    const p = post("sql/tables", { id: conn, catalog: catalog || undefined, schema: schema == null ? undefined : schema })
+      .then((r) => (r.ok ? { catalog: r.catalog || "", catalogs: r.catalogs || [], schema: r.schema || "", schemas: r.schemas || [], tables: (r.tables || []).map((t) => t.name) } : NONE))
+      .catch(() => { tablesCache.delete(k); return NONE; });
+    tablesCache.set(k, p);
   }
-  return tablesCache.get(conn);
+  return tablesCache.get(k);
 }
-function getColumns(post, conn, schema, table) {
-  const k = conn + "\u0001" + schema + "\u0001" + table.toLowerCase();
+const getTables = (post, conn) => tablesOf(post, conn);
+function getColumns(post, conn, catalog, schema, table) {
+  const k = conn + "\u0001" + (catalog || "") + "\u0001" + (schema || "") + "\u0001" + table.toLowerCase();
   if (colsCache.has(k)) return Promise.resolve(colsCache.get(k));
   if (colsWait.has(k)) return colsWait.get(k);
-  const p = post("sql/columns", { id: conn, schema, table }).then((r) => { const c = r.ok ? (r.columns || []).map((x) => ({ name: x.name, type: x.type || "" })) : []; colsCache.set(k, c); return c; }).catch(() => []).finally(() => colsWait.delete(k));
+  const p = post("sql/columns", { id: conn, catalog: catalog || undefined, schema, table }).then((r) => { const c = r.ok ? (r.columns || []).map((x) => ({ name: x.name, type: x.type || "" })) : []; colsCache.set(k, c); return c; }).catch(() => []).finally(() => colsWait.delete(k));
   colsWait.set(k, p);
   return p;
 }
-export const forgetSchema = (conn) => { tablesCache.delete(conn); for (const k of [...colsCache.keys()]) if (k.startsWith(conn + "\u0001")) colsCache.delete(k); };
+export const forgetSchema = (conn) => { for (const m of [tablesCache, colsCache]) for (const k of [...m.keys()]) if (k.startsWith(conn + "\u0001")) m.delete(k); };
 
-// tables the query reads and the names they go by: [{ table, alias }]
-function usedTables(text, known) {
-  const out = [], lower = new Map(known.map((t) => [t.toLowerCase(), t])), re = /\b(?:from|join|update|into)\s+([A-Za-z_][\w$.]*)(?:\s+(?:as\s+)?([A-Za-z_]\w*))?/gi;
+const unq = (x) => x.replace(/^[`"\[]|[`"\]]$/g, "");
+const same = (list, name) => list.find((x) => x.toLowerCase() === name.toLowerCase());
+const IDENT = String.raw`(?:[A-Za-z_][\w$]*|` + "`[^`]+`" + String.raw`|"[^"]+"|\[[^\]]+\])`;
+
+// a dotted name -> { catalog, schema, table } (1 part: default place, 2: schema.table, 3: catalog.schema.table)
+function place(parts, sch) {
+  if (parts.length >= 3) return { catalog: parts[parts.length - 3], schema: parts[parts.length - 2], table: parts[parts.length - 1] };
+  if (parts.length === 2) return { catalog: sch.catalog, schema: parts[0], table: parts[1] };
+  return { catalog: sch.catalog, schema: sch.schema, table: parts[0] };
+}
+
+// tables the query reads and the names they go by: [{ catalog, schema, table, alias }]
+function usedTables(text, sch) {
+  const out = [], re = new RegExp(String.raw`\b(?:from|join|update|into)\s+(${IDENT}(?:\s*\.\s*${IDENT})*)(?:\s+(?:as\s+)?([A-Za-z_]\w*))?`, "gi");
   let m;
   while ((m = re.exec(text))) {
-    const full = m[1], bare = full.includes(".") ? full.slice(full.lastIndexOf(".") + 1) : full, t = lower.get(bare.toLowerCase());
-    if (!t) continue;
+    const parts = m[1].split(/\s*\.\s*/).map(unq), p = place(parts, sch);
+    if (parts.length === 1) { const t = same(sch.tables, p.table); if (!t) continue; p.table = t; }
     const a = m[2] && !NOT_ALIAS.has(m[2].toLowerCase()) ? m[2] : "";
-    out.push({ table: t, alias: a });
+    out.push({ ...p, alias: a });
   }
   return out;
+}
+
+// what comes after `a.b.` : columns of a table / alias, tables of a schema, or schemas of a catalog
+async function afterDot(post, conn, sch, parts, used) {
+  const cols = async (c, s, t) => (await getColumns(post, conn, c, s, t)).map((x) => ({ t: x.name, k: "property", d: x.type }));
+  const schemasOf = async (c) => (await tablesOf(post, conn, c)).schemas.map((x) => ({ t: x, k: "module", d: "schema" }));
+  const tablesIn = async (c, s) => (await tablesOf(post, conn, c, s)).tables.map((x) => ({ t: x, k: "class", d: (c ? c + "." : "") + s }));
+  if (parts.length === 1) {
+    const q = parts[0].toLowerCase(), u = used.find((x) => x.alias.toLowerCase() === q) || used.find((x) => !x.alias && x.table.toLowerCase() === q);
+    if (u) return cols(u.catalog, u.schema, u.table);
+    const t = same(sch.tables, parts[0]);
+    if (t) return cols(sch.catalog, sch.schema, t);
+    const c = same(sch.catalogs, parts[0]);
+    if (c) return schemasOf(c);
+    const s = same(sch.schemas, parts[0]);
+    if (s) return tablesIn(sch.catalog, s);
+    return [];
+  }
+  if (parts.length === 2) {
+    const c = same(sch.catalogs, parts[0]);
+    if (c) { const s = same((await tablesOf(post, conn, c)).schemas, parts[1]); if (s) return tablesIn(c, s); }
+    return cols(sch.catalog, parts[0], parts[1]);                       // schema.table.
+  }
+  return cols(parts[parts.length - 3], parts[parts.length - 2], parts[parts.length - 1]);
 }
 
 const rank = (name, w) => { const n = name.toLowerCase(); return n.startsWith(w) ? 0 : n.includes("_" + w) ? 1 : n.includes(w) ? 2 : 9; };
@@ -72,25 +113,25 @@ export function sqlComplete(post, conn) {
     const empty = { matches: [], start, end: pos };
     if (/--[^\n]*$/.test(before) || (before.split("'").length - 1) % 2 === 1) return empty;       // inside a comment or a string
     if (!conn) return { matches: pick(kw(KEYWORDS, "keyword").concat(kw(FUNCTIONS, "function")), w, 30), start, end: pos };
-    const sch = await getTables(post, conn), used = usedTables(code, sch.tables);
-    // `x.` : columns of the table or alias x (or tables of schema x)
-    const dot = /([A-Za-z_][\w$]*)\.$/.exec(before.slice(0, start));
-    if (dot) {
-      const q = dot[1].toLowerCase(), hit = used.find((u) => u.alias.toLowerCase() === q || u.table.toLowerCase() === q) || (sch.tables.some((t) => t.toLowerCase() === q) ? { table: sch.tables.find((t) => t.toLowerCase() === q) } : null);
-      if (hit) { const cols = await getColumns(post, conn, sch.schema, hit.table); return { matches: pick(cols.map((c) => ({ t: c.name, k: "property", d: c.type })), w, 60), start, end: pos }; }
-      if (sch.schemas.some((s) => s.toLowerCase() === q)) { const other = await post("sql/tables", { id: conn, schema: dot[1] }).catch(() => null); if (other && other.ok) return { matches: pick(other.tables.map((t) => ({ t: t.name, k: "class" })), w, 60), start, end: pos }; }
-      return empty;
+    const sch = await getTables(post, conn), used = usedTables(code, sch);
+    // `a.` / `a.b.` / `a.b.c.` : schemas of a catalog, tables of a schema, columns of a table or alias
+    const path = new RegExp(String.raw`((?:${IDENT}\s*\.\s*)+)$`).exec(before.slice(0, start));
+    if (path) {
+      const parts = path[1].split(/\s*\.\s*/).filter(Boolean).map(unq);
+      return { matches: pick(await afterDot(post, conn, sch, parts, used), w, 80), start, end: pos };
     }
     const prev = (/([A-Za-z_]+|[,(=<>+\-*/])\s*$/.exec(before.slice(0, start)) || [])[1] || "";
     if (/^(from|join|into|update|table|truncate)$/i.test(prev)) {              // a table is expected here
-      return { matches: pick(sch.tables.map((t) => ({ t, k: "class" })).concat(sch.schemas.length > 1 ? sch.schemas.map((s) => ({ t: s, k: "module" })) : []), w, 50), start, end: pos };
+      const places = sch.tables.map((t) => ({ t, k: "class", d: sch.schema ? (sch.catalog ? sch.catalog + "." : "") + sch.schema : "" }))
+        .concat(sch.schemas.length > 1 ? sch.schemas.map((s) => ({ t: s, k: "module", d: "schema" })) : [], sch.catalogs.map((c) => ({ t: c, k: "module", d: "catalog" })));
+      return { matches: pick(places, w, 60), start, end: pos };
     }
     let cols = [];
-    const tabs = used.length ? [...new Set(used.map((u) => u.table))] : [];
-    for (const t of tabs.slice(0, 6)) for (const c of await getColumns(post, conn, sch.schema, t)) cols.push({ t: c.name, k: "property", d: c.type });
+    const tabs = [...new Map(used.map((u) => [[u.catalog, u.schema, u.table].join("."), u])).values()];
+    for (const u of tabs.slice(0, 6)) for (const c of await getColumns(post, conn, u.catalog, u.schema, u.table)) cols.push({ t: c.name, k: "property", d: c.type });
     const seen = new Set(); cols = cols.filter((c) => !seen.has(c.t) && seen.add(c.t));
     if (!w && !cols.length) return empty;
-    const tables = sch.tables.map((t) => ({ t, k: "class" }));
+    const tables = sch.tables.map((t) => ({ t, k: "class" })).concat(sch.catalogs.map((c) => ({ t: c, k: "module", d: "catalog" })), sch.schemas.length > 1 ? sch.schemas.map((x) => ({ t: x, k: "module", d: "schema" })) : []);
     // after SELECT/WHERE/AND/ON ... columns first; elsewhere keywords first
     const colFirst = /^(select|where|and|or|on|by|set|having|when|then|else|,|\(|=|<|>|\+|-|\*|\/)$/i.test(prev);
     const lists = colFirst ? [cols, kw(FUNCTIONS, "function"), kw(KEYWORDS, "keyword"), tables] : [kw(KEYWORDS, "keyword"), cols, tables, kw(FUNCTIONS, "function")];

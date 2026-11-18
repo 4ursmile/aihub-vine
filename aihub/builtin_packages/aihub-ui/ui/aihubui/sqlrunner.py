@@ -124,6 +124,45 @@ def bind_sql(sql, params):
     return text, {n: params[n] for n in real.values()}
 
 
+SYSTEM_SCHEMAS = {"information_schema", "mysql", "performance_schema", "sys", "__internal_schema", "_statistics_", "pg_catalog"}
+
+
+def first_schema(schemas):
+    """A database to show when the login names none (MySQL / Doris / StarRocks fail with "No database selected" otherwise)."""
+    for s in schemas:
+        if str(s).lower() not in SYSTEM_SCHEMAS:
+            return s
+    return schemas[0] if schemas else None
+
+
+def mysql_catalogs(eng):
+    """Doris / StarRocks catalogs over the MySQL protocol: [names], or None on plain MySQL (no SHOW CATALOGS)."""
+    try:
+        with eng.connect() as cn:
+            r = cn.exec_driver_sql("show catalogs")
+            keys = [str(k).lower() for k in r.keys()]
+            i = keys.index("catalogname") if "catalogname" in keys else keys.index("catalog") if "catalog" in keys else 0
+            names = [str(row[i]) for row in r.fetchall()]
+        return names or None
+    except Exception:
+        return None
+
+
+def use_catalog(sa, eng, cat):
+    """Every new connection of ENG switches to catalog CAT first (Doris: SWITCH, StarRocks: SET CATALOG)."""
+    q = "`%s`" % cat.replace("`", "``")
+
+    @sa.event.listens_for(eng, "connect")
+    def _switch(dbapi_con, _rec):
+        cur = dbapi_con.cursor()
+        try:
+            cur.execute("SWITCH " + q)
+        except Exception:
+            cur.execute("SET CATALOG " + q)
+        finally:
+            cur.close()
+
+
 def main():
     req = json.loads(sys.stdin.read() or "{}")
     try:
@@ -151,6 +190,8 @@ def main():
     except Exception as e:
         out(ok=False, error=str(e)[:600])
     sa = ad.need("sqlalchemy")
+    if cat and eng.dialect.name == "mysql":
+        use_catalog(sa, eng, cat)
     t0 = time.time()
     try:
         if act == "test":
@@ -174,6 +215,12 @@ def main():
                     cur = (str(c.get("database") or "").split("/")[0].strip()) or ""
                 if not cur:
                     out(ok=True, catalogs=catalogs, catalog="", schemas=[], schema=None, tables=[], more=False)
+            elif eng.dialect.name == "mysql":
+                catalogs = mysql_catalogs(eng)
+                if catalogs and len(catalogs) < 2:
+                    catalogs = None                                       # one catalog: nothing to pick
+                elif catalogs and not cur:
+                    cur = "internal" if "internal" in catalogs else "default_catalog" if "default_catalog" in catalogs else catalogs[0]
             insp = sa.inspect(eng)
             schemas = []
             try:
@@ -183,6 +230,8 @@ def main():
             sch = req.get("schema") or None
             if sch is None and not req.get("schema_given"):
                 sch = getattr(insp, "default_schema_name", None)
+            if sch is None and eng.dialect.name == "mysql":
+                sch = first_schema(schemas)
             tabs = [{"name": n, "kind": "table"} for n in insp.get_table_names(schema=sch)]
             try:
                 tabs += [{"name": n, "kind": "view"} for n in insp.get_view_names(schema=sch)]
@@ -201,6 +250,8 @@ def main():
             sch = req.get("schema") or None
             if sch is None:
                 sch = getattr(insp, "default_schema_name", None)
+            if sch is None and eng.dialect.name == "mysql":
+                sch = first_schema(schemas)
             max_t, max_c, budget = int(req.get("max_tables") or 60), int(req.get("max_columns") or 40), float(req.get("budget") or 20)
             names = [(n, "table") for n in insp.get_table_names(schema=sch)]
             try:
