@@ -49,6 +49,14 @@ import json, sys
 pairs = json.loads(sys.argv[1])
 out = {"python": sys.executable, "version": "%d.%d.%d" % tuple(sys.version_info[:3]), "prefix": sys.prefix,
        "venv": sys.prefix != getattr(sys, "base_prefix", sys.prefix), "mods": {}, "managed": False}
+if not out["venv"]:                     # -I hides the user site, where pip installs when site-packages is not writable (Windows): add it back
+    try:
+        import os, site
+        us = site.getusersitepackages()
+        if us and os.path.isdir(us) and us not in sys.path:
+            site.addsitedir(us)
+    except Exception:
+        pass
 try:
     import importlib.util as u
 except ImportError:
@@ -98,7 +106,16 @@ def _venv_python(d):
 
 def managed(name):
     """True when NAME is (or would be) a managed env, not a program on PATH such as python3."""
-    return bool(ENV_NAME.match(name)) and (os.path.isdir(envs_dir(name)) or not shutil.which(name))
+    if not ENV_NAME.match(name):
+        return False
+    if os.path.isdir(envs_dir(name)):
+        return True
+    w = shutil.which(name)                   # a program on PATH wins only when it is a Python: `jupyter`, `data`, ... stay env names
+    return not w or not _is_python(w)
+
+
+def _is_python(p):
+    return bool(PYTHON_NAME.match(os.path.basename(p))) or os.path.basename(os.path.realpath(p)).lower().startswith(("python", "pypy"))
 
 
 def resolve(value, spark=False):
@@ -122,7 +139,7 @@ def interpreter(value, spark=False):
         if name:
             raise ValueError("the environment %r is not created yet: open the node's Environment box and press Install (or: aihub work env install --env %s ...)" % (name, name))
         raise ValueError("no Python at %s (the node's Environment field)" % py)
-    if not PYTHON_NAME.match(os.path.basename(py)) and not os.path.basename(os.path.realpath(py)).lower().startswith(("python", "pypy")):
+    if not _is_python(py):
         raise ValueError("%s does not look like a Python interpreter" % py)
     return py
 

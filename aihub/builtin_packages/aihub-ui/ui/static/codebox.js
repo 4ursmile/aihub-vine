@@ -1,4 +1,4 @@
-// The code box shared by Notebook cells and SQL Studio: coloured text under a transparent textarea, a completion list and AI ghost text.
+// The code box shared by Notebook cells and Data Studio: coloured text under a transparent textarea, a completion list and AI ghost text.
 import { html, useState, useEffect, useRef, useMemo } from "./vendor/preact-htm.js";
 import { useHl, colorize, esc } from "./code.js";
 

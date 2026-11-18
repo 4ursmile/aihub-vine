@@ -70,7 +70,7 @@ function shellBlock(code) {
   return box;
 }
 const SQL_LANGS = new Set(["sql", "pgsql", "postgresql", "mysql", "sqlite", "tsql", "plsql", "mssql"]);
-// Hand the SQL to SQL Studio: it opens a new tab (a `-- conn: name` first line picks the connection). The page may already be open: tell it too.
+// Hand the SQL to Data Studio: it opens a new tab (a `-- conn: name` first line picks the connection). The page may already be open: tell it too.
 function openInStudio(sql) {
   try { localStorage.setItem("sqls_inbox", JSON.stringify({ sql, at: Date.now() })); } catch (e) { /* private mode */ }
   if (location.hash.startsWith("#/sql")) dispatchEvent(new Event("sqlstudio:inbox")); else location.hash = "#/sql/studio";
@@ -79,7 +79,7 @@ function codeBlock(pre, code, lang, onRender) {          // replaces PRE by the 
   const box = el("div", "bk cb"); const acts = [];
   if (onRender && ["html", "svg", "openui"].includes(lang)) acts.push(btn("play", "Render", () => onRender({ lang, code: code.textContent })));
   acts.push(copyBtn(() => code.textContent));
-  if (SQL_LANGS.has(lang)) acts.push(btn("database", "Open in SQL Studio", () => openInStudio(code.textContent)));
+  if (SQL_LANGS.has(lang)) acts.push(btn("database", "Open in Data Studio", () => openInStudio(code.textContent)));
   if (lang === "html" || lang === "svg") { const s = shareBtn(() => ({ content: lang === "svg" ? pageOf("Graphic", code.textContent) : code.textContent, filename: (lang === "svg" ? "graphic" : "page") + ".html" })); if (s) acts.push(s); }
   acts.push(zoomBtn(box));
   if (lang) withHl((h) => { if (h.getLanguage(lang)) try { h.highlightElement(code); } catch (e) { /* plain */ } });

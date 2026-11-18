@@ -1,4 +1,4 @@
-// SQL code intelligence for SQL Studio and notebook SQL cells: keywords, functions, the tables of the connection, and the columns of the tables the query
+// SQL code intelligence for Data Studio and notebook SQL cells: keywords, functions, the tables of the connection, and the columns of the tables the query
 // uses (aliases resolved: `from orders o ... o.<columns>`). Schema comes from /api/sql/tables and /api/sql/columns, cached per connection.
 // Same result shape as the kernel's completion, so the shared CodeBox shows it: { matches: [{ t, k }], start, end }.
 

@@ -124,7 +124,7 @@ const UI_CMDS = [
 ];
 // One of these shows in the empty message box (a new one per chat and after every send), so features get found while typing.
 const TIPS = ["/btw asks a side question without touching the chat", "@file: puts a project file in your message", "@folder: shares a folder's file list",
-  "@chat: brings in another chat's messages", "@knowledge: quotes one of your notes", "@space: pulls in a Space from the hub", "@node: runs a Works node from the chat",
+  "@chat: brings in another chat's messages", "@knowledge: quotes one of your notes", "@space: pulls in a Space from the hub", "@node: runs a Works node from the chat", "@data: brings a Data Studio database into the message (schema, query, chart)",
   "@work: runs one of your workflows", "@theme: styles slides and pages", "/create-work turns a sentence into a workflow", "/compact frees context when the ring fills up",
   "/engine free talks to the model directly", "/engine aihub works on files with few tokens", "/mcp chooses the MCP servers of this chat", "/canvas shows the files Claude makes", "Paste or drop files to attach them",
   "Shift+Enter starts a new line", "Cmd/Ctrl+K searches every chat", "Keep typing while Claude works: it reads you at its next step"];
@@ -308,7 +308,7 @@ function SlashMenu({ items, idx, pick, at }) {
   useEffect(() => { const e = ref.current && ref.current.children[idx]; if (e && e.scrollIntoView) e.scrollIntoView({ block: "nearest" }); }, [idx]);
   if (!items.length) return null;
   return html`<div class="slash" ref=${ref}>${items.map((c, i) => html`<button class=${"opt" + (i === idx ? " hi" : "")} onMouseDown=${(e) => { e.preventDefault(); pick(c); }}><span class="oi">${Ic(SLASH_ICON[c.source] || "slash", 14)}</span>
-    <span class="grow"><b>${at || ["theme", "chat", "tool", "file", "folder"].includes(c.source) ? "@" : "/"}${c.name}</b><span class="d">${(c.description || "").slice(0, 110)}</span></span><span class="src">${c.sw ? html`<span class="swatch sm">${["bg", "accent", "fg"].map((k) => html`<i style=${`background:${c.sw[k]}`}></i>`)}</span>` : c.source === "ui" ? "" : c.source}</span></button>`)}</div>`;
+    <span class="grow"><b>${at || ["theme", "chat", "tool", "file", "folder", "data"].includes(c.source) ? "@" : "/"}${c.name}</b><span class="d">${(c.description || "").slice(0, 110)}</span></span><span class="src">${c.sw ? html`<span class="swatch sm">${["bg", "accent", "fg"].map((k) => html`<i style=${`background:${c.sw[k]}`}></i>`)}</span>` : c.source === "ui" ? "" : c.source}</span></button>`)}</div>`;
 }
 
 // ---------- working folder: file tree, editor, diff, dialogs
@@ -614,7 +614,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const setEng = (v) => { setEngine(v); post("sessions/update", { id, engine: v }).catch(() => {}); };
   const saveMcp = (list) => post("sessions/update", { id, mcp: list }).then((r) => setS(r.session)).catch((e) => toast(e.message));
   const pickSlash = (c) => { if (sm && c.source === "node") { setText("@" + c.name + " "); ta.current && ta.current.focus(); return; }
-    if (!sm && ["theme", "chat", "tool", "space", "knowledge", "file", "folder", "node", "work"].includes(c.source)) { setText(text.replace(/@[\w:.@\/-]*$/, "@" + c.name + " ")); ta.current && ta.current.focus(); return; } if (c.source === "ui" && c.action !== "send" && c.action !== "workflow" && c.action !== "btw") return runUi(c.action); setText("/" + c.name + " "); ta.current && ta.current.focus(); };
+    if (!sm && ["theme", "chat", "tool", "space", "knowledge", "file", "folder", "node", "work", "data"].includes(c.source)) { setText(text.replace(/@[\w:.@\/-]*$/, "@" + c.name + " ")); ta.current && ta.current.focus(); return; } if (c.source === "ui" && c.action !== "send" && c.action !== "workflow" && c.action !== "btw") return runUi(c.action); setText("/" + c.name + " "); ta.current && ta.current.focus(); };
 
   // /work:<name>: the command and a workflow card are saved as two history rows (server chat/card), so the card sits right after the message that started it
   // and a reopened chat shows it in the same place; the card starts the run itself (spec.auto) and follows it.
@@ -2052,7 +2052,7 @@ function Spotlight({ close, go, sessions, nav, hub, importLink, projects = [], d
 }
 const SORTS = [["recent", "Recent activity"], ["created", "Newest first"], ["oldest", "Oldest first"], ["name", "Name A–Z"]];
 const sortChats = (list, how) => { const l = [...list]; if (how === "created") l.sort((a, b) => (b.created || 0) - (a.created || 0)); else if (how === "oldest") l.sort((a, b) => (a.created || 0) - (b.created || 0)); else if (how === "name") l.sort((a, b) => String(a.title).localeCompare(String(b.title), undefined, { sensitivity: "base", numeric: true })); else l.sort((a, b) => (b.updated || 0) - (a.updated || 0)); return l; };
-const NAV = [["packages", "package", "Packages"], ["services", "server", "Services"], ["mcp", "plug", "MCP servers"], ["knowledge", "book", "Knowledge"], ["usage", "chart", "Usage"], ["sql", "database", "SQL Studio"], ["notebook", "book", "Notebook"], ["works", "flow", "Works"]];
+const NAV = [["packages", "package", "Packages"], ["services", "server", "Services"], ["mcp", "plug", "MCP servers"], ["knowledge", "book", "Knowledge"], ["usage", "chart", "Usage"], ["sql", "database", "Data Studio"], ["notebook", "book", "Notebook"], ["works", "flow", "Works"]];
 const TOOLS = ["packages", "services", "mcp", "knowledge", "usage"];     // grouped under "Tools" in the sidebar
 function App() {
   const [sw, setSw] = useState(() => +pref("sidew", "272") || 272), [sbHide, setSbHide] = useState(() => pref("sidehide", "0") === "1");

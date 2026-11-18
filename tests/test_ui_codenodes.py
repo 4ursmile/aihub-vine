@@ -86,6 +86,20 @@ class Requirements(Base):
 
 
 class Checks(Base):
+    def test_a_program_on_path_does_not_take_an_env_name(self):
+        bin_ = os.path.join(self.tmp, "bin")
+        os.makedirs(bin_)
+        tool = os.path.join(bin_, "jupyter")
+        with open(tool, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(tool, 0o755)
+        old = os.environ["PATH"]
+        os.environ["PATH"] = bin_ + os.pathsep + old
+        try:
+            self.assertEqual(nodeenv.resolve("jupyter"), (nodeenv._venv_python(nodeenv.envs_dir("jupyter")), "jupyter"))
+        finally:
+            os.environ["PATH"] = old
+
     def test_resolve_names_paths_and_the_ui_python(self):
         self.assertEqual(nodeenv.resolve("")[0], sys.executable)
         py, name = nodeenv.resolve("data")

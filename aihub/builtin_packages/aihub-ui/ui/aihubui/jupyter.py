@@ -3,7 +3,7 @@
 Servers live in ~/.aihub/ui/jupyter.json WITHOUT secrets; the API token sits in the encrypted box under `jupyter:<id>`. The browser never sees a token:
 every call goes through this module (REST for files and sessions, a WebSocket per kernel / terminal that a thread keeps buffered and the page polls).
 A server is {id, name, kind: server|hub|local, url, user, verify, kernel, env, root}.
-SQL cells: a code cell whose metadata `aihub.sql` = {conn, var, limit} holds SQL; it runs through the SQL Studio connection `conn` (so passwords stay here)
+SQL cells: a code cell whose metadata `aihub.sql` = {conn, var, limit} holds SQL; it runs through the Data Studio connection `conn` (so passwords stay here)
 and, with `var`, the rows are sent into the kernel as a pandas DataFrame named `var`."""
 import ast
 import atexit
@@ -340,8 +340,11 @@ def local_start(rec):
     log = store.ui_dir("jupyter-%s.log" % rec["id"])
     argv = [py, "-m", "jupyter_server", "--no-browser", "--ip=127.0.0.1", "--port=%d" % port, "--port-retries=0", "--ServerApp.token=" + token,
             "--IdentityProvider.token=" + token, "--ServerApp.root_dir=" + root, "--ServerApp.disable_check_xsrf=True"]
+    # the env's own kernelspecs first: a user-wide ~/Library/Jupyter/kernels/python3 (often pointing at a deleted venv) would shadow it
+    share = os.path.join(os.path.dirname(os.path.dirname(py)), "share", "jupyter")
+    env = dict(os.environ, JUPYTER_PREFER_ENV_PATH="1", JUPYTER_PATH=os.pathsep.join([share] + [x for x in os.environ.get("JUPYTER_PATH", "").split(os.pathsep) if x]))
     with open(log, "wb") as lf:
-        p = subprocess.Popen(argv, stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, cwd=root, start_new_session=True)
+        p = subprocess.Popen(argv, stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, cwd=root, env=env, start_new_session=True)
     lc = {"p": p, "port": port, "token": token}
     c = Conn(rec, "http://127.0.0.1:%d/" % port, token, True)
     end = time.time() + 60
@@ -419,7 +422,7 @@ def hub_ready(c, hub, wait=150):
 
 def about(c):
     """Connection test: -> {version, kernelspecs: [...], default}."""
-    v = http(c, "GET", "")                                              # /api/ -> {"version": ...}
+    v = http(c, "GET", c.base + "api", absolute=True)                 # /api -> {"version": ...} (Jupyter Server 2.x redirects /api/ to /api)
     return dict(version=v.get("version", ""), **kernelspecs(c))
 
 
@@ -583,7 +586,9 @@ def session(c, path, kernel=""):
     for s in http(c, "GET", "sessions") or []:
         if s.get("path") == path:
             return {"id": s["id"], "kernel": s.get("kernel") or {}, "reused": True}
-    body = {"path": path, "name": os.path.basename(path), "type": "notebook", "kernel": {"name": kernel} if kernel else None}
+    body = {"path": path, "name": os.path.basename(path), "type": "notebook"}
+    if kernel:                                                          # no "kernel": null: Jupyter Server 2.x answers 500 to it; leaving it out = the default kernel
+        body["kernel"] = {"name": kernel}
     s = http(c, "POST", "sessions", body)
     return {"id": s["id"], "kernel": s.get("kernel") or {}, "reused": False}
 
@@ -843,7 +848,7 @@ def sql_meta(cell):
 
 
 def run_sql(box, ref, sql, var="", limit=10000, c=None, kid="", deadline=None):
-    """Run SQL on SQL Studio connection REF. With VAR and a kernel (C, KID) the rows become a pandas DataFrame there.
+    """Run SQL on Data Studio connection REF. With VAR and a kernel (C, KID) the rows become a pandas DataFrame there.
     -> {ok, columns, rows, truncated, ms, assigned: {ok, var, error?}}. Raises ValueError for setup problems."""
     cn = sqlstudio.resolve(ref)
     limit = max(1, min(int(limit or 10000), 200000))

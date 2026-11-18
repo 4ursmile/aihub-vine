@@ -7,6 +7,7 @@ import { Ic } from "./icons.js";
 import { toast, guard, Seg, Modal, Switch, Pop, confirmBox, ask } from "./ui.js";
 import { Output, serializeNotebook, parseNotebook, cellsOf } from "./notebook.js";
 import { Grid } from "./sqlstudio.js";
+import { DataView, frameFromHtml, frameFromResource } from "./dataviz.js";
 import { Md } from "./blocks.js";
 import { useHl, colorize, esc, langOf } from "./code.js";
 import { CodeBox, IDENT, KW } from "./codebox.js";
@@ -23,6 +24,16 @@ const ago = (t) => { const d = t ? (Date.now() - new Date(t).getTime()) / 1000 :
 const KSHORT = { hub: "JupyterHub", server: "Jupyter Server", local: "Local" };
 const KIND = { hub: "JupyterHub", server: "Jupyter Server / Lab", local: "Local (installed by AI Hub)" };
 const sqlOf = (c) => (c.type === "code" && c.raw && c.raw.metadata && c.raw.metadata.aihub && c.raw.metadata.aihub.sql) || null;
+// chart / stats views of a cell's data, kept in the cell metadata so they come back with the notebook: aihub.viz = {sql | output index: spec}
+const vizOf = (c, k) => ((c.raw && c.raw.metadata && c.raw.metadata.aihub && c.raw.metadata.aihub.viz) || {})[k] || null;
+const withViz = (c, k, spec) => {
+  const raw = { ...(c.raw || {}) }, md = { ...(raw.metadata || {}) }, ai = { ...(md.aihub || {}) }, v = { ...(ai.viz || {}) };
+  if (spec && (spec.view !== "table" || (spec.charts || []).length)) v[k] = spec; else delete v[k];
+  if (Object.keys(v).length) ai.viz = v; else delete ai.viz;
+  if (Object.keys(ai).length) md.aihub = ai; else delete md.aihub;
+  raw.metadata = md; return raw;
+};
+const frameOf = (o) => { if (o.output_type !== "display_data" && o.output_type !== "execute_result") return null; const d = o.data || {}; return (d["application/vnd.dataresource+json"] && frameFromResource(d["application/vnd.dataresource+json"])) || frameFromHtml(join(d["text/html"])); };
 const withSql = (c, sql) => { const raw = { ...(c.raw || {}) }, md = { ...(raw.metadata || {}) }, ai = { ...(md.aihub || {}) }; if (sql) ai.sql = sql; else delete ai.sql; if (Object.keys(ai).length) md.aihub = ai; else delete md.aihub; raw.metadata = md; return raw; };
 
 // kernel output event -> the cell's nbformat outputs (same rules as the server's Fold)
@@ -45,12 +56,14 @@ const outText = (c, n = 300) => { const s = (c.outputs || []).map((o) => (o.outp
 const errText = (c) => { const e = (c.outputs || []).find((o) => o.output_type === "error"); return e ? (e.traceback || []).join("\n").replace(ANSI, "") || e.ename + ": " + e.evalue : c.sqlres && !c.sqlres.ok ? c.sqlres.error : c.sqlres && c.sqlres.assigned && !c.sqlres.assigned.ok ? c.sqlres.assigned.error : ""; };
 
 // ---------- one output: rich HTML that needs scripts (plotly, bokeh) runs in a sandboxed frame served by the UI, everything else is the shared renderer
-function Out({ o, post }) {
+function Out({ o, post, viz, onViz }) {
   const d = o.data || {}, h = join(d["text/html"]);
   const [src, setSrc] = useState("");
+  const df = useMemo(() => frameOf(o), [o]);
   const rich = (o.output_type === "display_data" || o.output_type === "execute_result") && h && /<script/i.test(h) && !d["image/png"];
   useEffect(() => { if (rich) post("jupyter/frame", { html: h }).then((r) => setSrc("/nbframe/" + r.id)).catch(() => {}); }, [rich, h]);
   if (rich) return src ? html`<iframe class="nbj-frame" sandbox="allow-scripts allow-popups" src=${src} title="Interactive output"></iframe>` : html`<div class="nb-o mute small">Loading output…</div>`;
+  if (df) return html`<${DataView} res=${df} spec=${viz} onSpec=${onViz} table=${html`<${Output} o=${o}/>`} note=${"from the " + df.rows.length + " rows printed" + (df.partial ? " (output was cut: show more rows for full charts)" : "")}/>`;
   return html`<${Output} o=${o}/>`;
 }
 
@@ -301,7 +314,7 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
             <select value=${sql.conn} onChange=${(e) => upd(c.key, (x) => ({ raw: withSql(x, { ...sql, conn: e.target.value }) }))} aria-label="Connection"><option value="">Connection…</option>${conns.map((q) => html`<option value=${q.name}>${q.name}</option>`)}</select>
             <label class="mute small">into DataFrame <input class="nbj-var" placeholder="none" value=${sql.var || ""} onInput=${(e) => upd(c.key, (x) => ({ raw: withSql(x, { ...sql, var: e.target.value.replace(/[^A-Za-z0-9_]/g, "") }) }))} aria-label="Python variable"/></label>
             <label class="mute small">rows <select value=${sql.limit || 10000} onChange=${(e) => upd(c.key, (x) => ({ raw: withSql(x, { ...sql, limit: +e.target.value }) }))}>${[100, 1000, 10000, 50000, 200000].map((n) => html`<option value=${n}>${n.toLocaleString()}</option>`)}</select></label>
-            ${!conns.length && html`<span class="mute small">Add a database in SQL Studio first.</span>`}</div>`}
+            ${!conns.length && html`<span class="mute small">Add a database in Data Studio first.</span>`}</div>`}
           ${c.type === "markdown" && sel !== c.key ? html`<div class="nb-md" title="Click to edit" onClick=${() => setSel(c.key)}>${c.src.trim() ? html`<${Md} text=${c.src}/>` : html`<span class="mute small">Empty text cell: click to write.</span>`}</div>`
             : html`<${CodeBox} value=${c.src} lang=${sql ? "sql" : c.type === "code" ? lang : c.type === "markdown" ? "markdown" : ""} autofocus=${sel === c.key && !c.src}
                 onChange=${(v) => upd(c.key, { src: v })} onKey=${key(c, i)} delay=${settings.suggest.on && c.type === "code" && !sql ? settings.suggest.delay : 0}
@@ -310,9 +323,9 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
                 signature=${c.type !== "code" ? null : sql ? sqlSignature : kern.k.id && kern.k.state !== "dead" ? (code, pos) => kern.signature(code, pos) : null} suggest=${(prefix, suffix) => post("jupyter/ai/suggest", { prefix, suffix, lang, cells: ctxFor(c.key)(), ...kern.live() }).then((r) => r.text || "")}/>`}
           ${aiOpen === c.key && html`<${AiBar} c=${c} sql=${sql ? { ...sql, conn: (conns.find((q) => q.name === sql.conn) || {}).id || sql.conn } : null} conns=${conns} post=${post} ctx=${ctxFor(c.key)} lang=${lang} apply=${aiApply(c, i)} close=${() => setAiOpen(null)} failed=${failed}/>`}
           ${c.type === "code" && (c.outputs.length > 0 || c.sqlres) && html`<div class="nb-outs">
-            ${c.sqlres && c.sqlres.ok && c.sqlres.columns && c.sqlres.columns.length ? html`<${Grid} res=${c.sqlres} name=${(sql && sql.conn) || "result"}/>${c.sqlres.assigned && html`<div class=${"small " + (c.sqlres.assigned.ok ? "mute" : "nbj-bad")}>${c.sqlres.assigned.ok ? "Also in the kernel as DataFrame " : "Could not assign "}<code>${c.sqlres.assigned.var}</code>${c.sqlres.assigned.error ? ": " + c.sqlres.assigned.error : ""}</div>`}`
+            ${c.sqlres && c.sqlres.ok && c.sqlres.columns && c.sqlres.columns.length ? html`<${DataView} res=${c.sqlres} spec=${vizOf(c, "sql")} onSpec=${(s) => upd(c.key, (x) => ({ raw: withViz(x, "sql", s) }))} table=${html`<${Grid} res=${c.sqlres} name=${(sql && sql.conn) || "result"}/>`}/>${c.sqlres.assigned && html`<div class=${"small " + (c.sqlres.assigned.ok ? "mute" : "nbj-bad")}>${c.sqlres.assigned.ok ? "Also in the kernel as DataFrame " : "Could not assign "}<code>${c.sqlres.assigned.var}</code>${c.sqlres.assigned.error ? ": " + c.sqlres.assigned.error : ""}</div>`}`
               : c.sqlres && !c.sqlres.ok ? html`<pre class="nb-o err">${c.sqlres.error}</pre>`
-              : c.outputs.map((o, j) => html`<${Out} key=${j} o=${o} post=${post}/>`)}
+              : c.outputs.map((o, j) => html`<${Out} key=${j} o=${o} post=${post} viz=${vizOf(c, String(j))} onViz=${(s) => upd(c.key, (x) => ({ raw: withViz(x, String(j), s) }))}/>`)}
             ${failed && !aiOpen && html`<div><button class="btn sm" onClick=${() => setAiOpen(c.key)}>${Ic("bolt", 12)} Fix with AI</button></div>`}</div>`}
         </div></div>${adder(i + 1)}`; })}</div>
     <div class="ebar"><span class=${saveErr ? "nbj-bad" : ""} title=${saveErr}><i class=${"dot " + (saveErr ? "dead" : dirty ? "busy" : "idle")}></i>${saveErr ? "Auto-save failed" : busySave ? "Saving…" : dirty ? (auto ? "Saving soon" : "Unsaved changes") : "Saved"}</span><label class="nbj-auto" title="Save changes automatically"><input type="checkbox" checked=${auto} onChange=${(e) => { setAuto(e.target.checked); LS.set("auto", e.target.checked); }}/> Auto-save</label><span>${cells.length} cell${cells.length === 1 ? "" : "s"}</span><span>${lang}</span><span class="grow"></span>

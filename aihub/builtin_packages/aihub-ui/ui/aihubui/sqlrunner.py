@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SQL Studio runner: one JSON request on stdin, one JSON answer (last stdout line). Runs in the connection's Python environment so the
+"""Data Studio runner: one JSON request on stdin, one JSON answer (last stdout line). Runs in the connection's Python environment so the
 drivers installed there are found. Actions: test, tables, columns, query. Never prints the password; secrets only live in memory."""
 import json
 import os
@@ -9,6 +9,16 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "lib"))
+if sys.prefix == getattr(sys, "base_prefix", sys.prefix):
+    # we run with -I, which hides the user site-packages; pip installs there when the Python's own folder is not writable
+    # (Windows: Program Files / Microsoft Store Python), so without this a driver that was just installed is "missing" again
+    try:
+        import site
+        _us = site.getusersitepackages()
+        if _us and os.path.isdir(_us) and _us not in sys.path:
+            site.addsitedir(_us)
+    except Exception:
+        pass
 
 
 def out(**k):
@@ -121,6 +131,10 @@ def main():
     except Exception as e:
         out(ok=False, error="cannot load the data helpers: %s" % e)
     act, c = req.get("action"), req.get("conn") or {}
+    if str(c.get("driver") or "") == "mongodb":                          # not SQL: its own runner (pymongo, shell-style statements)
+        sys.path.insert(0, HERE)
+        import mongorunner
+        mongorunner.handle(act, req, c, out, ad)
     try:
         eng = ad.engine(c)
     except ad.Missing as e:

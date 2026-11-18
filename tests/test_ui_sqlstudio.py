@@ -1,4 +1,4 @@
-"""aihub-ui SQL Studio: saved connections (secrets kept out of the JSON file), the SQLAlchemy runner and the driver catalog."""
+"""aihub-ui Data Studio: saved connections (secrets kept out of the JSON file), the SQLAlchemy runner and the driver catalog."""
 import json
 import os
 import sys

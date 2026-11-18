@@ -35,6 +35,8 @@ DRIVERS = {
     "mysql": {"title": "MySQL / MariaDB", "dialect": "mysql+pymysql", "module": "pymysql", "pip": "pymysql", "port": 3306},
     "sqlite": {"title": "SQLite", "dialect": "sqlite", "module": "", "pip": "", "note": "Database = the file path (empty = in memory); no driver to install"},
     "duckdb": {"title": "DuckDB", "dialect": "duckdb", "module": "duckdb_engine", "pip": "duckdb-engine", "note": "Database = the file path (empty = in memory)"},
+    "mongodb": {"title": "MongoDB", "dialect": "", "module": "pymongo", "pip": "pymongo", "port": 27017, "nosql": True,
+                "note": "Not SQL: statements are written like the mongo shell (db.orders.find({...})). Database = the MongoDB database; a mongodb+srv:// connection string works in the URL field"},
     "other": {"title": "Other (SQLAlchemy URL)", "dialect": "", "module": "", "pip": "", "note": "write the full SQLAlchemy URL; install its driver yourself"},
 }
 # import name -> pip package, when they differ (or need an extra)

@@ -1,24 +1,25 @@
-// SQL Studio: a lightweight, browser-based SQL client. Saved connections (any SQLAlchemy database), schema browser, query tabs,
-// result grid with export, and a Drivers tab that installs the extra packages a database needs into a chosen Python environment.
+// Data Studio: a lightweight, browser-based SQL client. Saved connections (any SQLAlchemy database), schema browser, query tabs,
+// result grid with export, charts and column stats (dataviz.js), and a Drivers tab that installs the extra packages a database needs into a chosen Python environment.
 // Data: /api/sql/* (server.py -> aihubui/sqlstudio.py; queries run in a child Python of the connection's environment).
 import { html, useState, useEffect, useRef, useMemo, useCallback } from "./vendor/preact-htm.js";
 import { Ic } from "./icons.js";
 import { toast, guard, Seg, Switch, confirmBox, ask } from "./ui.js";
 import { CodeBox } from "./codebox.js";
 import { sqlComplete, sqlSignature, SQL_WORDS, forgetSchema } from "./sqlintel.js";
+import { DataView } from "./dataviz.js";
 
 const LS = { get(k, d) { try { const v = localStorage.getItem("sqls_" + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem("sqls_" + k, JSON.stringify(v)); } catch (e) { /* private mode */ } } };
 const uid = () => Math.random().toString(36).slice(2, 10);
 const num = (n) => Number(n).toLocaleString();
 const KW = "select from where group by order having limit offset join left right inner outer full cross on as and or not in is null like ilike between exists case when then else end union all distinct insert into values update set delete create table alter drop index view with asc desc count sum avg min max cast over partition returning using primary key foreign references default explain describe show pragma top true false".split(" ");
 const KWRE = new RegExp("^(" + KW.join("|") + ")$", "i");
-const DRIVER_LABEL = { postgresql: "PostgreSQL", mysql: "MySQL", sqlite: "SQLite", mssql: "SQL Server", "mssql-odbc": "SQL Server (ODBC)", oracle: "Oracle", trino: "Trino", duckdb: "DuckDB", other: "SQLAlchemy URL" };
-const PORTS = { postgresql: "5432", mysql: "3306", mssql: "1433", "mssql-odbc": "1433", oracle: "1521", trino: "443" };
+const DRIVER_LABEL = { postgresql: "PostgreSQL", mysql: "MySQL", sqlite: "SQLite", mssql: "SQL Server", "mssql-odbc": "SQL Server (ODBC)", oracle: "Oracle", trino: "Trino", duckdb: "DuckDB", mongodb: "MongoDB", other: "SQLAlchemy URL" };
+const PORTS = { postgresql: "5432", mysql: "3306", mssql: "1433", "mssql-odbc": "1433", oracle: "1521", trino: "443", mongodb: "27017" };
 const FILE_DB = ["sqlite", "duckdb"];
 
 // Brand icons come from a public icon host (Simple Icons). Offline or blocked: the image is dropped and the name alone is shown.
 const ICON_HOST = "https://cdn.simpleicons.org/";
-const ICON_SLUG = { postgresql: "postgresql", mysql: "mysql", sqlite: "sqlite", mssql: "microsoftsqlserver", "mssql-odbc": "microsoftsqlserver", oracle: "oracle", trino: "trino", duckdb: "duckdb",
+const ICON_SLUG = { postgresql: "postgresql", mysql: "mysql", sqlite: "sqlite", mssql: "microsoftsqlserver", "mssql-odbc": "microsoftsqlserver", oracle: "oracle", trino: "trino", duckdb: "duckdb", mongodb: "mongodb",
   clickhouse: "clickhouse", snowflake: "snowflake", bigquery: "googlebigquery", redshift: "amazonredshift", databricks: "databricks", cockroachdb: "cockroachlabs", hana: "sap", db2: "ibm", teradata: "teradata" };
 const iconBad = new Set();
 function DbIcon({ k, size = 22 }) {
@@ -64,7 +65,7 @@ function Editor({ value, onChange, onRun, conn, post }) {
   const key = (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); const t = e.target, sel = t.value.slice(t.selectionStart, t.selectionEnd); onRun(sel.trim() ? sel : null); } };
   const lines = value.split("\n").length;
   return html`<div class="sq-ed"><div class="sq-edscroll"><div class="sq-gut" aria-hidden="true">${Array.from({ length: Math.min(lines, 2000) }, (_, i) => html`<span>${i + 1}</span>`)}</div>
-    <${CodeBox} value=${value} onChange=${onChange} lang="sql" nowrap=${true} intel=${true} complete=${complete} words=${SQL_WORDS} signature=${sqlSignature} onKey=${key} label="SQL editor" placeholder="select * from …   (Ctrl/⌘ + Enter runs; a selection runs alone)"/></div></div>`;
+    <${CodeBox} value=${value} onChange=${onChange} lang="sql" nowrap=${true} intel=${true} complete=${complete} words=${SQL_WORDS} signature=${sqlSignature} onKey=${key} label="Query editor" placeholder=${conn && conn.driver === "mongodb" ? "db.orders.find({}).limit(20)   (Ctrl/⌘ + Enter runs; a selection runs alone)" : "select * from …   (Ctrl/⌘ + Enter runs; a selection runs alone)"}/></div></div>`;
 }
 
 // ---------- result grid
@@ -158,7 +159,10 @@ function ConnForm({ init, envs, ui, api, post, close, saved, onOpen, onDelete })
       : file ? field("Database file", "database", drv === "duckdb" ? "/path/to/file.duckdb (empty = in memory)" : "/path/to/file.sqlite (empty = in memory)")
       : html`<div class="sq-grid2">${field("Host", "host", "db.example.com")}${field("Port", "port", PORTS[drv] || "")}${field("User", "user", "")}
           <label class="sq-f"><span>Password ${f.has_secret && !f.password ? html`<em class="mute">saved (leave blank to keep)</em>` : ""}</span><input type="password" value=${f.password} onInput=${set("password")} autocomplete="new-password"/></label>
-          ${field("Database", "database", drv === "oracle" ? "service name" : drv === "trino" ? "catalog/schema" : "", "text", "span2")}${field("Extra options", "options", "sslmode=require&connect_timeout=10", "text", "span2")}</div>`}</div>
+          ${field("Database", "database", drv === "oracle" ? "service name" : drv === "trino" ? "catalog/schema" : drv === "mongodb" ? "database name (e.g. shop)" : "", "text", "span2")}${field("Extra options", "options", drv === "mongodb" ? "authSource=admin&tls=true" : "sslmode=require&connect_timeout=10", "text", "span2")}
+          ${drv === "mongodb" && html`<label class="sq-f span2"><span>Connection string (optional) ${f.url_masked && !f.url ? html`<em class="mute">saved: ${f.url_masked} (leave blank to keep)</em>` : ""}</span>
+            <input type="password" value=${f.url} placeholder="mongodb+srv://user:password@cluster.mongodb.net/" onInput=${set("url")} autocomplete="off"/>
+            <small class="mute">Replaces host, port, user and password (Atlas, replica sets). Statements are written like the mongo shell: db.orders.find({"status": "paid"}).limit(20).</small></label>`}</div>`}</div>
     <div class="ms-sec"><h4>Run</h4><label class="sq-f"><span>Python environment</span><select value=${f.env || ""} onChange=${set("env")}><option value="">UI's own Python</option>${envs.map((e) => html`<option value=${e.name}>${e.name}</option>`)}</select>
         <small class="mute">Queries run in this environment, so the drivers you install for it (Drivers tab) are found. ${ui ? "UI Python: " + ui : ""}</small></label>
       <div class="row sq-ro"><${Switch} on=${f.readonly} onChange=${(v) => setF((x) => ({ ...x, readonly: v }))} label="Read-only"/><div><b>Read-only</b><div class="mute small">Only SELECT, WITH, SHOW, EXPLAIN… statements are allowed on this connection.</div></div></div></div>
@@ -170,13 +174,15 @@ function ConnForm({ init, envs, ui, api, post, close, saved, onOpen, onDelete })
 
 function Connections({ conns, envs, ui, api, post, reload, openStudio, edit, setEdit }) {
   const cur = edit || conns[0] || null, isNew = cur && !cur.id;
-  const sub = (c) => (c.driver === "other" ? c.url_masked || "URL" : FILE_DB.includes(c.driver) ? c.database || "in memory" : (c.host || "?") + (c.port ? ":" + c.port : "") + (c.database ? "/" + c.database : ""));
+  const sub = (c) => (c.driver === "other" || (c.driver === "mongodb" && c.url_masked && !c.host) ? c.url_masked || "URL" : FILE_DB.includes(c.driver) ? c.database || "in memory" : (c.host || "?") + (c.port ? ":" + c.port : "") + (c.database ? "/" + c.database : ""));
+  const restoreSample = guard(async () => { await post("sql/sample", {}); reload(); toast("Sample data is back"); });
   const del = guard(async (c) => { if (await confirmBox({ title: "Delete " + c.name + "?", text: "The saved password is removed too.", ok: "Delete", danger: true })) { await post("sql/delete", { id: c.id }); setEdit(null); reload(); } });
   return html`<div class="sq-pane"><div class="ms"><div class="ms-list ms-panel"><div class="ms-ph"><b>Connections</b><span>${conns.length}</span></div>
-      ${conns.map((c) => html`<button key=${c.id} class=${"nbj-srow" + (cur && cur.id === c.id ? " on" : "")} onClick=${() => setEdit(c)}><${DbIcon} k=${c.driver} size=${20}/><span class="nbj-fn"><span class="sq-ell">${c.name}</span><small>${DRIVER_LABEL[c.driver] || c.driver} · ${sub(c)}</small></span>${c.readonly ? Ic("eye", 12) : ""}</button>`)}
+      ${conns.map((c) => html`<button key=${c.id} class=${"nbj-srow" + (cur && cur.id === c.id ? " on" : "")} onClick=${() => setEdit(c)}><${DbIcon} k=${c.driver} size=${20}/><span class="nbj-fn"><span class="sq-ell">${c.name}</span><small>${DRIVER_LABEL[c.driver] || c.driver} · ${c.sample ? "built-in sample, varied tables for every chart" : sub(c)}</small></span>${c.readonly ? Ic("eye", 12) : ""}</button>`)}
+      ${!conns.some((c) => c.sample) && html`<button class="btn sm ms-add" title="Bring back the built-in SQLite database with example tables for every chart type" onClick=${restoreSample}>${Ic("sparkles", 13)} Restore sample data</button>`}
       <button class=${"btn ms-add" + (isNew ? " on" : "")} onClick=${() => setEdit({})}>${Ic("plus", 14)} New connection</button><p class="mute small ms-note">Passwords are stored encrypted on this machine and never sent back to the browser.</p></div>
       ${cur ? html`<${ConnForm} key=${cur.id || "new"} init=${cur} envs=${envs} ui=${ui} api=${api} post=${post} onOpen=${openStudio} onDelete=${del} close=${() => setEdit(null)} saved=${(c) => { setEdit(c); reload(); toast("Saved " + c.name); }}/>`
-      : html`<div class="ms-empty">${Ic("database", 34)}<h3>Connect your first database</h3><p style="margin:0;max-width:46ch">PostgreSQL, MySQL, SQL Server, Oracle, Trino, SQLite, DuckDB, or anything SQLAlchemy reaches with a URL.</p><button class="btn acc" onClick=${() => setEdit({})}>${Ic("plus", 14)} New connection</button></div>`}</div></div>`;
+      : html`<div class="ms-empty">${Ic("database", 34)}<h3>Connect your first database</h3><p style="margin:0;max-width:46ch">PostgreSQL, MySQL, SQL Server, Oracle, Trino, SQLite, DuckDB, MongoDB, or anything SQLAlchemy reaches with a URL.</p><button class="btn acc" onClick=${() => setEdit({})}>${Ic("plus", 14)} New connection</button></div>`}</div></div>`;
 }
 
 // ---------- drivers
@@ -222,7 +228,7 @@ function Tree({ conn, env, api, post, onInsert, onOpen, head }) {
     ${data && data.schemas.length > 1 && html`<select class="sq-sel" value=${schema || ""} onChange=${(e) => load(e.target.value)} aria-label="Schema">${data.schemas.map((s) => html`<option value=${s}>${s}</option>`)}</select>`}
     <input class="sq-find" placeholder="Filter tables" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Filter tables"/>
     <div class="sq-tl">${err && (err.missing ? html`<${MissingHint} info=${err} env=${env} api=${api} post=${post} small=${true} onDone=${() => load()}/>` : html`<div class="sq-test bad small">${Ic("alert", 13)} <span>${err.error}</span></div>`)}
-      ${tabs.map((t) => html`<div key=${t.name}><div class="sq-tr" onClick=${() => toggle(t)} onDblClick=${() => onOpen(t, schema)} title="Click: columns · Double-click: SELECT 100 rows"><i class=${"sq-chev" + (open[t.name] ? " o" : "")}>${Ic("right", 11)}</i>${Ic(t.kind === "view" ? "eye" : "table", 13)}<span class="sq-ell grow">${t.name}</span>
+      ${tabs.map((t) => html`<div key=${t.name}><div class="sq-tr" onClick=${() => toggle(t)} onDblClick=${() => onOpen(t, schema)} title="Click: columns · Double-click: the first 100 rows"><i class=${"sq-chev" + (open[t.name] ? " o" : "")}>${Ic("right", 11)}</i>${Ic(t.kind === "view" ? "eye" : "table", 13)}<span class="sq-ell grow">${t.name}</span>
           <button class="ibtn sm" title="Insert name" aria-label="Insert name" onClick=${(e) => { e.stopPropagation(); onInsert(t.name); }}>${Ic("plus", 12)}</button></div>
         ${open[t.name] && html`<div class="sq-cl">${(cols[t.name] || []).map((c) => html`<div class="sq-co" key=${c.name} onClick=${() => onInsert(c.name)}><span class=${"sq-pk" + (c.pk ? " on" : "")}>${c.pk ? Ic("key", 10) : ""}</span><span class="sq-ell grow">${c.name}</span><em>${c.type}</em></div>`)}${!cols[t.name] && html`<div class="mute small" style="padding:2px 8px"><i class="spin"></i></div>`}</div>`}</div>`)}
       ${data && !tabs.length && html`<p class="mute small" style="padding:6px 8px">${q ? "No table matches." : "No tables in this schema."}</p>`}${data && data.more && html`<p class="mute small" style="padding:6px 8px">First 2000 shown, filter to narrow.</p>`}</div></div>`;
@@ -231,14 +237,17 @@ function Tree({ conn, env, api, post, onInsert, onOpen, head }) {
 // Magic SQL: describe what you want, the model writes it with the schemas of this connection (and any others ticked) as context
 function AskAi({ conns, conn, tab, res, post, apply }) {
   const [q, setQ] = useState(""), [busy, setBusy] = useState(false), [note, setNote] = useState(""), [more, setMore] = useState([]), [pick, setPick] = useState(false);
+  const [mode, setModeS] = useState(() => (LS.get("ai_mode", "fast") === "agentic" ? "agentic" : "fast")), [steps, setSteps] = useState([]);
+  const setMode = (m) => { setModeS(m); LS.set("ai_mode", m); };
   const failed = res && !res.ok && res.error && !res.missing;
   const go = guard(async (fix) => {
     if (!conn) return toast("Pick a connection first");
     const hasSql = !!tab.sql.trim();
     if (!fix && !q.trim()) return toast("Describe what you want");
-    setBusy(true); setNote("");
+    setBusy(true); setNote(""); setSteps([]);
     try {
-      const r = await post("sql/ask", { ask: fix ? "Fix the error." + (q.trim() ? " " + q : "") : q, conn: conn.id, sql: tab.sql, error: fix && failed ? res.error : "", others: more });
+      const r = await post("sql/ask", { ask: fix ? "Fix the error." + (q.trim() ? " " + q : "") : q, conn: conn.id, sql: tab.sql, error: fix && failed ? res.error : "", others: more, mode });
+      setSteps(r.steps || []);
       if (!r.sql) { setNote(r.note || "No SQL came back."); return; }
       apply(r, fix || (hasSql && /\b(fix|change|add|remove|replace|rewrite|instead|also|only)\b/i.test(q)) ? "fix" : "new");
       setNote(r.note || ""); setQ("");
@@ -250,8 +259,12 @@ function AskAi({ conns, conn, tab, res, post, apply }) {
         onInput=${(e) => setQ(e.target.value)} onKeyDown=${(e) => e.key === "Enter" && !e.shiftKey && go(false)} aria-label="Ask AI to write SQL"/>
       ${others.length > 0 && html`<div class="sq-hw"><button class="btn sm" title="Let the AI also see the schemas of other connections" onClick=${() => setPick(!pick)} aria-expanded=${pick}>${Ic("database", 13)} ${more.length ? "+" + more.length : "Context"}</button>
         ${pick && html`<div class="sq-hist"><div class="row sq-hh"><b class="grow">Also give the AI the schema of</b></div>${others.map((c) => html`<label class="sq-hi"><span><input type="checkbox" checked=${more.includes(c.id)} onChange=${() => setMore((m) => m.includes(c.id) ? m.filter((x) => x !== c.id) : [...m, c.id])}/> ${c.name}</span></label>`)}</div>`}</div>`}
-      <button class="btn acc" disabled=${busy || !conn} onClick=${() => go(false)}>${busy ? html`<i class="spin"></i>` : Ic("sparkles", 13)} Generate</button>
+      <${Seg} value=${mode} onChange=${setMode} items=${[{ id: "fast", label: "Fast", icon: "bolt" }, { id: "agentic", label: "Agent", icon: "search" }]}/>
+      <button class="btn acc" disabled=${busy || !conn} title=${mode === "agentic" ? "Explores the data source step by step (tables, columns, real values), then writes the query" : "One shot with the schemas as context"} onClick=${() => go(false)}>${busy ? html`<i class="spin"></i>` : Ic("sparkles", 13)} ${mode === "agentic" ? "Explore & generate" : "Generate"}</button>
       ${failed && html`<button class="btn" disabled=${busy} title="Send the error and the SQL to the AI" onClick=${() => go(true)}>${Ic("bolt", 13)} Fix error</button>`}</div>
+    ${busy && mode === "agentic" && html`<div class="mute small sq-ainote"><i class="spin"></i> Exploring the data source step by step. This can take a minute…</div>`}
+    ${steps.length > 0 && html`<details class="sq-steps" open=${steps.length < 8}><summary>${Ic("search", 13)} Explored in ${steps.length} step${steps.length === 1 ? "" : "s"}</summary>
+      <ol>${steps.map((s, i) => html`<li key=${i} class=${s.ok ? "" : "bad"}><span class="sq-stt">${Ic(s.ok ? "check" : "alert", 12)} ${s.title}</span>${s.detail && html`<pre>${s.detail}</pre>`}</li>`)}</ol></details>`}
     ${note && html`<div class="mute small sq-ainote">${note} <button class="ibtn sm" aria-label="Dismiss" onClick=${() => setNote("")}>${Ic("x", 11)}</button></div>`}</div>`;
 }
 
@@ -263,7 +276,7 @@ function Studio({ conns, post, api, envs, go, init }) {
   const loadFiles = useCallback(() => api("sql/files").then((r) => setFiles(r.files || [])).catch(() => {}), []);
   useEffect(() => { loadFiles(); }, []);
   const runId = useRef({}), tab = tabs.find((t) => t.id === cur) || tabs[0];
-  useEffect(() => { const w = setTimeout(() => LS.set("tabs", tabs.map((t) => ({ id: t.id, name: t.name, sql: t.sql, conn: t.conn, params: t.params || {}, file: t.file || "" }))), 400); return () => clearTimeout(w); }, [tabs]);       // not on every keystroke
+  useEffect(() => { const w = setTimeout(() => LS.set("tabs", tabs.map((t) => ({ id: t.id, name: t.name, sql: t.sql, conn: t.conn, params: t.params || {}, file: t.file || "", viz: t.viz || undefined }))), 400); return () => clearTimeout(w); }, [tabs]);       // not on every keystroke
   useEffect(() => { LS.set("cur", tab.id); }, [tab.id]);
   useEffect(() => { LS.set("limit", limit); }, [limit]);
   useEffect(() => { if (init && conns.some((c) => c.id === init)) patch({ conn: init }); }, [init]);
@@ -321,7 +334,11 @@ function Studio({ conns, post, api, envs, go, init }) {
     else if (!tab.sql.trim()) patch({ sql: r.sql + "\n", conn: cid });
     else { const t = { id: uid(), name: "AI query", sql: r.sql + "\n", conn: cid }; setTabs((ts) => [...ts, t]); setCur(t.id); }
   };
-  const open = (t, schema) => { const nm = (schema && !/^(main|public|dbo)$/i.test(schema) ? schema + "." : "") + t.name; patch({ sql: "select * from " + nm + " limit 100" }); setTimeout(() => run("select * from " + nm + " limit 100"), 0); };
+  const open = (t, schema) => {
+    const mongo = conn && conn.driver === "mongodb", nm = (schema && !/^(main|public|dbo)$/i.test(schema) ? schema + "." : "") + t.name;
+    const q = mongo ? "db." + (/^[A-Za-z_]\w*$/.test(t.name) ? t.name : 'getCollection("' + t.name + '")') + ".find({}).limit(100)" : "select * from " + nm + " limit 100";
+    patch({ sql: q }); setTimeout(() => run(q), 0);
+  };
   if (!conns.length) return html`<div class="sq-pane setup"><div class="sq-hero">${Ic("database", 34)}<h3>No connection yet</h3><p class="mute">Add a database to start writing SQL.</p><button class="btn acc" onClick=${() => go("connections")}>${Ic("plus", 14)} New connection</button></div></div>`;
   const rail = (id, icon, title) => html`<button class=${"nbj-rb" + (panel === id ? " on" : "")} title=${title} aria-label=${title} aria-pressed=${panel === id} onClick=${() => setPanel(panel === id ? "" : id)}>${Ic(icon, 20)}</button>`;
   const addParam = guard(async () => { const v = await ask({ title: "Add a parameter", submit: "Insert", fields: [{ name: "name", label: "Name (letters, digits, _)", type: "text", value: "" }] }); const n = v && v.name.trim().replace(/[^A-Za-z0-9_]/g, "_"); if (!n) return; insert(":" + n); });
@@ -357,7 +374,7 @@ function Studio({ conns, post, api, envs, go, init }) {
       <${Editor} value=${tab.sql} onChange=${(v) => patch({ sql: v })} onRun=${run} conn=${conn} post=${post}/>
       <div class="sq-out">${busy && html`<div class="sq-load"><i class="spin"></i> Running…<button class="btn sm" onClick=${stop}>Stop</button></div>`}
         ${!busy && !res && html`<div class="sq-empty big">${Ic("table", 26)}<div>Results appear here</div><div class="mute small">Double-click a table in the tree to preview it.</div></div>`}
-        ${!busy && res && res.ok && (res.columns.length ? html`<${Grid} res=${res} name=${(conn && conn.name) || "result"}/>` : html`<div class="sq-test ok" style="margin:14px">${Ic("check", 15)} Done${res.rowcount != null && res.rowcount >= 0 ? " · " + num(res.rowcount) + " row" + (res.rowcount === 1 ? "" : "s") + " affected" : ""} · ${res.ms} ms</div>`)}
+        ${!busy && res && res.ok && (res.columns.length ? html`<${DataView} res=${res} spec=${tab.viz} onSpec=${(v) => patch({ viz: v })} table=${html`<${Grid} res=${res} name=${(conn && conn.name) || "result"}/>`}/>` : html`<div class="sq-test ok" style="margin:14px">${Ic("check", 15)} Done${res.rowcount != null && res.rowcount >= 0 ? " · " + num(res.rowcount) + " row" + (res.rowcount === 1 ? "" : "s") + " affected" : ""} · ${res.ms} ms</div>`)}
         ${!busy && res && !res.ok && (res.missing ? html`<div class="sq-errbox"><${MissingHint} info=${res} env=${conn ? conn.env : ""} api=${api} post=${post} onDone=${() => run()}/></div>`
           : html`<div class="sq-errbox"><div class="sq-test bad">${Ic("alert", 15)} <span>${res.error}</span></div></div>`)}</div></section></div>`;
 }
@@ -368,9 +385,9 @@ export function SqlStudioPage({ api, post, arg }) {
   const reload = useCallback(() => api("sql/connections").then((x) => { setD(x); setLoaded(true); setErr(""); }).catch((e) => { setErr(e.message); setLoaded(true); }), []);
   useEffect(() => { reload(); }, []);
   const go = (v) => { setView(v); LS.set("view", v); };
-  useEffect(() => { document.title = "SQL Studio"; }, []);
+  useEffect(() => { document.title = "Data Studio"; }, []);
   const items = [{ id: "studio", label: "Studio", icon: "terminal" }, { id: "connections", label: "Connections", icon: "database" }, { id: "drivers", label: "Drivers", icon: "download" }];
-  return html`<div class="sqs"><div class="sq-head"><span class="sq-logo">${Ic("database", 18)}</span><h1>SQL Studio</h1><span class="grow"></span>
+  return html`<div class="sqs"><div class="sq-head"><span class="sq-logo">${Ic("database", 18)}</span><h1>Data Studio</h1><span class="grow"></span>
       <${Seg} value=${view} onChange=${go} items=${items}/></div>
     ${err && html`<div class="sq-test bad" style="margin:12px 20px">${Ic("alert", 15)} ${err}</div>`}
     ${!loaded ? html`<div class="sq-pane"><p class="mute">Loading…</p></div>`

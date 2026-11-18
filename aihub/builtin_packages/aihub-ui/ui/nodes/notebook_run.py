@@ -2,7 +2,7 @@
 """Jupyter notebook node. JSON on stdin ({config, input, inputs, workdir}), JSON on stdout. Stdlib only.
 
 Asks the running AI Hub UI (127.0.0.1) to run a notebook on one of its saved Jupyter servers (Notebook page): a fresh kernel, `params` set like
-papermill (right after the cell tagged `parameters`, else before the first cell), every code cell in order (SQL cells run through SQL Studio and may
+papermill (right after the cell tagged `parameters`, else before the first cell), every code cell in order (SQL cells run through Data Studio and may
 fill a pandas DataFrame), then the variable `result_var` is read back as JSON. The server's token never leaves the UI."""
 import json
 import os

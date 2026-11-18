@@ -78,12 +78,19 @@ class Fake(BaseHTTPRequestHandler):
             return self.reply({"type": "directory", "path": "dir", "content": [{"name": "b.txt", "path": "dir/b.txt", "type": "file"}, {"name": "a", "path": "dir/a", "type": "directory"}]})
         if self.path.startswith("/api/contents/"):
             return self.reply({"type": "notebook", "content": json.loads(json.dumps(NB)), "name": "n.ipynb"})
+        if self.path.split("?")[0] == "/api/":                       # Jupyter Server 2.x: /api/ -> 301 /api
+            self.send_response(301)
+            self.send_header("Location", "/api")
+            self.send_header("Content-Length", "0")
+            return self.end_headers()
         self.reply({"version": "2.0"})
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length") or 0)
-        self.rfile.read(n)
+        body = self.rfile.read(n)
         if self.path.startswith("/api/sessions"):
+            if "kernel" in json.loads(body or b"{}") and json.loads(body)["kernel"] is None:      # Jupyter Server 2.x crashes on "kernel": null
+                return self.reply({"message": "Unhandled error"}, 500)
             return self.reply({"id": "s1", "kernel": {"id": "k1", "name": "python3"}}, 201)
         self.reply({"id": "k1", "name": "python3"}, 201)
 
@@ -175,6 +182,10 @@ class JupyterTest(unittest.TestCase):
         self.assertEqual(a["default"], "python3")
         items = jupyter.ls(c, "dir")["items"]
         self.assertEqual([i["name"] for i in items], ["a", "b.txt"])        # folders first
+
+    def test_session_without_a_kernel_name_uses_the_default(self):
+        c = jupyter.conn(self.box, "Lab")
+        self.assertEqual(jupyter.session(c, "n.ipynb")["kernel"]["id"], "k1")
 
     def test_ws_roundtrip(self):
         c = jupyter.conn(self.box, "Lab")

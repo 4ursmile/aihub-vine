@@ -175,11 +175,11 @@ ORDER BY orders DESC
 """
 NB_GUIDE = ("Runs a Jupyter notebook that lives on one of the user's Jupyter servers (Notebook page: JupyterHub, Jupyter Server or the local one the UI installs). "
             "Server = its saved name. Parameters (a JSON object, {{data.x}} filled in) are set like papermill: right after the cell tagged `parameters`, else before the first cell. "
-            "Every code cell runs in order on a fresh kernel; SQL cells run through SQL Studio and may fill a pandas DataFrame. The node's output is the variable named in Result variable "
+            "Every code cell runs in order on a fresh kernel; SQL cells run through Data Studio and may fill a pandas DataFrame. The node's output is the variable named in Result variable "
             "(read back as JSON, its keys become {{data.key}}), else the output of the last cell. Save as (optional) writes the executed notebook, outputs included, to that path on the server. "
             "Needs the UI running. A failing cell stops the run unless Continue after errors is on.")
 
-SQLFILE_GUIDE = ("Runs a SQL file saved in SQL Studio (the Save button there) on the connection saved with it; the password never leaves the UI. "
+SQLFILE_GUIDE = ("Runs a SQL file saved in Data Studio (the Save button there) on the connection saved with it; the password never leaves the UI. "
                  "The file may use named parameters like `where day = :day`; each keeps the value saved with the file unless Override parameters (a JSON object, {{data.x}} filled in) sets it. "
                  "Values are bound by the database driver, never pasted into the text. The result is a table, JSON or CSV; rows / columns / row_count are {{data.rows}} etc. Needs the UI running.")
 
@@ -353,9 +353,9 @@ BUILTIN = {
                           {"name": "url", "label": "SQLAlchemy URL (instead of the fields; stored encrypted)", "type": "password", "help": "e.g. postgresql+psycopg://me:pw@db:5432/sales"},
                           {"name": "verify", "label": "Check TLS certificate (Trino: true / false)", "type": "text", "default": ""},
                           {"name": "timeout", "label": "Timeout (seconds)", "type": "number", "default": 600}]},
-    "db.sqlfile": {"title": "SQL file (from SQL Studio)", "kind": "action", "group": "Data", "desc": "Runs a SQL file you saved in SQL Studio, on its saved connection. The file's :name parameters keep their saved values unless this node overrides them.",
+    "db.sqlfile": {"title": "SQL file (from Data Studio)", "kind": "action", "group": "Data", "desc": "Runs a SQL file you saved in Data Studio, on its saved connection. The file's :name parameters keep their saved values unless this node overrides them.",
                    "run": ["{python}", "{pkg}/nodes/sql_file.py"], "timeout": 330, "timeout_key": "timeout", "templated": ["params", "file"], "guide": SQLFILE_GUIDE,
-                   "fields": [{"name": "file", "label": "SQL file (saved name)", "type": "text", "default": "", "required": True, "help": "The name you gave it with Save in SQL Studio."},
+                   "fields": [{"name": "file", "label": "SQL file (saved name)", "type": "text", "default": "", "required": True, "help": "The name you gave it with Save in Data Studio."},
                               {"name": "params", "label": "Override parameters (JSON object)", "type": "textarea", "default": "", "help": "e.g. {\"day\": \"{{data.day}}\", \"n\": 10}. Parameters left out keep the value saved with the file."},
                               {"name": "connection", "label": "Connection (optional)", "type": "text", "default": "", "help": "A saved connection name; empty = the one saved with the file."},
                               {"name": "output", "label": "Result as", "type": "select", "options": ["table", "json", "csv"], "default": "table"},

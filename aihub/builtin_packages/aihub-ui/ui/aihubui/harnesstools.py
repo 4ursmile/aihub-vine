@@ -68,7 +68,7 @@ SPECS = [
      "input_schema": {"type": "object", "properties": {"cmd": {"type": "string"}, "timeout": {"type": "integer", "description": "seconds, default 120, max 600"}}, "required": ["cmd"]}},
     {"name": "digest", "description": "Answer a question about a big file or saved output with a small fast model, without reading it all yourself.",
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "question": {"type": "string"}}, "required": ["path", "question"]}},
-    {"name": "sql", "description": "Work with the user's saved SQL Studio databases. connections: list them. schema: tables + columns of one or all connections (optional table filter). "
+    {"name": "sql", "description": "Work with the user's saved Data Studio databases. connections: list them. schema: tables + columns of one or all connections (optional table filter). "
                                     "query: run a READ-ONLY statement on a connection, rows come back as a table. Writes are refused: give the SQL in a ```sql block instead.",
      "input_schema": {"type": "object", "properties": {"action": {"type": "string", "enum": ["connections", "schema", "query"]}, "conn": {"type": "string", "description": "connection name or id"},
                                                        "sql": {"type": "string"}, "table": {"type": "string", "description": "schema: only tables whose name contains this"},
@@ -216,8 +216,8 @@ class Tools:
         drop = set(CHANGES) if self.mode in READ_ONLY else set()
         try:
             from . import sqlstudio
-            if not sqlstudio.connections():
-                drop.add("sql")                                          # no saved database: do not spend tokens on the tool
+            if not sqlstudio.connections() or not (store.get_session(self.sid) or {}).get("data"):
+                drop.add("sql")                                          # no saved database, or the chat never mentioned one with @data: -> no tokens spent on the tool
         except Exception:
             drop.add("sql")
         try:
@@ -348,7 +348,7 @@ class Tools:
         from . import sqlstudio
         box, act = sqlstudio._BOX["box"], str(a.get("action") or "")
         if box is None:
-            return "SQL Studio is not available in this process", True
+            return "Data Studio is not available in this process", True
         try:
             if act == "connections":
                 return "\n".join("%s  id=%s  %s%s" % (c["name"], c["id"], c["driver"], "  read-only" if c.get("readonly") else "") for c in sqlstudio.connections()) or "none saved", False

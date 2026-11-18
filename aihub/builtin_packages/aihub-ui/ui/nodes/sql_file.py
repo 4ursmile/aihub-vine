@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Saved SQL file node. JSON on stdin ({config, input, inputs, workdir}), JSON on stdout. Stdlib only.
 
-Runs a SQL file saved in SQL Studio (Save button) through the running AI Hub UI, so the connection's password and Python environment stay
+Runs a SQL file saved in Data Studio (Save button) through the running AI Hub UI, so the connection's password and Python environment stay
 there. The file's `:name` parameters keep their saved values unless the node's `params` (a JSON object) overrides them; {{data.x}} is
 filled in before this runs. The result is a table (markdown), JSON or CSV; rows, columns and row_count are also handed on as data."""
 import csv
@@ -60,7 +60,7 @@ def main():
     cfg = d.get("config") or {}
     name = str(cfg.get("file") or "").strip()
     if not name:
-        fail("Set the SQL file (its name in SQL Studio).")
+        fail("Set the SQL file (its name in Data Studio).")
     params = {}
     if str(cfg.get("params") or "").strip():
         try:

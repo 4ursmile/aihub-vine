@@ -9,6 +9,7 @@ const LAZY = new URL("./vendor/lazy/", import.meta.url).href;      // vendored c
 export const DIAGRAMS = { mermaid: "Diagram", dot: "Graph", graphviz: "Graph", echarts: "Chart", map: "Map" };
 
 const dark = () => matchMedia("(prefers-color-scheme: dark)").matches;
+export const isDark = dark;
 const libs = {};
 const once = (key, make) => libs[key] || (libs[key] = make().catch((e) => { delete libs[key]; throw e; }));
 const script = (src) => new Promise((ok, no) => { const s = document.createElement("script"); s.src = src; s.onload = ok; s.onerror = () => no(new Error("could not load " + src)); document.head.append(s); });
@@ -16,7 +17,7 @@ const css = (local) => { const l = document.createElement("link"); l.rel = "styl
 
 const loadMermaid = () => once("mermaid", async () => (await import(LAZY + "mermaid.mjs")).default);
 const loadViz = () => once("viz", async () => (await import(LAZY + "viz.mjs")).instance());
-const loadEcharts = () => once("echarts", async () => { await script(LAZY + "echarts.min.js"); return window.echarts; });
+export const loadEcharts = () => once("echarts", async () => { await script(LAZY + "echarts.min.js"); return window.echarts; });
 const loadLeaflet = () => once("leaflet", async () => { css("leaflet/leaflet.css"); await script(LAZY + "leaflet/leaflet.js"); return window.L; });
 
 let queue = Promise.resolve(), seq = 0;                         // mermaid renders one at a time (it keeps global state)

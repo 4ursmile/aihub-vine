@@ -1596,7 +1596,7 @@ MENTION_NODE = re.compile(r"@node:([A-Za-z0-9][\w.:/-]{0,79})")
 MENTION_DEFAULT, MENTION_CHARS = 40, 40000
 
 
-def mentions(s, text):
+def mentions(s, text, engine="claude"):
     """Prompt text for @chat:<id>[:N] (that chat's last N messages, default 40, as plain text) and @tool:<name> (a pointer to a skill,
     command or MCP server). -> (text to append, tool names). Max 3 chats, 6 tools; the chat itself and unknown chats are skipped."""
     out = []
@@ -1623,6 +1623,15 @@ def mentions(s, text):
         w = store.get_work(wid)
         if w:
             out.append(store.work_brief(w))
+    try:
+        brief = sqlstudio.chat_brief(BOX, text, engine)                       # @data:<connection>: schema + how to query and draw, only when asked for
+    except Exception as e:                                                  # a broken connection never blocks the message
+        brief = "[Data source could not be loaded: %s]" % str(e)[:200]
+    if brief:
+        out.append(brief)
+        ids = [c["id"] for c in sqlstudio.mentioned(text)]
+        if ids and ids != s.get("data"):
+            store.update_session(s["id"], data=ids)                          # the harness offers its sql tool only in chats that asked for data
     more = sources.resolve(text, store.session_dir(s["id"])) + sources.file_mentions(text, store.session_dir(s["id"])) + sources.folder_mentions(text, store.session_dir(s["id"]))
     return (("\n\n" + "\n\n".join(out)) if out else "") + more, tools
 
@@ -1635,6 +1644,8 @@ def works_sources(h, q, b):
         words = words[5:] if words.startswith("node:") else words
         items += [{"name": "node:" + t, "description": "Node · %s%s" % (sp["title"], " - " + sp["desc"][:80] if sp.get("desc") else ""), "source": "node", "key": (sp["title"] + " " + sp["group"] + " " + t).lower()}
                   for t, sp in W.catalogue().items() if W.runnable(sp) and (not words or words in (sp["title"] + " " + t).lower())][:20]
+        items += [{"name": "data:" + sqlstudio.mention_name(c), "description": "Data · %s (%s%s)" % (c["name"], c["driver"], ", read-only" if c.get("readonly") else ""), "source": "data",
+                   "key": (c["name"] + " " + c["driver"]).lower()} for c in sqlstudio._load()["connections"] if not words or words.replace("data:", "") in (c["name"] + " " + c["driver"]).lower()][:20]
         items += [{"name": "work:" + w["id"], "description": "Workflow · %s%s" % (w["title"], " - " + w["description"][:80] if w.get("description") else ""), "source": "work", "key": (w["title"] or "").lower()}
                   for w in store.works() if not words or words.replace("work:", "") in (w["title"] or "").lower()][:20]
     return {"items": items}
@@ -1679,7 +1690,7 @@ def chat_send(h, q, b):
         if t and tid not in (s.get("themes") or []):                         # a theme already given in this chat stays in its context
             prompt += "\n\n" + store.theme_prompt(t)
             store.update_session(s["id"], themes=(s.get("themes") or []) + [tid])
-    more, tools = mentions(s, text)
+    more, tools = mentions(s, text, engine)
     prompt += more
     if chat.active(s["id"]):
         raise Err("this chat is still answering", 409)
@@ -2213,10 +2224,20 @@ def env_list(h, q, b):
     return {"envs": nodeenv.envs(), "dir": nodeenv.envs_dir(), "ui": sys.executable}
 
 
-# ---------- SQL Studio: saved connections, schema browser, queries (in a child Python of the connection's env), drivers
+# ---------- Data Studio: saved connections, schema browser, queries (in a child Python of the connection's env), drivers
 
 def sql_connections(h, q, b):
+    try:
+        sqlstudio.ensure_sample()                                          # the built-in SQLite sample database (unless the user deleted it)
+    except Exception:
+        pass
     return {"connections": sqlstudio.connections(), "envs": nodeenv.envs(), "ui": sys.executable}
+
+
+def sql_sample(h, q, b):
+    """Bring the sample database back after it was deleted."""
+    sqlstudio.restore_sample()
+    return {"connections": sqlstudio.connections()}
 
 
 def sql_save(h, q, b):
@@ -2319,7 +2340,8 @@ def sql_ask(h, q, b):
     """Magic SQL: {ask, conn?, sql?, error?, others?: [ref], model?} -> {sql, conn, note}. Nothing runs here."""
     try:
         return sqlstudio.ask_sql(BOX, str(b.get("ask") or ""), str(b.get("conn") or ""), str(b.get("sql") or ""), str(b.get("error") or ""),
-                                 [str(x) for x in b.get("others")] if isinstance(b.get("others"), list) else None, str(b.get("model") or ""))
+                                 [str(x) for x in b.get("others")] if isinstance(b.get("others"), list) else None, str(b.get("model") or ""),
+                                 "agentic" if b.get("mode") == "agentic" else "fast")
     except ValueError as e:
         raise Err(str(e))
     except RuntimeError as e:
@@ -3135,7 +3157,7 @@ ROUTES = {
     ("GET", "sql/connections"): sql_connections, ("POST", "sql/save"): sql_save, ("POST", "sql/delete"): sql_delete, ("POST", "sql/test"): sql_test, ("POST", "sql/tables"): sql_tables,
     ("GET", "sql/files"): sql_files, ("POST", "sql/file/save"): sql_file_save, ("POST", "sql/file/delete"): sql_file_delete, ("POST", "sql/file/run"): sql_file_run,
     ("POST", "jupyter/normalize"): lambda h, q, b: jupyter.normalize_url(b.get("url"), str(b.get("kind") or "server")),
-    ("POST", "sql/columns"): sql_columns, ("POST", "sql/run"): sql_run, ("POST", "sql/cancel"): sql_cancel, ("POST", "sql/ai/context"): sql_ai_context, ("POST", "sql/ai/query"): sql_ai_query, ("POST", "sql/ask"): sql_ask, ("GET", "sql/drivers"): sql_drivers,
+    ("POST", "sql/columns"): sql_columns, ("POST", "sql/run"): sql_run, ("POST", "sql/cancel"): sql_cancel, ("POST", "sql/ai/context"): sql_ai_context, ("POST", "sql/ai/query"): sql_ai_query, ("POST", "sql/ask"): sql_ask, ("POST", "sql/sample"): sql_sample, ("GET", "sql/drivers"): sql_drivers,
     ("GET", "jupyter/servers"): _jx(jup_servers), ("POST", "jupyter/save"): _jx(jup_save), ("POST", "jupyter/delete"): _jx(jup_delete), ("POST", "jupyter/test"): _jx(jup_test), ("POST", "jupyter/local"): _jx(jup_local),
     ("POST", "jupyter/ls"): _jx(jup_ls), ("POST", "jupyter/file/get"): _jx(jup_file_get), ("POST", "jupyter/file/put"): _jx(jup_file_put), ("POST", "jupyter/file/new"): _jx(jup_file_new),
     ("POST", "jupyter/file/rename"): _jx(jup_file_rename), ("POST", "jupyter/file/delete"): _jx(jup_file_delete), ("POST", "jupyter/kernelspecs"): _jx(jup_kernelspecs),
