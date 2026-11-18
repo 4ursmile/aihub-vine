@@ -2265,11 +2265,11 @@ def sql_test(h, q, b):
 
 
 def sql_tables(h, q, b):
-    return _sql_call({"action": "tables", "schema": str(b.get("schema") or ""), "schema_given": "schema" in b and b.get("schema") is not None}, b, 60)
+    return _sql_call({"action": "tables", "catalog": str(b.get("catalog") or ""), "schema": str(b.get("schema") or ""), "schema_given": "schema" in b and b.get("schema") is not None}, b, 60)
 
 
 def sql_columns(h, q, b):
-    return _sql_call({"action": "columns", "schema": str(b.get("schema") or ""), "table": need(b, "table")}, b, 60)
+    return _sql_call({"action": "columns", "catalog": str(b.get("catalog") or ""), "schema": str(b.get("schema") or ""), "table": need(b, "table")}, b, 60)
 
 
 def sql_run(h, q, b):

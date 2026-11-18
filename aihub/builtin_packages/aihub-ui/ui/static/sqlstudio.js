@@ -159,7 +159,7 @@ function ConnForm({ init, envs, ui, api, post, close, saved, onOpen, onDelete })
       : file ? field("Database file", "database", drv === "duckdb" ? "/path/to/file.duckdb (empty = in memory)" : "/path/to/file.sqlite (empty = in memory)")
       : html`<div class="sq-grid2">${field("Host", "host", "db.example.com")}${field("Port", "port", PORTS[drv] || "")}${field("User", "user", "")}
           <label class="sq-f"><span>Password ${f.has_secret && !f.password ? html`<em class="mute">saved (leave blank to keep)</em>` : ""}</span><input type="password" value=${f.password} onInput=${set("password")} autocomplete="new-password"/></label>
-          ${field("Database", "database", drv === "oracle" ? "service name" : drv === "trino" ? "catalog/schema" : drv === "mongodb" ? "database name (e.g. shop)" : "", "text", "span2")}${field("Extra options", "options", drv === "mongodb" ? "authSource=admin&tls=true" : "sslmode=require&connect_timeout=10", "text", "span2")}
+          ${field("Database", "database", drv === "oracle" ? "service name" : drv === "trino" ? "optional: leave empty to browse every catalog" : drv === "mongodb" ? "database name (e.g. shop)" : "", "text", "span2")}${field("Extra options", "options", drv === "mongodb" ? "authSource=admin&tls=true" : "sslmode=require&connect_timeout=10", "text", "span2")}
           ${drv === "mongodb" && html`<label class="sq-f span2"><span>Connection string (optional) ${f.url_masked && !f.url ? html`<em class="mute">saved: ${f.url_masked} (leave blank to keep)</em>` : ""}</span>
             <input type="password" value=${f.url} placeholder="mongodb+srv://user:password@cluster.mongodb.net/" onInput=${set("url")} autocomplete="off"/>
             <small class="mute">Replaces host, port, user and password (Atlas, replica sets). Statements are written like the mongo shell: db.orders.find({"status": "paid"}).limit(20).</small></label>`}</div>`}</div>
@@ -218,20 +218,23 @@ function Drivers({ api, post, envs, ui, onUseUrl, reloadEnvs }) {
 }
 
 // ---------- studio
-function Tree({ conn, env, api, post, onInsert, onOpen, head }) {
-  const [data, setData] = useState(null), [err, setErr] = useState(null), [schema, setSchema] = useState(null), [open, setOpen] = useState({}), [cols, setCols] = useState({}), [q, setQ] = useState(""), [busy, setBusy] = useState(false);
-  const load = (sch) => { if (sch == null) forgetSchema(conn); setBusy(true); setErr(null); post("sql/tables", { id: conn, schema: sch == null ? undefined : sch }).then((r) => { if (!r.ok) setErr(r); else { setData(r); setSchema(r.schema); } }).catch((e) => setErr({ error: e.message })).finally(() => setBusy(false)); };
-  useEffect(() => { setData(null); setOpen({}); setCols({}); setQ(""); if (conn) load(); }, [conn]);
-  const toggle = (t) => { const k = t.name; setOpen((o) => ({ ...o, [k]: !o[k] })); if (!cols[k]) post("sql/columns", { id: conn, schema, table: t.name }).then((r) => setCols((c) => ({ ...c, [k]: r.ok ? r.columns : [{ name: r.error, type: "" }] }))).catch(() => {}); };
+function Tree({ conn, nodb, env, api, post, onInsert, onOpen, head }) {
+  const [data, setData] = useState(null), [err, setErr] = useState(null), [schema, setSchema] = useState(null), [catalog, setCatalog] = useState(""), [open, setOpen] = useState({}), [cols, setCols] = useState({}), [q, setQ] = useState(""), [busy, setBusy] = useState(false);
+  const load = (sch, cat) => { if (sch == null) forgetSchema(conn); setBusy(true); setErr(null); const c = cat == null ? catalog : cat; post("sql/tables", { id: conn, schema: sch == null ? undefined : sch, catalog: c || undefined }).then((r) => { if (!r.ok) setErr(r); else { setData(r); setSchema(r.schema); setCatalog(r.catalog || ""); } }).catch((e) => setErr({ error: e.message })).finally(() => setBusy(false)); };
+  useEffect(() => { setData(null); setOpen({}); setCols({}); setQ(""); setCatalog(""); if (conn) load(undefined, ""); }, [conn]);
+  const pickCatalog = (c) => { setOpen({}); setCols({}); setSchema(null); load(undefined, c); };
+  const qual = (n) => (data && data.catalogs && catalog ? [catalog, schema, n].filter(Boolean).join(".") : schema && nodb ? schema + "." + n : n);
+  const toggle = (t) => { const k = t.name; setOpen((o) => ({ ...o, [k]: !o[k] })); if (!cols[k]) post("sql/columns", { id: conn, catalog: catalog || undefined, schema, table: t.name }).then((r) => setCols((c) => ({ ...c, [k]: r.ok ? r.columns : [{ name: r.error, type: "" }] }))).catch(() => {}); };
   const tabs = (data ? data.tables : []).filter((t) => !q.trim() || t.name.toLowerCase().includes(q.toLowerCase()));
   return html`<div class="sq-tree"><div class="nbj-ph"><b>Schema</b><button class="ibtn sm" title="Refresh" aria-label="Refresh" onClick=${() => load(schema)}>${busy ? html`<i class="spin"></i>` : Ic("refresh", 14)}</button>${head}</div>
-    ${data && data.schemas.length > 1 && html`<select class="sq-sel" value=${schema || ""} onChange=${(e) => load(e.target.value)} aria-label="Schema">${data.schemas.map((s) => html`<option value=${s}>${s}</option>`)}</select>`}
+    ${data && data.catalogs && html`<select class="sq-sel" value=${catalog} onChange=${(e) => pickCatalog(e.target.value)} aria-label="Catalog"><option value="">Pick a catalog (${data.catalogs.length})</option>${data.catalogs.map((s) => html`<option value=${s}>${s}</option>`)}</select>`}
+    ${data && data.schemas.length > 1 && html`<select class="sq-sel" value=${schema || ""} onChange=${(e) => load(e.target.value)} aria-label="Schema">${!schema && html`<option value="">Pick a schema / database</option>`}${data.schemas.map((s) => html`<option value=${s}>${s}</option>`)}</select>`}
     <input class="sq-find" placeholder="Filter tables" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Filter tables"/>
     <div class="sq-tl">${err && (err.missing ? html`<${MissingHint} info=${err} env=${env} api=${api} post=${post} small=${true} onDone=${() => load()}/>` : html`<div class="sq-test bad small">${Ic("alert", 13)} <span>${err.error}</span></div>`)}
-      ${tabs.map((t) => html`<div key=${t.name}><div class="sq-tr" onClick=${() => toggle(t)} onDblClick=${() => onOpen(t, schema)} title="Click: columns · Double-click: the first 100 rows"><i class=${"sq-chev" + (open[t.name] ? " o" : "")}>${Ic("right", 11)}</i>${Ic(t.kind === "view" ? "eye" : "table", 13)}<span class="sq-ell grow">${t.name}</span>
-          <button class="ibtn sm" title="Insert name" aria-label="Insert name" onClick=${(e) => { e.stopPropagation(); onInsert(t.name); }}>${Ic("plus", 12)}</button></div>
+      ${tabs.map((t) => html`<div key=${t.name}><div class="sq-tr" onClick=${() => toggle(t)} onDblClick=${() => onOpen(t, schema, data && data.catalogs ? catalog : "")} title="Click: columns · Double-click: the first 100 rows"><i class=${"sq-chev" + (open[t.name] ? " o" : "")}>${Ic("right", 11)}</i>${Ic(t.kind === "view" ? "eye" : "table", 13)}<span class="sq-ell grow">${t.name}</span>
+          <button class="ibtn sm" title="Insert name" aria-label="Insert name" onClick=${(e) => { e.stopPropagation(); onInsert(qual(t.name)); }}>${Ic("plus", 12)}</button></div>
         ${open[t.name] && html`<div class="sq-cl">${(cols[t.name] || []).map((c) => html`<div class="sq-co" key=${c.name} onClick=${() => onInsert(c.name)}><span class=${"sq-pk" + (c.pk ? " on" : "")}>${c.pk ? Ic("key", 10) : ""}</span><span class="sq-ell grow">${c.name}</span><em>${c.type}</em></div>`)}${!cols[t.name] && html`<div class="mute small" style="padding:2px 8px"><i class="spin"></i></div>`}</div>`}</div>`)}
-      ${data && !tabs.length && html`<p class="mute small" style="padding:6px 8px">${q ? "No table matches." : "No tables in this schema."}</p>`}${data && data.more && html`<p class="mute small" style="padding:6px 8px">First 2000 shown, filter to narrow.</p>`}</div></div>`;
+      ${data && !tabs.length && html`<p class="mute small" style="padding:6px 8px">${data.catalogs && !catalog ? "Pick a catalog above to browse its schemas and tables." : q ? "No table matches." : "No tables in this schema."}</p>`}${data && data.more && html`<p class="mute small" style="padding:6px 8px">First 2000 shown, filter to narrow.</p>`}</div></div>`;
 }
 
 // Magic SQL: describe what you want, the model writes it with the schemas of this connection (and any others ticked) as context
@@ -334,8 +337,8 @@ function Studio({ conns, post, api, envs, go, init }) {
     else if (!tab.sql.trim()) patch({ sql: r.sql + "\n", conn: cid });
     else { const t = { id: uid(), name: "AI query", sql: r.sql + "\n", conn: cid }; setTabs((ts) => [...ts, t]); setCur(t.id); }
   };
-  const open = (t, schema) => {
-    const mongo = conn && conn.driver === "mongodb", nm = (schema && !/^(main|public|dbo)$/i.test(schema) ? schema + "." : "") + t.name;
+  const open = (t, schema, catalog) => {
+    const mongo = conn && conn.driver === "mongodb", nm = catalog ? [catalog, schema, t.name].filter(Boolean).join(".") : (schema && (!(conn && conn.database) || !/^(main|public|dbo)$/i.test(schema)) ? schema + "." : "") + t.name;
     const q = mongo ? "db." + (/^[A-Za-z_]\w*$/.test(t.name) ? t.name : 'getCollection("' + t.name + '")') + ".find({}).limit(100)" : "select * from " + nm + " limit 100";
     patch({ sql: q }); setTimeout(() => run(q), 0);
   };
@@ -345,7 +348,7 @@ function Studio({ conns, post, api, envs, go, init }) {
   const close = html`<span class="grow"></span><button class="ibtn sm" title="Close panel" aria-label="Close panel" onClick=${() => setPanel("")}>${Ic("x", 14)}</button>`;
   return html`<div class=${"nbj-ws2 sqw" + (panel ? "" : " nopanel")}>
     <div class="nbj-rail">${rail("schema", "database", "Schema")}${rail("files", "file", "Saved SQL files")}${rail("hist", "clock", "History")}<span class="nbj-rsep"></span>${rail("set", "sliders", "Settings: connection and rows")}</div>
-    ${panel === "schema" && html`<aside class="nbj-panel" aria-label="Schema"><${Tree} conn=${tab.conn} env=${conn ? conn.env : ""} api=${api} post=${post} onInsert=${insert} onOpen=${open} head=${close}/></aside>`}
+    ${panel === "schema" && html`<aside class="nbj-panel" aria-label="Schema"><${Tree} conn=${tab.conn} nodb=${!(conn && conn.database)} env=${conn ? conn.env : ""} api=${api} post=${post} onInsert=${insert} onOpen=${open} head=${close}/></aside>`}
     ${panel === "files" && html`<aside class="nbj-panel" aria-label="Saved SQL files"><div class="nbj-ph"><b>Files</b>${close}</div>
       <div class="nbj-list">${!files.length && html`<p class="mute small" style="padding:10px 8px">Nothing saved yet. Write a query, add :parameters if you like, and press Save.</p>`}
         ${files.map((f) => html`<div class="nbj-srow sqf" key=${f.id}><button class="sqf-o" onClick=${() => openFile(f)}><span class="nbj-fn"><span class="sq-ell">${f.name}</span><small>${(f.params || []).length ? (f.params || []).map((q) => ":" + q.name).join(" ") + " · " : ""}${(conns.find((c) => c.id === f.conn) || {}).name || "no connection"}</small></span></button><button class="ibtn sm" aria-label="Delete" onClick=${() => delFile(f)}>${Ic("trash", 12)}</button></div>`)}</div></aside>`}

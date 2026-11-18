@@ -135,6 +135,9 @@ def main():
         sys.path.insert(0, HERE)
         import mongorunner
         mongorunner.handle(act, req, c, out, ad)
+    cat = str(req.get("catalog") or "").strip()
+    if cat and str(c.get("driver") or "") == "trino" and not str(c.get("url") or "").strip():
+        c = dict(c, database=cat)                                         # Trino: one connection per catalog, picked in the tree
     try:
         eng = ad.engine(c)
     except ad.Missing as e:
@@ -163,6 +166,14 @@ def main():
                         pass
             out(ok=True, dialect=eng.dialect.name, server=ver[:160], ms=int((time.time() - t0) * 1000))
         if act == "tables":
+            catalogs, cur = None, cat
+            if eng.dialect.name == "trino":                               # several catalogs behind one login: list them, no database needed
+                with eng.connect() as cn:
+                    catalogs = sorted(str(r[0]) for r in cn.exec_driver_sql("show catalogs").fetchall())
+                if not cur:
+                    cur = (str(c.get("database") or "").split("/")[0].strip()) or ""
+                if not cur:
+                    out(ok=True, catalogs=catalogs, catalog="", schemas=[], schema=None, tables=[], more=False)
             insp = sa.inspect(eng)
             schemas = []
             try:
@@ -178,7 +189,7 @@ def main():
             except Exception:
                 pass
             tabs.sort(key=lambda t: t["name"].lower())
-            out(ok=True, schemas=schemas, schema=sch, tables=tabs[:2000], more=len(tabs) > 2000)
+            out(ok=True, schemas=schemas, schema=sch, tables=tabs[:2000], more=len(tabs) > 2000, catalogs=catalogs, catalog=cur)
         if act == "digest":
             # tables + columns + keys of one schema in ONE process: the data context an AI needs to write correct SQL (capped, time-boxed)
             insp = sa.inspect(eng)
