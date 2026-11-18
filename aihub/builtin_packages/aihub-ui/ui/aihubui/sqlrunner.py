@@ -339,7 +339,8 @@ def main():
                         if missing:
                             out(ok=False, error="Parameter without a value: " + ", ".join(":" + m for m in missing))
                     bound = bind_sql(s, params) if params else None
-                    r = cn.execute(sa.text(bound[0]), bound[1]) if bound else cn.exec_driver_sql(s)
+                    # no_parameters: cursor.execute(sql) with no args, else pymysql / psycopg2 %-format the text and LIKE '%x%' breaks
+                    r = cn.execute(sa.text(bound[0]), bound[1]) if bound else cn.exec_driver_sql(s, execution_options={"no_parameters": True})
                     done += 1
                     if r.returns_rows:
                         rows = r.fetchmany(limit + 1)
