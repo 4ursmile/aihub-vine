@@ -1207,3 +1207,14 @@ button.dl.gap:hover{color:var(--ink);background:var(--soft2)}
 .sq-steps li.bad{border-left-color:var(--bad,#d9534f)}
 .sq-stt{display:flex;align-items:center;gap:5px;font-weight:600}
 .sq-steps pre{margin:3px 0 0;font:11px/1.4 ui-monospace,Menlo,monospace;white-space:pre-wrap;max-height:90px;overflow:auto;color:var(--mute,inherit)}
+
+/* Performance. Long chats: only the newest messages animate in (opening a chat no longer animates every message at once),
+   and older ones skip layout and paint while off screen (auto remembers their real height). Hover / focus lift it so the
+   message actions and menus are never clipped. */
+.msgs .col>.msg:not(:nth-last-child(-n+5)){animation:none}
+.msgs .col>.msg:not(:nth-last-child(-n+8)){content-visibility:auto;contain-intrinsic-size:auto 160px}
+.msgs .col>.msg:hover,.msgs .col>.msg:focus-within{content-visibility:visible}
+/* Lightweight mode (Settings > Performance): same as reduced motion, plus no blur or glow */
+[data-lite] *,[data-lite] *::before,[data-lite] *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+[data-lite] .shine{color:var(--mute);-webkit-text-fill-color:currentColor;background:none}
+[data-lite] .msgs{background:none}

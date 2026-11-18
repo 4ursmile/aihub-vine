@@ -6,22 +6,26 @@ import { Md, AskCard, WorkRunCard, setWorkMaker, setBlockSharer, setNodeHost, Ru
 import * as OUI from "./openui.js";
 import { CodeEditor, useHl, langOf, colorize, splitHl, esc, isMac as isMacUI } from "./code.js";
 import { UsagePage, AlertBar, useAlerts } from "./usage.js";
-import { SqlStudioPage } from "./sqlstudio.js";
-import { JupyterPage } from "./jupyter.js";
-import { EnvBox, MagicBar, CodeField, CodeLab, defaultsOf } from "./nodelab.js";
 
 // term.js, slides.js (+ export.js) and space.js load when first needed, not at start
 const runInstall = (...a) => import("./term.js").then((m) => m.runInstall(...a));
 const chatsMod = () => import("./chats.js");
 const shareToSpace = (...a) => import("./space.js").then((m) => m.shareToSpace(...a));
-function lazy(load, name) {
+// inline = a part inside a page (render nothing while it loads), else a whole page (a "Loading…" placeholder)
+function lazy(load, name, inline) {
   let C = null, bad = "";
   return function Lazy(p) {
     const [, bump] = useState(0);
     useEffect(() => { if (!C) load().then((m) => { C = m[name]; bump(1); }).catch((x) => { bad = x.message || "could not load"; bump(1); }); }, []);
-    return C ? h(C, p) : bad ? html`<div class="empty"><div>${Ic("alert", 24)}<div>${bad}</div></div></div>` : html`<div class="empty"><div class="shine">Loading…</div></div>`;
+    return C ? h(C, p) : bad ? html`<div class=${inline ? "mute small" : "empty"}><div>${Ic("alert", inline ? 13 : 24)}<div>${bad}</div></div></div>` : inline ? null : html`<div class="empty"><div class="shine">Loading…</div></div>`;
   };
 }
+// Data Studio, Notebook (+ dataviz, notebook, codebox, sqlintel) and the works node lab are ~470 KB: they load on first use,
+// warmed when the pointer heads for their link and once the browser is idle after start, so opening them stays instant.
+const PAGE_MODS = { sql: () => import("./sqlstudio.js"), notebook: () => import("./jupyter.js"), works: () => import("./nodelab.js") };
+const warm = (k) => { const f = PAGE_MODS[k]; if (f) f().catch(() => {}); };
+const SqlStudioPage = lazy(PAGE_MODS.sql, "SqlStudioPage"), JupyterPage = lazy(PAGE_MODS.notebook, "JupyterPage");
+const EnvBox = lazy(PAGE_MODS.works, "EnvBox", 1), MagicBar = lazy(PAGE_MODS.works, "MagicBar", 1), CodeField = lazy(PAGE_MODS.works, "CodeField", 1), CodeLab = lazy(PAGE_MODS.works, "CodeLab", 1);
 const DiffView = lazy(() => import("./diff.js"), "DiffView"), GitView = lazy(() => import("./diff.js"), "GitView");
 const Viewer = lazy(() => import("./slides.js"), "Viewer"), Themes = lazy(() => import("./slides.js"), "Themes"), Notebook = lazy(() => import("./notebook.js"), "Notebook");
 const isNb = (p) => /\.ipynb$/i.test(p || "");
@@ -96,6 +100,10 @@ const ago = (t) => { const s = Date.now() / 1000 - t; return s < 90 ? "now" : s 
 const num = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n || 0));
 const pref = (k, d) => { try { return localStorage.getItem("aihub_ui_" + k) ?? d; } catch (e) { return d; } };
 const setPref = (k, v) => { try { localStorage.setItem("aihub_ui_" + k, v); } catch (e) { /* private mode */ } };
+// Lightweight mode (Settings > Performance, per browser): no animations, blur or glow, and no background warm-up of pages.
+const liteOn = () => pref("lite", "0") === "1";
+const applyLite = (on) => { if (on) document.documentElement.dataset.lite = "1"; else delete document.documentElement.dataset.lite; };
+applyLite(liteOn());
 const linkify = (t) => String(t).split(/(https:\/\/[^\s)"']+)/).map((p, i) => (i % 2 ? html`<a href=${p} target="_blank" rel="noopener noreferrer">${p}</a>` : p));
 
 // ---------- pickers (model, effort, mode, context) and the slash menu
@@ -1881,6 +1889,11 @@ function UpdateCard({ prefs, savePrefs }) {
     ${(at >= 0 || down) && html`<div class="updprog" role="status"><ol>${UPD_STEPS.map(([k, l], i) => html`<li class=${down || i < at ? "done" : i === at ? "cur" : ""}><i></i>${l}</li>`)}</ol><div class="bar"><span class=${down ? "full" : "ind"}></span></div><div class="mute small">${down ? "Waiting for the service to come back…" : st === "waiting" ? "Waiting for running work to finish: " + (u.waiting || "") : st === "updating" ? "Installing aihub-ui " + (u.latest || "") + "…" : st === "restarting" ? "Restarting; this page reloads when it is back." : "Checking for a newer version…"}</div></div>`}</div>`;
 }
 
+function LiteCard() {
+  const [on, setOn] = useState(liteOn());
+  const set = (v) => { setPref("lite", v ? "1" : "0"); applyLite(v); setOn(v); toast(v ? "Lightweight mode on" : "Lightweight mode off"); };
+  return html`<div class="card"><div class="row"><div class="grow"><b>Lightweight mode</b><div class="mute small">For slow machines, remote desktops and long chats: turns off animations, blur and glow effects, and pages like Data Studio and Notebook load only when you open them instead of in the background. Saved in this browser only.</div></div><${Switch} on=${on} label="Lightweight mode" onChange=${set}/></div></div>`;
+}
 function Settings({ boot, reload, prefs, savePrefs, focus }) {
   const [sec, setSec] = useState({ names: [] }), [f, setF] = useState({ name: "", value: "" }), [lg, setLg] = useState({ username: "", password: "" }), card = useRef(), userIn = useRef(), [cw, setCw] = useState(String(prefs.window || 1000000)), [fm, setFm] = useState(prefs.free_model || "");
   useEffect(() => setCw(String(prefs.window || 1000000)), [prefs.window]);
@@ -1910,6 +1923,8 @@ function Settings({ boot, reload, prefs, savePrefs, focus }) {
     <div class="card"><div class="row"><div class="grow"><b>Context window</b><div class="mute small">The size the context ring in chats measures against, and where auto-compact counts from. Claude Code only has 1M when the model supports it (pick a model marked 1M).</div></div>
       <select value=${WINDOWS.some((w) => w[0] === prefs.window) ? String(prefs.window) : "custom"} onChange=${(e) => e.target.value !== "custom" && savePrefs({ window: +e.target.value })}>${WINDOWS.map((w) => html`<option value=${w[0]}>${w[1]}</option>`)}<option value="custom">Custom…</option></select></div>
       <div class="row" style="margin-top:10px"><span class="small">Tokens</span><${Num} min="50000" step="10000" style="width:170px" value=${cw} onInput=${(e) => setCw(e.target.value)} onChange=${() => +cw >= 50000 ? savePrefs({ window: +cw }) : toast("At least 50000 tokens")}/><span class="mute small">= ${num(+cw || 0)}</span></div></div>
+    <h2>Performance</h2>
+    <${LiteCard}/>
     <${HelperStatus}/>
     <${Themes} api=${api} post=${post}/>
     <h2>Claude settings file</h2><div class="card"><div class="row"><div class="grow"><b>${cl.custom ? "Custom file" : "Default file"}</b><div class="mono small" style="overflow-wrap:anywhere">${cl.path}${cl.exists ? "" : " (not found)"}</div></div>
@@ -2082,6 +2097,13 @@ function App() {
   const reloadSess = () => api("sessions").then((d) => { setSess(d); setRunning((r) => { const idle = Object.keys(r).filter((k) => r[k] && d.sessions.some((x) => x.id === k && !x.busy)); if (!idle.length) return r; const n = { ...r }; idle.forEach((k) => delete n[k]); return n; }); }).catch(() => {});                                     // chats this page is streaming right now (shown before the next sessions poll)
   const markBusy = useCallback((sid, v) => setRunning((r) => (!!r[sid] === v ? r : { ...r, [sid]: v || undefined })), []);
   const alerts = useAlerts(api);
+  useEffect(() => {   // after start, when idle, fetch the lazy pages one by one so the first visit is instant; never on lite mode or data saver
+    if (liteOn() || (navigator.connection && navigator.connection.saveData)) return;
+    const idle = window.requestIdleCallback || ((f) => setTimeout(f, 200)), ks = Object.keys(PAGE_MODS); let t, gone = false;
+    const next = () => { if (gone || !ks.length) return; warm(ks.shift()); t = setTimeout(() => idle(next, { timeout: 4000 }), 400); };
+    t = setTimeout(() => idle(next, { timeout: 4000 }), 2500);
+    return () => { gone = true; clearTimeout(t); };
+  }, []);
   const savePrefs = guard(async (p) => { const r = await put("prefs", p); setPrefs(r.prefs); return r.prefs; });
   useEffect(() => { OUI.warm(); reloadBoot(); reloadSess(); api("prefs").then((d) => setPrefs(d.prefs)).catch(() => {}); api("slash").then(setSlash).catch(() => {}); const h = () => setRoute(location.hash.slice(2) || "chat"); addEventListener("hashchange", h); return () => removeEventListener("hashchange", h); }, []);
   useInterval(reloadSess, sess.sessions.some((x) => x.busy || running[x.id]) ? 4000 : null);      // chats answering in the background
@@ -2128,8 +2150,8 @@ function App() {
       <div class="nav"><div class="srow2"><button class="srow" onClick=${() => { setDrawer(false); newChat(); }}>${Ic("plus", 17)}<span class="grow">New chat</span><kbd>${NEW_KEY}</kbd></button><button class="ibtn" title="New incognito chat (not saved)" aria-label="New incognito chat" onClick=${() => { setDrawer(false); newIncog(); }}>${Ic("incognito", 17)}</button></div><button class="srow" onClick=${() => { setDrawer(false); setSpotOpen(true); }} aria-label="Search chats and pages">${Ic("search", 17)}<span class="grow">Search</span><kbd>${MAC ? "⌘K" : "Ctrl K"}</kbd></button></div>
       <div class="nav" onClick=${(e) => { if (e.target.closest("a")) setDrawer(false); }}>
         <button class=${"srow tools" + (inTools ? " has" : "")} aria-expanded=${toolsOpen} onClick=${() => { const v = !toolsOpen; setToolsOpen(v); setPref("toolsopen", v ? "1" : "0"); }}>${Ic("sliders", 17)}<span class="grow">Tools</span><i class=${"chev" + (toolsOpen ? " o" : "")}>${Ic("right", 13)}</i></button>
-        ${toolsOpen && html`<div class="nsub">${NAV.filter((n) => TOOLS.includes(n[0])).map(([k, ic, l]) => html`<a class=${page === k ? "on" : ""} href=${"#/" + k}>${Ic(ic, 16)}${l}</a>`)}</div>`}
-        ${NAV.filter((n) => !TOOLS.includes(n[0])).map(([k, ic, l]) => html`<a class=${page === k ? "on" : ""} href=${"#/" + k}>${Ic(ic, 17)}${l}</a>`)}</div>
+        ${toolsOpen && html`<div class="nsub">${NAV.filter((n) => TOOLS.includes(n[0])).map(([k, ic, l]) => html`<a class=${page === k ? "on" : ""} href=${"#/" + k} onPointerEnter=${() => warm(k)} onFocus=${() => warm(k)}>${Ic(ic, 16)}${l}</a>`)}</div>`}
+        ${NAV.filter((n) => !TOOLS.includes(n[0])).map(([k, ic, l]) => html`<a class=${page === k ? "on" : ""} href=${"#/" + k} onPointerEnter=${() => warm(k)} onFocus=${() => warm(k)}>${Ic(ic, 17)}${l}</a>`)}</div>
       <div class="hist">${groups.map(([f, items]) => !!(f || items.length) && html`<h6 class="gh"><button class="gtoggle" aria-expanded=${!folded.includes(f)} title=${folded.includes(f) ? "Expand" : "Collapse"} onClick=${() => fold(f)}><span class=${"chev" + (folded.includes(f) ? " shut" : "")}>${Ic("down", 12)}</span><span class="gname" title=${(sess.folder_dirs || {})[f] ? "Working folder: " + sess.folder_dirs[f] : ""}>${f || "Chats"}</span>${(sess.folder_dirs || {})[f] ? Ic("folder", 12) : ""}<span class="cnt">${items.length}</span></button>
           <span class="hbtns">${!f && html`<button class="ibtn gnew" style="width:28px;height:28px" title="New chat" aria-label="New chat" onClick=${() => { setDrawer(false); newChat(); }}>${Ic("plus", 17)}</button><${Pop} open=${sortPop} setOpen=${setSortPop} up=${false} align="right" button=${html`<button class="ibtn" style="width:28px;height:28px" title=${"Sort: " + (SORTS.find((x) => x[0] === sortBy) || SORTS[0])[1]} aria-label="Sort chats" onClick=${() => setSortPop(!sortPop)}>${Ic("filter", 16)}</button>`}><h5>Sort by</h5>${SORTS.map(([k, l]) => html`<button class=${"opt" + (k === sortBy ? " on" : "")} onClick=${() => chooseSort(k)}><span class="grow"><b>${l}</b></span><span class="ck">${Ic("check", 15)}</span></button>`)}<//>`}
           ${f && html`<button class="ibtn" style="width:28px;height:28px" title="New chat in this project" aria-label=${"New chat in " + f} onClick=${() => newChat(f)}>${Ic("plus", 17)}</button><button class="ibtn" style="width:28px;height:28px" title="Delete project" aria-label=${"Delete project " + f} onClick=${() => delProject(f)}>${Ic("trash", 17)}</button>`}</span></h6>
