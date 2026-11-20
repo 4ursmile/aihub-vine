@@ -1265,3 +1265,15 @@ button.dl.gap:hover{color:var(--ink);background:var(--soft2)}
 .nbj-droph{display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:8px;background:var(--accentbg);color:var(--ink2);font-size:12px}.nbj-droph b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nbj-upl{padding:6px 8px;border-radius:8px;background:var(--soft2);display:flex;flex-direction:column;gap:5px}.nbj-uplbar{height:3px;border-radius:2px;background:var(--line);overflow:hidden}.nbj-uplbar i{display:block;height:100%;background:var(--accent);transition:width .2s}
 .nbj-f[draggable="true"]{-webkit-user-drag:element}
+
+/* ipywidgets in notebook outputs (tqdm.notebook bars, labels, boxes) */
+.nb-o.nbw{white-space:normal;font:12.5px/1.5 var(--mono);max-height:none;overflow:visible}
+.nbw-box{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}.nbw-box.col{flex-direction:column;align-items:stretch;gap:4px}
+.nbw-pw{display:inline-flex;align-items:center;gap:6px;flex:1 1 160px;min-width:120px;max-width:520px}
+.nbw-bar{flex:1;height:14px;border-radius:7px;background:var(--soft);border:1px solid var(--line);overflow:hidden}
+.nbw-bar i{display:block;height:100%;background:var(--accent);transition:width .15s linear}
+.nbw-bar.success i{background:var(--good)}.nbw-bar.danger i{background:var(--bad)}.nbw-bar.warning i{background:var(--warn,#d89614)}.nbw-bar.info i{background:var(--accent)}
+.nbw-h{white-space:pre-wrap}.nbw-d{color:var(--mute)}
+/* file menu of the canvas: the ⋯ of a row shows on hover / focus; a cut file is dimmed until it is pasted */
+.tr .tr-more{opacity:0;flex:none}.tr:hover .tr-more,.tr:focus-within .tr-more,.tr:focus .tr-more{opacity:1}.tr.cut{opacity:.5}
+@media (hover:none){.tr .tr-more{opacity:1}}

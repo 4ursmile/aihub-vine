@@ -1,7 +1,7 @@
 // AI Hub UI. Preact + htm, marked, DOMPurify, highlight.js and OpenUI come from jsDelivr (pinned). No build step, no npm.
 import { h, html, render, useState, useEffect, useRef, useCallback, useMemo } from "./vendor/preact-htm.js";
 import { Ic } from "./icons.js";
-import { toast, guard, setToaster, Seg, Pop, Switch, Modal, ask, confirmBox, AskHost, escPush, useInterval, Num } from "./ui.js";
+import { toast, guard, setToaster, Seg, Pop, Switch, Modal, ask, confirmBox, AskHost, escPush, useInterval, Num, CtxMenu, menuAt } from "./ui.js";
 import { Md, AskCard, WorkRunCard, setWorkMaker, setBlockSharer, setNodeHost, RunLog, fmtDur, useTick } from "./blocks.js";
 import * as OUI from "./openui.js";
 import { CodeEditor, useHl, langOf, colorize, splitHl, esc, isMac as isMacUI } from "./code.js";
@@ -323,23 +323,34 @@ function SlashMenu({ items, idx, pick, at }) {
 
 // ---------- working folder: file tree, editor, diff, dialogs
 const baseName = (p) => String(p || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
-function buildTree(files) {
+function buildTree(files, dirs = []) {
   const root = { dirs: {}, files: [], n: 0 };
+  for (const d of dirs) { let n = root; for (const x of d.split("/")) n = n.dirs[x] || (n.dirs[x] = { dirs: {}, files: [], n: 0 }); }
   for (const f of files) { const parts = f.path.split("/"); let n = root; n.n++; for (const d of parts.slice(0, -1)) { n = n.dirs[d] || (n.dirs[d] = { dirs: {}, files: [], n: 0 }); n.n++; } n.files.push({ ...f, name: parts[parts.length - 1] }); }
   return root;
 }
 const kbd = (fn) => (ev) => { if (ev.target === ev.currentTarget && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); fn(ev); } };
-function FileTree({ files, sel, onPick, src }) {
+// onMenu(event, {path, dir}) opens the file menu (right-click, the ContextMenu key, Shift+F10; path "" = the top folder); onKey(event, entry) gets
+// the file shortcuts of a focused row (F2, Delete, Cmd/Ctrl+C X V D)
+function FileTree({ files, dirs = [], sel, onPick, src, onMenu, onKey, cut }) {
   const [q, setQ] = useState(""), [tog, setTog] = useState({});
-  const list = q ? files.filter((f) => f.path.toLowerCase().includes(q.toLowerCase())) : files, tree = buildTree(list), dflt = (depth) => !!q || depth < 1 || files.length <= 60;
+  const lq = q.toLowerCase(), list = q ? files.filter((f) => f.path.toLowerCase().includes(lq)) : files, tree = buildTree(list, q ? dirs.filter((d) => d.toLowerCase().includes(lq)) : dirs), dflt = (depth) => !!q || depth < 1 || files.length <= 60;
+  const menu = (en) => onMenu && ((e) => { e.preventDefault(); e.stopPropagation(); onMenu(e, en); });
+  const key = (en, fn) => (e) => { if (onKey && e.target === e.currentTarget && onKey(e, en)) return; kbd(fn)(e); };
   const walk = (n, base, depth) => [
-    ...Object.keys(n.dirs).sort().map((d) => { const path = base + d, isOpen = tog[path] ?? dflt(depth);
-      return html`<div class="tr dir" role="button" tabindex="0" aria-expanded=${isOpen} style=${`padding-left:${6 + depth * 14}px`} onClick=${() => setTog({ ...tog, [path]: !isOpen })} onKeyDown=${kbd(() => setTog({ ...tog, [path]: !isOpen }))}>${Ic(isOpen ? "down" : "right", 12)}${Ic("folder", 14)}<span class="t">${d}</span><span class="mute small">${n.dirs[d].n}</span></div>${isOpen && walk(n.dirs[d], path + "/", depth + 1)}`; }),
-    ...n.files.sort((a, b) => a.name.localeCompare(b.name)).map((f) => html`<div class=${"tr" + (sel === f.path ? " on" : "")} role="button" tabindex="0" style=${`padding-left:${22 + depth * 14}px`} onClick=${() => onPick(f)} onKeyDown=${kbd(() => onPick(f))} title=${f.path}>${Ic("file", 14)}<span class="t">${f.name}</span><span class="mute small">${num(f.size)}B</span>
-      <a class="ibtn" style="width:24px;height:24px" href=${src(f.path) + "?download=1"} download onClick=${(e) => e.stopPropagation()} title="Download" aria-label=${"Download " + f.name}>${Ic("download", 13)}</a></div>`)];
-  return html`<div class="ftree">${files.length > 12 && html`<input class="fq" placeholder="Filter files" value=${q} onInput=${(e) => setQ(e.target.value)}/>`}
-    ${list.length ? walk(tree, "", 0) : html`<p class="mute small" style="padding:10px">${files.length ? "No file matches." : "No files yet."}</p>`}</div>`;
+    ...Object.keys(n.dirs).sort().map((d) => { const path = base + d, isOpen = tog[path] ?? dflt(depth), en = { path, dir: true };
+      return html`<div class=${"tr dir" + (cut === path ? " cut" : "")} role="button" tabindex="0" aria-expanded=${isOpen} style=${`padding-left:${6 + depth * 14}px`} title=${path} onClick=${() => setTog({ ...tog, [path]: !isOpen })} onContextMenu=${menu(en)} onKeyDown=${key(en, () => setTog({ ...tog, [path]: !isOpen }))}>${Ic(isOpen ? "down" : "right", 12)}${Ic("folder", 14)}<span class="t">${d}</span><span class="mute small">${n.dirs[d].n || ""}</span>
+        ${onMenu && html`<button class="ibtn tr-more" style="width:24px;height:24px" title="More actions" aria-label=${"More actions for " + d} onClick=${(e) => { e.stopPropagation(); onMenu(e, en); }}>${Ic("more", 13)}</button>`}</div>${isOpen && walk(n.dirs[d], path + "/", depth + 1)}`; }),
+    ...n.files.sort((a, b) => a.name.localeCompare(b.name)).map((f) => { const en = { path: f.path, dir: false };
+      return html`<div class=${"tr" + (sel === f.path ? " on" : "") + (cut === f.path ? " cut" : "")} role="button" tabindex="0" style=${`padding-left:${22 + depth * 14}px`} onClick=${() => onPick(f)} onContextMenu=${menu(en)} onKeyDown=${key(en, () => onPick(f))} title=${f.path}>${Ic("file", 14)}<span class="t">${f.name}</span><span class="mute small">${num(f.size)}B</span>
+      <a class="ibtn" style="width:24px;height:24px" href=${src(f.path) + "?download=1"} download onClick=${(e) => e.stopPropagation()} title="Download" aria-label=${"Download " + f.name}>${Ic("download", 13)}</a>${onMenu && html`<button class="ibtn tr-more" style="width:24px;height:24px" title="More actions" aria-label=${"More actions for " + f.name} onClick=${(e) => { e.stopPropagation(); onMenu(e, en); }}>${Ic("more", 13)}</button>`}</div>`; })];
+  return html`<div class="ftree" onContextMenu=${onMenu && ((e) => { if (e.target.closest("input")) return; menu({ path: "", dir: true })(e); })}>${files.length > 12 && html`<input class="fq" placeholder="Filter files" value=${q} onInput=${(e) => setQ(e.target.value)}/>`}
+    ${list.length || dirs.length ? walk(tree, "", 0) : html`<p class="mute small" style="padding:10px">${files.length ? "No file matches." : "No files yet."}</p>`}</div>`;
 }
+// what Copy / Cut put aside for Paste: {id (chat), path, dir, cut}. One for the whole page, so a file can be pasted into another chat's folder.
+let fileClip = null;
+const parentOf = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+const b64Of = async (blob) => { const b = new Uint8Array(await blob.arrayBuffer()); let x = ""; for (let i = 0; i < b.length; i += 32768) x += String.fromCharCode.apply(null, b.subarray(i, i + 32768)); return btoa(x); };
 // Drag handle that resizes a panel horizontally: `sign` is +1 when moving right makes the panel wider (left panel), -1 for a panel on the right.
 function Grip({ cls, value, onChange, onDone, min, max, sign, reset }) {
   const down = (e) => {
@@ -539,7 +550,7 @@ function cleanBlocks(blocks, hist, i) {
 }
 
 function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onBusy, onImport, onIncog }) {
-  const [s, setS] = useState(null), [hist, setHist] = useState([]), [files, setFiles] = useState([]), [sig, setSig] = useState("");
+  const [s, setS] = useState(null), [hist, setHist] = useState([]), [files, setFiles] = useState([]), [dirs, setDirs] = useState([]), [sig, setSig] = useState("");
   const [live, setLive] = useState({ text: "", think: "" }), [busy, setBusy] = useState(false), [text, setText] = useState(() => pref("draft_" + id, ""));
   const [model, setModel] = useState(pref("model", "")), [effort, setEffort] = useState(pref("effort", "")), [mode, setMode] = useState(pref("mode", "auto"));
   const [ctx, setCtx] = useState(0), [pop, setPop] = useState(null), [sidx, setSidx] = useState(0), [signin, setSignin] = useState(false);
@@ -835,7 +846,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const leaveOk = async () => { if (!dirtyRef.current) return true; if (!(await discard(baseName(prevRef.current)))) return false; dirtyRef.current = false; return true; };
   const changeTab = async (t) => { if (t !== tab && (tab === "edit" || (tab === "preview" && isNb(prev))) && !(await leaveOk())) return; setTab(t); };
   const pickFile = async (f) => { if (!(await leaveOk())) return; setPrev(f.path); setTab(canPrev(f.path) ? "preview" : "edit"); };
-  const refreshFiles = () => api("files?id=" + id).then((d) => { setFiles(d.files); setSig(d.sig); }).catch(() => {});
+  const refreshFiles = () => api("files?id=" + id).then((d) => { setFiles(d.files); setDirs(d.dirs || []); setSig(d.sig); }).catch(() => {});
   const noFile = html`<div class="empty"><div>${Ic("file", 26)}<div>Pick a file in Files first.</div></div></div>`;
   const previewEl = prev ? (isNb(prev) ? html`<${Notebook} key=${prev} id=${id} path=${prev} ver=${fver} api=${api} put=${put} onSaved=${refreshFiles} dirtyRef=${dirtyRef}/>`
     : /\.(md|markdown)$/i.test(prev) ? html`<${MdFile} key=${prev} id=${id} path=${prev} ver=${fver} src=${src}/>`
@@ -850,8 +861,89 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   useEffect(() => { setProj([]); api("project/info?id=" + id).then((d) => setProj(d.packages || [])).catch(() => {}); }, [id, s && s.cwd, busy]);
   const openCode = guard(async (path) => { await post("files/vscode", { id, path: path || "" }); toast("Opening in VS Code"); });
   const openDir = guard(async (path) => { await post("files/reveal", { id, path: path || "" }); toast(path ? "Showing it in its folder" : "Opening the folder"); });
+  // ---- file menu (right-click a file or folder in Files, the editor's file list, or the file name above Preview / Edit / Diff)
+  const [fmenu, setFmenu] = useState(null), [clipV, setClipV] = useState(0), upIn = useRef(), upTo = useRef("");
+  useEffect(() => { refreshFiles(); }, [id]);                                           // the empty folders (the chat load sends only files)
+  const under = (p, base) => p === base || p.startsWith(base + "/");
+  const touchesOpen = (path) => !!prev && under(prev, path);
+  const fsOp = async (path, fn) => { if (touchesOpen(path) && !(await leaveOk())) return; await fn(); refreshFiles(); };
+  const absOf = (p) => { const d = dirInfo.dir || "", sl = d.includes("\\") && !d.includes("/") ? "\\" : "/"; return p ? d.replace(/[\\/]+$/, "") + sl + p.split("/").join(sl) : d; };
+  const copyText = async (t, what) => { try { await navigator.clipboard.writeText(t); toast("Copied " + what); } catch (e) { toast("Could not copy: " + t); } };
+  const nameAsk = async (title, value, submit, at) => { const v = await ask({ title, submit, fields: [{ name: "name", label: "Name", type: "text", value, required: true, max: 255 }] }); const n = v && v.name.trim(); if (!n) return ""; if (/[\\/]/.test(n) && !at) { toast("A name cannot hold / or \\"); return ""; } return n; };
+  const fNew = guard(async (dir, folder) => {
+    const n = await nameAsk((folder ? "New folder" : "New file") + (dir ? " in " + dir : ""), folder ? "new-folder" : "untitled.txt", "Create", true); if (!n) return;
+    const r = await post("files/new", { id, path: (dir ? dir + "/" : "") + n.replace(/^\/+/, ""), folder }); await refreshFiles();
+    if (!folder) { if (await leaveOk()) { setPrev(r.path); setTab("edit"); } } else toast("Folder " + r.path + " made");
+  });
+  const fRename = guard(async (en) => {
+    const old = baseName(en.path), n = await nameAsk("Rename " + old, old, "Rename"); if (!n || n === old) return;
+    const to = (parentOf(en.path) ? parentOf(en.path) + "/" : "") + n;
+    await fsOp(en.path, async () => { const r = await post("files/rename", { id, path: en.path, to }); if (touchesOpen(en.path)) { dirtyRef.current = false; setPrev(r.path + prev.slice(en.path.length)); } if (fileClip && fileClip.id === id && under(fileClip.path, en.path)) fileClip = { ...fileClip, path: r.path + fileClip.path.slice(en.path.length) }; toast("Renamed to " + n); });
+  });
+  const fDelete = guard(async (en) => {
+    const n = en.dir ? files.filter((f) => under(f.path, en.path)).length : 0;
+    if (!(await confirmBox({ title: "Delete " + baseName(en.path) + "?", text: (en.dir ? "This folder" + (n ? " and the " + n + " file" + (n === 1 ? "" : "s") + " in it are" : " is") : "This file is") + " removed from " + (dirInfo.dir || "the chat's folder") + ". It does not go to the Trash.", ok: "Delete", danger: true }))) return;
+    await fsOp(en.path, async () => { await post("files/delete", { id, path: en.path }); if (touchesOpen(en.path)) { dirtyRef.current = false; setPrev(""); } if (fileClip && fileClip.id === id && under(fileClip.path, en.path)) { fileClip = null; setClipV((v) => v + 1); } toast("Deleted " + baseName(en.path)); });
+  });
+  const fClip = (en, cut) => { fileClip = { id, path: en.path, dir: en.dir, cut }; setClipV((v) => v + 1); toast((cut ? "Cut " : "Copied ") + baseName(en.path) + ": right-click a folder and Paste"); };
+  const fPaste = guard(async (dir) => {
+    const c = fileClip; if (!c) return;
+    const move = c.cut, mine = c.id === id;
+    if (move && mine && parentOf(c.path) === dir) { fileClip = null; setClipV((v) => v + 1); return; }
+    await fsOp(move && mine ? c.path : "", async () => {
+      const r = await post("files/copy", { id, from: c.id, path: c.path, to: dir, move });
+      if (move) { if (mine && touchesOpen(c.path)) { dirtyRef.current = false; setPrev(r.path + prev.slice(c.path.length)); } fileClip = null; setClipV((v) => v + 1); }
+      toast((move ? "Moved " : "Pasted ") + r.path);
+    });
+  });
+  const fDup = guard(async (en) => { const r = await post("files/copy", { id, path: en.path, to: parentOf(en.path) }); await refreshFiles(); toast("Made " + r.path); });
+  const fDownload = (en) => { const a = document.createElement("a"); a.href = en.dir ? "/api/files/zip?id=" + encodeURIComponent(id) + "&path=" + encodeURIComponent(en.path) : src(en.path) + "?download=1"; a.download = ""; document.body.appendChild(a); a.click(); a.remove(); };
+  const fUploadPick = (dir) => { upTo.current = dir; upIn.current && upIn.current.click(); };
+  const fUpload = guard(async (list) => {
+    const dir = upTo.current, big = list.find((f) => f.size > 28 * 1048576); if (big) return toast(big.name + " is over 28 MB: copy it into " + (dirInfo.dir || "the folder") + " with Finder / Explorer");
+    let n = 0; for (const f of list) { toast("Uploading " + f.name + "…"); await post("files/upload", { id, dir, name: f.name, data: await b64Of(f) }); n++; }
+    await refreshFiles(); toast(n === 1 ? "Uploaded " + list[0].name : "Uploaded " + n + " files");
+  });
+  const openEntry = async (en, t) => { if (en.path === prev) return setTab(t); if (!(await leaveOk())) return; dirtyRef.current = false; setPrev(en.path); setTab(t); setOpen(true); };
+  const fileMenuItems = (en) => {
+    const c = fileClip, mod = isMacUI ? "⌘" : "Ctrl+", here = en.dir ? en.path : parentOf(en.path), top = !en.path;
+    const pasteLabel = c ? (c.cut ? "Paste (move " : "Paste (") + baseName(c.path) + ")" : "Paste";
+    if (top) return [["New file…", "file", "", false, () => fNew("", false)], ["New folder…", "folder", "", false, () => fNew("", true)], ["Upload files…", "upload", "", false, () => fUploadPick("")], "-",
+      [pasteLabel, "clip", mod + "V", !c, () => fPaste("")], "-",
+      ["Copy folder path", "copy", "", !dirInfo.dir, () => copyText(dirInfo.dir, "the folder path")], ["Download all as .zip", "download", "", !files.length, () => fDownload({ path: "", dir: true })], ["Refresh", "refresh", "", false, refreshFiles], "-",
+      ["Open in VS Code", "code", "", false, () => openCode("")], ["Show in Finder / Explorer", "folder", "", false, () => openDir("")]];
+    return [
+      !en.dir && canPrev(en.path) && ["Open preview", "eye", "", false, () => openEntry(en, "preview")],
+      !en.dir && ["Edit", "edit", "", false, () => openEntry(en, "edit")],
+      !en.dir && ["Diff", "layers", "", false, () => openEntry(en, "diff")],
+      en.dir && ["New file here…", "file", "", false, () => fNew(here, false)], en.dir && ["New folder here…", "folder", "", false, () => fNew(here, true)], en.dir && ["Upload files here…", "upload", "", false, () => fUploadPick(here)],
+      "-",
+      ["Cut", "shrink", mod + "X", false, () => fClip(en, true)], ["Copy", "copy", mod + "C", false, () => fClip(en, false)], [pasteLabel + (en.dir ? " into " + baseName(en.path) : " here"), "clip", mod + "V", !c, () => fPaste(here)], ["Duplicate", "layers", mod + "D", false, () => fDup(en)],
+      "-",
+      ["Rename…", "edit", "F2", false, () => fRename(en)], ["Copy path", "link", "", false, () => copyText(absOf(en.path), "the path")], ["Copy relative path", "link", "", false, () => copyText(en.path, "the relative path")],
+      [en.dir ? "Download as .zip" : "Download", "download", "", false, () => fDownload(en)],
+      !en.dir && !/\.(exe|dll|zip|gz|tar|bin)$/i.test(en.path) && ["Share to a Space…", "share", "", false, () => share(en.path, false)],
+      "-",
+      ["Open in VS Code", "code", "", false, () => openCode(en.path)], ["Show in Finder / Explorer", "folder", "", false, () => openDir(en.path)],
+      "-",
+      ["Delete", "trash", isMacUI ? "⌘⌫" : "Del", false, () => fDelete(en), true]];
+  };
+  const openMenu = (e, en) => setFmenu({ at: menuAt(e), en });
+  const treeKey = (e, en) => {                                                          // shortcuts on a focused row of the file list
+    const m = isMacUI ? e.metaKey : e.ctrlKey, k = e.key.toLowerCase();
+    const go = (fn) => { e.preventDefault(); e.stopPropagation(); fn(); return true; };
+    if (e.key === "F2") return go(() => fRename(en));
+    if (e.key === "Delete" || (m && e.key === "Backspace")) return go(() => fDelete(en));
+    if (m && k === "c") return go(() => fClip(en, false));
+    if (m && k === "x") return go(() => fClip(en, true));
+    if (m && k === "v" && fileClip) return go(() => fPaste(en.dir ? en.path : parentOf(en.path)));
+    if (m && k === "d") return go(() => fDup(en));
+    if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) return go(() => setFmenu({ at: menuAt(null, e.currentTarget), en }));
+    return false;
+  };
+  const cutPath = clipV >= 0 && fileClip && fileClip.cut && fileClip.id === id ? fileClip.path : "";
   const switchTo = async (f) => { if (f.path === prev) return; if (dirtyRef.current && !(await discard(baseName(prev)))) return; dirtyRef.current = false; setPrev(f.path); };
-  const editEl = prev && html`<div class="edlay">${rail && html`<div class="edfiles" style=${"width:" + ew + "px"}><${FileTree} files=${files} sel=${prev} src=${src} onPick=${switchTo}/></div><${Grip} cls="ed-grip" value=${() => ew} onChange=${setEw} onDone=${(v) => setPref("edw", String(v))} min=${120} max=${420} sign=${1} reset=${() => { setEw(200); setPref("edw", "200"); }}/>`}<${Editor} key=${prev} id=${id} path=${prev} ver=${fver} onSaved=${refreshFiles} dirtyRef=${dirtyRef}/></div>`, diffEl = html`<${DiffView} key=${prev || "-"} id=${id} path=${prev} ver=${fver} rev=${fsig} api=${api} put=${put} onPick=${(p) => switchTo({ path: p })} onSaved=${refreshFiles}/>`;
+  const editEl = prev && html`<div class="edlay">${rail && html`<div class="edfiles" style=${"width:" + ew + "px"}><${FileTree} files=${files} dirs=${dirs} sel=${prev} src=${src} onPick=${switchTo} onMenu=${openMenu} onKey=${treeKey} cut=${cutPath}/></div><${Grip} cls="ed-grip" value=${() => ew} onChange=${setEw} onDone=${(v) => setPref("edw", String(v))} min=${120} max=${420} sign=${1} reset=${() => { setEw(200); setPref("edw", "200"); }}/>`}<${Editor} key=${prev} id=${id} path=${prev} ver=${fver} onSaved=${refreshFiles} dirtyRef=${dirtyRef}/></div>`, diffEl = html`<${DiffView} key=${prev || "-"} id=${id} path=${prev} ver=${fver} rev=${fsig} api=${api} put=${put} onPick=${(p) => switchTo({ path: p })} onSaved=${refreshFiles}/>`;
   const openDiff = (p) => { setPref("diffbase", "git"); setPrev(p); setTab("diff"); };
   // the message list is rebuilt only when the history, the busy state, the edit box or the folder signature change, not for every streamed token
   const histEl = useMemo(() => hist.map((e, i) => e.parent || e.k === "task" ? null : e.k === "user" ? html`<div class="msg user">${edit && edit.i === i ? null : acts(e, i, true)}${edit && edit.i === i ? html`<div class="bub editing"><textarea rows="3" value=${edit.text} autofocus onInput=${(x) => setEdit({ ...edit, text: x.target.value })} onKeyDown=${(x) => { if (x.key === "Escape") setEdit(null); else if (x.key === "Enter" && (x.metaKey || x.ctrlKey)) saveEdit(); }}></textarea>
@@ -942,19 +1034,21 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     <div class=${"canvas" + (open ? " open" : "") + (split && (tab === "edit" || tab === "diff") ? " wide" : "")} style=${cw ? "--cw:" + cw + "px" : ""}>
       ${open && html`<${Grip} cls="cv-grip" value=${() => document.querySelector(".canvas").getBoundingClientRect().width} onChange=${setCw} onDone=${(v) => setPref("canvasw", String(Math.round(v)))} min=${360} max=${() => Math.max(420, innerWidth - 272 - 320)} sign=${-1} reset=${() => { setCw(0); setPref("canvasw", "0"); }}/>`}
       <div class="ctabs"><${Seg} small value=${tab} onChange=${changeTab} items=${[{ id: "files", label: "Files", icon: "folder" }, { id: "preview", label: "Preview", icon: "eye" }, { id: "edit", label: "Edit", icon: "edit" }, { id: "diff", label: "Diff", icon: "layers" }, { id: "git", label: "Git", icon: "branch" }, { id: "elements", label: "Elements", icon: "grid" }]}/><button class="ibtn cv-x" title="Close the canvas" aria-label="Close the canvas" onClick=${() => setOpen(false)}>${Ic("x", 16)}</button></div>
-      ${(tab === "preview" || tab === "edit" || tab === "diff") && html`<div class="fbar"><span class="mono t" title=${prev}>${prev || "No file selected"}</span>${prev && canPrev(prev) && html`<a class="small" href=${src(prev)} target="_blank" rel="noopener">Open ${Ic("link", 12)}</a>`}${prev && !/\.(exe|dll|zip|gz|tar|bin)$/i.test(prev) && html`<button class="btn" title="Publish this file as a Space on the hub" onClick=${() => share(prev, false)}>${Ic("upload", 13)} Share</button>`}${/(^|\/)index\.html?$/i.test(prev || "") && html`<button class="btn" title="Publish the whole folder as a web page Space" onClick=${() => share(prev, true)}>${Ic("folder", 13)} Share bundle</button>`}
+      ${(tab === "preview" || tab === "edit" || tab === "diff") && html`<div class="fbar" onContextMenu=${(e) => { if (!prev || e.target.closest("button,a,input")) return; e.preventDefault(); openMenu(e, { path: prev, dir: false }); }}><span class="mono t" title=${prev ? prev + " (right-click for file actions)" : ""}>${prev || "No file selected"}</span>${prev && html`<button class="ibtn" style="width:26px;height:26px" title="File actions: rename, copy, paste, download…" aria-label="File actions" onClick=${(e) => openMenu(e, { path: prev, dir: false })}>${Ic("more", 14)}</button>`}${prev && canPrev(prev) && html`<a class="small" href=${src(prev)} target="_blank" rel="noopener">Open ${Ic("link", 12)}</a>`}${prev && !/\.(exe|dll|zip|gz|tar|bin)$/i.test(prev) && html`<button class="btn" title="Publish this file as a Space on the hub" onClick=${() => share(prev, false)}>${Ic("upload", 13)} Share</button>`}${/(^|\/)index\.html?$/i.test(prev || "") && html`<button class="btn" title="Publish the whole folder as a web page Space" onClick=${() => share(prev, true)}>${Ic("folder", 13)} Share bundle</button>`}
         ${tab === "edit" && html`<button class=${"ibtn" + (rail ? " on" : "")} style="width:26px;height:26px" title="Show the file list beside the editor" aria-label="Show the file list beside the editor" onClick=${() => { setRail(!rail); setPref("edrail", rail ? "0" : "1"); }}>${Ic("folder", 14)}</button>`}
         ${prev && html`<button class="btn" title="Open this file, in the project folder, in VS Code" onClick=${() => openCode(prev)}>${Ic("code", 13)} VS Code</button><button class="btn" title="Show this file in its folder (Finder / Explorer)" onClick=${() => openDir(prev)}>${Ic("folder", 13)} Open folder</button>`}
         ${(tab === "edit" || tab === "diff") && html`<button class=${"ibtn" + (split ? " on" : "")} style="width:26px;height:26px" title="Show the preview beside the editor or diff" aria-label="Show the preview beside the editor or diff" onClick=${() => setSplit(!split)}>${Ic("panel", 14)}</button>`}</div>`}
       <div class="cbody">
         ${tab === "files" && html`<div class="fdir"><span class="mono t" title=${dirInfo.dir}>${dirInfo.dir}</span><button class="btn" title="Open the project folder in VS Code" onClick=${() => openCode("")}>${Ic("code", 13)} VS Code</button><button class="btn" title="Open the project folder in Finder / Explorer" onClick=${() => openDir("")}>${Ic("folder", 13)} Open folder</button><button class="btn" onClick=${() => setDlg("dir")}>${Ic("folder", 13)} Change</button></div>
-          ${files.length ? html`<${FileTree} files=${files} sel=${prev} src=${src} onPick=${pickFile}/>` : html`<div class="empty"><div>${Ic("folder", 26)}<div>No files yet.<br/>Ask Claude to build something.</div></div></div>`}`}
+          ${files.length || dirs.length ? html`<${FileTree} files=${files} dirs=${dirs} sel=${prev} src=${src} onPick=${pickFile} onMenu=${openMenu} onKey=${treeKey} cut=${cutPath}/>` : html`<div class="empty" onContextMenu=${(e) => { e.preventDefault(); openMenu(e, { path: "", dir: true }); }}><div>${Ic("folder", 26)}<div>No files yet.<br/>Ask Claude to build something.</div><button class="btn" style="margin-top:10px" onClick=${() => fNew("", false)}>${Ic("plus", 13)} New file</button></div></div>`}`}
         ${tab === "preview" && previewEl}
         ${tab === "diff" && !prev && diffEl}
         ${tab === "git" && html`<${GitView} id=${id} api=${api} rev=${fsig} file=${prev} onOpenDiff=${openDiff}/>`}
         ${(tab === "edit" || (tab === "diff" && prev)) && (!prev ? noFile : split && canPrev(prev) ? html`<div class="split"><div class="pane">${previewEl}</div><div class="pane">${tab === "edit" ? editEl : diffEl}</div></div>` : tab === "edit" ? editEl : diffEl)}
         ${tab === "elements" && (els.length ? els.map((e, i) => html`<${Element} key=${e.id} e=${e}/>`) : html`<div class="empty"><div>${Ic("layers", 26)}<div>Use Render on an html, svg or openui block<br/>to see it here.</div></div></div>`)}
       </div>
+      ${fmenu && html`<${CtxMenu} at=${fmenu.at} items=${fileMenuItems(fmenu.en)} close=${() => setFmenu(null)}/>`}
+      <input type="file" multiple hidden ref=${upIn} onChange=${(e) => { const l = [...e.target.files]; e.target.value = ""; if (l.length) fUpload(l); }}/>
     </div>
   </div>`;
 }

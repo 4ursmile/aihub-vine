@@ -128,6 +128,29 @@ class Http(unittest.TestCase):
         c, body, h = self.req(url, "HEAD")
         self.assertEqual((c, body, h["Content-Length"]), (200, b"", "1024"))
 
+    def test_file_menu_routes(self):
+        import base64
+        import io
+        import zipfile
+        sid, _ = self.chat_file("a.txt", b"A")
+        self.assertEqual(self.api("POST", "files/new", {"id": sid, "path": "box", "folder": True}), (200, {"path": "box"}))
+        c, d = self.api("GET", "files?id=" + sid)
+        self.assertEqual((c, d["dirs"]), (200, ["box"]))
+        self.assertEqual(self.api("POST", "files/copy", {"id": sid, "path": "a.txt", "to": "box"}), (200, {"path": "box/a.txt"}))
+        self.assertEqual(self.api("POST", "files/rename", {"id": sid, "path": "box/a.txt", "to": "box/b.txt"}), (200, {"path": "box/b.txt"}))
+        c, d = self.api("POST", "files/rename", {"id": sid, "path": "a.txt", "to": "box/b.txt"})
+        self.assertEqual(c, 409)
+        c, d = self.api("POST", "files/copy", {"id": sid, "path": "../x", "to": ""})
+        self.assertEqual(c, 400)
+        self.assertEqual(self.api("POST", "files/upload", {"id": sid, "dir": "box", "name": "u.bin", "data": base64.b64encode(b"\x00u").decode()}), (200, {"path": "box/u.bin"}))
+        c, raw, h = self.req("/api/files/zip?id=%s&path=box" % sid, headers={"Cookie": "aihub_ui=" + self.server.TOKEN})
+        self.assertEqual((c, h["Content-Type"]), (200, "application/zip"))
+        self.assertIn("box.zip", h["Content-Disposition"])
+        self.assertEqual(sorted(zipfile.ZipFile(io.BytesIO(raw)).namelist()), ["box/b.txt", "box/u.bin"])
+        self.assertEqual(self.api("POST", "files/delete", {"id": sid, "path": "box"})[0], 200)
+        c, d = self.api("GET", "files?id=" + sid)
+        self.assertEqual([f["path"] for f in d["files"]], ["a.txt"])
+
     def test_files_content_conflict(self):
         sid, _ = self.chat_file("n.txt", b"one")
         c, d = self.api("GET", "files/content?id=%s&path=n.txt" % sid)

@@ -486,6 +486,210 @@ def tree(sid, limit=None):
     return out
 
 
+def empty_dirs(sid, limit=300):
+    """Folders of the working folder with no file the tree lists (a New folder), so the page can show them: ["a", "a/b", ...]."""
+    root, out = session_dir(sid), []
+    for d, dirs, fs in os.walk(root):
+        dirs[:] = sorted(x for x in dirs if not x.startswith(".") and x not in SKIP_DIRS)
+        if d != root and not any(not f.startswith(".") for f in fs) and not dirs:
+            out.append(os.path.relpath(d, root).replace(os.sep, "/"))
+            if len(out) >= limit:
+                break
+    return out
+
+
+# ---- file manager of the working folder (the canvas right-click menu): new, rename / move, copy / paste, delete, upload, zip
+COPY_MAX = 1 << 30                                          # bytes a copy, a zip or an upload may hold
+
+
+def _parts(rel):
+    parts = [x for x in str(rel or "").replace("\\", "/").split("/") if x and x != "."]
+    if not parts or ".." in parts or ".git" in parts:
+        raise ValueError("bad path: %s" % (rel or "(empty)"))
+    return parts
+
+
+def _entry(sid, rel, exists=True):
+    """(path, clean rel) of a file or folder of the chat's folder: the parent is resolved (it must stay inside), the name is not, so a symlink
+    is renamed / deleted itself, never what it points to. EXISTS False: it must not exist yet (FileExistsError); None: either."""
+    parts = _parts(rel)
+    root = os.path.realpath(session_dir(sid))
+    parent = safe_join(root, "/".join(parts[:-1])) if len(parts) > 1 else root
+    if not parent:
+        raise ValueError("bad path: %s" % rel)
+    p, clean = os.path.join(parent, parts[-1]), "/".join(parts)
+    if exists and not os.path.lexists(p):
+        raise LookupError("no such file or folder: %s" % clean)
+    if exists is False and os.path.lexists(p):
+        raise FileExistsError("%s already exists" % clean)
+    return p, clean
+
+
+def _rel_of(sid, p):
+    return os.path.relpath(p, os.path.realpath(session_dir(sid))).replace(os.sep, "/")
+
+
+def _size(p, cap=COPY_MAX):
+    if os.path.islink(p) or not os.path.isdir(p):
+        return os.lstat(p).st_size
+    n = 0
+    for d, _, fs in os.walk(p):
+        for f in fs:
+            try:
+                n += os.lstat(os.path.join(d, f)).st_size
+            except OSError:
+                pass
+            if n > cap:
+                return n
+    return n
+
+
+def _free_name(folder, name, tag=" copy"):
+    """NAME, or "stem copy.ext", "stem copy 2.ext" ... when NAME is taken in FOLDER (a folder keeps its whole name as the stem)."""
+    if not os.path.lexists(os.path.join(folder, name)):
+        return name
+    full = os.path.join(folder, name)
+    stem, ext = (name, "") if os.path.isdir(full) and not os.path.islink(full) else os.path.splitext(name)
+    if stem.startswith(".") and not ext:
+        stem, ext = name, ""
+    for i in range(1, 1000):
+        cand = "%s%s%s%s" % (stem, tag, "" if i == 1 else " %d" % i, ext)
+        if not os.path.lexists(os.path.join(folder, cand)):
+            return cand
+    raise FileExistsError("no free name for %s" % name)
+
+
+def fs_new(sid, rel, folder=False):
+    """Make an empty file (or a folder) REL; missing parent folders are made. -> {"path"}."""
+    p, clean = _entry(sid, rel, exists=False)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    if folder:
+        os.mkdir(p)
+    else:
+        with open(p, "x", encoding="utf-8"):
+            pass
+    return {"path": clean}
+
+
+def fs_rename(sid, rel, to):
+    """Rename or move REL to TO (both relative to the chat's folder). Never overwrites, never moves a folder into itself."""
+    src, a = _entry(sid, rel)
+    dst, b = _entry(sid, to, exists=False)
+    if b == a or b.startswith(a + "/"):
+        raise ValueError("cannot move %s into itself" % a)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    os.rename(src, dst)
+    return {"path": b}
+
+
+def fs_copy(src_sid, rel, dst_sid, to_dir="", move=False, name=None):
+    """Paste: copy (or MOVE) REL of chat SRC_SID into folder TO_DIR ("" = top) of chat DST_SID. A taken name gets " copy" (" copy 2" ...);
+    moving into the folder it is already in changes nothing. -> {"path"} of the pasted file or folder."""
+    src, a = _entry(src_sid, rel)
+    if to_dir:
+        folder, d = _entry(dst_sid, to_dir)
+        if not os.path.isdir(folder):
+            raise ValueError("%s is not a folder" % d)
+    else:
+        folder, d = os.path.realpath(session_dir(dst_sid)), ""
+    same = os.path.realpath(session_dir(src_sid)) == os.path.realpath(session_dir(dst_sid))
+    if same and os.path.isdir(src) and not os.path.islink(src) and (d == a or d.startswith(a + "/")):
+        raise ValueError("cannot paste %s into itself" % a)
+    if move and same and os.path.dirname(a) == d:
+        return {"path": a}
+    base = os.path.basename(name or a)
+    if not base or base in (".", "..", ".git") or "/" in base or "\\" in base:
+        raise ValueError("bad name: %s" % base)
+    if not move and _size(src) > COPY_MAX:
+        raise ValueError("%s is too big to copy here (over 1 GB)" % a)
+    dst = os.path.join(folder, _free_name(folder, base))
+    if move:
+        shutil.move(src, dst)
+    elif os.path.isdir(src) and not os.path.islink(src):
+        shutil.copytree(src, dst, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+    else:
+        shutil.copy2(src, dst, follow_symlinks=False)
+    return {"path": _rel_of(dst_sid, dst)}
+
+
+def fs_delete(sid, rel):
+    p, clean = _entry(sid, rel)
+    if os.path.isdir(p) and not os.path.islink(p):
+        shutil.rmtree(p)
+    else:
+        os.remove(p)
+    return {"ok": True, "path": clean}
+
+
+def fs_upload(sid, to_dir, name, data, replace=False):
+    """Write DATA (bytes) as NAME in folder TO_DIR ("" = top; made when missing). A taken name gets " (2)" ... unless REPLACE. -> {"path"}."""
+    base = str(name or "").replace("\\", "/").split("/")[-1]
+    rel = (str(to_dir or "").strip("/") + "/" if str(to_dir or "").strip("/") else "") + base
+    p, clean = _entry(sid, rel, exists=None)
+    if os.path.isdir(p):
+        raise FileExistsError("%s is a folder" % clean)
+    if os.path.lexists(p) and not replace:
+        p = os.path.join(os.path.dirname(p), _paren_name(os.path.dirname(p), base))
+        clean = _rel_of(sid, p)
+    if len(data) > COPY_MAX:
+        raise ValueError("file too big")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = "%s.aihub-%s.tmp" % (p, secrets.token_hex(4))
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    return {"path": clean}
+
+
+def _paren_name(folder, name):
+    stem, ext = os.path.splitext(name)
+    for i in range(2, 1000):
+        cand = "%s (%d)%s" % (stem, i, ext)
+        if not os.path.lexists(os.path.join(folder, cand)):
+            return cand
+    raise FileExistsError("no free name for %s" % name)
+
+
+def fs_zip(sid, rel=""):
+    """A zip of folder REL ("" = the whole working folder) in a temp file: hidden files and SKIP_DIRS are left out. -> (temp path, download name)."""
+    import tempfile
+    import zipfile
+    if rel:
+        p, clean = _entry(sid, rel)
+        if not os.path.isdir(p):
+            raise ValueError("%s is not a folder" % clean)
+        name = os.path.basename(clean)
+    else:
+        p = os.path.realpath(session_dir(sid))
+        name = os.path.basename(p.rstrip(os.sep)) or "files"
+    fd, tmp = tempfile.mkstemp(prefix="aihub-zip-", suffix=".zip")
+    os.close(fd)
+    total = 0
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as z:
+            for d, dirs, fs in os.walk(p):
+                dirs[:] = sorted(x for x in dirs if not x.startswith(".") and x not in SKIP_DIRS)
+                for f in sorted(fs):
+                    full = os.path.join(d, f)
+                    if f.startswith(".") or os.path.islink(full) or not os.path.isfile(full):
+                        continue
+                    total += os.path.getsize(full)
+                    if total > COPY_MAX:
+                        raise ValueError("the folder is too big to zip here (over 1 GB)")
+                    z.write(full, os.path.join(name, os.path.relpath(full, p)))
+    except BaseException:
+        os.remove(tmp)
+        raise
+    return tmp, name + ".zip"
+
+
 # ---- reading, editing and comparing one file of the working folder
 MAX_TEXT = 1_500_000
 SNAP_FILES, SNAP_FILE_MAX, SNAP_TOTAL = 400, 256_000, 20_000_000

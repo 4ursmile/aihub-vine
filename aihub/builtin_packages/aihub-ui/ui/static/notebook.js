@@ -63,11 +63,77 @@ export function Output({ o }) {
   if (v === undefined) { v = renderOutput(o); outCache.set(o, v); }
   return v;
 }
+// a terminal's carriage return: what follows \r writes over the start of the line (tqdm, pip, any progress bar). A trailing \r is kept so the
+// next chunk of the stream still overwrites the line; \r\n is a plain line end. Folding while streaming keeps a long progress loop small.
+export function fixCR(s) {
+  if (typeof s !== "string" || s.indexOf("\r") < 0) return s;
+  return s.replace(/\r+\n/g, "\n").split("\n").map((l) => {
+    if (l.indexOf("\r") < 0) return l;
+    const parts = l.split("\r"), pend = parts[parts.length - 1] === "";
+    let out = ""; for (const p of parts) out = p + out.slice(p.length);
+    return pend ? out + "\r" : out;
+  }).join("\n");
+}
+// ---------- ipywidgets (tqdm.notebook / tqdm.auto progress bars, labels, boxes): the kernel's comm messages keep the models here,
+// a widget output shows its live model. widgetSnap() writes the model as text into text/plain so a saved notebook still shows the last state.
+export const W_MIME = "application/vnd.jupyter.widget-view+json";
+const wModels = new Map(), wSubs = new Set();
+let wQueued = false;
+const wRef = (v) => (typeof v === "string" && v.startsWith("IPY_MODEL_") ? v.slice(10) : "");
+const wPing = () => { if (wQueued) return; wQueued = true; requestAnimationFrame(() => { wQueued = false; wSubs.forEach((f) => f()); }); };
+// kernel event {t, c} -> true when it is a comm message (handled here, never an output of a cell)
+export function widgetEvent(e) {
+  if (!e || !/^comm_(open|msg|close)$/.test(e.t)) return false;
+  const c = e.c || {}, id = c.comm_id, d = c.data || {};
+  if (!id) return true;
+  if (e.t === "comm_open") { if (/jupyter\.widget$/.test(c.target_name || "")) wModels.set(id, { ...(d.state || {}) }); else return true; }
+  else if (e.t === "comm_msg") { const m = wModels.get(id); if (!m || (d.method !== "update" && d.method !== "echo_update")) return true; wModels.set(id, { ...m, ...(d.state || {}) }); }
+  else { const m = wModels.get(id); if (!m) return true; wModels.set(id, { ...m, _closed: true }); }
+  if (wModels.size > 5000) wModels.delete(wModels.keys().next().value);
+  wPing(); return true;
+}
+const htmlText = (v) => { try { return new DOMParser().parseFromString(String(v || ""), "text/html").body.textContent.replace(/\u00a0/g, " "); } catch (e) { return String(v || ""); } };
+const wKind = (m) => String(m._model_name || "").replace(/Model$/, "");
+const wHidden = (m) => { const l = wModels.get(wRef(m.layout)) || {}; return m._closed || l.display === "none" || l.visibility === "hidden"; };
+function wText(id, depth = 0) {
+  const m = wModels.get(id); if (!m || depth > 8 || wHidden(m)) return "";
+  const k = wKind(m), desc = m.description ? m.description + " " : "";
+  if (/Box$/.test(k)) return (m.children || []).map((c) => wText(wRef(c), depth + 1)).join(/^VBox|GridBox$/.test(k) ? "\n" : "");
+  if (/Progress$/.test(k)) { const lo = +m.min || 0, hi = +m.max || 0, f = hi > lo ? Math.max(0, Math.min(1, ((+m.value || 0) - lo) / (hi - lo))) : 0, n = Math.round(f * 10); return desc + "|" + "█".repeat(n) + " ".repeat(10 - n) + "|"; }
+  if (/^HTML/.test(k)) return desc + htmlText(m.value);
+  return m.value != null && typeof m.value !== "object" ? desc + String(m.value) : desc.trim();
+}
+// outputs -> the same with each live widget's text/plain set to what it shows now (call when a cell is done)
+export function widgetSnap(outs) {
+  let ch = false;
+  const r = (outs || []).map((o) => { const v = o && o.data && o.data[W_MIME], id = v && v.model_id; if (!id || !wModels.has(id)) return o; const t = wText(id); if (!t || t === joinSrc(o.data["text/plain"])) return o; ch = true; return { ...o, data: { ...o.data, "text/plain": t } }; });
+  return ch ? r : outs;
+}
+function wView(id, depth) {
+  const m = wModels.get(id); if (!m || depth > 8 || wHidden(m)) return null;
+  const k = wKind(m), desc = m.description && html`<span class="nbw-d">${m.description}</span>`;
+  if (/Box$/.test(k)) return html`<div class=${"nbw-box" + (/^VBox|GridBox$/.test(k) ? " col" : "")}>${(m.children || []).map((c) => wView(wRef(c), depth + 1))}</div>`;
+  if (/Progress$/.test(k)) { const lo = +m.min || 0, hi = +m.max || 0, f = hi > lo ? Math.max(0, Math.min(1, ((+m.value || 0) - lo) / (hi - lo))) : 0;
+    return html`<span class="nbw-pw">${desc}<span class=${"nbw-bar " + (m.bar_style || "")} role="progressbar" aria-valuemin=${lo} aria-valuemax=${hi} aria-valuenow=${+m.value || 0}><i style=${"width:" + (f * 100).toFixed(2) + "%"}></i></span></span>`; }
+  if (/^HTML/.test(k)) return html`<span class="nbw-h">${desc}<span dangerouslySetInnerHTML=${{ __html: clean(String(m.value || ""), { FORBID_TAGS: ["style", "form", "input", "button"] }) }}></span></span>`;
+  if (k === "Label" || (m.value != null && typeof m.value !== "object")) return html`<span class="nbw-h">${desc}<span>${String(m.value ?? "")}</span></span>`;
+  return desc || null;
+}
+function WidgetOut({ o }) {
+  const [, tick] = useState(0);
+  useEffect(() => { const f = () => tick((n) => n + 1); wSubs.add(f); return () => { wSubs.delete(f); }; }, []);
+  const d = o.data || {}, id = (d[W_MIME] || {}).model_id;
+  if (id && wModels.has(id)) { const v = wView(id, 0); return v ? html`<div class="nb-o nbw">${v}</div>` : null; }
+  const s = joinSrc(d["text/plain"]).replace(ANSI, "");
+  if (!s || /^\w+\((children|value|layout|description)=/.test(s)) return html`<div class="nb-o mute small">Interactive widget: run the cell to see it.</div>`;
+  return html`<pre class="nb-o">${s.slice(0, MAX_OUT)}</pre>`;
+}
 function renderOutput(o) {
   const t = o.output_type, d = o.data || {};
-  if (t === "stream") { const s = joinSrc(o.text).replace(ANSI, ""); return html`<pre class=${"nb-o " + (o.name === "stderr" ? "err" : "")}>${s.slice(0, MAX_OUT)}${s.length > MAX_OUT ? "\n…" : ""}</pre>`; }
+  if (t === "stream") { const s = fixCR(joinSrc(o.text)).replace(/\r/g, "").replace(ANSI, ""); return html`<pre class=${"nb-o " + (o.name === "stderr" ? "err" : "")}>${s.slice(0, MAX_OUT)}${s.length > MAX_OUT ? "\n…" : ""}</pre>`; }
   if (t === "error") return html`<pre class="nb-o err">${((o.traceback || []).join("\n") || (o.ename + ": " + o.evalue)).replace(ANSI, "").slice(0, MAX_OUT)}</pre>`;
   if (t === "execute_result" || t === "display_data") {
+    if (d[W_MIME]) return html`<${WidgetOut} o=${o}/>`;
     for (const k of ["image/png", "image/jpeg", "image/gif"]) if (d[k]) return html`<div class="nb-o img"><img alt="output" src=${"data:" + k + ";base64," + joinSrc(d[k]).replace(/\s+/g, "")}/></div>`;
     if (d["image/svg+xml"]) return html`<div class="nb-o img" dangerouslySetInnerHTML=${{ __html: clean(joinSrc(d["image/svg+xml"]), { USE_PROFILES: { svg: true, svgFilters: true } }) }}></div>`;
     if (d["text/html"]) return html`<div class="nb-o html" dangerouslySetInnerHTML=${{ __html: clean(joinSrc(d["text/html"]).slice(0, MAX_OUT * 5), { FORBID_TAGS: ["style", "form", "input", "button"] }) }}></div>`;

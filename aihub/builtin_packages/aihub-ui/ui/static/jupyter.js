@@ -4,8 +4,8 @@
 // Data: /api/jupyter/* (server.py -> aihubui/jupyter.py). Tokens never reach the browser.
 import { html, useState, useEffect, useRef, useMemo, useCallback } from "./vendor/preact-htm.js";
 import { Ic } from "./icons.js";
-import { toast, guard, escPush, Seg, Modal, Switch, Pop, confirmBox, ask } from "./ui.js";
-import { Output, serializeNotebook, parseNotebook, cellsOf } from "./notebook.js";
+import { toast, guard, escPush, Seg, Modal, Switch, Pop, confirmBox, ask, CtxMenu, menuAt } from "./ui.js";
+import { Output, serializeNotebook, parseNotebook, cellsOf, fixCR, widgetEvent, widgetSnap } from "./notebook.js";
 import { Grid, drag } from "./sqlstudio.js";
 import { DataView, frameFromHtml, frameFromResource } from "./dataviz.js";
 import { Md } from "./blocks.js";
@@ -19,6 +19,7 @@ const enc = encodeURIComponent, sleep = (ms) => new Promise((r) => setTimeout(r,
 const uid = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join("");
 const join = (s) => (Array.isArray(s) ? s.join("") : typeof s === "string" ? s : "");
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
+let nbClip = null;                                                          // Copy / Cut of the Notebook file list: {sid, path, name, type, cut}
 const fmtSize = (n) => (n == null ? "" : n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB" : (n / 1048576).toFixed(1) + " MB");
 const ago = (t) => { const d = t ? (Date.now() - new Date(t).getTime()) / 1000 : NaN; return isNaN(d) ? "" : d < 60 ? "just now" : d < 3600 ? Math.floor(d / 60) + " min ago" : d < 86400 ? Math.floor(d / 3600) + " h ago" : d < 2592000 ? Math.floor(d / 86400) + " d ago" : new Date(t).toLocaleDateString(); };
 const KSHORT = { hub: "JupyterHub", server: "Jupyter Server", local: "Local" };
@@ -49,25 +50,12 @@ function OutBox({ scroll, running, children }) {
   useEffect(() => { const el = r.current; if (el && scroll && running && stick.current) el.scrollTop = el.scrollHeight; });
   return html`<div ref=${r} class=${"nb-outs " + (scroll ? "scroll" : "full")} onScroll=${(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24; }}>${children}</div>`;
 }
-// right-click menu at the pointer: items = [label, icon, hint, disabled, fn] or "-" for a separator. Closes on Esc, outside click, scroll, resize.
-function CtxMenu({ at, items, close }) {
-  const r = useRef(), [pos, setPos] = useState({ left: at.x, top: at.y });
-  useEffect(() => { const el = r.current; if (!el) return; const b = el.getBoundingClientRect(); setPos({ left: Math.max(4, Math.min(at.x, innerWidth - b.width - 4)), top: Math.max(4, at.y + b.height > innerHeight - 4 ? at.y - b.height : at.y) }); const f = el.querySelector(".opt:not(:disabled)"); if (f) f.focus(); }, [at]);
-  useEffect(() => {
-    const off = (e) => { if (r.current && !r.current.contains(e.target)) close(); }, pop = escPush(close), gone = () => close();
-    addEventListener("pointerdown", off, true); addEventListener("resize", gone); addEventListener("blur", gone); document.addEventListener("scroll", gone, true);
-    return () => { pop(); removeEventListener("pointerdown", off, true); removeEventListener("resize", gone); removeEventListener("blur", gone); document.removeEventListener("scroll", gone, true); };
-  }, []);
-  const nav = (e) => { if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return; e.preventDefault(); const bs = [...r.current.querySelectorAll(".opt:not(:disabled)")], i = bs.indexOf(document.activeElement); const n = bs[(i + (e.key === "ArrowDown" ? 1 : -1) + bs.length) % bs.length]; if (n) n.focus(); };
-  return html`<div ref=${r} class="nbj-ctx optlist" role="menu" style=${pos} onKeyDown=${nav} onContextMenu=${(e) => e.preventDefault()}>${items.filter(Boolean).map((it, k) => it === "-" ? html`<div key=${k} class="nbj-ctxsep" role="separator"></div>`
-    : html`<button key=${k} class=${"opt" + (it[5] ? " bad" : "")} role="menuitem" disabled=${it[3]} onClick=${() => { close(); it[4](); }}><span class="oi">${Ic(it[1], 14)}</span><span class="grow">${it[0]}</span>${it[2] && html`<kbd>${it[2]}</kbd>`}</button>`)}</div>`;
-}
 const withSql = (c, sql) => { const raw = { ...(c.raw || {}) }, md = { ...(raw.metadata || {}) }, ai = { ...(md.aihub || {}) }; if (sql) ai.sql = sql; else delete ai.sql; if (Object.keys(ai).length) md.aihub = ai; else delete md.aihub; raw.metadata = md; return raw; };
 
 // kernel output event -> the cell's nbformat outputs (same rules as the server's Fold)
 function fold(o, dids, e) {
   const t = e.t, c = e.c || {};
-  if (t === "stream") { const l = o[o.length - 1]; return l && l.output_type === "stream" && l.name === c.name ? [...o.slice(0, -1), { ...l, text: join(l.text) + (c.text || "") }] : [...o, { output_type: "stream", name: c.name || "stdout", text: c.text || "" }]; }
+  if (t === "stream") { const l = o[o.length - 1]; return l && l.output_type === "stream" && l.name === c.name ? [...o.slice(0, -1), { ...l, text: fixCR(join(l.text) + (c.text || "")) }] : [...o, { output_type: "stream", name: c.name || "stdout", text: fixCR(c.text || "") }]; }
   if (t === "display_data" || t === "execute_result" || t === "update_display_data") {
     const did = c.transient && c.transient.display_id;
     if (t === "update_display_data" && did && dids[did]) { const old = dids[did], nw = { ...old, data: c.data || {}, metadata: c.metadata || {} }; dids[did] = nw; return o.map((x) => (x === old ? nw : x)); }
@@ -150,6 +138,7 @@ function useKernel(server, path, nbKernel, post, api, ready) {
           for (const e of r.events) {
             after = e.n;
             if (e.t === "status" && e.c) setK((x) => (x.state === "dead" ? x : { ...x, state: e.c.execution_state === "busy" ? "busy" : "idle" }));
+            if (widgetEvent(e)) continue;                                       // ipywidgets (tqdm.notebook bars ...): models live in notebook.js
             const w = waiters.current[e.p];
             // done = execute_reply (shell) AND status idle (iopub). They come on separate channels, so the reply often
             // arrives before the last outputs: finishing on the reply alone dropped them. Same rule as the server's exec_wait.
@@ -258,7 +247,7 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
         upd(key, (x) => ({ outputs: fold(x.outputs, d, e) }));
       });
       if (reply.lost) { toast(reply.error || "Lost the connection to the kernel"); return false; }
-      upd(key, (x) => ({ raw: { ...(x.raw || {}), execution_count: reply.execution_count == null ? null : reply.execution_count } }));
+      upd(key, (x) => ({ outputs: widgetSnap(x.outputs), raw: { ...(x.raw || {}), execution_count: reply.execution_count == null ? null : reply.execution_count } }));
       return reply.status !== "error";
     } catch (e) { toast(e.message); return false; }
     finally { setRun((r) => { const n = { ...r }; delete n[key]; return n; }); }
@@ -582,21 +571,79 @@ function Workspace({ server, servers, conns, settings, models, post, api, go, us
   };
   const dref = (p) => (dirties.current[p] ||= { current: false });
   const reveal = (d) => { if (d && !exp.includes(d)) setExp((e) => [...e, d]); };
-  const mk = guard(async (type) => {
-    const v = await ask({ title: (type === "notebook" ? "New notebook" : type === "file" ? "New file" : "New folder") + (dir ? " in " + dir : ""), submit: "Create", fields: [{ name: "name", label: "Name", type: "text", value: type === "notebook" ? "Untitled.ipynb" : type === "file" ? "untitled.txt" : "new-folder" }] });
+  const mk = guard(async (type, at) => {
+    const d = at == null ? dir : at;
+    const v = await ask({ title: (type === "notebook" ? "New notebook" : type === "file" ? "New file" : "New folder") + (d ? " in " + d : ""), submit: "Create", fields: [{ name: "name", label: "Name", type: "text", value: type === "notebook" ? "Untitled.ipynb" : type === "file" ? "untitled.txt" : "new-folder" }] });
     if (!v || !v.name.trim()) return;
-    const r = await post("jupyter/file/new", { server: sid, dir, type, name: v.name.trim() }); reveal(dir); await loadDir(dir); if (type !== "directory") open(r.path);
+    const r = await post("jupyter/file/new", { server: sid, dir: d, type, name: v.name.trim() }); reveal(d); await loadDir(d); if (type !== "directory") open(r.path);
   });
   const rename = guard(async (it) => {
     const v = await ask({ title: "Rename", submit: "Rename", fields: [{ name: "name", label: "New name", type: "text", value: it.name }] });
     if (!v || !v.name.trim() || v.name === it.name) return;
     const to = (up(it.path) ? up(it.path) + "/" : "") + v.name.trim(); await post("jupyter/file/rename", { server: sid, path: it.path, to });
-    setTabs((t) => t.map((x) => (x === it.path ? to : x))); if (cur === it.path) setCur(to); loadDir(up(it.path));
+    moved(it.path, to); loadDir(up(it.path));
   });
   const del = guard(async (it) => {
     if (!(await confirmBox({ title: "Delete " + it.name + "?", text: "It is removed from the Jupyter server.", ok: "Delete", danger: true }))) return;
     await post("jupyter/file/delete", { server: sid, path: it.path }); setTabs((t) => t.filter((x) => x !== it.path && !x.startsWith(it.path + "/"))); if (cur === it.path) setCur(""); loadDir(up(it.path));
   });
+  // tabs (and the clipboard) follow a file or folder that was renamed / moved from A to B
+  const moved = (a, b) => { const m = (x) => (x === a ? b : x.startsWith(a + "/") ? b + x.slice(a.length) : x); setTabs((t) => t.map(m)); setCur((c) => m(c)); if (nbClip && nbClip.sid === sid) nbClip = { ...nbClip, path: m(nbClip.path) }; };
+  // ---- right-click menu of a file, a folder, an open tab or the empty list (paths are the server's; "" = its top folder)
+  const [fctx, setFctx] = useState(null), [, setClipV] = useState(0);
+  const openF = (e, it) => { e.preventDefault(); e.stopPropagation(); setFctx({ at: menuAt(e), it }); };
+  const copyText = async (t) => { try { await navigator.clipboard.writeText(t); toast("Copied " + t); } catch (e) { toast("Could not copy: " + t); } };
+  const fClip = (it, cut) => { nbClip = { sid, path: it.path, name: it.name, type: it.type, cut }; setClipV((v) => v + 1); toast((cut ? "Cut " : "Copied ") + it.name + ": right-click a folder and Paste"); };
+  const fPaste = guard(async (to) => {
+    const c = nbClip; if (!c) return;
+    if (c.sid !== sid) return toast("Paste works inside one server: download the file and upload it here");
+    if (c.cut) {
+      if (up(c.path) === to) { nbClip = null; setClipV((v) => v + 1); return; }
+      if (c.type === "directory" && (to === c.path || to.startsWith(c.path + "/"))) return toast("Cannot move a folder into itself");
+      const dest = (to ? to + "/" : "") + c.name;
+      if ((kids[to] || []).some((x) => x.name === c.name)) return toast(c.name + " already exists in " + (to || "the top folder"));
+      await post("jupyter/file/rename", { server: sid, path: c.path, to: dest }); moved(c.path, dest); nbClip = null; setClipV((v) => v + 1);
+      reveal(to); loadDir(up(c.path)); loadDir(to); toast("Moved to " + dest); return;
+    }
+    const r = await post("jupyter/file/copy", { server: sid, path: c.path, to }); reveal(to); loadDir(to); toast("Pasted " + (r.path || c.name));
+  });
+  const fDup = guard(async (it) => { const r = await post("jupyter/file/copy", { server: sid, path: it.path, to: up(it.path) }); loadDir(up(it.path)); toast("Made " + (r.path || "a copy")); });
+  const fDownload = guard(async (it) => {
+    const dirty = dirties.current[it.path] && dirties.current[it.path].current; if (dirty) toast("Downloading the saved version (save first to include your changes)");
+    const r = await post("jupyter/file/get", { server: sid, path: it.path });
+    let blob;
+    if (r.format === "base64") { const bin = atob(String(r.content || "").replace(/\s+/g, "")), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); blob = new Blob([u], { type: r.mimetype || "application/octet-stream" }); }
+    else blob = new Blob([r.format === "json" || typeof r.content !== "string" ? JSON.stringify(r.content, null, 1) + "\n" : r.content], { type: r.mimetype || (it.type === "notebook" ? "application/x-ipynb+json" : "text/plain") });
+    const url = URL.createObjectURL(blob), a = document.createElement("a"); a.href = url; a.download = it.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
+  });
+  const uploadTo = (d) => { setDir(d); fileIn.current && fileIn.current.click(); };
+  const fItems = (it, tab) => {
+    const c = nbClip, mod = /Mac/.test(navigator.platform) ? "⌘" : "Ctrl+";
+    if (!it) return [["New notebook", "book", "", false, () => mk("notebook", "")], ["New file", "file", "", false, () => mk("file", "")], ["New folder", "folder", "", false, () => mk("directory", "")], ["Upload files…", "upload", "", !!upl, () => uploadTo("")], "-",
+      [c ? (c.cut ? "Paste (move " : "Paste (") + c.name + ")" : "Paste", "clip", mod + "V", !c, () => fPaste("")], "-", ["Refresh", "refresh", "", false, refresh]];
+    const isDir = it.type === "directory", here = isDir ? it.path : up(it.path);
+    return [
+      tab ? ["Close tab", "x", "", false, () => closeTab(it.path)] : isDir ? [exp.includes(it.path) ? "Collapse" : "Expand", "folder", "", false, () => toggle(it)] : ["Open", it.type === "notebook" ? "book" : "file", "", false, () => open(it.path)],
+      "-",
+      isDir && ["New notebook here", "book", "", false, () => mk("notebook", it.path)], isDir && ["New file here", "file", "", false, () => mk("file", it.path)], isDir && ["New folder here", "folder", "", false, () => mk("directory", it.path)], isDir && ["Upload files here…", "upload", "", !!upl, () => uploadTo(it.path)],
+      "-",
+      ["Cut", "shrink", mod + "X", false, () => fClip(it, true)], ["Copy", "copy", mod + "C", isDir, () => fClip(it, false)], [(c ? (c.cut ? "Paste (move " : "Paste (") + c.name + ")" : "Paste") + (isDir ? " into " + it.name : " here"), "clip", mod + "V", !c, () => fPaste(here)], ["Duplicate", "layers", mod + "D", isDir, () => fDup(it)],
+      "-",
+      ["Rename…", "edit", "F2", false, () => rename(it)], ["Copy path", "link", "", false, () => copyText(it.path)], ["Download", "download", "", isDir, () => fDownload(it)],
+      it.type === "notebook" && ["Use as a Works node…", "flow", "", false, () => expose(it.path)],
+      "-",
+      ["Delete", "trash", "Del", false, () => del(it), true]];
+  };
+  const rowKey = (x) => (e) => {
+    const m = /Mac/.test(navigator.platform) ? e.metaKey : e.ctrlKey, k = e.key.toLowerCase(), go = (f) => { e.preventDefault(); e.stopPropagation(); f(); };
+    if (e.key === "F2") return go(() => rename(x));
+    if (e.key === "Delete" || (m && e.key === "Backspace")) return go(() => del(x));
+    if (m && k === "c" && x.type !== "directory") return go(() => fClip(x, false));
+    if (m && k === "x") return go(() => fClip(x, true));
+    if (m && k === "v" && nbClip) return go(() => fPaste(x.type === "directory" ? x.path : up(x.path)));
+    if (m && k === "d" && x.type !== "directory") return go(() => fDup(x));
+    if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) return go(() => setFctx({ at: menuAt(null, e.currentTarget), it: x }));
+  };
   const CHUNK = 6 * 1024 * 1024, b64 = async (blob) => { const b = new Uint8Array(await blob.arrayBuffer()); let x = ""; for (let i = 0; i < b.length; i += 32768) x += String.fromCharCode.apply(null, b.subarray(i, i + 32768)); return btoa(x); };
   // items = [{rel: "a/b.txt", file}] plus folders to create (dropped folders); into folder TO
   const upload = guard(async (items, to = dir, dirs = []) => {
@@ -674,7 +721,7 @@ function Workspace({ server, servers, conns, settings, models, post, api, go, us
     const isDir = x.type === "directory", on = isDir ? exp.includes(x.path) : false;
     return html`<div class=${"nbj-f" + (cur === x.path ? " on" : "") + (isDir && dir === x.path ? " tgt" : "") + (drop && isDir && drop.to === x.path ? " drop" : "")} key=${x.path} style=${{ paddingLeft: 6 + depth * 14 + "px", "--d": depth }} role="treeitem" aria-expanded=${isDir ? on : undefined} tabindex="0" title=${x.path}
       data-drop=${isDir ? x.path : up(x.path)} draggable="true" onDragStart=${(e) => { dragSrc.current = x.path; e.dataTransfer.setData(NBJ, x.path); e.dataTransfer.effectAllowed = "move"; }} onDragEnd=${() => { dragSrc.current = ""; setDrop(null); }}
-      onClick=${() => (isDir ? toggle(x) : open(x.path))} onKeyDown=${(e) => { if (e.key === "Enter") (isDir ? toggle(x) : open(x.path)); }}>
+      onClick=${() => (isDir ? toggle(x) : open(x.path))} onContextMenu=${(e) => openF(e, x)} onKeyDown=${(e) => { if (e.key === "Enter") (isDir ? toggle(x) : open(x.path)); else rowKey(x)(e); }}>
       <span class=${"nbj-chev" + (on ? " o" : "") + (isDir ? "" : " none")}>${isDir ? Ic("right", 12) : ""}</span><span class=${"nbj-fi " + x.type}>${Ic(ic(x), 14)}</span>
       <span class=${"nbj-fn" + (isDir ? " dir" : "")}><span class="sq-ell">${x.name}</span></span>${isDir ? (kids[x.path] ? html`<span class="nbj-ct">${kids[x.path].length}</span>` : null) : (x.size != null ? html`<span class="nbj-ct">${x.size < 1024 ? x.size + "B" : x.size < 1048576 ? Math.round(x.size / 1024) + "K" : (x.size / 1048576).toFixed(1) + "M"}</span>` : null)}
       <span class="nbj-fa"><button class="ibtn sm" title="Rename" aria-label="Rename" onClick=${(e) => { e.stopPropagation(); rename(x); }}>${Ic("edit", 12)}</button><button class="ibtn sm" title="Delete" aria-label="Delete" onClick=${(e) => { e.stopPropagation(); del(x); }}>${Ic("trash", 12)}</button></span></div>`;
@@ -700,11 +747,12 @@ function Workspace({ server, servers, conns, settings, models, post, api, go, us
         <input class="nbj-q" placeholder="Filter" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Filter files"/><input type="file" multiple hidden ref=${fileIn} onChange=${(e) => { upload([...e.target.files].map((f) => ({ rel: f.name, file: f }))); e.target.value = ""; }}/></div>
       ${upl && html`<div class="nbj-upl" role="status"><div class="row" style="gap:6px"><i class="spin"></i><span class="small grow sq-ell">Uploading ${upl.of > 1 ? upl.n + 1 + " of " + upl.of + " · " : ""}${upl.name.split("/").pop()}</span><button class="ibtn sm" title="Stop the upload" aria-label="Stop the upload" onClick=${() => { uplStop.current = true; }}>${Ic("x", 12)}</button></div><div class="nbj-uplbar"><i style=${{ width: Math.round(upl.pct * 100) + "%" }}></i></div></div>`}
       ${drop && html`<div class="nbj-droph">${Ic(drop.move ? "folder" : "upload", 13)} ${drop.move ? "Move to " : "Drop to upload to "}<b>${drop.to || "top folder"}</b></div>`}
-      <div class="nbj-list" role="tree" data-drop=${dir}>
+      <div class="nbj-list" role="tree" data-drop=${dir} onContextMenu=${(e) => { if (e.target.closest("input,a")) return; openF(e, null); }}>
         ${err && html`<div class="sq-test bad small">${Ic("alert", 13)} <span>${err}</span></div>`}
         ${!kids[""] && !err && html`<p class="mute small" style="padding:6px 8px"><i class="spin"></i> Connecting to ${server.name}…</p>`}
         ${flat ? (flat.length ? flat.map((x) => rowOf(x, 0)) : html`<p class="mute small" style="padding:10px 8px">No file matches.</p>`) : html`${dir && html`<div class="nbj-f up" role="button" tabindex="0" data-drop=${up(dir)} onClick=${() => setDir(up(dir))}><span class="nbj-chev none"></span><span class="nbj-fi">${Ic("folder", 17)}</span><span class="nbj-fn">..</span></div>`}${branch("", 0)}`}
         ${kids[""] && !kids[""].length && !err && !q && html`<p class="mute small" style="padding:10px 8px">This server has no files yet. Use +, or drop files here to upload.</p>`}</div></aside>`}
+    ${fctx && html`<${CtxMenu} at=${fctx.at} items=${fItems(fctx.it, fctx.it && fctx.it.tab)} close=${() => setFctx(null)}/>`}
     ${runOpen && html`<aside class="nbj-panel" aria-label="Running kernels and terminals">
       <div class="nbj-ph"><b>Running</b><span class="nbj-srvname sq-ell" title=${server.name}>${server.name}</span><span class="grow"></span><button class="ibtn sm" title="Close panel" aria-label="Close panel" onClick=${() => setPanel("")}>${Ic("x", 14)}</button></div>
       <${Running} server=${sid} post=${post} tabs=${tabs} cur=${cur} open=${open} closeTab=${closeTab} newTerm=${newTerm} onTermGone=${(n) => dropTab(TERM + n)}/></aside>`}
@@ -723,7 +771,7 @@ function Workspace({ server, servers, conns, settings, models, post, api, go, us
         <h6 class="nbj-sec">AI help</h6>
         <${AiSettings} settings=${settings} models=${models} post=${post} setSettings=${setSettings}/>
       </div></aside>`}
-    <section class="nbj-main"><div class="sq-tabs" role="tablist">${tabs.map((p) => html`<div key=${p} role="tab" aria-selected=${p === cur} class=${"sq-tab" + (p === cur ? " on" : "")} title=${termOf(p) ? "Terminal " + termOf(p) + " on " + server.name : p} onClick=${() => setCur(p)}>${Ic(termOf(p) ? "terminal" : p.endsWith(".ipynb") ? "book" : "file", 12)}<span class="sq-ell">${termOf(p) ? "Terminal " + termOf(p) : p.split("/").pop()}</span>
+    <section class="nbj-main"><div class="sq-tabs" role="tablist">${tabs.map((p) => html`<div key=${p} role="tab" aria-selected=${p === cur} class=${"sq-tab" + (p === cur ? " on" : "")} title=${termOf(p) ? "Terminal " + termOf(p) + " on " + server.name : p} onClick=${() => setCur(p)} onContextMenu=${termOf(p) ? undefined : (e) => openF(e, { path: p, name: p.split("/").pop(), type: p.endsWith(".ipynb") ? "notebook" : "file", tab: true })}>${Ic(termOf(p) ? "terminal" : p.endsWith(".ipynb") ? "book" : "file", 12)}<span class="sq-ell">${termOf(p) ? "Terminal " + termOf(p) : p.split("/").pop()}</span>
           <button class="ibtn sm" aria-label="Close tab" title=${termOf(p) ? "Close the tab (the terminal keeps running)" : "Close"} onClick=${(e) => { e.stopPropagation(); closeTab(p); }}>${Ic("x", 11)}</button></div>`)}${tabs.length > 0 && html`<button class="ibtn sm nbj-newterm" title="New terminal" aria-label="New terminal" onClick=${newTerm}>${Ic("plus", 12)}</button>`}</div>
       <div class="nbj-stage">${!tabs.length && html`<div class="sq-empty big">${Ic("book", 28)}<div>Open a notebook from the file list</div><div class="mute small">Or create one with + — cells run on ${server.name}'s kernel. Terminals and kernels are under Running.</div></div>`}
         ${tabs.map((p) => html`<div key=${sid + p} class="nbj-tab" hidden=${p !== cur}>${termOf(p) ? html`<${RemoteTerm} server=${sid} name=${termOf(p)} post=${post} api=${api} active=${p === cur} gone=${() => dropTab(p)}/>` : p.endsWith(".ipynb") ? html`<${Notebook} server=${sid} path=${p} post=${post} api=${api} conns=${conns} settings=${settings} models=${models} dirtyRef=${dref(p)} onExpose=${expose} onOutline=${onOutline} jump=${jump}/>` : html`<${FileView} server=${sid} path=${p} post=${post} dirtyRef=${dref(p)}/>`}</div>`)}</div>

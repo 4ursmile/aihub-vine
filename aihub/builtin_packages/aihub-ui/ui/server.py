@@ -24,7 +24,7 @@ import threading
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -1213,7 +1213,64 @@ def files(h, q, b):
     s = store.get_session(q.get("id"))
     if not s:
         raise Err("no such chat", 404)
-    return {"files": store.tree(s["id"]), "sig": sig(s["id"])}
+    return {"files": store.tree(s["id"]), "dirs": store.empty_dirs(s["id"]), "sig": sig(s["id"])}
+
+
+# ---- file manager of the working folder (canvas right-click menu)
+def _fs(fn, *a, **kw):
+    try:
+        return fn(*a, **kw)
+    except LookupError as e:
+        raise Err(str(e) or "no such file", 404)
+    except FileExistsError as e:
+        raise Err(str(e).split("] ")[-1] or "it already exists", 409)
+    except (ValueError, OSError, shutil.Error) as e:
+        raise Err(str(e).split("] ")[-1] or "the file operation failed")
+
+
+def file_new(h, q, b):
+    return _fs(store.fs_new, _chat_of(q, b)["id"], need(b, "path"), folder=bool(b.get("folder")))
+
+
+def file_rename(h, q, b):
+    return _fs(store.fs_rename, _chat_of(q, b)["id"], need(b, "path"), need(b, "to"))
+
+
+def file_copy(h, q, b):
+    """Paste what was copied (or cut: move=true), maybe from another chat's folder (`from` = that chat), into folder `to` of chat `id`."""
+    dst = _chat_of(q, b)["id"]
+    src = store.get_session(b.get("from") or dst)
+    if not src:
+        raise Err("no such chat", 404)
+    return _fs(store.fs_copy, src["id"], need(b, "path"), dst, str(b.get("to") or ""), move=bool(b.get("move")))
+
+
+def file_delete(h, q, b):
+    return _fs(store.fs_delete, _chat_of(q, b)["id"], need(b, "path"))
+
+
+def file_upload(h, q, b):
+    """One file from the page (base64 `data`) into folder `dir`: a taken name gets " (2)" unless replace=true."""
+    s = _chat_of(q, b)
+    try:
+        data = base64.b64decode(str(b.get("data") or ""), validate=True)
+    except (ValueError, TypeError):
+        raise Err("bad file data")
+    return _fs(store.fs_upload, s["id"], str(b.get("dir") or ""), need(b, "name"), data, replace=bool(b.get("replace")))
+
+
+def file_zip(h, q, b):
+    """GET: a folder of the chat (or all of it) as a .zip download."""
+    s = _chat_of(q, b)
+    tmp, name = _fs(store.fs_zip, s["id"], str(q.get("path") or ""))
+    try:
+        h._send_file(tmp, "application/zip", {"Content-Disposition": "attachment; filename*=UTF-8''" + quote(name), "Content-Security-Policy": "sandbox"})
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    return None
 
 
 def _chat_of(q, b):
@@ -2457,6 +2514,10 @@ def jup_file_rename(h, q, b):
     return jupyter.rename(_jc(b), need(b, "path"), need(b, "to"))
 
 
+def jup_file_copy(h, q, b):
+    return jupyter.copy(_jc(b), need(b, "path"), str(b.get("to") or ""))
+
+
 def jup_file_delete(h, q, b):
     return jupyter.remove(_jc(b), need(b, "path"))
 
@@ -3180,7 +3241,7 @@ ROUTES = {
     ("POST", "knowledge/delete"): note_delete, ("POST", "knowledge/pull"): knowledge_pull,
     ("GET", "sessions"): sessions, ("POST", "sessions"): session_new, ("GET", "sessions/get"): session_get,
     ("POST", "sessions/update"): session_update, ("POST", "sessions/delete"): session_delete, ("POST", "sessions/delmsg"): session_delmsg, ("POST", "folders"): folders,
-    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("POST", "files/reveal"): reveal_file, ("GET", "files/diff"): file_diff, ("GET", "files/changes"): file_changes, ("GET", "git/info"): git_info, ("GET", "git/log"): git_log, ("GET", "git/commit"): git_commit, ("GET", "git/file"): git_file, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "update/apply"): update_act, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/hint"): chat_hint, ("POST", "chat/agent_stop"): chat_agent_stop, ("POST", "chat/btw"): chat_btw, ("POST", "chat/permit"): chat_permit, ("GET", "harness/memory"): harness_memory, ("PUT", "harness/memory"): harness_memory_put, ("POST", "chat/card"): chat_card, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("GET", "sessions/export"): chat_export, ("POST", "sessions/share"): chat_share, ("GET", "sessions/shared"): chats_shared, ("POST", "sessions/import"): chat_import, ("POST", "sessions/rewind"): session_rewind,
+    ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("POST", "files/reveal"): reveal_file, ("POST", "files/new"): file_new, ("POST", "files/rename"): file_rename, ("POST", "files/copy"): file_copy, ("POST", "files/delete"): file_delete, ("POST", "files/upload"): file_upload, ("GET", "files/zip"): file_zip, ("GET", "files/diff"): file_diff, ("GET", "files/changes"): file_changes, ("GET", "git/info"): git_info, ("GET", "git/log"): git_log, ("GET", "git/commit"): git_commit, ("GET", "git/file"): git_file, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "update/apply"): update_act, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/hint"): chat_hint, ("POST", "chat/agent_stop"): chat_agent_stop, ("POST", "chat/btw"): chat_btw, ("POST", "chat/permit"): chat_permit, ("GET", "harness/memory"): harness_memory, ("PUT", "harness/memory"): harness_memory_put, ("POST", "chat/card"): chat_card, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("GET", "sessions/export"): chat_export, ("POST", "sessions/share"): chat_share, ("GET", "sessions/shared"): chats_shared, ("POST", "sessions/import"): chat_import, ("POST", "sessions/rewind"): session_rewind,
     ("GET", "themes"): themes_list, ("POST", "themes/save"): theme_save, ("POST", "themes/delete"): theme_delete, ("GET", "usage"): usage_get, ("GET", "usage/sessions"): usage_sessions, ("GET", "usage/session"): usage_session, ("POST", "spaces/publish"): space_publish, ("GET", "spaces"): spaces_mine, ("GET", "prefs"): prefs_get, ("PUT", "prefs"): prefs_put, ("GET", "slash"): slash,
     ("GET", "works"): works, ("GET", "works/get"): work_get, ("POST", "works/save"): work_save, ("POST", "works/delete"): work_delete,
     ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("GET", "works/presets"): presets_list, ("GET", "works/credentials"): credentials_list, ("POST", "works/credentials/save"): credentials_save, ("POST", "works/credentials/delete"): credentials_delete, ("POST", "works/presets/save"): presets_save, ("POST", "works/presets/delete"): presets_delete, ("POST", "nodes/run"): node_run, ("POST", "works/env/check"): env_check, ("POST", "works/env/install"): env_install, ("GET", "works/env/job"): env_job, ("POST", "works/env/cancel"): env_cancel, ("GET", "works/envs"): env_list, ("POST", "works/magic"): work_magic, ("POST", "works/try"): work_try, ("GET", "works/try/status"): work_try_status, ("GET", "works/chatruns"): work_chat_runs, ("GET", "works/active"): work_active, ("GET", "works/files"): work_files, ("POST", "works/open"): work_open, ("POST", "works/rerun"): work_rerun, ("POST", "works/stop"): work_stop, ("GET", "works/log"): work_log, ("GET", "project/info"): project_info, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/generate/start"): work_generate_start, ("GET", "works/generate/status"): work_generate_status, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import,
@@ -3192,7 +3253,7 @@ ROUTES = {
     ("POST", "sql/columns"): sql_columns, ("POST", "sql/import"): sql_import, ("POST", "sql/run"): sql_run, ("POST", "sql/cancel"): sql_cancel, ("POST", "sql/ai/context"): sql_ai_context, ("POST", "sql/ai/query"): sql_ai_query, ("POST", "sql/ask"): sql_ask, ("POST", "sql/sample"): sql_sample, ("GET", "sql/drivers"): sql_drivers,
     ("GET", "jupyter/servers"): _jx(jup_servers), ("POST", "jupyter/save"): _jx(jup_save), ("POST", "jupyter/delete"): _jx(jup_delete), ("POST", "jupyter/test"): _jx(jup_test), ("POST", "jupyter/local"): _jx(jup_local),
     ("POST", "jupyter/ls"): _jx(jup_ls), ("POST", "jupyter/file/get"): _jx(jup_file_get), ("POST", "jupyter/file/put"): _jx(jup_file_put), ("POST", "jupyter/file/new"): _jx(jup_file_new),
-    ("POST", "jupyter/file/rename"): _jx(jup_file_rename), ("POST", "jupyter/file/delete"): _jx(jup_file_delete), ("POST", "jupyter/kernelspecs"): _jx(jup_kernelspecs),
+    ("POST", "jupyter/file/rename"): _jx(jup_file_rename), ("POST", "jupyter/file/delete"): _jx(jup_file_delete), ("POST", "jupyter/file/copy"): _jx(jup_file_copy), ("POST", "jupyter/kernelspecs"): _jx(jup_kernelspecs),
     ("POST", "jupyter/session"): _jx(jup_session), ("POST", "jupyter/session/end"): _jx(jup_session_end), ("POST", "jupyter/kernel/execute"): _jx(jup_k_execute), ("POST", "jupyter/kernel/complete"): _jx(jup_k_complete), ("POST", "jupyter/kernel/inspect"): _jx(jup_k_inspect), ("GET", "jupyter/poll"): _jx(jup_k_poll),
     ("POST", "jupyter/kernel/op"): _jx(jup_k_op), ("POST", "jupyter/frame"): _jx(jup_frame), ("POST", "jupyter/term/new"): _jx(jup_term_new), ("POST", "jupyter/term/write"): _jx(jup_term_write), ("POST", "jupyter/term/close"): _jx(jup_term_close),
     ("POST", "jupyter/running"): _jx(jup_running), ("POST", "jupyter/kernel/shutdown"): _jx(jup_k_shutdown),

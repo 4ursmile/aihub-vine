@@ -8,6 +8,7 @@ and, with `var`, the rows are sent into the kernel as a pandas DataFrame named `
 import ast
 import atexit
 import base64
+import html
 import json
 import os
 import re
@@ -474,6 +475,12 @@ def rename(c, path, new):
     return {"path": d.get("path")}
 
 
+def copy(c, path, folder=""):
+    """Copy a file or notebook into FOLDER (Jupyter names it "name-Copy1.ext" when the name is taken there). Folders cannot be copied."""
+    d = http(c, "POST", "contents/%s" % _q(folder), {"copy_from": str(path or "").strip("/")}, timeout=120)
+    return {"path": d.get("path"), "name": d.get("name")}
+
+
 def remove(c, path):
     http(c, "DELETE", "contents/%s" % _q(path))
     return {"ok": True}
@@ -492,7 +499,8 @@ def new_item(c, folder, kind, name):
 
 # ---------- websocket channels (kernel and terminal)
 
-KEEP = {"stream", "display_data", "update_display_data", "execute_result", "error", "clear_output", "execute_input", "execute_reply", "status", "input_request", "complete_reply", "inspect_reply"}
+KEEP = {"stream", "display_data", "update_display_data", "execute_result", "error", "clear_output", "execute_input", "execute_reply", "status", "input_request", "complete_reply", "inspect_reply",
+        "comm_open", "comm_msg", "comm_close"}                 # comm = ipywidgets (tqdm.notebook progress bars ...)
 MAX_BUF = 24 * 1024 * 1024
 
 
@@ -828,20 +836,79 @@ def term_close(c, name):
 
 # ---------- outputs as nbformat, SQL into a DataFrame, running a whole notebook
 
+def fix_cr(s):
+    """A terminal's carriage return: text after \r writes over the start of its line (tqdm, pip). A trailing \r stays so the next chunk overwrites."""
+    if not isinstance(s, str) or "\r" not in s:
+        return s
+    out = []
+    for line in re.sub(r"\r+\n", "\n", s).split("\n"):
+        if "\r" in line:
+            parts, cur = line.split("\r"), ""
+            for p in parts:
+                cur = p + cur[len(p):]
+            line = cur + ("\r" if parts[-1] == "" else "")
+        out.append(line)
+    return "\n".join(out)
+
+
+W_MIME = "application/vnd.jupyter.widget-view+json"
+
+
 class Fold:
-    """Kernel output events -> nbformat `outputs`."""
+    """Kernel output events -> nbformat `outputs`. ipywidgets models (comm messages) are kept so `snap()` can write what a widget shows as text."""
 
     def __init__(self):
-        self.outputs, self.display = [], {}
+        self.outputs, self.display, self.models = [], {}, {}
+
+    def _wtext(self, mid, depth=0):
+        m = self.models.get(mid)
+        if not m or depth > 8 or m.get("_closed"):
+            return ""
+        lay = self.models.get(str(m.get("layout") or "")[10:]) or {}
+        if lay.get("display") == "none" or lay.get("visibility") == "hidden":
+            return ""
+        kind, desc = str(m.get("_model_name") or "")[:-5], (str(m["description"]) + " ") if m.get("description") else ""
+        if kind.endswith("Box"):
+            return ("\n" if kind in ("VBox", "GridBox") else "").join(self._wtext(str(c)[10:], depth + 1) for c in m.get("children") or [])
+        if kind.endswith("Progress"):
+            try:
+                lo, hi, v = float(m.get("min") or 0), float(m.get("max") or 0), float(m.get("value") or 0)
+            except (TypeError, ValueError):
+                lo = hi = v = 0
+            n = round(max(0.0, min(1.0, (v - lo) / (hi - lo))) * 10) if hi > lo else 0
+            return desc + "|" + "\u2588" * n + " " * (10 - n) + "|"
+        if kind.startswith("HTML"):
+            return desc + html.unescape(re.sub(r"<[^>]*>", "", str(m.get("value") or ""))).replace("\u00a0", " ")
+        v = m.get("value")
+        return desc + str(v) if v is not None and not isinstance(v, (dict, list)) else desc.strip()
+
+    def snap(self):
+        """The outputs, each live widget's text/plain set to what it shows now (a tqdm bar reads 100%|██████████| 10/10 ...)."""
+        for o in self.outputs:
+            v = (o.get("data") or {}).get(W_MIME)
+            if isinstance(v, dict) and v.get("model_id") in self.models:
+                t = self._wtext(v["model_id"])
+                if t:
+                    o["data"]["text/plain"] = t
+        return self.outputs
 
     def add(self, e):
         t, c = e["t"], e["c"]
         o = self.outputs
+        if t.startswith("comm_"):
+            cid, d = c.get("comm_id"), c.get("data") or {}
+            if t == "comm_open" and str(c.get("target_name") or "").endswith("jupyter.widget"):
+                self.models[cid] = dict(d.get("state") or {})
+            elif t == "comm_msg" and cid in self.models and d.get("method") in ("update", "echo_update"):
+                self.models[cid].update(d.get("state") or {})
+            elif t == "comm_close" and cid in self.models:
+                self.models[cid]["_closed"] = True
+            return
         if t == "stream":
             if o and o[-1].get("output_type") == "stream" and o[-1].get("name") == c.get("name"):
-                o[-1]["text"] += c.get("text", "")
+                o[-1]["text"] = fix_cr(o[-1]["text"] + c.get("text", ""))
             else:
-                o.append({"output_type": "stream", "name": c.get("name", "stdout"), "text": c.get("text", "")})
+                o.append({"output_type": "stream", "name": c.get("name", "stdout"), "text": fix_cr(c.get("text", ""))})
         elif t in ("display_data", "execute_result", "update_display_data"):
             did = (c.get("transient") or {}).get("display_id")
             if t == "update_display_data" and did in self.display:
@@ -867,7 +934,7 @@ def outputs_text(outs, limit=4000):
     for o in outs:
         t, d = o.get("output_type"), o.get("data") or {}
         if t == "stream":
-            L.append(str(o.get("text", "")))
+            L.append(fix_cr(str(o.get("text", ""))).replace("\r", ""))
         elif t == "error":
             L.append(ANSI.sub("", "\n".join(o.get("traceback") or [])) or "%s: %s" % (o.get("ename"), o.get("evalue")))
         elif "text/plain" in d:
@@ -949,7 +1016,7 @@ def exec_wait(c, kid, code, deadline, expr=None, silent=False, stop=None):
                 fold.add(e)
         if closed and reply is None:
             raise JError("The kernel connection closed (did the kernel die?).")
-    return reply or {}, fold.outputs
+    return reply or {}, fold.snap()
 
 
 def param_code(params):

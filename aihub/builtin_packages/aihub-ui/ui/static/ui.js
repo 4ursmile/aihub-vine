@@ -96,3 +96,20 @@ export function Num({ style, ...rest }) {
     <button type="button" class="nb up" tabindex="-1" aria-label="Increase" onMouseDown=${(e) => e.preventDefault()} onClick=${() => bump(1)}>${arrow(true)}</button>
     <button type="button" class="nb dn" tabindex="-1" aria-label="Decrease" onMouseDown=${(e) => e.preventDefault()} onClick=${() => bump(-1)}>${arrow(false)}</button></span>`;
 }
+
+// right-click menu at the pointer: items = [label, icon, hint, disabled, fn, danger] or "-" for a separator (falsy items are skipped). Closes on Esc, outside click, scroll, resize.
+const tidySeps = (items) => { const out = []; for (const it of items) { if (!it || (it === "-" && (!out.length || out[out.length - 1] === "-"))) continue; out.push(it); } while (out[out.length - 1] === "-") out.pop(); return out; };
+export function CtxMenu({ at, items, close }) {
+  const r = useRef(), [pos, setPos] = useState({ left: at.x, top: at.y });
+  useEffect(() => { const el = r.current; if (!el) return; const b = el.getBoundingClientRect(); setPos({ left: Math.max(4, Math.min(at.x, innerWidth - b.width - 4)), top: Math.max(4, at.y + b.height > innerHeight - 4 ? at.y - b.height : at.y) }); const f = el.querySelector(".opt:not(:disabled)"); if (f) f.focus(); }, [at]);
+  useEffect(() => {
+    const off = (e) => { if (r.current && !r.current.contains(e.target)) close(); }, pop = escPush(close), gone = () => close();
+    addEventListener("pointerdown", off, true); addEventListener("resize", gone); addEventListener("blur", gone); document.addEventListener("scroll", gone, true);
+    return () => { pop(); removeEventListener("pointerdown", off, true); removeEventListener("resize", gone); removeEventListener("blur", gone); document.removeEventListener("scroll", gone, true); };
+  }, []);
+  const nav = (e) => { if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return; e.preventDefault(); const bs = [...r.current.querySelectorAll(".opt:not(:disabled)")], i = bs.indexOf(document.activeElement); const n = bs[(i + (e.key === "ArrowDown" ? 1 : -1) + bs.length) % bs.length]; if (n) n.focus(); };
+  return html`<div ref=${r} class="nbj-ctx optlist" role="menu" style=${pos} onKeyDown=${nav} onContextMenu=${(e) => e.preventDefault()}>${tidySeps(items).map((it, k) => it === "-" ? html`<div key=${k} class="nbj-ctxsep" role="separator"></div>`
+    : html`<button key=${k} class=${"opt" + (it[5] ? " bad" : "")} role="menuitem" disabled=${it[3]} onClick=${() => { close(); it[4](); }}><span class="oi">${Ic(it[1], 14)}</span><span class="grow">${it[0]}</span>${it[2] && html`<kbd>${it[2]}</kbd>`}</button>`)}</div>`;
+}
+// where a menu opened by the keyboard (ContextMenu key, Shift+F10) or a button should appear: the pointer, else under the element
+export const menuAt = (e, el) => { if (e && (e.clientX || e.clientY) && e.type === "contextmenu") return { x: e.clientX, y: e.clientY }; const b = (el || (e && e.currentTarget)).getBoundingClientRect(); return { x: b.left, y: b.bottom + 2 }; };
