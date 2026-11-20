@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Data Studio runner: one JSON request on stdin, one JSON answer (last stdout line). Runs in the connection's Python environment so the
-drivers installed there are found. Actions: test, tables, columns, query. Never prints the password; secrets only live in memory."""
+drivers installed there are found. Actions: test, tables, columns, digest, query, import. Never prints the password; secrets only live in memory."""
 import json
 import os
 import re
@@ -191,6 +191,85 @@ NODB_HINT = (" Pick a database in the Schema panel (queries run in it), write th
              " (Doris / StarRocks external catalog: catalog.database).")
 
 
+IMPORT_TYPES = ("text", "integer", "real", "boolean", "date", "timestamp")
+
+
+def _when(v, kind):
+    """An ISO date / datetime string -> date / datetime (SQLAlchemy's Date / DateTime want objects); anything else unchanged."""
+    import datetime as dt
+    if not isinstance(v, str) or not v.strip():
+        return None if isinstance(v, str) else v
+    t = v.strip().replace("Z", "+00:00").replace(" ", "T", 1)
+    try:
+        d = dt.datetime.fromisoformat(t)
+    except ValueError:
+        try:
+            d = dt.datetime.fromisoformat(t[:10])
+        except ValueError:
+            return v
+    return d.date() if kind == "date" else d
+
+
+def import_rows(sa, eng, req):
+    """Rows from a file (parsed in the browser) into a table. mode: create (new table), replace (drop + create), append (existing table).
+    The browser sends big files in several requests: the first one carries the mode, the next ones append."""
+    if req.get("readonly"):
+        raise ValueError("This connection is read-only: importing is turned off.")
+    name, sch = str(req.get("table") or "").strip(), (str(req.get("schema") or "").strip() or None)
+    if not name:
+        raise ValueError("Give the table a name.")
+    mode = str(req.get("mode") or "create")
+    cols = [x for x in (req.get("columns") or []) if isinstance(x, dict) and str(x.get("name") or "").strip()]
+    rows = [r for r in (req.get("rows") or []) if isinstance(r, list)]
+    if not cols:
+        raise ValueError("The file has no columns.")
+    names = [str(x["name"]).strip() for x in cols]
+    if len(set(n.lower() for n in names)) != len(names):
+        raise ValueError("Two columns have the same name.")
+    T = {"text": sa.UnicodeText, "integer": sa.BigInteger, "real": sa.Float, "boolean": sa.Boolean, "date": sa.Date, "timestamp": sa.DateTime}
+    kinds = [x.get("type") if x.get("type") in IMPORT_TYPES else "text" for x in cols]
+    insp = sa.inspect(eng)
+    exists = insp.has_table(name, schema=sch)
+    md = sa.MetaData()
+    with eng.begin() as cn:
+        if mode == "append":
+            if not exists:
+                raise ValueError("There is no table %s to append to." % name)
+            t = sa.Table(name, md, autoload_with=cn, schema=sch)
+            have = {c.name.lower(): c for c in t.columns}
+            extra = [n for n in names if n.lower() not in have]
+            if extra:
+                raise ValueError("Not in table %s: %s. Rename them in the preview or import into a new table." % (name, ", ".join(extra[:12])))
+            names = [have[n.lower()].name for n in names]
+            kinds = []
+            for n in names:
+                try:
+                    pt = t.columns[n].type.python_type.__name__
+                except Exception:
+                    pt = ""
+                kinds.append("timestamp" if pt == "datetime" else "date" if pt == "date" else "")
+        else:
+            if exists and mode != "replace":
+                raise ValueError("Table %s already exists. Pick Replace or Append." % name)
+            t = sa.Table(name, md, *[sa.Column(n, T[k]()) for n, k in zip(names, kinds)], schema=sch)
+            if exists:
+                t.drop(cn)
+            t.create(cn)
+        when = [(i, k) for i, k in enumerate(kinds) if k in ("date", "timestamp")]
+        n = 0
+        for i in range(0, len(rows), 1000):
+            batch = []
+            for r in rows[i:i + 1000]:
+                r = (list(r) + [None] * len(names))[:len(names)]
+                for j, k in when:
+                    r[j] = _when(r[j], k)
+                batch.append(dict(zip(names, r)))
+            if batch:
+                cn.execute(t.insert(), batch)
+                n += len(batch)
+    return {"rows": n, "table": name, "created": mode != "append"}
+
+
 def main():
     req = json.loads(sys.stdin.read() or "{}")
     try:
@@ -351,6 +430,8 @@ def main():
                     if not ro:
                         cn.commit()
             out(ok=True, statements=done, ms=int((time.time() - t0) * 1000), **res)
+        if act == "import":
+            out(ok=True, ms=int((time.time() - t0) * 1000), **import_rows(sa, eng, req))
         out(ok=False, error="unknown action")
     except SystemExit:
         raise

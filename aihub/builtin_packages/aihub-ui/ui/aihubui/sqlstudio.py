@@ -245,7 +245,8 @@ def call(box, cid, req, timeout=120, rid=None):
         fields = f
     else:
         fields = conn_fields(box, c)
-        req["readonly"] = (bool(c.get("readonly")) or bool(req.pop("force_ro", False))) if req.get("action") == "query" else False
+        req["readonly"] = (bool(c.get("readonly")) or bool(req.pop("force_ro", False))) if req.get("action") == "query" \
+            else bool(c.get("readonly")) if req.get("action") == "import" else False
     try:
         py = _python(env)
     except ValueError as e:                                         # a managed env that is not created yet: installing creates it

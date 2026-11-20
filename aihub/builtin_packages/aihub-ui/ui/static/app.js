@@ -538,9 +538,11 @@ function cleanBlocks(blocks, hist, i) {
 
 function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onBusy, onImport, onIncog }) {
   const [s, setS] = useState(null), [hist, setHist] = useState([]), [files, setFiles] = useState([]), [sig, setSig] = useState("");
-  const [live, setLive] = useState({ text: "", think: "" }), [busy, setBusy] = useState(false), [text, setText] = useState("");
+  const [live, setLive] = useState({ text: "", think: "" }), [busy, setBusy] = useState(false), [text, setText] = useState(() => pref("draft_" + id, ""));
   const [model, setModel] = useState(pref("model", "")), [effort, setEffort] = useState(pref("effort", "")), [mode, setMode] = useState(pref("mode", "auto"));
   const [ctx, setCtx] = useState(0), [pop, setPop] = useState(null), [sidx, setSidx] = useState(0), [signin, setSignin] = useState(false);
+  useEffect(() => { try { if (text) localStorage.setItem("aihub_ui_draft_" + id, text); else localStorage.removeItem("aihub_ui_draft_" + id); } catch (e) { /* private mode */ } }, [text, id]);   // unsent text survives leaving the chat or reloading
+  useEffect(() => { const t = ta.current; if (t && t.value) { t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 240) + "px"; } }, []);
   const popWas = useRef(null);
   useEffect(() => {                                                       // any composer popup closing (pick, Esc, click away) hands the cursor back to the box
     const was = popWas.current; popWas.current = pop;

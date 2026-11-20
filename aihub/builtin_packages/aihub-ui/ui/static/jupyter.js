@@ -6,7 +6,7 @@ import { html, useState, useEffect, useRef, useMemo, useCallback } from "./vendo
 import { Ic } from "./icons.js";
 import { toast, guard, escPush, Seg, Modal, Switch, Pop, confirmBox, ask } from "./ui.js";
 import { Output, serializeNotebook, parseNotebook, cellsOf } from "./notebook.js";
-import { Grid } from "./sqlstudio.js";
+import { Grid, drag } from "./sqlstudio.js";
 import { DataView, frameFromHtml, frameFromResource } from "./dataviz.js";
 import { Md } from "./blocks.js";
 import { useHl, colorize, esc, langOf } from "./code.js";
@@ -307,7 +307,7 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
   const replaceOne = () => { const m = matches[fnd.i]; if (!m) return; const re = findRe(false), to = fnd.rx && re ? m.text.replace(re, fnd.r) : fnd.r; upd(m.key, (x) => ({ src: x.src.slice(0, m.start) + to + x.src.slice(m.end) })); };
   const replaceAll = () => { const re = findRe(); if (!re || !matches.length) return; const keys = new Set(matches.map((m) => m.key)); setDirty(true); setCells((cs) => cs.map((c) => (keys.has(c.key) ? { ...c, src: c.src.replace(re, fnd.rx ? fnd.r : () => fnd.r) } : c))); toast(matches.length + " replaced"); };
   const marksOf = (k) => (fnd && matches.length ? matches.filter((m) => m.key === k).map((m) => [m.start, m.end, m === matches[fnd.i]]) : null);
-  useEffect(() => { if (onOutline && cells) onOutline(path, cells.flatMap((c, n) => (c.type === "markdown" ? c.src.split("\n").filter((l) => /^#{1,6}\s+\S/.test(l)).map((l) => ({ key: c.key, level: /^#+/.exec(l)[0].length, text: l.replace(/^#+\s+/, "").replace(/[*_`]/g, "").trim() })) : []))); }, [cells]);
+  useEffect(() => { if (onOutline && cells) onOutline(path, cells.flatMap((c, n) => (c.type === "markdown" ? c.src.split("\n").filter(((fence) => (l) => { if (/^\s*(```|~~~)/.test(l)) fence = !fence; return !fence && /^#{1,6}\s+\S/.test(l); })(false)).map((l) => ({ key: c.key, level: /^#+/.exec(l)[0].length, text: l.replace(/^#+\s+/, "").replace(/[*_`]/g, "").trim() })) : []))); }, [cells]);
   const addAfter = (t) => { const cs = cellsRef.current, i = cs.findIndex((c) => c.key === sel), at = i < 0 ? cs.length : i + 1; const c = insert(at, t === "ai" ? "code" : t); if (t === "ai") setAiOpen(c.key); };
   useEffect(() => { if (!jump || jump.path !== path) return; requestAnimationFrame(() => { const el = document.getElementById("nbc-" + jump.key); if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); }); }, [jump]);
   const saving = useRef(false), [auto, setAuto] = useState(() => LS.get("auto", true)), [busySave, setBusySave] = useState(false), [saveErr, setSaveErr] = useState("");
@@ -547,7 +547,10 @@ function Workspace({ server, servers, conns, settings, models, post, api, go, us
   const rail = (id, icon, label, on, f) => html`<button class=${"nbj-rb" + (on ? " on" : "")} title=${label} aria-label=${label} aria-pressed=${on} onClick=${f}>${Ic(icon, 20)}</button>`;
   const filesOpen = panel === "files", outOpen = panel === "outline", setOpenP = panel === "settings", anyPanel = filesOpen || outOpen || setOpenP, heads = outline[cur] || [];
   const onOutline = useCallback((p, l) => setOutline((o) => (JSON.stringify(o[p]) === JSON.stringify(l) ? o : { ...o, [p]: l })), []);
-  return html`<div class=${"nbj-ws2" + (anyPanel ? "" : " nopanel")}>
+  const [pw, setPw] = useState(() => LS.get("pw", 280));                // side panel width (drag the gap next to it)
+  const dragPanel = (e) => { const w0 = pw; let w = w0; drag(e, "x", (dx) => setPw((w = Math.max(200, Math.min(Math.min(720, innerWidth * 0.55), w0 + dx)))), () => LS.set("pw", Math.round(w))); };
+  return html`<div class=${"nbj-ws2 rsz" + (anyPanel ? "" : " nopanel")} style=${"--sq-pw:" + pw + "px"}>
+    ${anyPanel && html`<div class="sq-vgrip" style=${"left:" + (77 + pw) + "px"} role="separator" aria-orientation="vertical" title="Drag to resize the panel (double-click to reset)" onPointerDown=${dragPanel} onDblClick=${() => { setPw(280); LS.set("pw", 280); }}></div>`}
     <div class="nbj-rail">${rail("files", "folder", "Files", filesOpen, () => setPanel(filesOpen ? "" : "files"))}${rail("outline", "list", "Table of contents", outOpen, () => setPanel(outOpen ? "" : "outline"))}${rail("term", "terminal", "Terminal on " + server.name, term, () => { setTerm(!term); setTermOn(true); })}<span class="nbj-rsep"></span>${rail("set", "sliders", "Settings: server and AI help", setOpenP, () => setPanel(setOpenP ? "" : "settings"))}</div>
     ${filesOpen && html`<aside class="nbj-panel" aria-label="Files">
       <div class="nbj-ph"><b>Files</b><span class="nbj-srvname sq-ell" title=${server.name}>${server.name}</span><span class="grow"></span><button class="ibtn sm" title="Close panel" aria-label="Close panel" onClick=${() => setPanel("")}>${Ic("x", 14)}</button></div>

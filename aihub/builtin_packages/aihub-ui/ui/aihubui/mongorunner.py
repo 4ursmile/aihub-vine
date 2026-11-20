@@ -503,6 +503,24 @@ def handle(act, req, c, out, ad):
             for s in stmts:
                 res = execute(db, s, limit, bool(req.get("readonly")))
             out(ok=True, statements=len(stmts), ms=ms(), **res)
+        if act == "import":                                               # rows from a file -> documents in a collection
+            if req.get("readonly"):
+                raise ValueError("This connection is read-only: importing is turned off.")
+            name, mode = str(req.get("table") or "").strip(), str(req.get("mode") or "create")
+            if not name:
+                raise ValueError("Give the collection a name.")
+            names = [str(x.get("name") or "").strip() for x in (req.get("columns") or []) if isinstance(x, dict)]
+            exists = name in db.list_collection_names()
+            if mode == "append" and not exists:
+                raise ValueError("There is no collection %s to append to." % name)
+            if mode == "create" and exists:
+                raise ValueError("Collection %s already exists. Pick Replace or Append." % name)
+            if mode == "replace" and exists:
+                db[name].drop()
+            docs = [{k: v for k, v in zip(names, r) if k and v is not None} for r in (req.get("rows") or []) if isinstance(r, list)]
+            if docs:
+                db[name].insert_many(docs, ordered=False)
+            out(ok=True, rows=len(docs), table=name, created=mode != "append", ms=ms())
         out(ok=False, error="unknown action")
     except SystemExit:
         raise

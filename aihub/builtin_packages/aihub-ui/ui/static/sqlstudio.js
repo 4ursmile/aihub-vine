@@ -1,5 +1,5 @@
 // Data Studio: a lightweight, browser-based SQL client. Saved connections (any SQLAlchemy database), schema browser, query tabs,
-// result grid with export, charts and column stats (dataviz.js), and a Drivers tab that installs the extra packages a database needs into a chosen Python environment.
+// result grid with export, charts and column stats (dataviz.js), file import into a table (sqlimport.js), and a Drivers tab that installs the extra packages a database needs into a chosen Python environment.
 // Data: /api/sql/* (server.py -> aihubui/sqlstudio.py; queries run in a child Python of the connection's environment).
 import { html, useState, useEffect, useRef, useMemo, useCallback } from "./vendor/preact-htm.js";
 import { Ic } from "./icons.js";
@@ -7,6 +7,7 @@ import { toast, guard, Seg, Switch, confirmBox, ask } from "./ui.js";
 import { CodeBox } from "./codebox.js";
 import { sqlComplete, sqlSignature, SQL_WORDS, forgetSchema } from "./sqlintel.js";
 import { DataView } from "./dataviz.js";
+import { ImportDialog } from "./sqlimport.js";
 
 const LS = { get(k, d) { try { const v = localStorage.getItem("sqls_" + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem("sqls_" + k, JSON.stringify(v)); } catch (e) { /* private mode */ } } };
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -58,6 +59,15 @@ function hl(sql) {
     else out.push(m[0]);
   }
   return out;
+}
+
+// drag a splitter: f(dx, dy) on every move, done() once at the end; body classes stop text selection and iframes eating the pointer
+export function drag(e, axis, f, done) {
+  e.preventDefault(); const x0 = e.clientX, y0 = e.clientY, cls = axis === "y" ? "dragging-y" : "dragging";
+  document.body.classList.add(cls);
+  const mv = (m) => f(m.clientX - x0, m.clientY - y0);
+  const up = () => { document.body.classList.remove(cls); removeEventListener("pointermove", mv); removeEventListener("pointerup", up); removeEventListener("pointercancel", up); done && done(); };
+  addEventListener("pointermove", mv); addEventListener("pointerup", up); addEventListener("pointercancel", up);
 }
 
 function Editor({ value, onChange, onRun, conn, post }) {
@@ -218,10 +228,11 @@ function Drivers({ api, post, envs, ui, onUseUrl, reloadEnvs }) {
 }
 
 // ---------- studio
-function Tree({ conn, nodb, env, api, post, onInsert, onOpen, onScope, head }) {
+function Tree({ conn, nodb, env, api, post, onInsert, onOpen, onScope, head, bump }) {
   const [data, setData] = useState(null), [err, setErr] = useState(null), [schema, setSchema] = useState(null), [catalog, setCatalog] = useState(""), [open, setOpen] = useState({}), [cols, setCols] = useState({}), [q, setQ] = useState(""), [busy, setBusy] = useState(false);
   const load = (sch, cat) => { if (sch == null) forgetSchema(conn); setBusy(true); setErr(null); const c = cat == null ? catalog : cat; post("sql/tables", { id: conn, schema: sch == null ? undefined : sch, catalog: c || undefined }).then((r) => { if (!r.ok) setErr(r); else { setData(r); setSchema(r.schema); setCatalog(r.catalog || ""); if (onScope) onScope(conn, { catalog: r.catalog || "", schema: r.schema || "" }); } }).catch((e) => setErr({ error: e.message })).finally(() => setBusy(false)); };
   useEffect(() => { setData(null); setOpen({}); setCols({}); setQ(""); setCatalog(""); if (conn) load(undefined, ""); }, [conn]);
+  useEffect(() => { if (bump && conn) load(schema); }, [bump]);             // a table was imported: show it
   const pickCatalog = (c) => { setOpen({}); setCols({}); setSchema(null); load(undefined, c); };
   const qual = (n) => (data && data.catalogs && catalog ? [catalog, schema, n].filter(Boolean).join(".") : schema && nodb ? schema + "." + n : n);
   const toggle = (t) => { const k = t.name; setOpen((o) => ({ ...o, [k]: !o[k] })); if (!cols[k]) post("sql/columns", { id: conn, catalog: catalog || undefined, schema, table: t.name }).then((r) => setCols((c) => ({ ...c, [k]: r.ok ? r.columns : [{ name: r.error, type: "" }] }))).catch(() => {}); };
@@ -279,6 +290,12 @@ function Studio({ conns, post, api, envs, go, init }) {
   const [cur, setCur] = useState(() => { const c = LS.get("cur", ""); return c; });
   const [results, setResults] = useState({}), [running, setRunning] = useState({}), [limit, setLimit] = useState(LS.get("limit", 1000)), [hist, setHist] = useState(() => LS.get("hist", [])), [showHist, setShowHist] = useState(false);
   const [files, setFiles] = useState([]), [panel, setPanelS] = useState(() => LS.get("panel", "schema")), setPanel = (v) => { setPanelS(v); LS.set("panel", v); };
+  const [imp, setImp] = useState(false), [bump, setBump] = useState(0), pendingRun = useRef("");   // import dialog, tree refresh, query to run once its new tab is current
+  const [pw, setPw] = useState(() => LS.get("pw", 280)), [eh, setEh] = useState(() => LS.get("eh", 0)), [full, setFull] = useState(false), mainRef = useRef(), edRef = useRef(0);   // side panel width, editor height (0 = default), results full page
+  useEffect(() => { if (!full) return; const k = (e) => { if (e.key === "Escape") setFull(false); }; addEventListener("keydown", k); return () => removeEventListener("keydown", k); }, [full]);
+  const dragPanel = (e) => { const w0 = pw; let w = w0; drag(e, "x", (dx) => setPw((w = Math.max(200, Math.min(Math.min(640, innerWidth * 0.5), w0 + dx)))), () => LS.set("pw", Math.round(w))); };
+  const dragEditor = (e) => { const m = mainRef.current, ed = m && m.querySelector(".sq-ed"); if (!ed) return; const h0 = ed.getBoundingClientRect().height, room = m.getBoundingClientRect().bottom - ed.getBoundingClientRect().top - 90; let h = h0;
+    drag(e, "y", (dx, dy) => setEh((h = Math.max(80, Math.min(room, h0 + dy)))), () => LS.set("eh", Math.round(h))); };
   const loadFiles = useCallback(() => api("sql/files").then((r) => setFiles(r.files || [])).catch(() => {}), []);
   useEffect(() => { loadFiles(); }, []);
   const runId = useRef({}), scope = useRef({}), tab = tabs.find((t) => t.id === cur) || tabs[0];
@@ -313,6 +330,7 @@ function Studio({ conns, post, api, envs, go, init }) {
     catch (e) { setResults((x) => ({ ...x, [id]: { ok: false, error: e.message } })); }
     finally { setRunning((r) => ({ ...r, [id]: false })); }
   });
+  useEffect(() => { const q = pendingRun.current; if (q && tab.sql === q) { pendingRun.current = ""; run(q); } }, [tab.id]);
   const names = useMemo(() => paramNames(tab.sql), [tab.sql]);
   const usedParams = (sql) => { const o = {}; for (const n of paramNames(sql)) o[n] = (tab.params || {})[n] ?? ""; return o; };
   const setParam = (n, v) => patch({ params: { ...(tab.params || {}), [n]: v } });
@@ -348,10 +366,18 @@ function Studio({ conns, post, api, envs, go, init }) {
   if (!conns.length) return html`<div class="sq-pane setup"><div class="sq-hero">${Ic("database", 34)}<h3>No connection yet</h3><p class="mute">Add a database to start writing SQL.</p><button class="btn acc" onClick=${() => go("connections")}>${Ic("plus", 14)} New connection</button></div></div>`;
   const rail = (id, icon, title) => html`<button class=${"nbj-rb" + (panel === id ? " on" : "")} title=${title} aria-label=${title} aria-pressed=${panel === id} onClick=${() => setPanel(panel === id ? "" : id)}>${Ic(icon, 20)}</button>`;
   const addParam = guard(async () => { const v = await ask({ title: "Add a parameter", submit: "Insert", fields: [{ name: "name", label: "Name (letters, digits, _)", type: "text", value: "" }] }); const n = v && v.name.trim().replace(/[^A-Za-z0-9_]/g, "_"); if (!n) return; insert(":" + n); });
+  const fullBtn = html`<button class="btn sm" title=${full ? "Back to the editor (Esc)" : "Show the results full page"} aria-pressed=${full} onClick=${() => setFull(!full)}>${Ic(full ? "x" : "expand", 12)} ${full ? "Exit full page" : "Full page"}</button>`;
   const close = html`<span class="grow"></span><button class="ibtn sm" title="Close panel" aria-label="Close panel" onClick=${() => setPanel("")}>${Ic("x", 14)}</button>`;
-  return html`<div class=${"nbj-ws2 sqw" + (panel ? "" : " nopanel")}>
+  const imported = (name) => {
+    setImp(false); setBump((b) => b + 1); forgetSchema(conn.id);
+    const sc = scope.current[conn.id] || {}, nm = conn.driver === "mongodb" ? "" : [sc.catalog, sc.schema && !/^(main|public|dbo)$/i.test(sc.schema) ? sc.schema : ""].filter(Boolean).concat(/^[A-Za-z_]\w*$/.test(name) ? name : '"' + name.replace(/"/g, '""') + '"').join(".");
+    const q = conn.driver === "mongodb" ? "db." + (/^[A-Za-z_]\w*$/.test(name) ? name : 'getCollection("' + name + '")') + ".find({}).limit(100)" : "select * from " + nm + " limit 100";
+    addTab(q, name); pendingRun.current = q;
+  };
+  return html`${imp && conn && html`<${ImportDialog} conn=${conn} scope=${scope.current[conn.id]} post=${post} close=${() => setImp(false)} done=${imported}/>`}<div class=${"nbj-ws2 sqw" + (panel ? "" : " nopanel")} style=${"--sq-pw:" + pw + "px" + (eh ? ";--sq-edh:" + eh + "px" : "")}>
+    ${panel && html`<div class="sq-vgrip" style=${"left:" + (77 + pw) + "px"} role="separator" aria-orientation="vertical" title="Drag to resize the panel (double-click to reset)" onPointerDown=${dragPanel} onDblClick=${() => { setPw(280); LS.set("pw", 280); }}></div>`}
     <div class="nbj-rail">${rail("schema", "database", "Schema")}${rail("files", "file", "Saved SQL files")}${rail("hist", "clock", "History")}<span class="nbj-rsep"></span>${rail("set", "sliders", "Settings: connection and rows")}</div>
-    ${panel === "schema" && html`<aside class="nbj-panel" aria-label="Schema"><${Tree} conn=${tab.conn} nodb=${!(conn && conn.database)} env=${conn ? conn.env : ""} api=${api} post=${post} onInsert=${insert} onOpen=${open} onScope=${(id, sc) => { scope.current[id] = sc; }} head=${close}/></aside>`}
+    ${panel === "schema" && html`<aside class="nbj-panel" aria-label="Schema"><${Tree} conn=${tab.conn} nodb=${!(conn && conn.database)} env=${conn ? conn.env : ""} api=${api} post=${post} onInsert=${insert} onOpen=${open} onScope=${(id, sc) => { scope.current[id] = sc; }} head=${close} bump=${bump}/></aside>`}
     ${panel === "files" && html`<aside class="nbj-panel" aria-label="Saved SQL files"><div class="nbj-ph"><b>Files</b>${close}</div>
       <div class="nbj-list">${!files.length && html`<p class="mute small" style="padding:10px 8px">Nothing saved yet. Write a query, add :parameters if you like, and press Save.</p>`}
         ${files.map((f) => html`<div class="nbj-srow sqf" key=${f.id}><button class="sqf-o" onClick=${() => openFile(f)}><span class="nbj-fn"><span class="sq-ell">${f.name}</span><small>${(f.params || []).length ? (f.params || []).map((q) => ":" + q.name).join(" ") + " · " : ""}${(conns.find((c) => c.id === f.conn) || {}).name || "no connection"}</small></span></button><button class="ibtn sm" aria-label="Delete" onClick=${() => delFile(f)}>${Ic("trash", 12)}</button></div>`)}</div></aside>`}
@@ -365,11 +391,12 @@ function Studio({ conns, post, api, envs, go, init }) {
         <button class="btn sm nbj-manage" onClick=${() => go("connections")}>${Ic("plus", 12)} Add or edit connections</button>
         <h6 class="nbj-sec">Results</h6>
         <label class="nbj-srow" style="cursor:default"><span class="nbj-fn"><span>Row limit</span><small>Rows fetched per query</small></span><select value=${limit} onChange=${(e) => setLimit(+e.target.value)} aria-label="Row limit">${[100, 500, 1000, 5000, 20000, 50000].map((n) => html`<option value=${n}>${num(n)}</option>`)}</select></label></div></aside>`}
-    <section class="nbj-main"><div class="sq-tabs" role="tablist">${tabs.map((t) => html`<div key=${t.id} role="tab" aria-selected=${t.id === tab.id} class=${"sq-tab" + (t.id === tab.id ? " on" : "")} onClick=${() => setCur(t.id)}>${running[t.id] ? html`<i class="spin"></i>` : Ic("code", 12)}<span class="sq-ell">${t.name}</span><button class="ibtn sm" aria-label="Close tab" onClick=${(e) => { e.stopPropagation(); closeTab(t.id); }}>${Ic("x", 11)}</button></div>`)}
+    <section class="nbj-main" ref=${mainRef}><div class="sq-tabs" role="tablist">${tabs.map((t) => html`<div key=${t.id} role="tab" aria-selected=${t.id === tab.id} class=${"sq-tab" + (t.id === tab.id ? " on" : "")} onClick=${() => setCur(t.id)}>${running[t.id] ? html`<i class="spin"></i>` : Ic("code", 12)}<span class="sq-ell">${t.name}</span><button class="ibtn sm" aria-label="Close tab" onClick=${(e) => { e.stopPropagation(); closeTab(t.id); }}>${Ic("x", 11)}</button></div>`)}
         <button class="ibtn" title="New query tab" aria-label="New query tab" onClick=${() => addTab()}>${Ic("plus", 14)}</button></div>
       <div class="sq-bar"><select class="sq-conn" value=${tab.conn} onChange=${(e) => patch({ conn: e.target.value })} aria-label="Connection"><option value="">Select a connection…</option>${conns.map((c) => html`<option value=${c.id}>${c.name}${c.readonly ? " (read-only)" : ""}</option>`)}</select>
         ${busy ? html`<button class="btn bad" onClick=${stop}>${Ic("stop", 12)} Stop</button>` : html`<button class="btn acc" disabled=${!conn} onClick=${() => run()}>${Ic("play", 13)} Run <kbd>⌘↵</kbd></button>`}
         <span class="mute small">${num(limit)} rows max</span><span class="grow"></span>
+        <button class="btn sm" disabled=${!conn} title="Import a CSV, JSON or Excel file into a table" onClick=${() => setImp(true)}>${Ic("upload", 13)} Import</button>
         <button class="btn sm" title="Add a :parameter to the query" onClick=${addParam}>${Ic("sliders", 13)} Parameter</button>
         <button class="btn sm" title="Save as a SQL file (parameters, connection) that a work node can run" onClick=${saveFile}>${Ic("save", 13)} Save${tab.file ? "" : " as file"}</button>
         <button class="btn sm" title="Rename this tab" aria-label="Rename" onClick=${guard(async () => { const n = prompt("Tab name", tab.name); if (n && n.trim()) patch({ name: n.trim().slice(0, 40) }); })}>${Ic("edit", 13)}</button></div>
@@ -378,9 +405,10 @@ function Studio({ conns, post, api, envs, go, init }) {
       ${names.length > 0 && html`<div class="sq-params"><span class="mute small">${Ic("sliders", 13)} Parameters</span>${names.map((n) => html`<label class="sq-pm" key=${n}><code>:${n}</code><input value=${(tab.params || {})[n] ?? ""} placeholder="value" onInput=${(e) => setParam(n, e.target.value)} aria-label=${"Parameter " + n}/></label>`)}
         <span class="mute small grow">Bound safely by the driver. Save the file to keep these values as defaults; a work node can override them.</span></div>`}
       <${Editor} value=${tab.sql} onChange=${(v) => patch({ sql: v })} onRun=${run} conn=${conn} post=${post}/>
-      <div class="sq-out">${busy && html`<div class="sq-load"><i class="spin"></i> Running…<button class="btn sm" onClick=${stop}>Stop</button></div>`}
+      <div class="sq-hgrip" role="separator" aria-orientation="horizontal" title="Drag to resize the editor and results (double-click to reset)" onPointerDown=${dragEditor} onDblClick=${() => { setEh(0); LS.set("eh", 0); }}></div>
+      <div class=${"sq-out" + (full ? " sq-full" : "")}>${!busy && (full || res) && !(res && res.ok && res.columns.length) && html`<div class="sq-fullbar"><span class="grow"></span>${fullBtn}</div>`}${busy && html`<div class="sq-load"><i class="spin"></i> Running…<button class="btn sm" onClick=${stop}>Stop</button></div>`}
         ${!busy && !res && html`<div class="sq-empty big">${Ic("table", 26)}<div>Results appear here</div><div class="mute small">Double-click a table in the tree to preview it.</div></div>`}
-        ${!busy && res && res.ok && (res.columns.length ? html`<${DataView} res=${res} spec=${tab.viz} onSpec=${(v) => patch({ viz: v })} table=${html`<${Grid} res=${res} name=${(conn && conn.name) || "result"}/>`}/>` : html`<div class="sq-test ok" style="margin:14px">${Ic("check", 15)} Done${res.rowcount != null && res.rowcount >= 0 ? " · " + num(res.rowcount) + " row" + (res.rowcount === 1 ? "" : "s") + " affected" : ""} · ${res.ms} ms</div>`)}
+        ${!busy && res && res.ok && (res.columns.length ? html`<${DataView} res=${res} spec=${tab.viz} onSpec=${(v) => patch({ viz: v })} table=${html`<${Grid} res=${res} name=${(conn && conn.name) || "result"}/>`} extra=${fullBtn}/>` : html`<div class="sq-test ok" style="margin:14px">${Ic("check", 15)} Done${res.rowcount != null && res.rowcount >= 0 ? " · " + num(res.rowcount) + " row" + (res.rowcount === 1 ? "" : "s") + " affected" : ""} · ${res.ms} ms</div>`)}
         ${!busy && res && !res.ok && (res.missing ? html`<div class="sq-errbox"><${MissingHint} info=${res} env=${conn ? conn.env : ""} api=${api} post=${post} onDone=${() => run()}/></div>`
           : html`<div class="sq-errbox"><div class="sq-test bad">${Ic("alert", 15)} <span>${res.error}</span></div></div>`)}</div></section></div>`;
 }

@@ -77,6 +77,26 @@ class SqlStudioTest(unittest.TestCase):
         r = sqlstudio.call(self.box, ro["id"], {"action": "query", "sql": "delete from t"})
         self.assertFalse(r["ok"])
 
+    @unittest.skipUnless(have_sqlalchemy(), "sqlalchemy not installed for this Python")
+    def test_import_rows_create_append_replace_readonly(self):
+        db = os.path.join(self.tmp, "imp.db")
+        c = sqlstudio.save(self.box, {"name": "imp", "driver": "sqlite", "database": db})
+        cols = [{"name": "id", "type": "integer"}, {"name": "name", "type": "text"}, {"name": "day", "type": "date"}, {"name": "ok", "type": "boolean"}]
+        req = lambda mode, rows, cs=cols: {"action": "import", "table": "people", "mode": mode, "columns": cs, "rows": rows}
+        r = sqlstudio.call(self.box, c["id"], req("create", [[1, "a", "2024-01-02", True], [2, "b", None, False]]))
+        self.assertTrue(r["ok"] and r["rows"] == 2, r)
+        self.assertFalse(sqlstudio.call(self.box, c["id"], req("create", [[3, "c", None, None]]))["ok"])     # exists: Replace or Append
+        self.assertTrue(sqlstudio.call(self.box, c["id"], req("append", [[3, "c", "2024-03-04", None]]))["ok"])
+        q = sqlstudio.call(self.box, c["id"], {"action": "query", "sql": "select id, day from people order by id"})
+        self.assertEqual(q["rows"], [[1, "2024-01-02"], [2, None], [3, "2024-03-04"]])
+        bad = sqlstudio.call(self.box, c["id"], req("append", [[1]], [{"name": "nope"}]))
+        self.assertFalse(bad["ok"])
+        self.assertIn("nope", bad["error"])
+        self.assertTrue(sqlstudio.call(self.box, c["id"], req("replace", [[9, "z", None, None]]))["ok"])
+        self.assertEqual(sqlstudio.call(self.box, c["id"], {"action": "query", "sql": "select count(*) from people"})["rows"], [[1]])
+        ro = sqlstudio.save(self.box, {"id": c["id"], "name": "imp", "driver": "sqlite", "database": db, "readonly": True})
+        self.assertFalse(sqlstudio.call(self.box, ro["id"], req("append", [[5, "e", None, None]]))["ok"])
+
     def test_resolve_by_name_id_and_prefix(self):
         a = sqlstudio.save(self.box, {"name": "Sales DB", "driver": "sqlite"})
         b = sqlstudio.save(self.box, {"name": "Stock", "driver": "sqlite"})

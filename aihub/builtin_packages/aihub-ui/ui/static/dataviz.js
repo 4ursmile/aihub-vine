@@ -484,7 +484,7 @@ function Stats({ rows, truncated, prof, onChart }) {
 }
 
 // ---------- the view
-export function DataView({ res, table, spec, onSpec, note }) {
+export function DataView({ res, table, spec, onSpec, note, extra }) {
   const [own, setOwn] = useState(null), [menu, setMenu] = useState(false);
   const cur = spec && typeof spec === "object" ? spec : own || { view: "table", charts: [] };
   const rows = useMemo(() => res.rows || [], [res]), prof = useMemo(() => profile(res.columns || [], rows), [res]);
@@ -502,7 +502,7 @@ export function DataView({ res, table, spec, onSpec, note }) {
           <div class="optlist dv-menu">${Object.entries(TYPES).map(([k, t]) => html`<button class="opt" onClick=${() => addType(k)}><span class="grow"><b>${t.label}</b></span></button>`)}</div><//>
         <button class="btn sm" title="Add the charts that fit these columns best" onClick=${more}>${Ic("sparkles", 12)} Suggest</button>
         ${charts.length > 0 && html`<button class="btn sm" onClick=${() => setCharts([])}>Clear</button>`}`}
-      <span class="grow"></span>${(view !== "table" || note) && html`<span class="mute small">${view !== "table" ? rows.length.toLocaleString() + " rows" + (res.truncated ? " (limited)" : "") : ""}${note ? (view !== "table" ? " · " : "") + note : ""}</span>`}</div>
+      <span class="grow"></span>${(view !== "table" || note) && html`<span class="mute small">${view !== "table" ? rows.length.toLocaleString() + " rows" + (res.truncated ? " (limited)" : "") : ""}${note ? (view !== "table" ? " · " : "") + note : ""}</span>`}${extra || ""}</div>
     <div class=${"dv-body dv-" + view}>${view === "table" ? table
       : view === "stats" ? html`<${Stats} rows=${rows} truncated=${res.truncated} prof=${prof} onChart=${(c) => setCharts([...charts, c])}/>`
       : charts.length ? html`<div class="dv-charts">${charts.map((c, i) => html`<${ChartCard} key=${c.id || i} c=${c} prof=${prof} rows=${rows}

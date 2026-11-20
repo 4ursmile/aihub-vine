@@ -2282,6 +2282,25 @@ def sql_run(h, q, b):
                                 "catalog": str(b.get("catalog") or "")[:200], "schema": str(b.get("schema") or "")[:200]}, b, 300, rid)
 
 
+def sql_import(h, q, b):
+    """Rows of a file the browser parsed (CSV, TSV, JSON, Excel) into a table: {id, table, schema?, catalog?, mode, columns: [{name, type}], rows}."""
+    cols = b.get("columns")
+    rows = b.get("rows")
+    if not isinstance(cols, list) or not cols or len(cols) > 2000 or not isinstance(rows, list):
+        raise Err("columns and rows are needed")
+    mode = str(b.get("mode") or "create")
+    if mode not in ("create", "replace", "append"):
+        raise Err("mode is create, replace or append")
+    cols = [{"name": str(c.get("name") or "")[:128], "type": str(c.get("type") or "text")} for c in cols if isinstance(c, dict)]
+    r = _sql_call({"action": "import", "table": need(b, "table")[:200], "mode": mode, "columns": cols, "rows": rows,
+                   "catalog": str(b.get("catalog") or "")[:200], "schema": str(b.get("schema") or "")[:200]}, b, 600)
+    if r.get("ok"):
+        cid = str(b.get("id") or "")
+        for k in [k for k in sqlstudio._digests if k[0] == cid]:             # the AI context must see the new table
+            sqlstudio._digests.pop(k, None)
+    return r
+
+
 def sql_files(h, q, b):
     return {"files": sqlstudio.files()}
 
@@ -3158,7 +3177,7 @@ ROUTES = {
     ("GET", "sql/connections"): sql_connections, ("POST", "sql/save"): sql_save, ("POST", "sql/delete"): sql_delete, ("POST", "sql/test"): sql_test, ("POST", "sql/tables"): sql_tables,
     ("GET", "sql/files"): sql_files, ("POST", "sql/file/save"): sql_file_save, ("POST", "sql/file/delete"): sql_file_delete, ("POST", "sql/file/run"): sql_file_run,
     ("POST", "jupyter/normalize"): lambda h, q, b: jupyter.normalize_url(b.get("url"), str(b.get("kind") or "server")),
-    ("POST", "sql/columns"): sql_columns, ("POST", "sql/run"): sql_run, ("POST", "sql/cancel"): sql_cancel, ("POST", "sql/ai/context"): sql_ai_context, ("POST", "sql/ai/query"): sql_ai_query, ("POST", "sql/ask"): sql_ask, ("POST", "sql/sample"): sql_sample, ("GET", "sql/drivers"): sql_drivers,
+    ("POST", "sql/columns"): sql_columns, ("POST", "sql/import"): sql_import, ("POST", "sql/run"): sql_run, ("POST", "sql/cancel"): sql_cancel, ("POST", "sql/ai/context"): sql_ai_context, ("POST", "sql/ai/query"): sql_ai_query, ("POST", "sql/ask"): sql_ask, ("POST", "sql/sample"): sql_sample, ("GET", "sql/drivers"): sql_drivers,
     ("GET", "jupyter/servers"): _jx(jup_servers), ("POST", "jupyter/save"): _jx(jup_save), ("POST", "jupyter/delete"): _jx(jup_delete), ("POST", "jupyter/test"): _jx(jup_test), ("POST", "jupyter/local"): _jx(jup_local),
     ("POST", "jupyter/ls"): _jx(jup_ls), ("POST", "jupyter/file/get"): _jx(jup_file_get), ("POST", "jupyter/file/put"): _jx(jup_file_put), ("POST", "jupyter/file/new"): _jx(jup_file_new),
     ("POST", "jupyter/file/rename"): _jx(jup_file_rename), ("POST", "jupyter/file/delete"): _jx(jup_file_delete), ("POST", "jupyter/kernelspecs"): _jx(jup_kernelspecs),
