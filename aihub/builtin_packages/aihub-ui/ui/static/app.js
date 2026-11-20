@@ -109,21 +109,21 @@ const linkify = (t) => String(t).split(/(https:\/\/[^\s)"']+)/).map((p, i) => (i
 // ---------- pickers (model, effort, mode, context) and the slash menu
 const MODE_INFO = {
   auto: ["sparkles", "Auto", "Claude decides when to ask before acting."],
-  edits: ["edit", "Accept edits", "File edits go through; other risky actions are denied here."],
+  edits: ["edit", "Edit", "File edits go through without asking; other risky actions are denied."],
   plan: ["eye", "Plan", "Think and propose a plan first. Nothing is changed."],
-  ask: ["shieldcheck", "Read only", "Anything that would change something is denied."],
-  bypass: ["alert", "Bypass checks", "Runs every tool without asking. Use only in a throwaway folder."],
+  ask: ["shieldcheck", "Read", "Read only: anything that would change something is denied."],
+  bypass: ["alert", "Bypass", "Runs every tool without asking. Use only in a throwaway folder."],
 };
 const EFFORT_INFO = { "": "Uses your Claude settings.", low: "Fast, minimal thinking.", medium: "Balanced.", high: "Thorough. Good default for code.", xhigh: "Very thorough, slower.", max: "Deepest reasoning. Slowest and most costly." };
 const UI_CMDS = [
   { name: "compact", description: "Summarise the conversation to free up context", action: "send" },
   { name: "btw", description: "Ask a quick side question (also while Claude works): answered from this chat, not added to it", action: "btw" },
   { name: "clear", description: "Start a fresh chat", action: "clear" },
-  { name: "model", description: "Choose the model", action: "model" },
-  { name: "effort", description: "Set the thinking effort", action: "effort" },
+  { name: "model", description: "Choose the model and thinking effort", action: "model" },
+  { name: "effort", description: "Set the thinking effort (in the model picker)", action: "effort" },
   { name: "mode", description: "Set the permission mode", action: "mode" },
   { name: "context", description: "Context window and auto-compact", action: "ctx" },
-  { name: "engine", description: "Switch engine: Claude Code, AIHubness or Free chat (/engine claude, /engine aihub, /engine free)", action: "engine" },
+  { name: "engine", description: "Switch engine: Code (Claude Code), Lite (AIHubness) or Chat (/engine code, /engine lite, /engine chat)", action: "engine" },
   { name: "mcp", description: "MCP servers: see what is connected and choose what this chat may use", action: "mcp" },
   { name: "canvas", description: "Show or hide the canvas", action: "canvas" },
   { name: "create-work", description: "Describe a work; it is designed and opened in Works (also /workflow)", action: "workflow" },
@@ -178,29 +178,31 @@ const EFFORT_TONE = { high: "acc", xhigh: "acc2", max: "hot" };
 // effort clock: an arc that fills with the level; high and up pulse softly
 const EffMeter = (v) => { const n = Math.max(0, LEVELS.indexOf(v)), c = 2 * Math.PI * 5;
   return html`<svg class=${"eclock" + (n >= 3 ? " live" : "")} width="15" height="15" viewBox="0 0 14 14" aria-hidden="true"><circle class="bg" cx="7" cy="7" r="5"/><circle class="fg" cx="7" cy="7" r="5" stroke-dasharray=${c} stroke-dashoffset=${c * (1 - n / 5)}/></svg>`; };
-function ModelPick({ models, value, onChange, close }) {
+function ModelPick({ models, value, onChange, close, effort, onEffort, focusEffort }) {
   const [q, setQ] = useState("");
   const row = (m) => html`<button class=${"opt" + (m.id === value ? " on" : "")} onClick=${() => { onChange(m.id); close(); }}><span class="oi">${Ic("cpu", 16)}</span>
     <span class="grow"><b>${m.label} ${m.window >= 1e6 && html`<span class="tag acc">1M</span>`}${m.kind === "image" && html` <span class="tag">Image</span>`}${m.kind === "tts" && html` <span class="tag">Speech</span>`}</b><span class="d">${m.note}${m.real && m.real !== m.label.toLowerCase() && m.real !== m.label ? " · " + m.real : ""}</span></span><span class="ck">${Ic("check", 16)}</span></button>`;
   const ok = (m) => !q || (m.id + " " + m.label).toLowerCase().includes(q.toLowerCase()), g = (k) => models.filter((m) => (m.group || "alias") === k && ok(m));
-  const al = g("alias"), pk = g("picker"), st = g("settings"), keys = useOptKeys();
+  const al = g("alias"), pk = g("picker"), st = g("settings"), keys = useOptKeys(!focusEffort);
   return html`<div ...${keys} tabindex="-1" class="optlist"><h5>Model</h5>${models.length > 10 && html`<input class="mq" placeholder="Search models" value=${q} onInput=${(e) => setQ(e.target.value)}/>`}
     <div class="mlist">${al.map(row)}${pk.length > 0 && html`<h5 style="margin-top:6px">Your model picker</h5>${pk.map(row)}`}${st.length > 0 && html`<h5 style="margin-top:6px">From your API</h5>${st.map(row)}`}
     ${!al.length && !pk.length && !st.length && html`<p class="mute small" style="padding:8px 10px">No model matches.</p>`}</div>
-    <div class="small mute" style="padding:6px 10px 4px">Models come from your Claude settings.json (three tiers, <code>modelPicker.options</code>) and, in Free chat, the list your API returns. Changing model mid-chat rewrites the prompt cache.</div><${OptKeys} n=${models.length > 10 ? 0 : al.length + pk.length + st.length}/></div>`;
+    ${onEffort && html`<${EffortPick} inline focus=${focusEffort} value=${effort} onChange=${onEffort} close=${close}/>`}
+    <div class="small mute" style="padding:6px 10px 4px">Models come from your Claude settings.json (three tiers, <code>modelPicker.options</code>) and, in Chat, the list your API returns. Changing model mid-chat rewrites the prompt cache.</div><${OptKeys} n=${models.length > 10 ? 0 : al.length + pk.length + st.length}/></div>`;
 }
 const LEVELS = ["", "low", "medium", "high", "xhigh", "max"];
-function EffortPick({ value, onChange, close }) {
-  const i = Math.max(0, LEVELS.indexOf(value)), pct = (i / (LEVELS.length - 1)) * 100, el = useRef(), name = (l) => l === "" ? "Auto" : l === "xhigh" ? "XHigh" : l[0].toUpperCase() + l.slice(1);
-  useEffect(() => { el.current && el.current.focus(); }, []);
+const effName = (l) => l === "" ? "Auto" : l === "xhigh" ? "XHigh" : l[0].toUpperCase() + l.slice(1);
+function EffortPick({ value, onChange, close, inline, focus = true }) {
+  const i = Math.max(0, LEVELS.indexOf(value)), pct = (i / (LEVELS.length - 1)) * 100, el = useRef(), name = effName;
+  useEffect(() => { focus && el.current && el.current.focus(); }, []);
   const go = (k) => onChange(LEVELS[Math.max(0, Math.min(LEVELS.length - 1, k))]);
   const onKey = (e) => {
     const k = e.key, m = { ArrowRight: i + 1, ArrowUp: i + 1, ArrowLeft: i - 1, ArrowDown: i - 1, Home: 0, End: LEVELS.length - 1 }[k];
     if (m !== undefined) go(m); else if (/^[0-5]$/.test(k)) go(+k); else if (k === "Enter" || k === " ") close(); else return;
     e.preventDefault();
   };
-  return html`<div class=${"eff lv" + i} ref=${el} tabindex="0" role="slider" aria-label="Thinking effort" aria-valuemin="0" aria-valuemax="5" aria-valuenow=${i} aria-valuetext=${name(value)} onKeyDown=${onKey}>
-    <div class="row"><b>Effort</b><span class="grow"></span><span class="eff-now">${EffMeter(value)}${name(value)}</span></div>
+  return html`<div class=${"eff lv" + i + (inline ? " inline" : "")} ref=${el} tabindex="0" role="slider" aria-label="Thinking effort" aria-valuemin="0" aria-valuemax="5" aria-valuenow=${i} aria-valuetext=${name(value)} onKeyDown=${onKey}>
+    <div class="row">${inline ? html`<h5>Thinking effort</h5>` : html`<b>Effort</b>`}<span class="grow"></span><span class="eff-now">${EffMeter(value)}${name(value)}</span></div>
     <div class="eff-track"><div class="eff-fill" style=${`width:${pct}%`}></div>${LEVELS.map((l, k) => html`<button tabindex="-1" class=${"eff-dot" + (k <= i ? " on" : "") + (k === i ? " cur" : "")} style=${`left:${(k / (LEVELS.length - 1)) * 100}%`} title=${name(l)} onClick=${() => onChange(l)}></button>`)}</div>
     <div class="eff-labels">${LEVELS.map((l) => html`<span class=${l === value ? "b" : ""}>${name(l)}</span>`)}</div>
     <div class="small eff-d">${EFFORT_INFO[value]}</div>
@@ -234,11 +236,11 @@ function ModePick({ modes, value, onChange, close }) {
   const keys = useOptKeys();
   return html`<div ...${keys} tabindex="-1" class="optlist"><h5>Permission mode</h5>${modes.map((m) => { const [ic, name, d] = MODE_INFO[m] || ["shield", m, ""]; return html`<button class=${"opt" + (m === value ? " on" : "") + (m === "bypass" ? " danger" : "")} onClick=${() => { onChange(m); close(); }}><span class="oi">${Ic(ic, 16)}</span><span class="grow"><b>${name}</b><span class="d">${d}</span></span><span class="ck">${Ic("check", 16)}</span></button>`; })}<${OptKeys} n=${modes.length}/></div>`;
 }
-const ENGINES = [["claude", "terminal", "Claude Code", "The full harness: tools, files in the working folder, skills, agents and MCP servers. Heavy: about 40k tokens of prompt per message."],
-  ["harness", "layers", "AIHubness", "Our mini agent: reads, edits and searches files, runs commands and retries, with its own memory. Built for few tokens (cut-off reads, digests, trimmed output). Same API key as Free chat; the permission mode applies."],
-  ["free", "zap", "Free chat", "Our own light harness: straight to the model, answers fast. No shell or files; it can use the MCP servers you tick below. Needs ANTHROPIC_API_KEY (Settings > Encrypted secrets) or your Claude settings env / key helper."]];
+const ENGINES = [["claude", "terminal", "Code", "Claude Code, the full harness: tools, files in the working folder, skills, agents and MCP servers. Heavy: about 40k tokens of prompt per message."],
+  ["harness", "layers", "Lite", "AIHubness, our mini agent: reads, edits and searches files, runs commands and retries, with its own memory. Built for few tokens (cut-off reads, digests, trimmed output). Same API key as Free chat; the permission mode applies."],
+  ["free", "zap", "Chat", "Free chat, our own light harness: straight to the model, answers fast. No shell or files; it can use the MCP servers you tick below. Needs ANTHROPIC_API_KEY (Settings > Encrypted secrets) or your Claude settings env / key helper."]];
 const PERM_DONE = { allow: "Allowed once", always: "Always allowed in this chat", deny: "Denied", timeout: "No answer: not run", stopped: "Stopped" };
-const ENG_NAME = { claude: "Claude Code", harness: "AIHubness", free: "Free chat" }, ENG_ICON = { claude: "terminal", harness: "layers", free: "zap" };
+const ENG_NAME = { claude: "Code", harness: "Lite", free: "Chat" }, ENG_FULL = { claude: "Claude Code", harness: "AIHubness", free: "Free chat" }, ENG_ICON = { claude: "terminal", harness: "layers", free: "zap" };
 const ownEngine = (e) => e === "free" || e === "harness";                 // the UI's own engines: API key, MCP servers ticked per chat, no /btw
 const MCP_TONE = { package: "package", claude: "terminal", ui: "sliders" };
 function McpPanel({ servers, on, onChange, engine, compact }) {
@@ -283,13 +285,13 @@ function McpSelect({ servers, on, onChange, engine }) {
         ${!shown.length && html`<p class="mute small" style="padding:6px 8px">No server matches.</p>`}</div>
       <p class="mcpsel-note">Ticked servers start for each answer; the model may call their tools without asking.</p></div>`}</div>`;
 }
-const ENG_SHORT = { claude: "Full harness: files, tools, skills, agents, every MCP server. About 40k tokens of prompt per message.",
-  harness: "Mini agent: reads, edits and runs commands, with memory. Light on tokens; uses your API key.",
-  free: "Straight to the model, fastest. No files or shell; can use the MCP tools you tick. Needs an API key." };
+const ENG_SHORT = { claude: "Claude Code. Full harness: files, tools, skills, agents, every MCP server. About 40k tokens of prompt per message.",
+  harness: "AIHubness. Mini agent: reads, edits and runs commands, with memory. Light on tokens; uses your API key.",
+  free: "Free chat. Straight to the model, fastest. No files or shell; can use the MCP tools you tick. Needs an API key." };
 function EnginePick({ value, onChange, close, mcpAll, mcpOn, onMcp, auto, onAuto, autoCc, onAutoCc }) {
   const keys = useOptKeys();
-  const auto1 = value === "free" ? ["Switch to AIHubness by itself", "When a task needs your files, commands or multi-step coding.", auto !== false, onAuto]
-    : value === "harness" ? ["Hand over to Claude Code when stuck", "After it tried and its tools cannot do the task (web, skills, agents).", !!autoCc, onAutoCc] : null;
+  const auto1 = value === "free" ? ["Switch to Lite by itself", "When a task needs your files, commands or multi-step coding.", auto !== false, onAuto]
+    : value === "harness" ? ["Hand over to Code when stuck", "After it tried and its tools cannot do the task (web, skills, agents).", !!autoCc, onAutoCc] : null;
   return html`<div ...${keys} tabindex="-1" class="optlist engpick"><h5>Engine</h5>
     ${ENGINES.map(([k, ic, name, d]) => html`<button class=${"opt" + (k === value ? " on" : "")} title=${d} onClick=${() => { onChange(k); if (k === "claude" || k === value) close(); }}><span class="oi">${Ic(ic, 15)}</span><span class="grow"><b>${name}</b><span class="d">${ENG_SHORT[k] || d}</span></span><span class="ck">${Ic("check", 16)}</span></button>`)}
     ${auto1 && html`<div class="engpick-auto"><div class="grow"><b class="small">${auto1[0]}</b><div class="mute small">${auto1[1]}</div></div><${Switch} on=${auto1[2]} label=${auto1[0]} onChange=${(v) => auto1[3] && auto1[3](v)}/></div>`}
@@ -619,7 +621,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const menuItems = dismissed === text ? [] : sm ? items : mitems;
   useEffect(() => setSidx(0), [sm && sm[1], mm && mm[1]]);
 
-  const runUi = (a) => { setText(""); if (a === "clear") newChat(); else if (a === "canvas") setOpen((o) => !o); else if (a === "mcp") openMcp(); else if (a === "node") { setText("@node:"); ta.current && ta.current.focus(); } else if (a === "engine") setPop("engine"); else if (a === "ctx" || a === "model" || a === "effort" || a === "mode") setPop(a); };
+  const runUi = (a) => { setText(""); if (a === "clear") newChat(); else if (a === "canvas") setOpen((o) => !o); else if (a === "mcp") openMcp(); else if (a === "node") { setText("@node:"); ta.current && ta.current.focus(); } else if (a === "engine") setPop("engine"); else if (a === "effort") setPop("effort"); else if (a === "ctx" || a === "model" || a === "mode") setPop(a); };
   const openMcp = () => { setDlg("mcp"); api("mcp/free").then((d) => setMcpAll(d.servers)).catch(() => setMcpAll([])); };
   const setEng = (v) => { setEngine(v); post("sessions/update", { id, engine: v }).catch(() => {}); };
   const saveMcp = (list) => post("sessions/update", { id, mcp: list }).then((r) => setS(r.session)).catch((e) => toast(e.message));
@@ -670,7 +672,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     if (!t || busyRef.current) return;
     if (ownEngine(engine) && /^\/compact\b/.test(t)) return toast(engine === "harness" ? "AIHubness trims its own context: later messages get earlier ones as text, never old tool output." : "Free chat has no compaction: switch to Claude Code, or start a new chat.");
     const m = (override === undefined || opts.cmd) && /^\/([\w:.-]+)\s*([\s\S]*)$/.exec(t);
-    if (m) { const ui = UI_CMDS.find((c) => c.name === m[1]); if (m[1] === "workflow" || m[1] === "create-work") { if (!m[2]) return toast("Describe the work after /create-work, for example: /create-work pull data from git, build a dashboard, publish it as a space"); return genWork(m[2]); } if (m[1] === "engine" && m[2]) { const w = m[2].trim().toLowerCase(), e = /^(free|api|light)/.test(w) ? "free" : /^(aihub|harness|hub|mini|agent)/.test(w) ? "harness" : /^(claude|code|cc)/.test(w) ? "claude" : ""; if (!e) return toast("Use /engine claude, /engine aihub or /engine free"); if (busyRef.current) return toast("Wait for the answer to finish first"); setText(""); setEng(e); return toast("Engine: " + ENG_NAME[e]); } if (ui && ui.action !== "send" && !m[2]) return runUi(ui.action); const wk = works.find((x) => "work:" + x.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") === m[1]); if (wk) return runWork(wk, m[2], t); const pk = slash.packages.find((c) => c.name === m[1]); if (pk) t = pk.prompt.replace(/\$ARGUMENTS/g, m[2]); }
+    if (m) { const ui = UI_CMDS.find((c) => c.name === m[1]); if (m[1] === "workflow" || m[1] === "create-work") { if (!m[2]) return toast("Describe the work after /create-work, for example: /create-work pull data from git, build a dashboard, publish it as a space"); return genWork(m[2]); } if (m[1] === "engine" && m[2]) { const w = m[2].trim().toLowerCase(), e = /^(free|chat|api|light)/.test(w) ? "free" : /^(lite|aihub|harness|hub|mini|agent)/.test(w) ? "harness" : /^(claude|code|cc)/.test(w) ? "claude" : ""; if (!e) return toast("Use /engine code, /engine lite or /engine chat"); if (busyRef.current) return toast("Wait for the answer to finish first"); setText(""); setEng(e); return toast("Engine: " + ENG_NAME[e]); } if (ui && ui.action !== "send" && !m[2]) return runUi(ui.action); const wk = works.find((x) => "work:" + x.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") === m[1]); if (wk) return runWork(wk, m[2], t); const pk = slash.packages.find((c) => c.name === m[1]); if (pk) t = pk.prompt.replace(/\$ARGUMENTS/g, m[2]); }
     if (mode === "bypass" && engine !== "free" && !(await confirmBox({ title: "Bypass checks?", text: "Bypass checks lets Claude run any tool without asking.", ok: "Continue", danger: true }))) return;
     const typed = override === undefined, atts = typed ? att : opts.atts || [], draft = text;       // the draft comes back if the server never starts the turn
     if (typed) { setText(""); setAtt([]); if (ta.current) ta.current.style.height = "auto"; nextTip(); }
@@ -883,7 +885,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
     <div class=${"chat" + (engine === "claude" ? " eng-claude" : "") + (incog ? " incog" : "")}>
       ${pickF && html`<${FilePicker} ext="" title=${pickF === "dir" ? "Choose a folder to mention" : "Choose a file to mention"} start=${dirInfo.dir || ""} dirs=${pickF === "dir"} onPick=${(p) => { const kind = pickF === "dir" ? "@folder:" : "@file:"; setPickF(false); const d = (dirInfo.dir || "").replace(/\\/g, "/").replace(/\/+$/, ""), q = p.replace(/\\/g, "/"); setText((t) => (t && !/\s$/.test(t) ? t + " " : t) + kind + (d && q.startsWith(d + "/") ? q.slice(d.length + 1) : q) + " "); ta.current && ta.current.focus(); }} close=${() => setPickF(false)}/>`}
       ${dlg === "mcp" && html`<${Modal} wide=${true} close=${() => setDlg(null)}><div class="row"><h1 class="grow" style="margin:0">MCP servers</h1><button class="ibtn" aria-label="Close" onClick=${() => setDlg(null)}>${Ic("x", 17)}</button></div>
-        <p class="sub" style="margin-top:4px">Engine: <b>${ENG_NAME[engine] || "Claude Code"}</b> · ${ENGINES.filter(([k]) => k !== engine).map(([k], i) => html`${i ? " · " : ""}<button class="linkbtn" onClick=${() => setEng(k)}>switch to ${ENG_NAME[k]}</button>`)}</p>
+        <p class="sub" style="margin-top:4px">Engine: <b>${ENG_NAME[engine] || "Code"}</b> · ${ENGINES.filter(([k]) => k !== engine).map(([k], i) => html`${i ? " · " : ""}<button class="linkbtn" onClick=${() => setEng(k)}>switch to ${ENG_NAME[k]}</button>`)}</p>
         <${McpPanel} servers=${mcpAll} on=${s.mcp || []} onChange=${saveMcp} engine=${engine}/>
         <div class="row" style="margin-top:14px"><a class="btn" href="#/mcp">${Ic("sliders", 14)} Manage servers</a><span class="grow"></span><button class="btn acc" onClick=${() => setDlg(null)}>Done</button></div><//>`}
       ${dlg === "dir" && html`<${WorkDirDialog} s=${s} cur=${dirInfo.dir} busy=${busy} close=${() => setDlg(null)} saved=${(n) => { setDlg(null); setS(n); load(); refresh(); }}/>`}
@@ -923,14 +925,13 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
             <button class="ibtn" title="Attach files" aria-label="Attach files" onClick=${() => fileIn.current && fileIn.current.click()}>${Ic("clip", 17)}</button><input type="file" multiple hidden ref=${fileIn} onChange=${(e) => { pick(e.target.files); e.target.value = ""; }}/>
             <button class="ibtn" title="Choose a file from this project (adds @file:path)" aria-label="Choose a file from this project (adds @file:path)" onClick=${() => setPickF("file")}>${Ic("file", 17)}</button>
             <button class="ibtn" title="Choose a folder from this project (adds @folder:path)" aria-label="Choose a folder from this project (adds @folder:path)" onClick=${() => setPickF("dir")}>${Ic("folder", 17)}</button>
-            <${Pop} open=${pop === "engine"} setOpen=${(v) => setPop(v ? "engine" : null)} button=${html`<${Pill} icon=${ENG_ICON[engine] || "terminal"} label=${(ENG_NAME[engine] || "Claude Code") + (ownEngine(engine) && (s.mcp || []).length ? " · " + s.mcp.length + " tool" + (s.mcp.length > 1 ? "s" : "") : "")} tone=${engine === "claude" ? "claude" : ""} active=${pop === "engine" || ownEngine(engine)} title="Engine" onClick=${() => { setPop(pop === "engine" ? null : "engine"); if (!mcpAll) api("mcp/free").then((d) => setMcpAll(d.servers)).catch(() => setMcpAll([])); }}/>`}><${EnginePick} auto=${prefs.auto_engine} onAuto=${(v) => savePrefs({ auto_engine: v })} autoCc=${prefs.auto_engine_claude} onAutoCc=${(v) => savePrefs({ auto_engine_claude: v })} mcpAll=${mcpAll} mcpOn=${s.mcp || []} onMcp=${saveMcp} value=${engine} onChange=${setEng} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>
+            <${Pop} open=${pop === "engine"} setOpen=${(v) => setPop(v ? "engine" : null)} button=${html`<${Pill} icon=${ENG_ICON[engine] || "terminal"} label=${(ENG_NAME[engine] || "Code") + (ownEngine(engine) && (s.mcp || []).length ? " · " + s.mcp.length + " tool" + (s.mcp.length > 1 ? "s" : "") : "")} tone=${engine === "claude" ? "claude" : ""} active=${pop === "engine" || ownEngine(engine)} title=${"Engine: " + (ENG_FULL[engine] || "Claude Code")} onClick=${() => { setPop(pop === "engine" ? null : "engine"); if (!mcpAll) api("mcp/free").then((d) => setMcpAll(d.servers)).catch(() => setMcpAll([])); }}/>`}><${EnginePick} auto=${prefs.auto_engine} onAuto=${(v) => savePrefs({ auto_engine: v })} autoCc=${prefs.auto_engine_claude} onAutoCc=${(v) => savePrefs({ auto_engine_claude: v })} mcpAll=${mcpAll} mcpOn=${s.mcp || []} onMcp=${saveMcp} value=${engine} onChange=${setEng} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>
             <i class="tsep" aria-hidden="true"></i>
             ${engine !== "free" && html`<${Pop} open=${pop === "mode"} setOpen=${(v) => setPop(v ? "mode" : null)} button=${html`<${Pill} icon=${MODE_INFO[mode][0]} label=${MODE_INFO[mode][1]} tone=${MODE_TONE[mode]} active=${pop === "mode"} title=${"Permission mode: " + MODE_INFO[mode][1]} onClick=${() => setPop(pop === "mode" ? null : "mode")}/>`}><${ModePick} modes=${boot.modes} value=${mode} onChange=${setMode} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>`}
-            <${Pop} open=${pop === "effort"} setOpen=${(v) => setPop(v ? "effort" : null)} button=${html`<${Pill} lead=${EffMeter(effort)} label=${effort ? (effort === "xhigh" ? "XHigh" : effort[0].toUpperCase() + effort.slice(1)) : "Effort"} tone=${EFFORT_TONE[effort]} active=${pop === "effort"} title=${"Thinking effort: " + (effort || "default")} onClick=${() => setPop(pop === "effort" ? null : "effort")}/>`}><${EffortPick} value=${effort} onChange=${pickEffort} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>
             <span class="grow" style="flex:1"></span>
             <${Pop} open=${pop === "ctx"} setOpen=${(v) => setPop(v ? "ctx" : null)} align="right" button=${html`<button class="ctxbtn" title="Context window" aria-label="Context window" onClick=${() => setPop(pop === "ctx" ? null : "ctx")}><${Ring} pct=${win ? ctx / win : 0}/><span>${ctx ? Math.round((ctx / win) * 100) + "%" : ""}</span></button>`}>
               <${CtxPick} used=${ctx} win=${win} prefs=${prefs} savePrefs=${savePrefs} busy=${busy} compact=${() => { setPop(null); send("/compact"); }} note=${lastCompact && `Last compact: ${num(lastCompact.pre)} → ${num(lastCompact.post)}`}/><//>
-            <${Pop} open=${pop === "model"} setOpen=${(v) => setPop(v ? "model" : null)} align="right" button=${html`<${Pill} icon="cpu" label=${mdl.label.length > 26 ? mdl.label.slice(0, 24) + "…" : mdl.label} active=${pop === "model"} title="Model" onClick=${() => { setPop(pop === "model" ? null : "model"); api("models").then(setFresh).catch(() => {}); if (ownEngine(engine) && !freeIds) api("free/models").then((d) => setFreeIds(d.items || (d.models || []).map((id) => ({ id, kind: "chat" })))).catch(() => setFreeIds([])); }}/>`}><${ModelPick} models=${pickList} value=${model} onChange=${pickModel} close=${() => setPop(null)}/><//>
+            <${Pop} open=${pop === "model" || pop === "effort"} setOpen=${(v) => setPop(v ? "model" : null)} align="right" button=${html`<${Pill} lead=${EffMeter(effort)} label=${html`${mdl.label.length > 26 ? mdl.label.slice(0, 24) + "…" : mdl.label}${effort && html`<i class="pill-eff">${effName(effort)}</i>`}`} tone=${EFFORT_TONE[effort]} active=${pop === "model" || pop === "effort"} title=${"Model: " + mdl.label + " · thinking effort: " + (effort || "default")} onClick=${() => { setPop(pop === "model" || pop === "effort" ? null : "model"); api("models").then(setFresh).catch(() => {}); if (ownEngine(engine) && !freeIds) api("free/models").then((d) => setFreeIds(d.items || (d.models || []).map((id) => ({ id, kind: "chat" })))).catch(() => setFreeIds([])); }}/>`}><${ModelPick} models=${pickList} value=${model} onChange=${pickModel} effort=${effort} onEffort=${pickEffort} focusEffort=${pop === "effort"} close=${() => { setPop(null); ta.current && ta.current.focus(); }}/><//>
             ${busy ? html`${text.trim() && html`<button class="send" title="Send now: Claude reads it at its next step" aria-label="Send now" onClick=${() => send()}>${Ic("send", 17)}</button>`}<button class="send stop" title="Stop" aria-label="Stop" onClick=${stop}>${Ic("stop", 16)}</button>` : html`<button class="send" title="Send" aria-label="Send" onClick=${() => send()} disabled=${!text.trim()}>${Ic("send", 17)}</button>`}
           </div>
         </div>

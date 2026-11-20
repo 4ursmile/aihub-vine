@@ -22,6 +22,8 @@ NB = {"nbformat": 4, "nbformat_minor": 5, "metadata": {"kernelspec": {"name": "p
     {"cell_type": "code", "metadata": {}, "source": ["boom"], "outputs": []},
     {"cell_type": "code", "metadata": {}, "source": ["never"], "outputs": []}]}
 SAVED = {}
+DELETED = []
+RUNNING = {"sessions": [], "kernels": [], "terminals": []}
 
 
 def frames(sock_file, write):
@@ -71,7 +73,11 @@ class Fake(BaseHTTPRequestHandler):
         if self.path.startswith("/api/kernelspecs"):
             return self.reply({"default": "python3", "kernelspecs": {"python3": {"spec": {"display_name": "Python 3", "language": "python"}}}})
         if self.path.startswith("/api/sessions"):
-            return self.reply([])
+            return self.reply(RUNNING["sessions"])
+        if self.path.startswith("/api/kernels"):
+            return self.reply(RUNNING["kernels"])
+        if self.path.startswith("/api/terminals"):
+            return self.reply(RUNNING["terminals"]) if RUNNING["terminals"] is not None else self.reply({"message": "off"}, 404)
         if self.path.startswith("/api/contents/?"):
             return self.reply({"type": "directory", "path": "", "content": [{"name": "n.ipynb", "path": "n.ipynb", "type": "notebook"}]})
         if self.path.startswith("/api/contents/dir"):
@@ -95,6 +101,7 @@ class Fake(BaseHTTPRequestHandler):
         self.reply({"id": "k1", "name": "python3"}, 201)
 
     def do_DELETE(self):
+        DELETED.append(self.path.split("?")[0])
         self.send_response(204)
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -187,6 +194,35 @@ class JupyterTest(unittest.TestCase):
         c = jupyter.conn(self.box, "Lab")
         self.assertEqual(jupyter.session(c, "n.ipynb")["kernel"]["id"], "k1")
 
+    def test_running_lists_kernels_with_their_notebooks_and_terminals(self):
+        c = jupyter.conn(self.box, "Lab")
+        RUNNING.update(sessions=[{"id": "s1", "path": "a/n.ipynb", "name": "n.ipynb", "type": "notebook", "kernel": {"id": "k1", "name": "python3"}}],
+                       kernels=[{"id": "k1", "name": "python3", "execution_state": "busy", "connections": 1, "last_activity": "t1"}, {"id": "k2", "name": "ir"}],
+                       terminals=[{"name": "1", "last_activity": "t2"}])
+        try:
+            r = jupyter.running(c)
+            self.assertEqual([k["id"] for k in r["kernels"]], ["k1", "k2"])
+            self.assertEqual(r["kernels"][0]["state"], "busy")
+            self.assertEqual([s["path"] for s in r["kernels"][0]["sessions"]], ["a/n.ipynb"])
+            self.assertEqual(r["kernels"][1]["sessions"], [])
+            self.assertEqual(r["terminals"], [{"name": "1", "activity": "t2"}])
+            RUNNING["terminals"] = None                                    # terminals switched off: no error, just None
+            self.assertIsNone(jupyter.running(c)["terminals"])
+            del DELETED[:]
+            jupyter.kernel_shutdown(c, "k1")                               # its session goes first, then the kernel
+            self.assertEqual(DELETED, ["/api/sessions/s1", "/api/kernels/k1"])
+        finally:
+            RUNNING.update(sessions=[], kernels=[], terminals=[])
+
+    def test_chunked_upload_sends_the_part_number(self):
+        c = jupyter.conn(self.box, "Lab")
+        jupyter.write_file(c, "big.bin", "file", "QUJD", "base64", chunk=-1)
+        self.assertEqual(SAVED["/api/contents/big.bin"]["chunk"], -1)
+        jupyter.write_file(c, "d", "directory", None, chunk=2)               # only files take parts
+        self.assertNotIn("chunk", SAVED["/api/contents/d"])
+        jupyter.write_file(c, "small.txt", "file", "x")
+        self.assertNotIn("chunk", SAVED["/api/contents/small.txt"])
+
     def test_ws_roundtrip(self):
         c = jupyter.conn(self.box, "Lab")
         ws = WS(c.ws_url("api/kernels/k1/channels"), c.headers())
@@ -198,6 +234,15 @@ class JupyterTest(unittest.TestCase):
                 break
         ws.close()
         self.assertEqual(got, ["status", "stream", "execute_reply", "status"])
+
+    def test_poll_names_each_connection_uniquely(self):
+        # the page restarts its event cursor when "ch" changes; id(ch) is reused by CPython after a reconnect, which made the page skip all new output
+        c = jupyter.conn(self.box, "Lab")
+        first = jupyter.poll(c, "k", "kpoll", 0, 0)["ch"]
+        self.assertEqual(jupyter.poll(c, "k", "kpoll", 0, 0)["ch"], first)
+        jupyter.drop_channel(c, "k", "kpoll")
+        self.assertNotEqual(jupyter.poll(c, "k", "kpoll", 0, 0)["ch"], first)
+        jupyter.drop_channel(c, "k", "kpoll")
 
     def test_run_notebook(self):
         r = jupyter.run_notebook(self.box, "Lab", "n.ipynb", params={"n": 7}, timeout=30, save_as="out.ipynb")

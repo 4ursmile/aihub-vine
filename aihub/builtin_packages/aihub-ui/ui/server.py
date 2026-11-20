@@ -2439,7 +2439,11 @@ def jup_file_get(h, q, b):
 
 
 def jup_file_put(h, q, b):
-    return jupyter.write_file(_jc(b), need(b, "path"), str(b.get("type") or "file"), b.get("content"), str(b.get("format") or "text"))
+    try:
+        chunk = int(b.get("chunk") or 0)
+    except (TypeError, ValueError):
+        raise Err("bad chunk")
+    return jupyter.write_file(_jc(b), need(b, "path"), str(b.get("type") or "file"), b.get("content"), str(b.get("format") or "text"), chunk)
 
 
 def jup_file_new(h, q, b):
@@ -2508,6 +2512,14 @@ def jup_k_op(h, q, b):
     if op not in ("interrupt", "restart"):
         raise Err("bad op")
     return jupyter.kernel_op(_jc(b), need(b, "kid"), op)
+
+
+def jup_running(h, q, b):
+    return jupyter.running(_jc(b))
+
+
+def jup_k_shutdown(h, q, b):
+    return jupyter.kernel_shutdown(_jc(b), need(b, "kid"))
 
 
 def jup_term_new(h, q, b):
@@ -3183,6 +3195,7 @@ ROUTES = {
     ("POST", "jupyter/file/rename"): _jx(jup_file_rename), ("POST", "jupyter/file/delete"): _jx(jup_file_delete), ("POST", "jupyter/kernelspecs"): _jx(jup_kernelspecs),
     ("POST", "jupyter/session"): _jx(jup_session), ("POST", "jupyter/session/end"): _jx(jup_session_end), ("POST", "jupyter/kernel/execute"): _jx(jup_k_execute), ("POST", "jupyter/kernel/complete"): _jx(jup_k_complete), ("POST", "jupyter/kernel/inspect"): _jx(jup_k_inspect), ("GET", "jupyter/poll"): _jx(jup_k_poll),
     ("POST", "jupyter/kernel/op"): _jx(jup_k_op), ("POST", "jupyter/frame"): _jx(jup_frame), ("POST", "jupyter/term/new"): _jx(jup_term_new), ("POST", "jupyter/term/write"): _jx(jup_term_write), ("POST", "jupyter/term/close"): _jx(jup_term_close),
+    ("POST", "jupyter/running"): _jx(jup_running), ("POST", "jupyter/kernel/shutdown"): _jx(jup_k_shutdown),
     ("POST", "jupyter/sql/run"): _jx(jup_sql_run), ("POST", "jupyter/ai/suggest"): _jx(jup_ai("suggest")), ("POST", "jupyter/ai/write"): _jx(jup_ai("write")), ("POST", "jupyter/ai/fix"): _jx(jup_ai("fix")),
     ("GET", "jupyter/settings"): _jx(jup_settings), ("POST", "jupyter/settings"): _jx(jup_settings), ("POST", "jupyter/run/start"): _jx(jup_run_start), ("GET", "jupyter/run/status"): _jx(jup_run_status),
     ("POST", "jupyter/run/stop"): _jx(jup_run_stop), ("POST", "jupyter/expose"): _jx(jup_expose),

@@ -115,9 +115,14 @@ function AiSettings({ settings, models, post, setSettings }) {
 
 // ---------- a live kernel for one notebook: session (reused after a reload), a polling loop, and run-with-callback
 function useKernel(server, path, nbKernel, post, api, ready) {
-  const [k, setK] = useState({ id: "", name: "", sid: "", state: "starting", err: "" }), [specs, setSpecs] = useState([]);
+  const [k, setK] = useState({ id: "", name: "", sid: "", state: "starting", err: "" }), [specs, setSpecs] = useState([]), [gen, setGen] = useState(0);
   const waiters = useRef({}), kid = useRef("");
   kid.current = k.id;
+  useEffect(() => {                                                      // the Running panel shut this kernel down: drop it (Reconnect or a kernel pick starts a new one)
+    const on = (e) => { const d = e.detail || {}; if (d.server !== server || !d.kid || d.kid !== kid.current) return;
+      if (d.op === "shutdown") { Object.values(waiters.current).forEach((w) => w.done({ status: "error", lost: true, error: "The kernel was shut down" })); waiters.current = {}; setK((x) => ({ ...x, id: "", sid: "", state: "dead", err: "Kernel shut down" })); } };
+    addEventListener("nbj-kernel", on); return () => removeEventListener("nbj-kernel", on);
+  }, [server]);
   useEffect(() => {
     if (!ready) return;
     let off = false;
@@ -131,7 +136,7 @@ function useKernel(server, path, nbKernel, post, api, ready) {
       } catch (e) { if (!off) setK((x) => ({ ...x, state: "dead", err: e.message })); }
     })();
     return () => { off = true; };
-  }, [server, path, ready]);
+  }, [server, path, ready, gen]);
   useEffect(() => {
     if (!k.id) return;
     let stop = false, after = 0, chid = 0;
@@ -146,7 +151,12 @@ function useKernel(server, path, nbKernel, post, api, ready) {
             after = e.n;
             if (e.t === "status" && e.c) setK((x) => (x.state === "dead" ? x : { ...x, state: e.c.execution_state === "busy" ? "busy" : "idle" }));
             const w = waiters.current[e.p];
-            if (w) { if (e.t === "execute_reply") w.done(e.c); else w.on(e); }
+            // done = execute_reply (shell) AND status idle (iopub). They come on separate channels, so the reply often
+            // arrives before the last outputs: finishing on the reply alone dropped them. Same rule as the server's exec_wait.
+            if (!w) continue;
+            if (e.t === "execute_reply") { w.reply = e.c; if (w.idle) w.done(e.c); else if (!w.t) w.t = setTimeout(() => w.done(w.reply), 3000); }
+            else if (e.t === "status") { if (e.c && e.c.execution_state === "idle") { w.idle = true; if (w.reply) w.done(w.reply); } }
+            else w.on(e);
           }
           if (r.closed) { setK((x) => ({ ...x, state: "dead", err: "Disconnected from the kernel." })); await sleep(2500); setK((x) => (x.state === "dead" && !x.err.startsWith("Disconnected") ? x : { ...x, state: "idle", err: "" })); }
         } catch (e) { if (stop) return; setK((x) => ({ ...x, state: "dead", err: e.message })); await sleep(3000); }
@@ -157,16 +167,21 @@ function useKernel(server, path, nbKernel, post, api, ready) {
   const exec = useCallback((code, on) => {
     const msg = uid(); let done;
     const p = new Promise((res) => { done = res; });
-    waiters.current[msg] = { on, done: (c) => { delete waiters.current[msg]; done(c); } };
+    const w = { on, reply: null, idle: false, t: 0, fin: false, done: (c) => { if (w.fin) return; w.fin = true; clearTimeout(w.t); if (waiters.current[msg] === w) delete waiters.current[msg]; done(c); } };
+    waiters.current[msg] = w;
     post("jupyter/kernel/execute", { server, kid: kid.current, code, msg }).catch((e) => waiters.current[msg] && waiters.current[msg].done({ status: "error", lost: true, error: e.message }));
     return p;
   }, [server]);
   const op = (o) => post("jupyter/kernel/op", { server, kid: k.id, op: o });
-  const switchTo = async (name) => { setK((x) => ({ ...x, state: "starting" })); try { const s = await post("jupyter/session", { server, switch: k.sid, kernel: name }); setK({ id: s.kernel.id, name: s.kernel.name, sid: s.id, state: "idle", err: "" }); } catch (e) { setK((x) => ({ ...x, state: "idle" })); toast(e.message); } };
+  const switchTo = async (name) => {
+    const was = k.state; setK((x) => ({ ...x, state: "starting" }));
+    try { const s = await post("jupyter/session", k.sid ? { server, switch: k.sid, kernel: name } : { server, path, kernel: name }); setK({ id: s.kernel.id, name: s.kernel.name, sid: s.id, state: "idle", err: "" }); }
+    catch (e) { setK((x) => ({ ...x, state: was })); toast(e.message); }
+  };
   const complete = (code, pos) => post("jupyter/kernel/complete", { server, kid: kid.current, code, pos });
   const signature = (code, pos) => post("jupyter/kernel/inspect", { server, kid: kid.current, code, pos });
   const live = () => (kid.current && k.state === "idle" ? { server, kid: kid.current } : {});
-  return { k, specs, exec, complete, signature, live, interrupt: () => op("interrupt"), restart: () => op("restart"), switchTo, reply: (value) => post("jupyter/kernel/op", { server, kid: k.id, op: "input", value }) };
+  return { k, specs, exec, complete, signature, live, interrupt: () => op("interrupt"), restart: () => op("restart"), switchTo, reconnect: () => setGen((g) => g + 1), reply: (value) => post("jupyter/kernel/op", { server, kid: k.id, op: "input", value }) };
 }
 
 // ---------- AI bar under a cell: write / fix, the proposal is shown first
@@ -339,7 +354,8 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
   const adder = (at) => html`<div class="nb-add"><button type="button" onClick=${() => insert(at, "code")}>${Ic("plus", 12)} Code</button><button type="button" onClick=${() => insert(at, "markdown")}>${Ic("plus", 12)} Text</button>
     <button type="button" onClick=${() => insert(at, "sql")}>${Ic("database", 12)} SQL</button><button type="button" onClick=${() => { const c = insert(at, "code"); setAiOpen(c.key); }}>${Ic("sparkles", 12)} AI</button></div>`;
   const st = kern.k.state, busy = Object.keys(run).length > 0;
-  const stateTag = html`<span class=${"tag " + (st === "idle" ? "good" : st === "busy" ? "acc" : st === "dead" ? "bad" : "")} title=${kern.k.err || ""}>${st === "busy" || st === "starting" ? html`<i class="spin"></i>` : Ic(st === "dead" ? "alert" : "check", 11)} ${st === "starting" ? "Starting kernel" : st === "dead" ? "Kernel offline" : st === "busy" ? "Busy" : "Idle"}</span>`;
+  const stateTag = st === "dead" ? html`<button class="tag bad nbj-recon" title=${(kern.k.err ? kern.k.err + ". " : "") + "Click to connect a kernel again"} onClick=${kern.reconnect}>${Ic("alert", 11)} Kernel offline · Reconnect</button>`
+    : html`<span class=${"tag " + (st === "idle" ? "good" : st === "busy" ? "acc" : "")} title=${kern.k.err || ""}>${st === "busy" || st === "starting" ? html`<i class="spin"></i>` : Ic("check", 11)} ${st === "starting" ? "Starting kernel" : st === "busy" ? "Busy" : "Idle"}</span>`;
   return html`<div class="nb nbj" onKeyDown=${(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); save(); } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") { e.preventDefault(); openFind(); } }}>
     <div class="nbj-bar nbj-colab">
       <div class="nbj-split"><button class="btn sm ghost" title="Add a code cell after the selected one" onClick=${() => addAfter("code")}>${Ic("plus", 14)} Code</button>
@@ -452,37 +468,90 @@ function FileView({ server, path, post, dirtyRef }) {
     <div class="ebar"><span class="mute small grow">${dirty ? "Unsaved changes" : "Saved"} · ${path}</span><button class="btn" disabled=${!dirty} onClick=${() => setText(base)}>Revert</button><button class="btn acc" disabled=${!dirty} onClick=${save}>${Ic("check", 13)} Save</button></div></div>`;
 }
 
-// ---------- remote terminal (xterm.js on the server's terminal)
-function RemoteTerm({ server, post, api, close }) {
-  const host = useRef(), [msg, setMsg] = useState("Connecting…");
+// ---------- remote terminal (xterm.js on one of the server's terminals). A tab attaches to a terminal by name; closing the tab leaves it running
+// (like JupyterLab), the Running panel shuts it down. Re-attaching replays what the UI still buffers.
+const TERM = "term:", termOf = (p) => (p.startsWith(TERM) ? p.slice(TERM.length) : "");
+function RemoteTerm({ server, name, post, api, active, gone }) {
+  const host = useRef(), tr = useRef(), [msg, setMsg] = useState("Connecting…"), [dead, setDead] = useState(false);
+  useEffect(() => { if (active && tr.current) setTimeout(() => tr.current && tr.current.focus(), 30); }, [active]);
   useEffect(() => {
-    let dead = false, name = "", t;
+    let stop = false, t, ro;
     (async () => {
       try {
         const [{ Terminal }, { FitAddon }] = await loadXterm();
+        if (stop) return;
         const dark = matchMedia("(prefers-color-scheme: dark)").matches;
         t = new Terminal({ fontFamily: "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace", fontSize: 12.5, cursorBlink: true, scrollback: 5000, theme: dark ? { background: "#0e0e10", foreground: "#e5e5ea" } : { background: "#1c1c1e", foreground: "#e5e5ea" } });
-        const fit = new FitAddon(); t.loadAddon(fit); t.open(host.current); try { fit.fit(); } catch (e) { /* hidden */ }
-        const r = await post("jupyter/term/new", { server }); name = r.name; setMsg("");
+        tr.current = t;
+        const fit = new FitAddon(); t.loadAddon(fit); t.open(host.current);
         let q = Promise.resolve();
         t.onData((d) => { for (let i = 0; i < d.length; i += 4000) { const part = d.slice(i, i + 4000); q = q.then(() => post("jupyter/term/write", { server, name, data: part })).catch(() => {}); } });
-        const size = () => { try { fit.fit(); post("jupyter/term/write", { server, name, rows: t.rows, cols: t.cols }).catch(() => {}); } catch (e) { /* hidden */ } };
-        const ro = new ResizeObserver(size); ro.observe(host.current); size();
-        let after = 0, chid = 0;
-        while (!dead) {
+        const size = () => { try { if (!host.current || !host.current.offsetWidth) return; fit.fit(); post("jupyter/term/write", { server, name, rows: t.rows, cols: t.cols }).catch(() => {}); } catch (e) { /* hidden */ } };
+        ro = new ResizeObserver(size); ro.observe(host.current); size();
+        let after = 0, chid = 0, first = true;
+        while (!stop) {
           const p = await api(`jupyter/poll?server=${enc(server)}&kind=t&id=${enc(name)}&after=${after}&wait=15`);
-          if (dead) break;
+          if (stop) break;
+          if (first) { setMsg(""); first = false; if (active) t.focus(); }
           if (chid && p.ch !== chid) after = 0;
           chid = p.ch;
           for (const ev of p.events) { after = ev.n; try { const m = JSON.parse(ev.d); if (m[0] === "stdout") t.write(m[1]); } catch (e) { /* not a terminal frame */ } }
-          if (p.closed) { t.write("\r\n[terminal closed]\r\n"); break; }
+          if (p.closed) { t.write("\r\n[terminal closed]\r\n"); setDead(true); setMsg("This terminal has ended."); break; }
         }
-        ro.disconnect();
-      } catch (e) { if (!dead) setMsg(e.message); }
+      } catch (e) { if (!stop) { setDead(true); setMsg(e.message); } }
     })();
-    return () => { dead = true; if (name) post("jupyter/term/close", { server, name }).catch(() => {}); if (t) t.dispose(); };
-  }, [server]);
-  return html`<div class="nbj-termw"><div class="row nbj-termh"><b>Terminal</b><span class="mute small grow">${msg}</span><button class="ibtn sm" aria-label="Close terminal" onClick=${close}>${Ic("x", 13)}</button></div><div class="nbj-term" ref=${host}></div></div>`;
+    return () => { stop = true; if (ro) ro.disconnect(); if (t) t.dispose(); tr.current = null; };
+  }, [server, name]);
+  return html`<div class="nbj-termw">${msg && html`<div class=${"row nbj-termh" + (dead ? " bad" : "")}>${dead ? Ic("alert", 13) : html`<i class="spin"></i>`}<span class="small grow">${msg}</span>${dead && html`<button class="btn sm" onClick=${gone}>Close tab</button>`}</div>`}<div class="nbj-term" ref=${host}></div></div>`;
+}
+
+// ---------- Running panel: kernels and terminals on the server (JupyterLab's "Running Terminals and Kernels")
+function Running({ server, post, tabs, cur, open, closeTab, newTerm, onTermGone }) {
+  const [d, setD] = useState(null), [err, setErr] = useState(""), [busy, setBusy] = useState({}), [specs, setSpecs] = useState({}), [fold, setFold] = useState(() => LS.get("runfold", {}));
+  const load = useCallback(() => post("jupyter/running", { server }).then((r) => { setD(r); setErr(""); }).catch((e) => setErr(e.message)), [server]);
+  useEffect(() => { load(); post("jupyter/kernelspecs", { server }).then((r) => setSpecs(Object.fromEntries(r.kernelspecs.map((x) => [x.name, x.display])))).catch(() => {});
+    const vis = () => document.visibilityState === "visible" && load(), t = setInterval(vis, 5000);
+    document.addEventListener("visibilitychange", vis); return () => { clearInterval(t); document.removeEventListener("visibilitychange", vis); }; }, [server]);
+  useEffect(() => { LS.set("runfold", fold); }, [fold]);
+  const act = (key, f) => guard(async () => { setBusy((b) => ({ ...b, [key]: 1 })); try { await f(); } finally { setBusy((b) => { const n = { ...b }; delete n[key]; return n; }); load(); } })();
+  const tell = (kid, op) => dispatchEvent(new CustomEvent("nbj-kernel", { detail: { server, kid, op } }));
+  const shut = (k) => act(k.id, async () => {
+    const used = k.sessions.filter((s) => tabs.includes(s.path)).map((s) => s.path.split("/").pop());
+    if (used.length && !(await confirmBox({ title: "Shut down this kernel?", text: used.join(", ") + " use" + (used.length === 1 ? "s" : "") + " it: its variables are lost. Reconnect in the notebook starts a new kernel.", ok: "Shut down", danger: true }))) return;
+    await post("jupyter/kernel/shutdown", { server, kid: k.id }); tell(k.id, "shutdown");
+  });
+  const restart = (k) => act(k.id, async () => { if (!(await confirmBox({ title: "Restart this kernel?", text: "All its variables are lost.", ok: "Restart" }))) return; await post("jupyter/kernel/op", { server, kid: k.id, op: "restart" }); toast("Kernel restarting"); });
+  const interrupt = (k) => act(k.id, () => post("jupyter/kernel/op", { server, kid: k.id, op: "interrupt" }));
+  const killTerm = (t) => act("t" + t.name, async () => { await post("jupyter/term/close", { server, name: t.name }); onTermGone(t.name); });
+  const allK = () => act("allk", async () => {
+    if (!(await confirmBox({ title: "Shut down all " + d.kernels.length + " kernels?", text: "Every notebook on this server loses its variables.", ok: "Shut down all", danger: true }))) return;
+    for (const k of d.kernels) { await post("jupyter/kernel/shutdown", { server, kid: k.id }).catch((e) => toast(e.message)); tell(k.id, "shutdown"); }
+  });
+  const allT = () => act("allt", async () => {
+    if (!(await confirmBox({ title: "Shut down all " + d.terminals.length + " terminals?", text: "Programs running in them are stopped.", ok: "Shut down all", danger: true }))) return;
+    for (const t of d.terminals) { await post("jupyter/term/close", { server, name: t.name }).catch((e) => toast(e.message)); onTermGone(t.name); }
+  });
+  const sec = (id, title, n, extra) => html`<div class="nbj-rsec"><button class="nbj-rsh" aria-expanded=${!fold[id]} onClick=${() => setFold((f) => ({ ...f, [id]: !f[id] }))}><span class=${"nbj-chev" + (fold[id] ? "" : " o")}>${Ic("right", 12)}</span><b>${title}</b><span class="nbj-ct">${n}</span></button><span class="grow"></span>${extra}</div>`;
+  const spin = (k) => (busy[k] ? html`<i class="spin"></i>` : null);
+  const kdot = (st) => "nbj-dot " + (st === "busy" ? "busy" : st === "idle" ? "ok" : st === "dead" ? "bad" : "off");
+  const ks = (d && d.kernels) || [], ts = d && d.terminals, paths = tabs.filter((p) => !termOf(p));
+  return html`<div class="nbj-list nbj-procs">
+    ${err && html`<div class="sq-test bad small">${Ic("alert", 13)} <span>${err}</span></div>`}
+    ${!d && !err && html`<p class="mute small" style="padding:6px 8px"><i class="spin"></i> Loading…</p>`}
+    ${paths.length > 0 && html`${sec("tabs", "Open tabs", paths.length)}${!fold.tabs && paths.map((p) => html`<div key=${p} class=${"nbj-f nbj-ri" + (p === cur ? " on" : "")} role="button" tabindex="0" title=${p} onClick=${() => open(p)} onKeyDown=${(e) => e.key === "Enter" && open(p)}>
+      <span class=${"nbj-fi " + (p.endsWith(".ipynb") ? "notebook" : "file")}>${Ic(p.endsWith(".ipynb") ? "book" : "file", 14)}</span><span class="nbj-fn"><span class="sq-ell">${p.split("/").pop()}</span></span>
+      <span class="nbj-fa"><button class="ibtn sm" title="Close tab" aria-label="Close tab" onClick=${(e) => { e.stopPropagation(); closeTab(p); }}>${Ic("x", 12)}</button></span></div>`)}`}
+    ${d && html`${sec("k", "Kernels", ks.length, ks.length > 1 && html`<button class="btn sm ghost bad" disabled=${!!busy.allk} onClick=${allK}>${spin("allk")} Shut down all</button>`)}
+      ${!fold.k && (ks.length ? ks.map((k) => html`<div key=${k.id} class="nbj-ri nbj-kr">
+        <div class="row" style="gap:8px"><span class=${kdot(k.state)} title=${k.state || "unknown"}></span><span class="nbj-fn"><span class="sq-ell"><b>${specs[k.name] || k.name || "Kernel"}</b></span><small>${k.state || "unknown"}${k.activity ? " · " + ago(k.activity) : ""}${k.connections ? " · " + k.connections + " connected" : ""}</small></span>${spin(k.id)}</div>
+        ${k.sessions.length ? k.sessions.map((s) => html`<button key=${s.id} class="nbj-ks" title=${"Open " + s.path} onClick=${() => s.path && open(s.path)}>${Ic(s.path.endsWith(".ipynb") ? "book" : "file", 12)}<span class="sq-ell">${s.path || s.name || "(no file)"}</span></button>`) : html`<span class="mute small nbj-ks0">No notebook attached</span>`}
+        <div class="nbj-kact"><button class="btn sm ghost" disabled=${!!busy[k.id]} title="Interrupt what runs" onClick=${() => interrupt(k)}>${Ic("stop", 12)} Interrupt</button><button class="btn sm ghost" disabled=${!!busy[k.id]} title="Restart: clears all variables" onClick=${() => restart(k)}>${Ic("refresh", 12)} Restart</button><button class="btn sm ghost bad" disabled=${!!busy[k.id]} onClick=${() => shut(k)}>${Ic("x", 12)} Shut down</button></div></div>`)
+        : html`<p class="mute small nbj-r0">No kernel is running. Opening a notebook starts one.</p>`)}
+      ${sec("t", "Terminals", ts ? ts.length : 0, html`${ts && ts.length > 1 && html`<button class="btn sm ghost bad" disabled=${!!busy.allt} onClick=${allT}>${spin("allt")} Shut down all</button>`}${ts && html`<button class="ibtn sm" title="New terminal" aria-label="New terminal" onClick=${newTerm}>${Ic("plus", 14)}</button>`}`)}
+      ${!fold.t && (ts === null ? html`<p class="mute small nbj-r0">Terminals are turned off on this server.</p>` : ts.length ? ts.map((t) => html`<div key=${t.name} class=${"nbj-f nbj-ri" + (cur === TERM + t.name ? " on" : "")} role="button" tabindex="0" title="Open terminal" onClick=${() => open(TERM + t.name)} onKeyDown=${(e) => e.key === "Enter" && open(TERM + t.name)}>
+        <span class="nbj-fi">${Ic("terminal", 14)}</span><span class="nbj-fn"><span class="sq-ell">Terminal ${t.name}</span><small>${tabs.includes(TERM + t.name) ? "open" : "running"}${t.activity ? " · " + ago(t.activity) : ""}</small></span>${spin("t" + t.name)}
+        <span class="nbj-fa"><button class="ibtn sm bad" title="Shut down" aria-label="Shut down terminal" disabled=${!!busy["t" + t.name]} onClick=${(e) => { e.stopPropagation(); killTerm(t); }}>${Ic("x", 12)}</button></span></div>`)
+        : html`<p class="mute small nbj-r0">No terminal. <button class="linkbtn" onClick=${newTerm}>Open one</button></p>`)}`}</div>`;
 }
 
 // ---------- workspace: file panel + tabs
@@ -490,19 +559,26 @@ function Workspace({ server, servers, conns, settings, models, post, api, go, us
   const sid = server.id;
   const [dir, setDir] = useState(LS.get("dir_" + sid, "")), [kids, setKids] = useState({}), [exp, setExp] = useState(() => LS.get("exp_" + sid, [])), [err, setErr] = useState(""), [loading, setLoading] = useState({});
   const [tabs, setTabs] = useState(() => LS.get("tabs_" + sid, [])), [cur, setCur] = useState(() => LS.get("cur_" + sid, "")), [panel, setPanel] = useState(() => LS.get("panel", "files")), [outline, setOutline] = useState({}), [jump, setJump] = useState(null);
-  const [term, setTerm] = useState(false), [termOn, setTermOn] = useState(false), [q, setQ] = useState(""), [newMenu, setNewMenu] = useState(false), dirties = useRef({}), fileIn = useRef();
+  const [q, setQ] = useState(""), [newMenu, setNewMenu] = useState(false), dirties = useRef({}), fileIn = useRef();
+  const [drop, setDrop] = useState(null), [upl, setUpl] = useState(null), uplStop = useRef(false), dragSrc = useRef("");
   const loadDir = (d) => { setLoading((l) => ({ ...l, [d]: 1 })); return post("jupyter/ls", { server: sid, path: d }).then((r) => { setKids((k) => ({ ...k, [r.path || ""]: r.items })); setErr(""); if (!d && server.kind === "local" && !server.running && onLive) onLive(); }).catch((e) => { setErr(e.message); setKids((k) => ({ ...k, [d]: k[d] || [] })); }).finally(() => setLoading((l) => { const n = { ...l }; delete n[d]; return n; })); };
   const refresh = () => { const ds = new Set(["", ...exp]); ds.forEach((d) => loadDir(d)); };
-  useEffect(() => { setKids({}); setErr(""); setDir(LS.get("dir_" + sid, "")); const e = LS.get("exp_" + sid, []); setExp(e); ["", ...e].forEach((d) => loadDir(d)); setTabs(LS.get("tabs_" + sid, [])); setCur(LS.get("cur_" + sid, "")); setTermOn(false); setTerm(false); }, [sid]);
+  useEffect(() => { setKids({}); setErr(""); setDir(LS.get("dir_" + sid, "")); const e = LS.get("exp_" + sid, []); setExp(e); ["", ...e].forEach((d) => loadDir(d)); setTabs(LS.get("tabs_" + sid, [])); setCur(LS.get("cur_" + sid, ""));
+    post("jupyter/running", { server: sid }).then((r) => { const live = new Set((r.terminals || []).map((t) => TERM + t.name)); setTabs((t) => t.filter((p) => !termOf(p) || live.has(p))); }).catch(() => {});   // terminal tabs whose terminal ended while away
+  }, [sid]);
   useEffect(() => { LS.set("tabs_" + sid, tabs); LS.set("cur_" + sid, cur); }, [tabs, cur, sid]);
   useEffect(() => { LS.set("exp_" + sid, exp); LS.set("dir_" + sid, dir); }, [exp, dir, sid]);
   useEffect(() => { LS.set("panel", panel); }, [panel]);
   const up = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
   const toggle = (x) => { setDir(x.path); if (exp.includes(x.path)) setExp(exp.filter((e) => e !== x.path)); else { setExp([...exp, x.path]); if (!kids[x.path]) loadDir(x.path); } };
-  const open = (p) => { setTabs((t) => (t.includes(p) ? t : [...t, p])); setCur(p); setDir(up(p)); };
+  const open = (p) => { setTabs((t) => (t.includes(p) ? t : [...t, p])); setCur(p); if (!termOf(p)) setDir(up(p)); };
+  const newTerm = guard(async () => { const r = await post("jupyter/term/new", { server: sid }); open(TERM + r.name); });
+  const dropTab = (p) => setTabs((t) => t.filter((x) => x !== p));
+  useEffect(() => { if (cur && !tabs.includes(cur)) setCur(tabs[tabs.length - 1] || ""); }, [tabs]);       // the current tab went away (terminal shut down ...)
   const closeTab = async (p) => {
     if (dirties.current[p] && dirties.current[p].current && !(await confirmBox({ title: "Close without saving?", text: p.split("/").pop() + " has unsaved changes.", ok: "Close", danger: true }))) return;
     delete dirties.current[p]; const rest = tabs.filter((x) => x !== p); setTabs(rest); if (cur === p) setCur(rest[rest.length - 1] || "");
+    if (termOf(p)) toast("Terminal " + termOf(p) + " keeps running: shut it down in Running");
   };
   const dref = (p) => (dirties.current[p] ||= { current: false });
   const reveal = (d) => { if (d && !exp.includes(d)) setExp((e) => [...e, d]); };
@@ -521,13 +597,73 @@ function Workspace({ server, servers, conns, settings, models, post, api, go, us
     if (!(await confirmBox({ title: "Delete " + it.name + "?", text: "It is removed from the Jupyter server.", ok: "Delete", danger: true }))) return;
     await post("jupyter/file/delete", { server: sid, path: it.path }); setTabs((t) => t.filter((x) => x !== it.path && !x.startsWith(it.path + "/"))); if (cur === it.path) setCur(""); loadDir(up(it.path));
   });
-  const upload = guard(async (files) => {
-    for (const f of files) {
-      if (f.size > 25e6) { toast(f.name + " is over 25 MB"); continue; }
-      const b = new Uint8Array(await f.arrayBuffer()); let s = ""; for (let i = 0; i < b.length; i += 32768) s += String.fromCharCode.apply(null, b.subarray(i, i + 32768));
-      await post("jupyter/file/put", { server: sid, path: (dir ? dir + "/" : "") + f.name, type: "file", format: "base64", content: btoa(s) });
-    }
-    toast("Uploaded"); reveal(dir); loadDir(dir);
+  const CHUNK = 6 * 1024 * 1024, b64 = async (blob) => { const b = new Uint8Array(await blob.arrayBuffer()); let x = ""; for (let i = 0; i < b.length; i += 32768) x += String.fromCharCode.apply(null, b.subarray(i, i + 32768)); return btoa(x); };
+  // items = [{rel: "a/b.txt", file}] plus folders to create (dropped folders); into folder TO
+  const upload = guard(async (items, to = dir, dirs = []) => {
+    if (!items.length && !dirs.length) return;
+    const big = items.find((x) => x.file.size > 2e9); if (big) return toast(big.rel + " is over 2 GB");
+    const there = new Set((kids[to] || []).map((x) => x.name)), clash = [...new Set([...items.map((x) => x.rel), ...dirs].map((r) => r.split("/")[0]))].filter((n) => there.has(n));
+    if (clash.length && !(await confirmBox({ title: "Replace " + (clash.length === 1 ? clash[0] : clash.length + " items") + "?", text: (clash.length === 1 ? "It already exists" : clash.slice(0, 6).join(", ") + (clash.length > 6 ? " …" : "") + " already exist") + " in " + (to || "the top folder") + ". Files with the same name are overwritten; folders are merged.", ok: "Replace", danger: true }))) return;
+    const at = (r) => (to ? to + "/" : "") + r, total = items.reduce((n, x) => n + x.file.size, 0);
+    uplStop.current = false; let sent = 0, done = 0;
+    setUpl({ n: 0, of: items.length, name: "", pct: 0 });
+    try {
+      for (const d of [...new Set(dirs)].sort((x, y) => x.split("/").length - y.split("/").length)) await post("jupyter/file/put", { server: sid, path: at(d), type: "directory" });
+      for (const { rel, file } of items) {
+        if (uplStop.current) break;
+        setUpl({ n: done, of: items.length, name: rel, pct: total ? sent / total : 0 });
+        if (file.size <= CHUNK) { await post("jupyter/file/put", { server: sid, path: at(rel), type: "file", format: "base64", content: await b64(file) }); sent += file.size; }
+        else {                                                           // Jupyter appends numbered base64 parts (1, 2, ..., -1 = last)
+          let r;
+          for (let i = 0, n = 1; i < file.size; i += CHUNK, n++) {
+            if (uplStop.current) throw new Error("Upload stopped: " + rel + " is incomplete");
+            const last = i + CHUNK >= file.size;
+            r = await post("jupyter/file/put", { server: sid, path: at(rel), type: "file", format: "base64", chunk: last ? -1 : n, content: await b64(file.slice(i, i + CHUNK)) });
+            sent += Math.min(CHUNK, file.size - i); setUpl({ n: done, of: items.length, name: rel, pct: total ? sent / total : 1 });
+          }
+          if (r && r.size != null && r.size !== file.size) throw new Error("The server does not take files in parts: " + rel + " arrived broken (" + fmtSize(r.size) + " of " + fmtSize(file.size) + "). Upload files up to " + fmtSize(CHUNK) + " here.");
+        }
+        done++;
+      }
+      toast(uplStop.current ? "Upload stopped after " + done + " of " + items.length : done === 1 ? "Uploaded " + items[0].rel.split("/").pop() : "Uploaded " + done + " files" + (dirs.length ? " in " + new Set(dirs.map((d) => d.split("/")[0])).size + " folder(s)" : ""));
+    } finally { setUpl(null); reveal(to); loadDir(to); dirs.filter((d) => !d.includes("/")).forEach((d) => kids[at(d)] && loadDir(at(d))); }
+  });
+  // what was dropped -> files + folders (folders are walked with the File System entries API; must be read inside the drop event)
+  const collect = async (dt) => {
+    const ents = [...(dt.items || [])].map((it) => (it.kind === "file" && it.webkitGetAsEntry ? it.webkitGetAsEntry() : null));
+    if (!ents.some((e) => e && e.isDirectory)) return { items: [...dt.files].map((f) => ({ rel: f.name, file: f })), dirs: [] };
+    const items = [], dirs = [];
+    const all = (rd) => new Promise((res, rej) => { const out = []; const more = () => rd.readEntries((b) => { if (!b.length) return res(out); out.push(...b); more(); }, rej); more(); });
+    const walk = async (e, base) => {
+      if (!e) return;
+      if (e.isFile) { items.push({ rel: base + e.name, file: await new Promise((res, rej) => e.file(res, rej)) }); return; }
+      if (/^(\.git|node_modules|__pycache__|\.DS_Store)$/.test(e.name)) return;
+      dirs.push(base + e.name); for (const c of await all(e.createReader())) await walk(c, base + e.name + "/");
+    };
+    for (const e of ents) await walk(e, "");
+    return { items: items.filter((x) => x.file.name !== ".DS_Store"), dirs };
+  };
+  const NBJ = "application/x-nbj-path";
+  const dropDir = (e) => { const r = e.target.closest && e.target.closest("[data-drop]"); return r ? r.getAttribute("data-drop") : dir; };
+  const canMove = (src, to) => src && up(src) !== to && to !== src && !to.startsWith(src + "/");
+  const onDragOver = (e) => {
+    const types = [...(e.dataTransfer.types || [])], files = types.includes("Files"), mine = types.includes(NBJ);
+    if (!files && !mine) return;
+    const to = dropDir(e);
+    if (mine && !canMove(dragSrc.current, to)) { e.dataTransfer.dropEffect = "none"; setDrop(null); e.preventDefault(); return; }
+    e.preventDefault(); e.dataTransfer.dropEffect = mine ? "move" : "copy";
+    if (!drop || drop.to !== to || drop.move !== mine) setDrop({ to, move: mine });
+  };
+  const onDrop = guard(async (e) => {
+    e.preventDefault(); const to = dropDir(e), src = e.dataTransfer.getData(NBJ); setDrop(null);
+    if (src) { dragSrc.current = ""; if (!canMove(src, to)) return; const dest = (to ? to + "/" : "") + src.split("/").pop();
+      if ((kids[to] || []).some((x) => x.name === src.split("/").pop())) return toast(src.split("/").pop() + " already exists in " + (to || "the top folder"));
+      await post("jupyter/file/rename", { server: sid, path: src, to: dest });
+      setTabs((t) => t.map((x) => (x === src ? dest : x.startsWith(src + "/") ? dest + x.slice(src.length) : x))); setCur((c) => (c === src ? dest : c.startsWith(src + "/") ? dest + c.slice(src.length) : c));
+      reveal(to); loadDir(up(src)); loadDir(to); return; }
+    if (upl) return toast("An upload is already running");
+    const { items, dirs } = await collect(e.dataTransfer);
+    upload(items, to, dirs);
   });
   const expose = guard(async (path) => {
     if (!(await confirmBox({ title: "Use " + path.split("/").pop() + " as a node?", text: "A work is created (switched off) with a Jupyter notebook node. Parameters are read from the cell tagged `parameters` (or the first cell) and become the work's inputs. In chat you can also ask: run " + path + " on " + server.name + ".", ok: "Create work" }))) return;
@@ -536,7 +672,8 @@ function Workspace({ server, servers, conns, settings, models, post, api, go, us
   const ic = (x) => (x.type === "directory" ? "folder" : x.type === "notebook" ? "book" : "file");
   const rowOf = (x, depth) => {
     const isDir = x.type === "directory", on = isDir ? exp.includes(x.path) : false;
-    return html`<div class=${"nbj-f" + (cur === x.path ? " on" : "") + (isDir && dir === x.path ? " tgt" : "")} key=${x.path} style=${{ paddingLeft: 6 + depth * 14 + "px", "--d": depth }} role="treeitem" aria-expanded=${isDir ? on : undefined} tabindex="0" title=${x.path}
+    return html`<div class=${"nbj-f" + (cur === x.path ? " on" : "") + (isDir && dir === x.path ? " tgt" : "") + (drop && isDir && drop.to === x.path ? " drop" : "")} key=${x.path} style=${{ paddingLeft: 6 + depth * 14 + "px", "--d": depth }} role="treeitem" aria-expanded=${isDir ? on : undefined} tabindex="0" title=${x.path}
+      data-drop=${isDir ? x.path : up(x.path)} draggable="true" onDragStart=${(e) => { dragSrc.current = x.path; e.dataTransfer.setData(NBJ, x.path); e.dataTransfer.effectAllowed = "move"; }} onDragEnd=${() => { dragSrc.current = ""; setDrop(null); }}
       onClick=${() => (isDir ? toggle(x) : open(x.path))} onKeyDown=${(e) => { if (e.key === "Enter") (isDir ? toggle(x) : open(x.path)); }}>
       <span class=${"nbj-chev" + (on ? " o" : "") + (isDir ? "" : " none")}>${isDir ? Ic("right", 12) : ""}</span><span class=${"nbj-fi " + x.type}>${Ic(ic(x), 14)}</span>
       <span class=${"nbj-fn" + (isDir ? " dir" : "")}><span class="sq-ell">${x.name}</span></span>${isDir ? (kids[x.path] ? html`<span class="nbj-ct">${kids[x.path].length}</span>` : null) : (x.size != null ? html`<span class="nbj-ct">${x.size < 1024 ? x.size + "B" : x.size < 1048576 ? Math.round(x.size / 1024) + "K" : (x.size / 1048576).toFixed(1) + "M"}</span>` : null)}
@@ -545,27 +682,32 @@ function Workspace({ server, servers, conns, settings, models, post, api, go, us
   const branch = (d, depth) => [...(kids[d] || [])].sort((a, b) => (a.type === "directory") !== (b.type === "directory") ? (a.type === "directory" ? -1 : 1) : String(a.name).localeCompare(String(b.name))).flatMap((x) => [rowOf(x, depth), x.type === "directory" && exp.includes(x.path) ? (kids[x.path] ? (kids[x.path].length ? branch(x.path, depth + 1) : html`<div class="nbj-none" style=${{ paddingLeft: 36 + (depth + 1) * 14 + "px" }}>Empty</div>`) : html`<div class="nbj-none" style=${{ paddingLeft: 36 + (depth + 1) * 14 + "px" }}><i class="spin"></i></div>`) : null]);
   const flat = q.trim() ? Object.values(kids).flat().filter((x) => x.name.toLowerCase().includes(q.toLowerCase())) : null;
   const rail = (id, icon, label, on, f) => html`<button class=${"nbj-rb" + (on ? " on" : "")} title=${label} aria-label=${label} aria-pressed=${on} onClick=${f}>${Ic(icon, 20)}</button>`;
-  const filesOpen = panel === "files", outOpen = panel === "outline", setOpenP = panel === "settings", anyPanel = filesOpen || outOpen || setOpenP, heads = outline[cur] || [];
+  const filesOpen = panel === "files", outOpen = panel === "outline", setOpenP = panel === "settings", runOpen = panel === "running", anyPanel = filesOpen || outOpen || setOpenP || runOpen, heads = outline[cur] || [];
   const onOutline = useCallback((p, l) => setOutline((o) => (JSON.stringify(o[p]) === JSON.stringify(l) ? o : { ...o, [p]: l })), []);
   const [pw, setPw] = useState(() => LS.get("pw", 280));                // side panel width (drag the gap next to it)
   const dragPanel = (e) => { const w0 = pw; let w = w0; drag(e, "x", (dx) => setPw((w = Math.max(200, Math.min(Math.min(720, innerWidth * 0.55), w0 + dx)))), () => LS.set("pw", Math.round(w))); };
   return html`<div class=${"nbj-ws2 rsz" + (anyPanel ? "" : " nopanel")} style=${"--sq-pw:" + pw + "px"}>
     ${anyPanel && html`<div class="sq-vgrip" style=${"left:" + (77 + pw) + "px"} role="separator" aria-orientation="vertical" title="Drag to resize the panel (double-click to reset)" onPointerDown=${dragPanel} onDblClick=${() => { setPw(280); LS.set("pw", 280); }}></div>`}
-    <div class="nbj-rail">${rail("files", "folder", "Files", filesOpen, () => setPanel(filesOpen ? "" : "files"))}${rail("outline", "list", "Table of contents", outOpen, () => setPanel(outOpen ? "" : "outline"))}${rail("term", "terminal", "Terminal on " + server.name, term, () => { setTerm(!term); setTermOn(true); })}<span class="nbj-rsep"></span>${rail("set", "sliders", "Settings: server and AI help", setOpenP, () => setPanel(setOpenP ? "" : "settings"))}</div>
-    ${filesOpen && html`<aside class="nbj-panel" aria-label="Files">
+    <div class="nbj-rail">${rail("files", "folder", "Files", filesOpen, () => setPanel(filesOpen ? "" : "files"))}${rail("outline", "list", "Table of contents", outOpen, () => setPanel(outOpen ? "" : "outline"))}${rail("running", "cpu", "Running kernels and terminals", runOpen, () => setPanel(runOpen ? "" : "running"))}${rail("term", "terminal", "New terminal on " + server.name, !!termOf(cur), newTerm)}<span class="nbj-rsep"></span>${rail("set", "sliders", "Settings: server and AI help", setOpenP, () => setPanel(setOpenP ? "" : "settings"))}</div>
+    ${filesOpen && html`<aside class=${"nbj-panel" + (drop ? " dropping" : "")} aria-label="Files" onDragOver=${onDragOver} onDragLeave=${(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setDrop(null); }} onDrop=${onDrop}>
       <div class="nbj-ph"><b>Files</b><span class="nbj-srvname sq-ell" title=${server.name}>${server.name}</span><span class="grow"></span><button class="ibtn sm" title="Close panel" aria-label="Close panel" onClick=${() => setPanel("")}>${Ic("x", 14)}</button></div>
       <div class="nbj-pill">
         <${Pop} open=${newMenu} setOpen=${setNewMenu} up=${false} width=${220} button=${html`<button class="ibtn sm" title=${"New in " + (dir || "top folder")} aria-label="New" onClick=${() => setNewMenu(!newMenu)}>${Ic("plus", 16)}</button>`}>
           <div class="optlist"><h5>New in ${dir || "top folder"}</h5>${[["notebook", "book", "Notebook", ".ipynb with a live kernel"], ["file", "file", "Text file", "Python, CSV, Markdown …"], ["directory", "folder", "Folder", "Group files together"]].map(([t, i, n, d]) => html`<button class="opt" onClick=${() => { setNewMenu(false); mk(t); }}><span class="oi">${Ic(i, 16)}</span><span class="grow"><b>${n}</b><span class="d">${d}</span></span></button>`)}</div><//>
-        <button class="ibtn sm" title="Upload files here" aria-label="Upload" onClick=${() => fileIn.current.click()}>${Ic("upload", 16)}</button>
+        <button class="ibtn sm" title=${"Upload files to " + (dir || "the top folder") + " (or drop files and folders on the list)"} aria-label="Upload" disabled=${!!upl} onClick=${() => fileIn.current.click()}>${Ic("upload", 16)}</button>
         <button class="ibtn sm" title="Refresh" aria-label="Refresh" onClick=${refresh}>${Ic("refresh", 16)}</button>
         <button class="ibtn sm" title="Top folder" aria-label="Top folder" onClick=${() => setDir("")}>${Ic("home", 16)}</button>
-        <input class="nbj-q" placeholder="Filter" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Filter files"/><input type="file" multiple hidden ref=${fileIn} onChange=${(e) => { upload([...e.target.files]); e.target.value = ""; }}/></div>
-      <div class="nbj-list" role="tree">
+        <input class="nbj-q" placeholder="Filter" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Filter files"/><input type="file" multiple hidden ref=${fileIn} onChange=${(e) => { upload([...e.target.files].map((f) => ({ rel: f.name, file: f }))); e.target.value = ""; }}/></div>
+      ${upl && html`<div class="nbj-upl" role="status"><div class="row" style="gap:6px"><i class="spin"></i><span class="small grow sq-ell">Uploading ${upl.of > 1 ? upl.n + 1 + " of " + upl.of + " · " : ""}${upl.name.split("/").pop()}</span><button class="ibtn sm" title="Stop the upload" aria-label="Stop the upload" onClick=${() => { uplStop.current = true; }}>${Ic("x", 12)}</button></div><div class="nbj-uplbar"><i style=${{ width: Math.round(upl.pct * 100) + "%" }}></i></div></div>`}
+      ${drop && html`<div class="nbj-droph">${Ic(drop.move ? "folder" : "upload", 13)} ${drop.move ? "Move to " : "Drop to upload to "}<b>${drop.to || "top folder"}</b></div>`}
+      <div class="nbj-list" role="tree" data-drop=${dir}>
         ${err && html`<div class="sq-test bad small">${Ic("alert", 13)} <span>${err}</span></div>`}
         ${!kids[""] && !err && html`<p class="mute small" style="padding:6px 8px"><i class="spin"></i> Connecting to ${server.name}…</p>`}
-        ${flat ? (flat.length ? flat.map((x) => rowOf(x, 0)) : html`<p class="mute small" style="padding:10px 8px">No file matches.</p>`) : html`${dir && html`<div class="nbj-f up" role="button" tabindex="0" onClick=${() => setDir(up(dir))}><span class="nbj-chev none"></span><span class="nbj-fi">${Ic("folder", 17)}</span><span class="nbj-fn">..</span></div>`}${branch("", 0)}`}
-        ${kids[""] && !kids[""].length && !err && !q && html`<p class="mute small" style="padding:10px 8px">This server has no files yet. Use + or upload.</p>`}</div></aside>`}
+        ${flat ? (flat.length ? flat.map((x) => rowOf(x, 0)) : html`<p class="mute small" style="padding:10px 8px">No file matches.</p>`) : html`${dir && html`<div class="nbj-f up" role="button" tabindex="0" data-drop=${up(dir)} onClick=${() => setDir(up(dir))}><span class="nbj-chev none"></span><span class="nbj-fi">${Ic("folder", 17)}</span><span class="nbj-fn">..</span></div>`}${branch("", 0)}`}
+        ${kids[""] && !kids[""].length && !err && !q && html`<p class="mute small" style="padding:10px 8px">This server has no files yet. Use +, or drop files here to upload.</p>`}</div></aside>`}
+    ${runOpen && html`<aside class="nbj-panel" aria-label="Running kernels and terminals">
+      <div class="nbj-ph"><b>Running</b><span class="nbj-srvname sq-ell" title=${server.name}>${server.name}</span><span class="grow"></span><button class="ibtn sm" title="Close panel" aria-label="Close panel" onClick=${() => setPanel("")}>${Ic("x", 14)}</button></div>
+      <${Running} server=${sid} post=${post} tabs=${tabs} cur=${cur} open=${open} closeTab=${closeTab} newTerm=${newTerm} onTermGone=${(n) => dropTab(TERM + n)}/></aside>`}
     ${outOpen && html`<aside class="nbj-panel" aria-label="Table of contents">
       <div class="nbj-ph"><b>Contents</b><span class="nbj-srvname sq-ell" title=${cur}>${cur ? cur.split("/").pop() : ""}</span><span class="grow"></span><button class="ibtn sm" title="Close panel" aria-label="Close panel" onClick=${() => setPanel("")}>${Ic("x", 14)}</button></div>
       <nav class="nbj-list nbj-toc">${!cur.endsWith(".ipynb") ? html`<p class="mute small" style="padding:10px 8px">Open a notebook to see its headings.</p>`
@@ -581,11 +723,11 @@ function Workspace({ server, servers, conns, settings, models, post, api, go, us
         <h6 class="nbj-sec">AI help</h6>
         <${AiSettings} settings=${settings} models=${models} post=${post} setSettings=${setSettings}/>
       </div></aside>`}
-    <section class="nbj-main"><div class="sq-tabs" role="tablist">${tabs.map((p) => html`<div key=${p} role="tab" aria-selected=${p === cur} class=${"sq-tab" + (p === cur ? " on" : "")} onClick=${() => setCur(p)}>${Ic(p.endsWith(".ipynb") ? "book" : "file", 12)}<span class="sq-ell">${p.split("/").pop()}</span>
-          <button class="ibtn sm" aria-label="Close tab" onClick=${(e) => { e.stopPropagation(); closeTab(p); }}>${Ic("x", 11)}</button></div>`)}</div>
-      <div class="nbj-stage">${!tabs.length && html`<div class="sq-empty big">${Ic("book", 28)}<div>Open a notebook from the file list</div><div class="mute small">Or create one with + — cells run on ${server.name}'s kernel.</div></div>`}
-        ${tabs.map((p) => html`<div key=${sid + p} class="nbj-tab" hidden=${p !== cur}>${p.endsWith(".ipynb") ? html`<${Notebook} server=${sid} path=${p} post=${post} api=${api} conns=${conns} settings=${settings} models=${models} dirtyRef=${dref(p)} onExpose=${expose} onOutline=${onOutline} jump=${jump}/>` : html`<${FileView} server=${sid} path=${p} post=${post} dirtyRef=${dref(p)}/>`}</div>`)}</div>
-      ${termOn && html`<div class="nbj-termbox" hidden=${!term}><${RemoteTerm} server=${sid} post=${post} api=${api} close=${() => { setTerm(false); setTermOn(false); }}/></div>`}</section></div>`;
+    <section class="nbj-main"><div class="sq-tabs" role="tablist">${tabs.map((p) => html`<div key=${p} role="tab" aria-selected=${p === cur} class=${"sq-tab" + (p === cur ? " on" : "")} title=${termOf(p) ? "Terminal " + termOf(p) + " on " + server.name : p} onClick=${() => setCur(p)}>${Ic(termOf(p) ? "terminal" : p.endsWith(".ipynb") ? "book" : "file", 12)}<span class="sq-ell">${termOf(p) ? "Terminal " + termOf(p) : p.split("/").pop()}</span>
+          <button class="ibtn sm" aria-label="Close tab" title=${termOf(p) ? "Close the tab (the terminal keeps running)" : "Close"} onClick=${(e) => { e.stopPropagation(); closeTab(p); }}>${Ic("x", 11)}</button></div>`)}${tabs.length > 0 && html`<button class="ibtn sm nbj-newterm" title="New terminal" aria-label="New terminal" onClick=${newTerm}>${Ic("plus", 12)}</button>`}</div>
+      <div class="nbj-stage">${!tabs.length && html`<div class="sq-empty big">${Ic("book", 28)}<div>Open a notebook from the file list</div><div class="mute small">Or create one with + — cells run on ${server.name}'s kernel. Terminals and kernels are under Running.</div></div>`}
+        ${tabs.map((p) => html`<div key=${sid + p} class="nbj-tab" hidden=${p !== cur}>${termOf(p) ? html`<${RemoteTerm} server=${sid} name=${termOf(p)} post=${post} api=${api} active=${p === cur} gone=${() => dropTab(p)}/>` : p.endsWith(".ipynb") ? html`<${Notebook} server=${sid} path=${p} post=${post} api=${api} conns=${conns} settings=${settings} models=${models} dirtyRef=${dref(p)} onExpose=${expose} onOutline=${onOutline} jump=${jump}/>` : html`<${FileView} server=${sid} path=${p} post=${post} dirtyRef=${dref(p)}/>`}</div>`)}</div>
+</section></div>`;
 }
 
 // ---------- servers

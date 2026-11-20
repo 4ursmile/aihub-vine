@@ -458,12 +458,15 @@ def read_file(c, path):
     return {"type": d.get("type"), "format": d.get("format"), "content": d.get("content"), "modified": d.get("last_modified"), "size": d.get("size"), "mimetype": d.get("mimetype"), "name": d.get("name")}
 
 
-def write_file(c, path, kind, content, fmt="text"):
+def write_file(c, path, kind, content, fmt="text", chunk=0):
+    """PUT a file / notebook / folder. CHUNK (1, 2, ... then -1 for the last) uploads a big file in parts: Jupyter appends each base64 part."""
     body = {"type": kind}
     if kind != "directory":
         body.update(content=content, format=("json" if kind == "notebook" else fmt))
-    d = http(c, "PUT", "contents/%s" % _q(path), body, timeout=60)
-    return {"path": d.get("path"), "modified": d.get("last_modified")}
+    if chunk and kind == "file":
+        body["chunk"] = int(chunk)
+    d = http(c, "PUT", "contents/%s" % _q(path), body, timeout=120)
+    return {"path": d.get("path"), "modified": d.get("last_modified"), "size": d.get("size")}
 
 
 def rename(c, path, new):
@@ -606,6 +609,43 @@ def switch_kernel(c, sid, kernel):
 
 def end_session(c, sid):
     http(c, "DELETE", "sessions/" + urllib.parse.quote(sid))
+    return {"ok": True}
+
+
+def running(c):
+    """What runs on the server, like JupyterLab's Running panel: kernels (with the notebook of their session), sessions, terminals."""
+    ks = http(c, "GET", "kernels") or []
+    ss = http(c, "GET", "sessions") or []
+    try:
+        ts = http(c, "GET", "terminals") or []
+    except JError:                                                       # terminals switched off on the server
+        ts = None
+    by = {}
+    for s in ss if isinstance(ss, list) else []:
+        k = s.get("kernel") or {}
+        if k.get("id"):
+            by.setdefault(k["id"], []).append({"id": s.get("id"), "path": s.get("path") or "", "name": s.get("name") or "", "type": s.get("type") or ""})
+    kernels = [{"id": k.get("id"), "name": k.get("name") or "", "state": k.get("execution_state") or "", "connections": k.get("connections") or 0,
+                "activity": k.get("last_activity") or "", "sessions": by.get(k.get("id"), [])} for k in ks if isinstance(k, dict) and k.get("id")]
+    terms = None if ts is None else [{"name": str(t.get("name")), "activity": t.get("last_activity") or ""} for t in ts if isinstance(t, dict) and t.get("name") is not None]
+    return {"kernels": kernels, "terminals": terms}
+
+
+def kernel_shutdown(c, kid):
+    """Shut a kernel down: through its sessions (so they go too), then the kernel itself when it is still there."""
+    for s in http(c, "GET", "sessions") or []:
+        if (s.get("kernel") or {}).get("id") == kid:
+            try:
+                http(c, "DELETE", "sessions/" + urllib.parse.quote(s["id"]))
+            except JError:
+                pass
+    drop_channel(c, "k", kid)
+    _ns_cache.pop(kid, None)
+    try:
+        http(c, "DELETE", "kernels/" + urllib.parse.quote(kid))
+    except JError as e:
+        if e.status != 404:
+            raise
     return {"ok": True}
 
 
@@ -761,7 +801,9 @@ def reply_input(c, kid, value):
 def poll(c, kind, ident, after, wait):
     ch = channel(c, kind, ident)
     items, last, closed = ch.read(after, wait)
-    return {"events": [dict(v, n=s) if isinstance(v, dict) else {"n": s, "d": v} for s, v in items], "next": last, "closed": closed, "ch": id(ch)}
+    # "ch" names this connection so the page restarts its cursor on a new one. Not id(ch): CPython reuses the address of a
+    # dropped channel, the page then keeps its old `after` and skips every event of the new connection (all output lost).
+    return {"events": [dict(v, n=s) if isinstance(v, dict) else {"n": s, "d": v} for s, v in items], "next": last, "closed": closed, "ch": ch.session}
 
 
 def term_new(c):
