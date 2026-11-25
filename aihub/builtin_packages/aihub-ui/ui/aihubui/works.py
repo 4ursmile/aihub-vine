@@ -3274,7 +3274,7 @@ def write_guide():
                     return p
         except OSError:
             pass
-        tmp = p + ".tmp"
+        tmp = "%s.%d.%d.tmp" % (p, os.getpid(), threading.get_ident())      # two writers at once (catalogue refresh + a caller) never share a temp file
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(text)
         os.replace(tmp, p)
@@ -3480,6 +3480,110 @@ def checked_work(w, strip_secrets_with=None, warnings=None):
     if not w["nodes"]:
         raise ValueError("the work has no nodes")
     return w
+
+
+KEEP_NODE = ("preset", "credential", "credential_kind", "credential_name", "vault", "vault_kinds", "folder_hint", "env_hint", "requires")
+
+
+def updated_work(old, proposal, warnings=None):
+    """A chat's change to an existing work, made safe like checked_work, but it stays the same work: same id, On/Off state, package,
+    working folder and history size. A node that keeps its id and type keeps its stored secrets (MARK) and its links (saved node,
+    credential set, vault grants) unless the proposal names another one that exists. Secret values typed in the proposal are never taken."""
+    if not isinstance(proposal, dict) or not isinstance(proposal.get("nodes"), list):
+        raise ValueError("the change has no nodes")
+    cat = catalogue()
+    oldn = {n["id"]: n for n in old.get("nodes", []) if isinstance(n, dict) and n.get("id")}
+    w = {k: v for k, v in proposal.items() if k in ("title", "description", "nodes", "edges", "workdir", "keep")}
+    w["id"], w["enabled"] = old["id"], bool(old.get("enabled"))
+    if old.get("package"):
+        w["package"] = old["package"]
+    for k in ("workdir", "keep"):
+        if not w.get(k) and old.get(k):
+            w[k] = old[k]
+    w.setdefault("title", old.get("title") or "Untitled")
+    w.setdefault("description", old.get("description") or "")
+    nodes = []
+    for n in w["nodes"]:
+        if not isinstance(n, dict) or n.get("type") not in cat:
+            raise ValueError("unknown node type %r" % (n.get("type") if isinstance(n, dict) else n))
+        n = dict(n)
+        cfg = dict(n.get("config") or {}) if isinstance(n.get("config"), dict) else {}
+        was = oldn.get(n.get("id"))
+        same = bool(was) and was.get("type") == n["type"]
+        ck = (cat[n["type"]].get("credential") or {}).get("kind")
+        for f in cat[n["type"]]["fields"]:
+            if f.get("secret"):
+                cfg.pop(f["name"], None)                                       # never a secret from the proposal
+                if same and (was.get("config") or {}).get(f["name"]) == MARK:
+                    cfg[f["name"]] = MARK                                      # the stored one stays (the box still holds it)
+        n["config"] = cfg
+        p = preset(n.get("preset"))
+        if not p or p["type"] != n["type"]:
+            n.pop("preset", None)
+        c = credential(n.get("credential"))
+        if not c or c.get("kind") != ck:
+            n.pop("credential", None)
+        n["vault"] = [v for v in (n.get("vault") or []) if isinstance(v, str) and credential(v)] if isinstance(n.get("vault"), list) else []
+        if not n["vault"]:
+            n.pop("vault")
+        for k in ("credential_kind", "credential_name", "vault_kinds", "folder_hint", "env_hint", "requires"):
+            n.pop(k, None)                                                     # these only come from the work as it was
+        if same:
+            for k in KEEP_NODE:
+                if k not in n and k in was:
+                    n[k] = was[k]
+        elif ck and not n.get("credential"):
+            fit = [x for x in credentials().values() if x["kind"] == ck]
+            if len(fit) == 1:
+                n["credential"] = fit[0]["id"]
+            else:
+                n["credential_kind"] = ck
+        if n.get("credential"):
+            n.pop("credential_kind", None)
+            n.pop("credential_name", None)
+        nodes.append(n)
+    w["nodes"] = nodes
+    if not any(cat[n["type"]]["kind"] == "trigger" for n in nodes):
+        raise ValueError("a work needs a Start node")
+    repair(w, cat)
+    if warnings is not None:
+        warnings.extend(ref_warnings(w, cat))
+    _layout(w)
+    w = store.clean_work(w)
+    if not w["nodes"]:
+        raise ValueError("the work has no nodes")
+    return w
+
+
+HISTORY_KEEP = 10
+BACKUP_NAME = re.compile(r"^[A-Za-z0-9_-]{1,40}-\d{10,20}\.json$")
+
+
+def backup_work(w):
+    """Keep the version of W that is about to be replaced (the last HISTORY_KEEP per work) -> the backup's file name."""
+    d = store.ui_dir("works-history")
+    name = "%s-%d.json" % (w["id"], int(time.time() * 1000))
+    store._write(os.path.join(d, name), w)
+    mine = sorted(f for f in os.listdir(d) if f.startswith(w["id"] + "-") and BACKUP_NAME.match(f))
+    for f in mine[:-HISTORY_KEEP]:
+        try:
+            os.remove(os.path.join(d, f))
+        except OSError:
+            pass
+    return name
+
+
+def restore_work(wid, name):
+    """Put back a version backup_work kept. Raises ValueError for a name that is not one of this work's backups."""
+    if not BACKUP_NAME.match(str(name or "")) or not str(name).startswith(str(wid) + "-"):
+        raise ValueError("no such backup")
+    w = store._read(os.path.join(store.ui_dir("works-history"), name), None)
+    if not isinstance(w, dict) or w.get("id") != wid:
+        raise ValueError("no such backup")
+    cur = store.get_work(wid)
+    if cur:
+        backup_work(cur)                                                       # undoing can be undone too
+    return store.save_work(w)
 
 
 GEN_TRIES = 3

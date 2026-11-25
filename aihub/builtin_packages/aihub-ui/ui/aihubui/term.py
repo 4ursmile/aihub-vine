@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -21,6 +22,7 @@ except ImportError:                                  # Windows: Term falls back 
 
 MAX = 400_000
 IDLE_REAP = 15 * 60                                  # a terminal nobody has read from for this long is killed (the page is gone)
+IDLE_REAP_SHELL = 60 * 60                            # a chat's shell: the page detaches it when you leave the chat and attaches again when you come back
 KILL_GRACE = 2.0                                     # SIGTERM -> SIGKILL
 lock = threading.Lock()
 terms = {}
@@ -222,7 +224,7 @@ def reap(now=None):
     """Kill running terminals nobody has read from for IDLE_REAP seconds. -> how many."""
     now = now or time.time()
     with lock:
-        idle = [t for t in terms.values() if t.code is None and now - t.last_read > IDLE_REAP]
+        idle = [t for t in terms.values() if t.code is None and now - t.last_read > (IDLE_REAP_SHELL if t.shell else IDLE_REAP)]
     for t in idle:
         t.kill()
     return len(idle)
@@ -246,3 +248,34 @@ def start(argv, env=None, cwd=None, shell=False):
 def get(tid):
     with lock:
         return terms.get(str(tid))
+
+
+def _cwd_darwin(pid):
+    """macOS: the current folder of PID through libproc (PROC_PIDVNODEPATHINFO), no lsof run. -> path or ''."""
+    import ctypes
+    try:
+        lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+        buf = ctypes.create_string_buffer(2352)          # struct proc_vnodepathinfo: 2 x (vnode_info 152 + path 1024)
+        if lib.proc_pidinfo(ctypes.c_int(pid), ctypes.c_int(9), ctypes.c_uint64(0), buf, ctypes.c_int(2352)) <= 0:
+            return ""
+        return buf.raw[152:152 + 1024].split(b"\0", 1)[0].decode("utf-8", "replace")
+    except (OSError, AttributeError, ValueError):
+        return ""
+
+
+def cwd_of(tid):
+    """The folder a shell terminal is in now (after the user's `cd`s), else the folder it started in; '' for no such terminal."""
+    t = get(tid)
+    if not t:
+        return ""
+    pid = getattr(getattr(t, "p", None), "pid", None)
+    d = ""
+    if pid and t.code is None:
+        if sys.platform.startswith("linux"):
+            try:
+                d = os.readlink("/proc/%d/cwd" % pid)
+            except OSError:
+                d = ""
+        elif sys.platform == "darwin":
+            d = _cwd_darwin(pid)
+    return d if d and os.path.isdir(d) else (t.cwd or "")

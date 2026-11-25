@@ -44,6 +44,9 @@ When the user asks you to build a workflow / work / automation (a flow of nodes 
 with its fields), then answer with a short explanation and ONE ```workflow block (not ```json) holding the JSON {"title","description","nodes":[{"id","type","label","x","y","config"}],"edges":[{"from","to"}]}; the page shows a
 button that saves it in Works (switched off) and opens it. Use only node types and field names from the guide, one Start node, required fields filled, secret fields empty (credential sets carry logins).
 Without the guide: tell the user to type /create-work <description>.
+To change an EXISTING work: the works are JSON files in {WORKS_DIR} (one <id>.json each: id, title, description, nodes, edges; secret values are never in them, "__stored__" marks a saved secret).
+Read the file of the work the user means, then answer with ONE ```workflow block holding the whole updated work WITH its "id": keep the ids of the nodes that stay (their saved secrets
+and credential sets are kept), give new nodes new ids, leave secret fields out. The page shows the changes and an Apply button (and Undo); nothing changes before the user applies it.
 Notebooks: the user's Jupyter servers live on the Notebook page. `{NB_CLI} servers`, `{NB_CLI} ls SERVER [FOLDER]` and `{NB_CLI} run SERVER PATH [--param k=v ...] [--timeout S]` run a notebook on a fresh kernel and print every cell's output and its `result` variable; answer from those real outputs."""
 
 GUIDES = {
@@ -126,7 +129,7 @@ def build_system(extra="", soul=None):
     SOUL = this chat's own persona text instead of the soul note (None = use the note)."""
     line, extra = _lazy_extra(extra or "")
     g = {k: _guide(k, v) or "(not available)" for k, v in GUIDES.items()}
-    parts = [CANVAS_HELP.replace("{WORKS_GUIDE}", os.path.join(HOME(), "ui", "works-guide.md")).replace("{G_DIAGRAMS}", g["diagrams"])
+    parts = [CANVAS_HELP.replace("{WORKS_GUIDE}", os.path.join(HOME(), "ui", "works-guide.md")).replace("{WORKS_DIR}", os.path.join(HOME(), "ui", "works")).replace("{G_DIAGRAMS}", g["diagrams"])
              .replace("{SQL_CLI}", "%s %s" % (sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "sqlcli.py"))).replace("{NB_CLI}", "%s %s" % (sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "nbcli.py"))).replace("{G_DOCS}", g["documents"]).replace("{G_EXTRA}", line)]
     try:
         if soul is None:

@@ -2,7 +2,7 @@
 import { h, html, render, useState, useEffect, useRef, useCallback, useMemo } from "./vendor/preact-htm.js";
 import { Ic } from "./icons.js";
 import { toast, guard, setToaster, Seg, Pop, Switch, Modal, ask, confirmBox, AskHost, escPush, useInterval, Num, CtxMenu, menuAt } from "./ui.js";
-import { Md, AskCard, WorkRunCard, setWorkMaker, setBlockSharer, setNodeHost, RunLog, fmtDur, useTick } from "./blocks.js";
+import { Md, AskCard, WorkRunCard, setWorkMaker, setWorkGetter, setBlockSharer, setNodeHost, RunLog, fmtDur, useTick } from "./blocks.js";
 import * as OUI from "./openui.js";
 import { CodeEditor, useHl, langOf, colorize, splitHl, esc, isMac as isMacUI } from "./code.js";
 import { UsagePage, AlertBar, useAlerts } from "./usage.js";
@@ -78,6 +78,7 @@ async function api(path, { method = "GET", body, signal } = {}) {
 const nativePick = async (b) => { try { const r = await post("fs/pick", b); return r.unsupported ? null : r.path; } catch (e) { return null; } };
 const post = (p, b) => api(p, { method: "POST", body: b || {} });
 setWorkMaker(async (work) => await post("works/make", { work }));
+setWorkGetter({ get: (id) => api("works/get?id=" + encodeURIComponent(id)).then((d) => d.work || null, (e) => (e.status === 404 || /no such|not found/i.test(e.message || "") ? null : Promise.reject(e))), restore: (id, backup) => post("works/restore", { id, backup }) });
 const put = (p, b) => api(p, { method: "PUT", body: b });
 async function stream(path, body, on, signal) {
   const r = await fetch("/api/" + path, { method: "POST", signal, headers: { "Content-Type": "application/json", "X-AIHub-UI": "1" }, body: JSON.stringify(body) });
@@ -374,8 +375,15 @@ function MdFile({ id, path, ver, src }) {
   const text = String(d.text || "").replace(/(!?\[[^\]]*\]\()(<[^>]+>|[^)\s]+)/g, (m, a, u) => a + rel(u.replace(/^<|>$/g, "")));
   return html`<div class="mdfile">${text.trim() ? html`<${Md} text=${text}/>` : html`<p class="mute">This file is empty.</p>`}</div>`;
 }
+const LANG_BY_EXT = { py: "python", sh: "sh", bash: "sh", zsh: "sh", js: "javascript", ts: "typescript", sql: "sql", md: "markdown" };
 function Editor({ id, path, ver, onSaved, dirtyRef }) {
   const [d, setD] = useState(null), [text, setText] = useState(""), [gen, setGen] = useState(0), dr = useRef(false);
+  // completion (the UI's completer: jedi / stdlib members for .py, words otherwise) and AI grey text, the same model as the notebook's suggestions
+  const [sugOn, setSugOn] = useState(() => pref("suggest", "1") === "1"), [aiSt, setAiSt] = useState({ s: "" });
+  const flang = LANG_BY_EXT[(/\.([A-Za-z0-9]+)$/.exec(path) || [])[1]] || "";
+  const assist = useMemo(() => ({ on: sugOn, delay: 900, onState: (s, m) => setAiSt({ s, m }),
+    complete: (code, pos) => post("code/complete", { code, pos, path, lang: flang }),
+    suggest: (prefix, suffix) => post("jupyter/ai/suggest", { prefix, suffix, lang: flang || "text", cells: [] }).then((r) => r.text || "") }), [sugOn, path, flang]);
   const dirty = !!d && !d.err && text !== (d.text || "");
   dr.current = dirty; if (dirtyRef) dirtyRef.current = dirty;
   useEffect(() => () => { if (dirtyRef) dirtyRef.current = false; }, []);
@@ -399,9 +407,11 @@ function Editor({ id, path, ver, onSaved, dirtyRef }) {
   if (d.err || d.binary || d.big) return html`<div class="empty"><div>${Ic("file", 26)}<div>${d.err || (d.big ? "Too large to edit here (" + num(d.big) + "B)." : "This is a binary file.")}</div></div></div>`;
   const mk = isMacUI ? "⌘" : "Ctrl+";
   // Revert goes through the editor's history, so Undo brings the edits back
-  return html`<div class="editor"><${CodeEditor} value=${text} onChange=${setText} doc=${path + ":" + gen} path=${path} onSave=${() => save()}
+  return html`<div class="editor"><${CodeEditor} value=${text} onChange=${setText} doc=${path + ":" + gen} path=${path} onSave=${() => save()} assist=${assist}
     footer=${(t) => html`<div class="ebar"><button class="ibtn sm" title=${"Undo (" + mk + "Z)"} aria-label="Undo" disabled=${!t.canUndo} onClick=${t.undo}>${Ic("undo", 15)}</button><button class="ibtn sm" title=${"Redo (" + (isMacUI ? "⇧⌘Z" : "Ctrl+Y") + ")"} aria-label="Redo" disabled=${!t.canRedo} onClick=${t.redo}>${Ic("redo", 15)}</button><button class=${"ibtn sm" + (t.finding ? " on" : "")} title=${"Find and replace (" + mk + "F)"} aria-label="Find and replace" onClick=${t.find}>${Ic("search", 15)}</button>
-      <span class="mute small grow">${dirty ? "Unsaved changes" : "Saved"} · ${num(text.split("\n").length)} lines${t.lang ? " · " + t.lang : ""}</span><button class="btn" disabled=${!dirty} onClick=${() => setText(d.text || "")}>Revert</button><button class="btn acc" disabled=${!dirty} onClick=${() => save()}>${Ic("check", 13)} Save</button></div>`}/></div>`;
+      <span class="mute small grow">${dirty ? "Unsaved changes" : "Saved"} · ${num(text.split("\n").length)} lines${t.lang ? " · " + t.lang : ""}${aiSt.s === "busy" ? " · suggesting…" : aiSt.s === "err" ? " · suggestion failed" : ""}</span>
+      <button class=${"btn sm ghost" + (sugOn ? " on" : "")} aria-pressed=${sugOn} title=${"AI suggestions as grey text at the end of a line: Tab accepts, Esc dismisses, Alt+\\ asks now. Ctrl+Space lists completions."} onClick=${() => { setSugOn(!sugOn); setPref("suggest", sugOn ? "0" : "1"); }}>Suggest ${sugOn ? "on" : "off"}</button>
+      <button class="btn sm" disabled=${!dirty} onClick=${() => setText(d.text || "")}>Revert</button><button class="btn sm" disabled=${!dirty} onClick=${() => save()}>Save</button></div>`}/></div>`;
 }
 function WorkDirDialog({ s, cur, busy, close, saved }) {
   const [v, setV] = useState(s.cwd || ""), [pick, setPick] = useState(false), [wait, setWait] = useState(false);
@@ -481,23 +491,43 @@ function GenBar({ gen }) {
 }
 
 // One shell inside a terminal tab. It stays mounted while another tab (or a hidden panel) is in front, so nothing running is lost.
-function TermPane({ id, active, onEnd, regStop }) {
+// Leaving the chat only detaches it: the shell keeps running on this machine (its output is buffered) and the tab attaches to it again,
+// with its scrollback, when the chat opens next (also after a reload). The tab's × is what ends it.
+function TermPane({ id, tid, active, onEnd, onId }) {
   const host = useRef(null), tm = useRef(null), [n, setN] = useState(0), [ended, setEnded] = useState(null);
   useEffect(() => {
     let gone = false; setEnded(null);
-    (async () => { try { const x = await runInstall(host.current, { shell: true, session: id }, { post, api }, (code) => { if (!gone) { setEnded(code); onEnd(code); } }); if (gone) x.stop(); else tm.current = x; } catch (e) { if (!gone) { toast(e.message || "Cannot open a terminal"); setEnded(-1); onEnd(-1); } } })();
-    return () => { gone = true; if (tm.current) { tm.current.stop(); tm.current = null; } };
+    (async () => {
+      try {
+        let attach = n === 0 && tid ? tid : "";
+        if (attach) { try { const r = await api(`term/read?id=${attach}&after=999999999999&wait=0`); if (r.code != null) attach = ""; } catch (e) { attach = ""; } }      // gone or ended: a fresh shell
+        if (gone) return;
+        const x = await runInstall(host.current, attach ? { attach } : { shell: true, session: id }, { post, api }, (code) => { if (!gone) { setEnded(code); onEnd(code); } });
+        if (gone) { x.detach(); return; }
+        tm.current = x; onId(x.id);
+      } catch (e) { if (!gone) { toast(e.message || "Cannot open a terminal"); setEnded(-1); onEnd(-1); } }
+    })();
+    return () => { gone = true; if (tm.current) { tm.current.detach(); tm.current = null; } };
   }, [id, n]);
-  return html`<div class=${"ct-pane" + (active ? " on" : "")}><div class="ct-b" ref=${host}></div>${ended != null && html`<div class="ct-end"><span>Process exited (${ended})</span><button class="btn" onClick=${() => setN(n + 1)}>Restart</button></div>`}</div>`;
+  useEffect(() => { if (active && host.current) { const ta = host.current.querySelector("textarea"); if (ta) setTimeout(() => ta.focus(), 30); } }, [active]);
+  return html`<div class=${"ct-pane" + (active ? " on" : "")}><div class="ct-b" ref=${host}></div>${ended != null && html`<div class="ct-end"><span>Process exited (${ended})</span><button class="btn sm" onClick=${() => setN(n + 1)}>New shell</button></div>`}</div>`;
 }
 
 // Terminal panel like VS Code's: several shells as tabs, a "+" to open another, full screen, hide (shells keep running) and per-tab kill.
+// The tabs (and which shell each one shows) are kept per chat for this browser tab, so switching chats or reloading comes back to the same shells.
 let termSeq = 0;
+const ctKey = (id) => "aihub_ui_ct_" + id;
+const ctSaved = (id) => { try { const v = JSON.parse(sessionStorage.getItem(ctKey(id)) || "null"); return v && Array.isArray(v.tabs) && v.tabs.length ? v : null; } catch (e) { return null; } };
 function ChatTerm({ id, show, hide }) {
-  const root = useRef(null), mk = () => ({ k: ++termSeq, no: 0 });
-  const [tabs, setTabs] = useState(() => { const t = mk(); t.no = 1; return [t]; }), [act, setAct] = useState(() => tabs[0].k), [full, setFull] = useState(false), [h, setH] = useState(() => +pref("termh", "280") || 280), [ex, setEx] = useState({});
-  const add = () => setTabs((ts) => { if (ts.length >= 8) { toast("At most 8 terminals per chat"); return ts; } const t = mk(); t.no = Math.max(0, ...ts.map((x) => x.no)) + 1; setAct(t.k); return [...ts, t]; });
-  const kill = (k) => setTabs((ts) => { const i = ts.findIndex((x) => x.k === k), rest = ts.filter((x) => x.k !== k); if (!rest.length) { const t = mk(); t.no = 1; setAct(t.k); setTimeout(hide, 0); return [t]; } if (act === k) setAct(rest[Math.min(i, rest.length - 1)].k); return rest; });
+  const root = useRef(null), mk = (no = 1, tid = "") => ({ k: ++termSeq, no, tid });
+  const [tabs, setTabs] = useState(() => { const v = ctSaved(id); return v ? v.tabs.slice(0, 8).map((t) => mk(t.no || 1, t.tid || "")) : [mk()]; });
+  const [act, setAct] = useState(() => { const v = ctSaved(id), i = v ? Math.max(0, Math.min(v.act || 0, tabs.length - 1)) : 0; return tabs[i].k; });
+  const [full, setFull] = useState(false), [h, setH] = useState(() => +pref("termh", "280") || 280), [ex, setEx] = useState({});
+  useEffect(() => { try { sessionStorage.setItem(ctKey(id), JSON.stringify({ tabs: tabs.map((t) => ({ no: t.no, tid: t.tid })), act: Math.max(0, tabs.findIndex((t) => t.k === act)), open: !!show })); } catch (e) { /* private mode */ } }, [tabs, act, show, id]);
+  const setTid = (k, tid) => setTabs((ts) => (ts.some((x) => x.k === k && x.tid !== tid) ? ts.map((x) => (x.k === k ? { ...x, tid } : x)) : ts));
+  const add = () => setTabs((ts) => { if (ts.length >= 8) { toast("At most 8 terminals per chat"); return ts; } const t = mk(Math.max(0, ...ts.map((x) => x.no)) + 1); setAct(t.k); return [...ts, t]; });
+  const kill = (k) => { const t = tabs.find((x) => x.k === k); if (t && t.tid) post("term/write", { id: t.tid, kill: true }).catch(() => {});
+    setTabs((ts) => { const i = ts.findIndex((x) => x.k === k), rest = ts.filter((x) => x.k !== k); if (!rest.length) { const t2 = mk(); setAct(t2.k); setTimeout(hide, 0); return [t2]; } if (act === k) setAct(rest[Math.min(i, rest.length - 1)].k); return rest; }); };
   const toggleFull = () => {
     const el = root.current;
     if (!full) { setFull(true); try { el.requestFullscreen && el.requestFullscreen().catch(() => {}); } catch (e) {} }
@@ -508,11 +538,12 @@ function ChatTerm({ id, show, hide }) {
   const drag = (e) => { e.preventDefault(); const y0 = e.clientY, h0 = h; document.body.classList.add("dragging-y"); const mv = (m) => setH(Math.max(120, Math.min(innerHeight - 220, h0 + y0 - m.clientY))); const up = () => { document.body.classList.remove("dragging-y"); removeEventListener("pointermove", mv); removeEventListener("pointerup", up); removeEventListener("pointercancel", up); }; addEventListener("pointermove", mv); addEventListener("pointerup", up); addEventListener("pointercancel", up); };
   return html`<div ref=${root} class=${"chatterm" + (full ? " ct-full" : "") + (show ? "" : " ct-off")} style=${full ? "" : "height:" + h + "px"}>
     ${!full && html`<div class="ct-grip" onPointerDown=${drag}></div>`}
-    <div class="ct-h">${Ic("terminal", 14)}<div class="ct-tabs" role="tablist">${tabs.map((t) => html`<div key=${t.k} role="tab" aria-selected=${act === t.k} class=${"ct-tab" + (act === t.k ? " on" : "") + (ex[t.k] != null ? " dead" : "")} onClick=${() => setAct(t.k)} title=${ex[t.k] != null ? "Exited (" + ex[t.k] + ")" : "Terminal " + t.no}><span>Terminal ${t.no}</span><button class="ct-x" title="Kill this terminal" aria-label=${"Kill terminal " + t.no} onClick=${(e) => { e.stopPropagation(); kill(t.k); }}>${Ic("x", 11)}</button></div>`)}</div>
-      <button class="ibtn" title="New terminal" aria-label="New terminal" onClick=${add}>${Ic("plus", 14)}</button><span class="grow" style="flex:1"></span>
-      <button class="ibtn" title=${full ? "Exit full screen" : "Full screen"} aria-label=${full ? "Exit full screen" : "Full screen"} aria-pressed=${full} onClick=${toggleFull}>${Ic(full ? "shrink" : "expand", 14)}</button>
-      <button class="ibtn" title="Hide the panel (terminals keep running)" aria-label="Hide the panel" onClick=${() => { if (full) toggleFull(); hide(); }}>${Ic("x", 14)}</button></div>
-    <div class="ct-panes">${tabs.map((t) => html`<${TermPane} key=${t.k} id=${id} active=${act === t.k} onEnd=${(c) => setEx((x) => ({ ...x, [t.k]: c }))}/>`)}</div></div>`;
+    <div class="ct-h"><div class="ct-tabs" role="tablist">${tabs.map((t) => html`<div key=${t.k} role="tab" aria-selected=${act === t.k} class=${"ct-tab" + (act === t.k ? " on" : "") + (ex[t.k] != null ? " dead" : "")} onClick=${() => setAct(t.k)} title=${ex[t.k] != null ? "Exited (" + ex[t.k] + ")" : "Terminal " + t.no + " (keeps running when you leave the chat)"}><span>Terminal ${t.no}</span><button class="ct-x" title="End this shell" aria-label=${"End terminal " + t.no} onClick=${(e) => { e.stopPropagation(); kill(t.k); }}>${Ic("x", 11)}</button></div>`)}</div>
+      <button class="ibtn sm" title="New terminal" aria-label="New terminal" onClick=${add}>${Ic("plus", 14)}</button><span class="grow" style="flex:1"></span>
+      <span class="ct-hint small mute">→ accepts grey text · Ctrl+Space commands, files, history · # describe a command</span>
+      <button class="ibtn sm" title=${full ? "Exit full screen" : "Full screen"} aria-label=${full ? "Exit full screen" : "Full screen"} aria-pressed=${full} onClick=${toggleFull}>${Ic(full ? "shrink" : "expand", 14)}</button>
+      <button class="ibtn sm" title="Hide the panel (shells keep running)" aria-label="Hide the panel" onClick=${() => { if (full) toggleFull(); hide(); }}>${Ic("down", 14)}</button></div>
+    <div class="ct-panes">${tabs.map((t) => html`<${TermPane} key=${t.k} id=${id} tid=${t.tid} active=${act === t.k} onId=${(tid) => setTid(t.k, tid)} onEnd=${(c) => setEx((x) => ({ ...x, [t.k]: c }))}/>`)}</div></div>`;
 }
 
 function ToolRow({ b, res, hint }) {
@@ -566,7 +597,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   useEffect(() => setMent(null), [id]);
   const [att, setAtt] = useState([]), [tab, setTab] = useState("files"), [open, setOpen] = useState(false), [prev, setPrev] = useState(""), [els, setEls] = useState([]);
   const [engine, setEngine] = useState(pref("engine", "claude")), busyRef = useRef(false), engineNow = useRef("claude"), [mcpAll, setMcpAll] = useState(null), [freeIds, setFreeIds] = useState(null);
-  const [split, setSplit] = useState(pref("split", "0") === "1"), [dlg, setDlg] = useState(null), [hintOff, setHintOff] = useState(false), [term, setTerm] = useState(false), [termOn, setTermOn] = useState(false), [cw, setCw] = useState(() => +pref("canvasw", "0") || 0), [rail, setRail] = useState(pref("edrail", "1") === "1"), [ew, setEw] = useState(() => +pref("edw", "200") || 200), dirtyRef = useRef(false), [dirInfo, setDirInfo] = useState({ dir: "", def: "" });
+  const [split, setSplit] = useState(pref("split", "0") === "1"), [dlg, setDlg] = useState(null), [hintOff, setHintOff] = useState(false), [term, setTerm] = useState(() => !!(ctSaved(id) || {}).open), [termOn, setTermOn] = useState(() => !!ctSaved(id)), [cw, setCw] = useState(() => +pref("canvasw", "0") || 0), [rail, setRail] = useState(pref("edrail", "1") === "1"), [ew, setEw] = useState(() => +pref("edw", "200") || 200), dirtyRef = useRef(false), [dirInfo, setDirInfo] = useState({ dir: "", def: "" });
   const [hints, setHints] = useState([]), [btws, setBtws] = useState([]);
   const [qs, setQs] = useState(() => ({ ...CHAT_QUEUES })), [qPause, setQPause] = useState(false), [qTick, setQTick] = useState(0), qBusy = useRef(false), stopRef = useRef(false);
   const queue = qs[id] || [], editQ = (f) => setQs((m) => { const n = { ...m, [id]: f(m[id] || []) }; CHAT_QUEUES[id] = n[id]; return n; });
@@ -848,6 +879,9 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   const pickFile = async (f) => { if (!(await leaveOk())) return; setPrev(f.path); setTab(canPrev(f.path) ? "preview" : "edit"); };
   const refreshFiles = () => api("files?id=" + id).then((d) => { setFiles(d.files); setDirs(d.dirs || []); setSig(d.sig); }).catch(() => {});
   const noFile = html`<div class="empty"><div>${Ic("file", 26)}<div>Pick a file in Files first.</div></div></div>`;
+  // Edit tab: make a file or folder next to the open file (the folder of PREV, else the project root); a name may hold "/" for subfolders
+  const newBtns = (dir) => html`<button class="ibtn" style="width:26px;height:26px" title=${"New file" + (dir ? " in " + dir : "")} aria-label="New file" onClick=${() => fNew(dir, false)}>${Ic("filePlus", 14)}</button><button class="ibtn" style="width:26px;height:26px" title=${"New folder" + (dir ? " in " + dir : "")} aria-label="New folder" onClick=${() => fNew(dir, true)}>${Ic("folderPlus", 14)}</button>`;
+  const noEdit = html`<div class="empty" onContextMenu=${(e) => { e.preventDefault(); openMenu(e, { path: "", dir: true }); }}><div>${Ic("file", 26)}<div>Pick a file in Files, or make one here.</div><div style="display:flex;gap:8px;justify-content:center;margin-top:10px"><button class="btn" onClick=${() => fNew("", false)}>${Ic("filePlus", 13)} New file</button><button class="btn" onClick=${() => fNew("", true)}>${Ic("folderPlus", 13)} New folder</button></div></div></div>`;
   const previewEl = prev ? (isNb(prev) ? html`<${Notebook} key=${prev} id=${id} path=${prev} ver=${fver} api=${api} put=${put} onSaved=${refreshFiles} dirtyRef=${dirtyRef}/>`
     : /\.(md|markdown)$/i.test(prev) ? html`<${MdFile} key=${prev} id=${id} path=${prev} ver=${fver} src=${src}/>`
     : /\.html?$/i.test(prev) ? html`<${Viewer} url=${src(prev)} name=${prev} ver=${fver} sandbox="allow-scripts allow-forms allow-modals allow-popups"/>`
@@ -1035,6 +1069,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
       ${open && html`<${Grip} cls="cv-grip" value=${() => document.querySelector(".canvas").getBoundingClientRect().width} onChange=${setCw} onDone=${(v) => setPref("canvasw", String(Math.round(v)))} min=${360} max=${() => Math.max(420, innerWidth - 272 - 320)} sign=${-1} reset=${() => { setCw(0); setPref("canvasw", "0"); }}/>`}
       <div class="ctabs"><${Seg} small value=${tab} onChange=${changeTab} items=${[{ id: "files", label: "Files", icon: "folder" }, { id: "preview", label: "Preview", icon: "eye" }, { id: "edit", label: "Edit", icon: "edit" }, { id: "diff", label: "Diff", icon: "layers" }, { id: "git", label: "Git", icon: "branch" }, { id: "elements", label: "Elements", icon: "grid" }]}/><button class="ibtn cv-x" title="Close the canvas" aria-label="Close the canvas" onClick=${() => setOpen(false)}>${Ic("x", 16)}</button></div>
       ${(tab === "preview" || tab === "edit" || tab === "diff") && html`<div class="fbar" onContextMenu=${(e) => { if (!prev || e.target.closest("button,a,input")) return; e.preventDefault(); openMenu(e, { path: prev, dir: false }); }}><span class="mono t" title=${prev ? prev + " (right-click for file actions)" : ""}>${prev || "No file selected"}</span>${prev && html`<button class="ibtn" style="width:26px;height:26px" title="File actions: rename, copy, paste, download…" aria-label="File actions" onClick=${(e) => openMenu(e, { path: prev, dir: false })}>${Ic("more", 14)}</button>`}${prev && canPrev(prev) && html`<a class="small" href=${src(prev)} target="_blank" rel="noopener">Open ${Ic("link", 12)}</a>`}${prev && !/\.(exe|dll|zip|gz|tar|bin)$/i.test(prev) && html`<button class="btn" title="Publish this file as a Space on the hub" onClick=${() => share(prev, false)}>${Ic("upload", 13)} Share</button>`}${/(^|\/)index\.html?$/i.test(prev || "") && html`<button class="btn" title="Publish the whole folder as a web page Space" onClick=${() => share(prev, true)}>${Ic("folder", 13)} Share bundle</button>`}
+        ${tab === "edit" && newBtns(prev ? parentOf(prev) : "")}
         ${tab === "edit" && html`<button class=${"ibtn" + (rail ? " on" : "")} style="width:26px;height:26px" title="Show the file list beside the editor" aria-label="Show the file list beside the editor" onClick=${() => { setRail(!rail); setPref("edrail", rail ? "0" : "1"); }}>${Ic("folder", 14)}</button>`}
         ${prev && html`<button class="btn" title="Open this file, in the project folder, in VS Code" onClick=${() => openCode(prev)}>${Ic("code", 13)} VS Code</button><button class="btn" title="Show this file in its folder (Finder / Explorer)" onClick=${() => openDir(prev)}>${Ic("folder", 13)} Open folder</button>`}
         ${(tab === "edit" || tab === "diff") && html`<button class=${"ibtn" + (split ? " on" : "")} style="width:26px;height:26px" title="Show the preview beside the editor or diff" aria-label="Show the preview beside the editor or diff" onClick=${() => setSplit(!split)}>${Ic("panel", 14)}</button>`}</div>`}
@@ -1044,7 +1079,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
         ${tab === "preview" && previewEl}
         ${tab === "diff" && !prev && diffEl}
         ${tab === "git" && html`<${GitView} id=${id} api=${api} rev=${fsig} file=${prev} onOpenDiff=${openDiff}/>`}
-        ${(tab === "edit" || (tab === "diff" && prev)) && (!prev ? noFile : split && canPrev(prev) ? html`<div class="split"><div class="pane">${previewEl}</div><div class="pane">${tab === "edit" ? editEl : diffEl}</div></div>` : tab === "edit" ? editEl : diffEl)}
+        ${(tab === "edit" || (tab === "diff" && prev)) && (!prev ? noEdit : split && canPrev(prev) ? html`<div class="split"><div class="pane">${previewEl}</div><div class="pane">${tab === "edit" ? editEl : diffEl}</div></div>` : tab === "edit" ? editEl : diffEl)}
         ${tab === "elements" && (els.length ? els.map((e, i) => html`<${Element} key=${e.id} e=${e}/>`) : html`<div class="empty"><div>${Ic("layers", 26)}<div>Use Render on an html, svg or openui block<br/>to see it here.</div></div></div>`)}
       </div>
       ${fmenu && html`<${CtxMenu} at=${fmenu.at} items=${fileMenuItems(fmenu.en)} close=${() => setFmenu(null)}/>`}
@@ -1794,13 +1829,15 @@ function RunsPanel({ w, cat, runs, run, setRun, refresh, now }) {
         <div class="io-k" style="margin-top:10px">Timeline</div>
         ${nodes.map(([id, rec]) => html`<${TimelineRow} key=${id} w=${w} run=${run} id=${id} label=${rec.label || label(id)} rec=${rec} total=${total} now=${now} files=${(files ? files.files : []).filter((f) => f.node === id)}/>`)}</div>`}</div></aside>`;
 }
-function Works({ boot, openId }) {
+function Works({ boot, openId, chatWith }) {
   const [trig, setTrig] = useState({});
   const [list, setList] = useState([]), [w, setW] = useState(null), [cat, setCat] = useState({}), [sel, setSel] = useState(null), [link, setLink] = useState(null), [mouse, setMouse] = useState(null);
   const [gen, setGen] = useState(""), [genBusy, setGenBusy] = useState(false), [wf, setWf] = useState(false), [nd, setNd] = useState(false), [shared, setShared] = useState(null), [share, setShare] = useState(null), [runs, setRuns] = useState([]), [run, setRun] = useState(null), [hook, setHook] = useState(""), [dirty, setDirty] = useState(false), [pal, setPal] = useState(null), graph = useRef();
   const [presets, setPresets] = useState([]), [pe, setPe] = useState(null), [tab, setTab] = useState(() => { try { return localStorage.getItem("aihub_works_tab") || "works"; } catch { return "works"; } });
   const pickTab = (t) => { setTab(t); try { localStorage.setItem("aihub_works_tab", t); } catch {} };
-  const [sched, setSched] = useState(null), [fdlg, setFdlg] = useState(false);
+  const [sched, setSched] = useState(null), [fdlg, setFdlg] = useState(false), [lmenu, setLmenu] = useState(null), [nmenu, setNmenu] = useState(null), [ren, setRen] = useState(null), titleIn = useRef();
+  const renameWork = guard(async (x) => { const v = await ask({ title: "Rename work", submit: "Rename", fields: [{ name: "t", label: "Name", value: x.title || "", max: 80 }] }); if (!v || !v.t.trim() || v.t.trim() === x.title) return; await post("works/rename", { id: x.id, title: v.t.trim() }); load(); toast("Renamed to " + v.t.trim()); });
+  const deleteWork = guard(async (x) => { if (await confirmBox({ title: "Delete " + x.title + "?", text: "Its run history, logs and stored node secrets go too, and its triggers stop.", ok: "Delete", danger: true })) { await post("works/delete", { id: x.id }); load(); } });
   const load = guard(async () => { const d = await api("works"); setList(d.works); setSched(d.scheduler || null); });
   const loadPresets = () => api("works/presets").then((d) => setPresets(d.presets || [])).catch(() => {});
   const loadCat = () => { loadPresets(); return api("works/nodes").then((d) => setCat(Object.fromEntries(d.nodes.map((n) => [n.type, n])))).catch(() => {}); };
@@ -1846,6 +1883,12 @@ function Works({ boot, openId }) {
       if (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || "") || t.isContentEditable || (t.closest && t.closest("[contenteditable],.pbox,[role=dialog],dialog"))) return; e.preventDefault(); delNode(sel); };
     addEventListener("keydown", kd); return () => removeEventListener("keydown", kd);
   }, [sel, selEdge]);
+  useEffect(() => {                                                    // F2: rename the selected node on the canvas, or the work when no node is selected
+    const kd = (e) => { if (e.key !== "F2" || !wRef.current || spc.current.open) return; const t = e.target || {}; if (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || "") || t.isContentEditable) return;
+      e.preventDefault(); const id = spc.current.sel, n = id && wRef.current.nodes.find((q) => q.id === id);
+      if (n) setRen({ id, v: n.label || "" }); else if (titleIn.current) { titleIn.current.focus(); titleIn.current.select(); } };
+    addEventListener("keydown", kd); return () => removeEventListener("keydown", kd);
+  }, []);
   const refreshRuns = useCallback(() => w && w.id && api("works/runs?id=" + w.id).then((d) => setRuns(d.runs)).catch(() => {}), [w && w.id]);
   useEffect(() => { if (w && w.id) refreshRuns(); }, [w && w.id]);
   useInterval(() => { refreshRuns(); if (sel && w.enabled) api("works/get?id=" + w.id).then((d) => setTrig(d.triggers || {})).catch(() => {}); if (run && ["queued", "running"].includes(run.status)) api(`works/run?id=${w.id}&run=${run.id}`).then((d) => setRun(d.run)).catch(() => {}); }, w && w.id ? 2000 : null);
@@ -1866,14 +1909,22 @@ function Works({ boot, openId }) {
     <button class="btn acc" onClick=${() => { setW({ title: "Untitled work", enabled: false, nodes: [{ id: "s" + Math.random().toString(36).slice(2, 6), type: "start.manual", x: 60, y: 80, config: {} }], edges: [] }); setSel(null); setRuns([]); setRun(null); setDirty(true); }}>${Ic("plus", 14)} New work</button>
     ${!list.length && html`<div class="card mute" style="margin-top:16px">No works yet. Add a Start node, a Claude task, connect them, then switch the work On.</div>`}
     ${wf && html`<${Workflows} close=${() => setWf(false)} opened=${(nw) => { setWf(false); load(); setW(nw); setSel(null); setRun(null); setDirty(false); }}/>`}
-    ${list.map((x) => html`<div class="card row wkrow" role="button" tabindex="0" title="Open the design" onClick=${(e) => { if (!e.target.closest("button,.wksw")) open(x.id); }} onKeyDown=${(e) => { if (e.key === "Enter" && e.target === e.currentTarget) open(x.id); }}><span class="nico" style="width:34px;height:34px;border-radius:10px;background:var(--soft2);display:grid;place-items:center">${Ic("flow", 17)}</span><div class="grow"><b>${x.title}</b> <span class="mute small">${x.nodes} nodes · ${ago(x.updated)}</span>${x.description && html`<div class="mute small">${x.description}</div>`}</div>
+    ${list.map((x) => html`<div class="card row wkrow" role="button" tabindex="0" title="Open the design (right-click for more)" onContextMenu=${(e) => { if (e.target.closest(".wksw")) return; e.preventDefault(); setLmenu({ at: menuAt(e), x }); }} onKeyUp=${(e) => { if (e.key === "F2" && e.target === e.currentTarget) renameWork(x); }} onClick=${(e) => { if (!e.target.closest("button,.wksw")) open(x.id); }} onKeyDown=${(e) => { if (e.key === "Enter" && e.target === e.currentTarget) open(x.id); }}><span class="nico" style="width:34px;height:34px;border-radius:10px;background:var(--soft2);display:grid;place-items:center">${Ic("flow", 17)}</span><div class="grow"><b>${x.title}</b> <span class="mute small">${x.nodes} nodes · ${ago(x.updated)}</span>${x.description && html`<div class="mute small">${x.description}</div>`}</div>
       <span class="wksw row small" title=${x.enabled ? "On: its triggers are live. Click to switch off" : "Off: click to switch its triggers on"}><${Switch} on=${!!x.enabled} label=${"Work " + x.title + " on"} onChange=${guard(async (on) => { await post("works/enable", { id: x.id, enabled: on }); load(); toast(on ? x.title + " is on" : x.title + " is off"); })}/><span>${x.enabled ? "On" : "Off"}</span></span>
-      <button class="btn bad" title="Delete" onClick=${guard(async () => { if (await confirmBox({ title: "Delete " + x.title + "?", text: "Its run history, logs and stored node secrets go too, and its triggers stop.", ok: "Delete", danger: true })) { await post("works/delete", { id: x.id }); load(); } })}>${Ic("trash", 14)}</button></div>`)}
+      <button class="ibtn" title="Rename, open, delete…" aria-label=${"Actions for " + x.title} onClick=${(e) => { e.stopPropagation(); setLmenu({ at: menuAt(null, e.currentTarget), x }); }}>${Ic("more", 16)}</button></div>`)}
+    ${lmenu && html`<${CtxMenu} at=${lmenu.at} close=${() => setLmenu(null)} items=${[["Open", "flow", "", false, () => open(lmenu.x.id)], ["Rename…", "edit", "", false, () => renameWork(lmenu.x)], "-", ["Delete", "trash", "", false, () => deleteWork(lmenu.x), true]]}/>`}
     <${ChatRuns}/>`}</div>`;
 
   const add = (type, pos, pid, from) => { const sp = cat[type], pre = pid && presets.find((p) => p.id === pid); const cfg = {}; if (!pre) (sp ? sp.fields : []).forEach((f) => { if (f.default !== undefined && f.default !== "" && !f.secret) cfg[f.name] = f.default; });   // a saved node: empty fields follow it
     const id = "n" + Math.random().toString(36).slice(2, 7); upd((c) => (c.nodes.push({ id, type, ...(pos ? { x: pos.x, y: pos.y } : freeSpot(c.nodes)), label: pre ? pre.name : "", config: cfg, ...(pre ? { preset: pre.id } : {}) }), from && sp && sp.kind !== "trigger" && c.nodes.some((q) => q.id === from) && c.edges.push({ from, to: id }), c), { hard: true }); setSel(id); setPal(null); setLink(null); };
-  const drag = (n, e) => { if (e.target.closest("button")) return; e.preventDefault(); setSel(n.id); const sx = e.clientX - n.x, sy = e.clientY - n.y; let moved = false; const mv = (ev) => { if (!moved && Math.hypot(ev.clientX - e.clientX, ev.clientY - e.clientY) < 4) return; if (!moved) snap({ hard: true }); moved = true; upd((c) => (Object.assign(c.nodes.find((q) => q.id === n.id), { x: Math.max(0, Math.round(ev.clientX - sx)), y: Math.max(0, Math.round(ev.clientY - sy)) }), c), { nopush: true }); }; const up = () => { if (moved) lastDrag.current = Date.now(); removeEventListener("pointermove", mv); removeEventListener("pointerup", up); }; addEventListener("pointermove", mv); addEventListener("pointerup", up); };
+  const renameNode = (id, label) => { const n = w.nodes.find((q) => q.id === id); const v = String(label || "").trim().slice(0, 60); if (n && (n.label || "") !== v) upd((c) => { c.nodes.find((q) => q.id === id).label = v; return c; }, { hard: true }); setRen(null); };
+  const dupNode = (id) => { const o = w.nodes.find((q) => q.id === id); if (!o) return; const nid = "n" + Math.random().toString(36).slice(2, 7), cp = JSON.parse(JSON.stringify(o));
+    Object.keys(cp.config || {}).forEach((k) => { if (cp.config[k] === "__stored__") delete cp.config[k]; });          // a stored secret belongs to the original node: type it again
+    upd((c) => (c.nodes.push({ ...cp, id: nid, x: o.x + 30, y: o.y + 30, label: ((o.label || (cat[o.type] || {}).title || o.type) + " copy").slice(0, 60) }), c), { hard: true }); setSel(nid); };
+  const nodeItems = (id) => { const n = w.nodes.find((q) => q.id === id); if (!n) return []; const linked = w.edges.some((e) => e.from === id || e.to === id);
+    return [["Rename", "edit", "F2", false, () => setRen({ id, v: n.label || "" })], ["Duplicate node", "layers", "", false, () => dupNode(id)], ["Disconnect all", "link", "", !linked, () => upd((c) => ((c.edges = c.edges.filter((e) => e.from !== id && e.to !== id)), c), { hard: true })], "-", ["Delete", "trash", "Del", false, () => delNode(id), true]]; };
+  const chatEdit = guard(async () => { const saved = dirty || !w.id ? await save() : w; if (chatWith) chatWith("Change the work “" + saved.title + "” (id " + saved.id + "): "); });
+  const drag = (n, e) => { if (e.target.closest("button,input")) return; e.preventDefault(); setSel(n.id); const sx = e.clientX - n.x, sy = e.clientY - n.y; let moved = false; const mv = (ev) => { if (!moved && Math.hypot(ev.clientX - e.clientX, ev.clientY - e.clientY) < 4) return; if (!moved) snap({ hard: true }); moved = true; upd((c) => (Object.assign(c.nodes.find((q) => q.id === n.id), { x: Math.max(0, Math.round(ev.clientX - sx)), y: Math.max(0, Math.round(ev.clientY - sy)) }), c), { nopush: true }); }; const up = () => { if (moved) lastDrag.current = Date.now(); removeEventListener("pointermove", mv); removeEventListener("pointerup", up); }; addEventListener("pointermove", mv); addEventListener("pointerup", up); };
   const st = (id) => (run && run.nodes && run.nodes[id] ? run.nodes[id].status : "");
   const toggle = guard(async (on) => { const saved = dirty || !w.id ? await save() : w; const r = await post("works/enable", { id: saved.id, enabled: on }); setW(r.work); load(); toast(on ? "Work is on: triggers are live while this service runs" : "Work is off"); });
   const go = guard(async () => { const ev = !(node && cat[node.type] && cat[node.type].kind === "trigger") ? {} : await ask({ title: "Run this trigger", text: "Event text for this run", submit: "Run", fields: [{ name: "t", label: "Event text", value: "manual run", max: 400 }] }); if (!ev) return; const saved = dirty || !w.id ? await save() : w; const r = await post("works/run", { id: saved.id, node: node && cat[node.type] && cat[node.type].kind === "trigger" ? sel : undefined, text: ev.t || "manual run" }); toast("Run queued"); setTimeout(() => api(`works/run?id=${saved.id}&run=${r.run}`).then((d) => setRun(d.run)), 600); });
@@ -1905,9 +1956,10 @@ function Works({ boot, openId }) {
   const P = (n, out) => ({ x: n.x + (out ? NW : 0), y: n.y + 27 });
   const curve = (a, b) => `M${a.x},${a.y} C${a.x + 80},${a.y} ${b.x - 80},${b.y} ${b.x},${b.y}`;
   return html`<div class="wk"><${RunningBar} openRun=${openRun}/><div class="wkbar"><button class="ibtn" title="Back" aria-label="Back" onClick=${async () => { if (!dirty || (await discard(""))) { setW(null); load(); } }}>${Ic("left", 18)}</button>
-      <input class="grow" style="font:600 16px var(--serif);border-color:transparent;background:transparent" value=${w.title} onInput=${(e) => upd((c) => ((c.title = e.target.value), c))}/>
+      <label class="grow wktitle" title="Rename the work (F2)"><input ref=${titleIn} value=${w.title} maxlength="80" aria-label="Work name" onInput=${(e) => upd((c) => ((c.title = e.target.value), c))} onKeyDown=${(e) => { if (e.key === "Enter" || e.key === "Escape") e.target.blur(); }}/>${Ic("edit", 14)}</label>
       <label class="row small" style="gap:6px" title="How many runs are kept on disk, and offered to Memory nodes"><span class="mute">History</span><${Num} min="1" max="500" style="width:80px" value=${w.keep || 40} onInput=${(e) => upd((c) => ((c.keep = Math.max(1, Math.min(500, +e.target.value || 40))), c))}/></label>
       <button class=${"dirchip" + (w.workdir ? " set" : "")} title=${w.workdir ? "Working folder: " + w.workdir + "\nClick to change" : "Each run gets its own run folder. Click to set a working folder for this work"} onClick=${() => setFdlg(true)}>${Ic("folder", 14)}<span>${w.workdir ? baseName(w.workdir) : "Run folders"}</span></button>
+      ${chatWith && html`<button class="btn" title="Open a chat that changes this work: describe the change, review it, apply it (Undo is offered)" onClick=${chatEdit}>${Ic("chat", 14)} Edit with chat</button>`}
       ${w.id && html`<button class="btn" title="Share as an aihub workflow package" onClick=${guard(async () => { const saved = dirty ? await save() : w; setShare({ id: saved.id, info: await api("works/export-info?id=" + saved.id) }); })}>${Ic("upload", 14)} Share</button>`}
       ${w.id && html`<button class="ibtn bad" title="Delete this work" aria-label="Delete this work" onClick=${removeWork}>${Ic("trash", 16)}</button>`}
       <button class="btn" title="Re-arrange the nodes so none overlap" onClick=${guard(async () => { const r = await post("works/layout", { nodes: w.nodes, edges: w.edges }); upd((c) => (c.nodes.forEach((n) => { const p = r.positions[n.id]; if (p) { n.x = p.x; n.y = p.y; } }), c)); })}>${Ic("layers", 14)} Tidy</button>
@@ -1922,12 +1974,14 @@ function Works({ boot, openId }) {
               return html`<g class=${"eg" + (selEdge === k ? " sel" : "")} key=${k}><path class="edge-hit" d=${d} onPointerDown=${(ev) => { ev.stopPropagation(); setSelEdge(k); setSel(null); setLink(null); }}><title>Click to select, then Delete</title></path><path class="edge" d=${d}/>
                 <g class="edge-x" transform=${`translate(${mx},${my})`} onPointerDown=${(ev) => { ev.stopPropagation(); delEdge(k); }}><title>Delete this connection</title><circle r="9"/><path d="M-3.5,-3.5L3.5,3.5M3.5,-3.5L-3.5,3.5"/></g></g>`; })}
             ${link && mouse && (() => { const a = w.nodes.find((n) => n.id === link); return a ? html`<path class="edge live" d=${curve(P(a, true), mouse)}/>` : null; })()}</svg>
-          ${w.nodes.map((n) => { const sp = cat[n.type]; const nr = run && run.nodes && run.nodes[n.id], secs = nr && (nr.started || nr.t0) ? Math.max(0, (nr.ended || now) - (nr.started || nr.t0)) : null; return html`<div data-id=${n.id} class=${`node ${nodeKind(n.type, sp)} ${st(n.id)} ${sel === n.id ? "sel" : ""}`} style=${`left:${n.x}px;top:${n.y}px;width:${NW}px`} onPointerDown=${() => { setSel(n.id); setSelEdge(""); }}>
+          ${w.nodes.map((n) => { const sp = cat[n.type]; const nr = run && run.nodes && run.nodes[n.id], secs = nr && (nr.started || nr.t0) ? Math.max(0, (nr.ended || now) - (nr.started || nr.t0)) : null; return html`<div data-id=${n.id} class=${`node ${nodeKind(n.type, sp)} ${st(n.id)} ${sel === n.id ? "sel" : ""}`} style=${`left:${n.x}px;top:${n.y}px;width:${NW}px`} onPointerDown=${() => { setSel(n.id); setSelEdge(""); }} onContextMenu=${(e) => { if (e.target.closest("input")) return; e.preventDefault(); setSel(n.id); setSelEdge(""); setNmenu({ at: menuAt(e), id: n.id }); }}>
             ${warns[n.id] && html`<span class="nwarn" title=${warns[n.id].join("\n")}>${Ic("alert", 11)} ${warns[n.id].length}</span>`}
             ${nr && html`<span class=${"dur " + nr.status} title=${nr.status + (secs != null ? " · " + fmtDur(secs) : "")}>${nr.status === "running" ? Ic("play", 9) : nr.status === "queued" ? "queued" : ""}${secs != null ? fmtDur(secs) : nr.status === "skipped" ? "skipped" : ""}</span>`}
             ${(!sp || sp.kind !== "trigger") && html`<span class=${"port i" + (link ? " act" : "")} title="Input" onPointerUp=${() => { if (link && link !== n.id) upd((c) => (c.edges.some((e) => e.from === link && e.to === n.id) || c.edges.push({ from: link, to: n.id }), c), { hard: true }); setLink(null); }}></span>`}
             <span class=${"port o" + (link === n.id ? " act" : "")} title="Drag to connect, then click the next node's left dot" onPointerDown=${(e) => { e.stopPropagation(); setLink(n.id); setSel(n.id); setSelEdge(""); portDrag(n.id, e); }}></span>
-            <header onPointerDown=${(e) => drag(n, e)}><span class="nico">${Ic(nodeIcon(n.type, sp), 16)}</span><div class="grow" style="min-width:0"><div class="nt">${n.label || (sp ? sp.title : n.type)}</div><div class="ns">${sp ? (sp.kind === "trigger" ? "Start" : sp.group) : "missing package"}</div></div><span class="st"></span>
+            <header onPointerDown=${(e) => drag(n, e)}><span class="nico">${Ic(nodeIcon(n.type, sp), 16)}</span><div class="grow" style="min-width:0">${ren && ren.id === n.id ? html`<input class="nren" ref=${(el) => { if (el && !el.dataset.f) { el.dataset.f = "1"; el.focus(); el.select(); } }} value=${ren.v} placeholder=${sp ? sp.title : n.type} maxlength="60" aria-label="Node name"
+                onInput=${(e) => setRen({ id: n.id, v: e.target.value })} onBlur=${(e) => { if (!e.target.dataset.x) renameNode(n.id, e.target.value); }} onKeyDown=${(e) => { e.stopPropagation(); if (e.key === "Enter") e.target.blur(); else if (e.key === "Escape") { e.target.dataset.x = "1"; setRen(null); } }}/>`
+                : html`<div class="nt" title="Double-click to rename" onDblClick=${(e) => { e.stopPropagation(); setRen({ id: n.id, v: n.label || "" }); }}>${n.label || (sp ? sp.title : n.type)}</div>`}<div class="ns">${sp ? (sp.kind === "trigger" ? "Start" : sp.group) : "missing package"}</div></div><span class="st"></span>
               <button class="rm" title="Delete (or select the node and press Delete)" onClick=${() => delNode(n.id)}>${Ic("x", 13)}</button></header>
             <div class="nb">${summary(n) || (n.preset ? html`<span class="mute">${Ic("key", 11)} ${(presets.find((p) => p.id === n.preset) || { name: "saved node missing" }).name}</span>` : html`<span class="mute">Not set up</span>`)}</div></div>`; })}
         </div>${link && !pal && html`<div class="toast" style="position:sticky;bottom:12px;left:40%;display:inline-block">Click the left dot of the next node <button type="button" class="lnk" style="color:var(--accent)" onClick=${() => setLink(null)}>cancel</button></div>`}</div>
@@ -1936,6 +1990,7 @@ function Works({ boot, openId }) {
     ${share && html`<${ShareForm} id=${share.id} info=${share.info} close=${() => setShare(null)} done=${(r) => { setShare(null); setShared(r); }}/>`}
     ${shared && html`<${PublishSteps} r=${shared} boot=${boot} close=${() => setShared(null)}/>`}
     ${pal && html`<${Palette} cat=${cat} presets=${presets} more=${() => { setPal(null); setNd(true); }} close=${() => { setPal(null); setLink(null); }} onPick=${(t, pid) => add(t, pal.x !== undefined ? pal : null, pid, pal.from)}/>`}${presetDlg}
+    ${nmenu && html`<${CtxMenu} at=${nmenu.at} items=${nodeItems(nmenu.id)} close=${() => setNmenu(null)}/>`}
     ${fdlg && html`<${WorkFolderDialog} value=${w.workdir || ""} close=${() => setFdlg(false)} apply=${(v) => upd((c) => { if (v) c.workdir = v; else delete c.workdir; return c; }, { hard: true })}/>`}</div>`;
 }
 
@@ -2213,6 +2268,7 @@ function App() {
   const importLink = guard(async (ref) => { toast("Importing " + ref + "…"); const extra = await OUI.languagePrompt().catch(() => ""); const r = await post("sessions/import", { link: ref, extra }); toast("Imported " + r.messages + " messages" + (r.files ? " and " + r.files + " files" : "")); await reloadSess(); go("chat/" + r.session.id); });
   const newChatIn = guard(async (cwd) => { const extra = await OUI.languagePrompt(); const r = await post("sessions", { cwd, extra }); await reloadSess(); go("chat/" + r.session.id); });     // a folder on disk: it becomes a project
   const newChat = guard(async (folder = "") => { const extra = await OUI.languagePrompt(); const r = await post("sessions", { folder: typeof folder === "string" ? folder : "", extra }); await reloadSess(); go("chat/" + r.session.id); });
+  const chatWith = guard(async (draft) => { const extra = await OUI.languagePrompt(); const r = await post("sessions", { folder: "", extra }); try { localStorage.setItem("aihub_ui_draft_" + r.session.id, draft); } catch (e) { /* private mode */ } await reloadSess(); go("chat/" + r.session.id); });     // a new chat with its first message typed in (Works: Edit with chat)
   newRef.current = newChat;
   const newIncog = guard(async () => { const extra = await OUI.languagePrompt(); const r = await post("sessions", { incognito: true, extra }); go("chat/" + r.session.id); });
   const incogRef = useRef(null);                                       // the incognito chat open now: removed as soon as the page leaves it
@@ -2259,7 +2315,7 @@ function App() {
     </aside>${imp && html`<${ImportLazy} get=${api} post=${post} close=${() => setImp(false)} extra=${impExtra} done=${async (n) => { setImp(false); await reloadSess(); go("chat/" + n.id); }}/>`}${spotOpen && html`<${Spotlight} close=${() => setSpotOpen(false)} go=${go} sessions=${sortChats(sess.sessions, "recent")} nav=${NAV} hub=${boot.context.hub_configured ? boot.context.hub : ""} importLink=${importLink} projects=${sess.folders} dirs=${sess.folder_dirs || {}} newChat=${newChat} newChatIn=${newChatIn}/>`}
     <main class="main">${!(page === "chat" && arg) && html`<button class="ibtn burger fab" title="Chats and pages" aria-label="Chats and pages" onClick=${openSide}>${Ic("menu", 18)}</button>`}<${HubNote} text=${brand.announcement}/><${AlertBar} alerts=${alerts}/>${page === "chat" && arg ? html`<${Chat} key=${arg} id=${arg} onBusy=${markBusy} onImport=${() => setImp(true)} onMenu=${openSide} onIncog=${markIncog} boot=${boot} refresh=${reloadSess} newChat=${() => newChat()} prefs=${prefs} savePrefs=${savePrefs} slash=${slash}/>`
       : page === "packages" ? html`<${Packages} key=${route} focus=${route.startsWith("packages/find/") ? decodeURIComponent(route.slice(14)) : ""}/>` : page === "services" ? html`<${Services}/>` : page === "mcp" ? html`<${Mcp}/>`
-      : page === "works" ? html`<${Works} boot=${boot} openId=${arg}/>` : page === "knowledge" ? html`<${Knowledge} key=${route} focus=${arg}/>` : page === "notebook" ? html`<${JupyterPage} key="notebook" api=${api} post=${post} boot=${boot} arg=${arg}/>` : page === "sql" ? html`<${SqlStudioPage} key="sql" api=${api} post=${post} arg=${arg}/>` : page === "usage" ? html`<${UsagePage} api=${api} prefs=${prefs} savePrefs=${savePrefs}/>` : page === "settings" || page === "vault" ? html`<${Settings} boot=${boot} reload=${reloadBoot} prefs=${prefs} savePrefs=${savePrefs} focus=${arg}/>`
+      : page === "works" ? html`<${Works} boot=${boot} openId=${arg} chatWith=${chatWith}/>` : page === "knowledge" ? html`<${Knowledge} key=${route} focus=${arg}/>` : page === "notebook" ? html`<${JupyterPage} key="notebook" api=${api} post=${post} boot=${boot} arg=${arg}/>` : page === "sql" ? html`<${SqlStudioPage} key="sql" api=${api} post=${post} arg=${arg}/>` : page === "usage" ? html`<${UsagePage} api=${api} prefs=${prefs} savePrefs=${savePrefs}/>` : page === "settings" || page === "vault" ? html`<${Settings} boot=${boot} reload=${reloadBoot} prefs=${prefs} savePrefs=${savePrefs} focus=${arg}/>`
       : html`<div class="hello"><div><span class="herologo">${Logo(44)}</span><h1>${hubName}</h1><p>Chat with Claude Code, manage packages, services, MCP servers and logins.</p><button class="btn acc" onClick=${() => newChat()}>${Ic("plus", 14)} New chat</button></div></div>`}</main>
     ${html`<div class="toast-live" role="status" aria-live="polite">${msg && html`<div class="toast">${msg}</div>`}</div>`}<${AskHost}/></div>`;
 }

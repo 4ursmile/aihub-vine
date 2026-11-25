@@ -1,5 +1,5 @@
 // Markdown answer with rich blocks rendered in place: shell sessions, code, tables, charts (```chart) and forms (```form).
-import { html, render, useState, useEffect, useRef } from "./vendor/preact-htm.js";
+import { html, render, useState, useEffect, useRef, useMemo } from "./vendor/preact-htm.js";
 import { marked } from "./vendor/marked.js";
 import DOMPurify from "./vendor/purify.js";
 import { Ic } from "./icons.js";
@@ -290,9 +290,42 @@ export function AskCard({ spec, onSend, locked }) {
 
 
 // ---------- workflow: an answer proposes a work; the button saves it (switched off) in Works and opens it
-let makeWork = null;
+let makeWork = null, workApi = null;
 export const setWorkMaker = (fn) => { makeWork = fn; };
+export const setWorkGetter = (o) => { workApi = o; };            // {get(id) -> work | null, restore(id, backup) -> work}
+// what a proposed change does to the work as it is: nodes added, removed, changed (type, label, config or links), edges, title
+function workDiff(cur, spec) {
+  const was = Object.fromEntries((cur.nodes || []).map((n) => [n.id, n])), now = (spec.nodes || []).filter((n) => n && n.id);
+  const strip = (n) => JSON.stringify([n.type, n.label || "", Object.fromEntries(Object.entries(n.config || {}).filter(([, v]) => v !== "" && v !== "__stored__").sort()), n.preset || "", n.credential || ""]);
+  const added = now.filter((n) => !was[n.id]), removed = (cur.nodes || []).filter((n) => !now.some((x) => x.id === n.id)), changed = now.filter((n) => was[n.id] && strip(was[n.id]) !== strip(n));
+  const ek = (e) => e.from + ">" + e.to, ce = new Set((cur.edges || []).map(ek)), ne = new Set((spec.edges || []).filter(Boolean).map(ek));
+  const edges = [...ne].filter((k) => !ce.has(k)).length + [...ce].filter((k) => !ne.has(k)).length;
+  const nm = (n) => n.label || n.type;
+  return { added, removed, changed, edges, title: spec.title && spec.title !== cur.title, nm };
+}
+function WorkUpdateCard({ spec, cur, locked }) {
+  const [state, setState] = useState(""), [err, setErr] = useState(""), [res, setRes] = useState(null);
+  const d = useMemo(() => workDiff(cur, spec), [cur, spec]);
+  const list = (label, xs) => xs.length ? html`<li><b>${label} ${xs.length}:</b> ${xs.slice(0, 6).map(d.nm).join(", ")}${xs.length > 6 ? " …" : ""}</li>` : null;
+  const apply = async () => { setState("busy"); setErr(""); try { if (!makeWork) throw new Error("The chat is not ready yet, try again in a moment."); const r = await makeWork(spec); setRes(r); setState("done"); } catch (e) { setState(""); setErr(e.message || String(e)); } };
+  const undo = async () => { setState("busy"); try { await workApi.restore(cur.id, res.backup); setState("undone"); toast("Put back the earlier version of " + (cur.title || "the work")); } catch (e) { setState("done"); setErr(e.message || String(e)); } };
+  const none = !d.added.length && !d.removed.length && !d.changed.length && !d.edges && !d.title && (spec.description || "") === (cur.description || "");
+  return html`<div class="ask"><div class="bk-head"><span class="bk-title">${Ic("flow", 14)}<span>Change to work: ${cur.title || "Untitled"}</span></span>${state === "done" && html`<span class="tag good">${Ic("check", 12)} applied</span>`}${state === "undone" && html`<span class="tag">undone</span>`}</div>
+    <ul class="small wk-diff">${d.title && html`<li><b>Renamed</b> to “${spec.title}”</li>`}${list("Added", d.added)}${list("Removed", d.removed)}${list("Changed", d.changed)}${d.edges ? html`<li><b>Connections:</b> ${d.edges} changed</li>` : null}${none && html`<li class="mute">No visible change to the nodes.</li>`}</ul>
+    ${cur.enabled && state !== "done" && html`<p class="small" style="margin:4px 0;color:var(--warn)">${Ic("alert", 12)} This work is On: the change applies to its next runs.</p>`}
+    ${res && res.warnings && res.warnings.length ? html`<div class="werr rc-pad">${Ic("alert", 14)}<span>Applied, but check: ${res.warnings.join(" · ")}</span></div>` : null}
+    ${err && html`<div class="werr rc-pad">${Ic("alert", 14)}<span>${err}</span></div>`}
+    <div class="row" style="gap:6px">${state === "done" || state === "undone" ? html`<a class="btn" href=${"#/works/" + cur.id}>${Ic("flow", 13)} Open in Works</a>${state === "done" && res && res.backup && workApi && html`<button type="button" class="btn" onClick=${undo}>Undo</button>`}`
+      : html`<button type="button" class="btn acc" disabled=${locked || state === "busy"} title=${locked ? "The answer is still being written" : "Saves the change; Undo puts the current version back"} onClick=${apply}>${locked ? "Writing…" : state === "busy" ? "Applying…" : "Apply changes"}</button><a class="btn" href=${"#/works/" + cur.id}>Open current</a>`}</div></div>`;
+}
 export function WorkCard({ spec, locked }) {
+  const [cur, setCur] = useState(spec.id ? undefined : null);        // undefined = still looking the id up; null = create a new work
+  useEffect(() => { if (!spec.id) return; let off = false; const look = () => (workApi ? workApi.get(spec.id).then((w) => !off && setCur(w || null)).catch(() => !off && setCur(null)) : setTimeout(look, 300)); look(); return () => { off = true; }; }, [spec.id]);
+  if (cur === undefined) return html`<div class="ask"><div class="bk-head"><span class="bk-title">${Ic("flow", 14)}<span>Workflow: ${spec.title || spec.id}</span></span></div><p class="mute small">Looking up the work…</p></div>`;
+  if (cur) return html`<${WorkUpdateCard} spec=${spec} cur=${cur} locked=${locked}/>`;
+  return html`<${WorkNewCard} spec=${spec} locked=${locked}/>`;
+}
+function WorkNewCard({ spec, locked }) {
   const [state, setState] = useState(""), [err, setErr] = useState(""), [warn, setWarn] = useState(null);
   const go = async () => { setState("busy"); setErr(""); try { if (!makeWork) throw new Error("The chat is not ready yet, try again in a moment."); const r = await makeWork(spec), w = r.work || r; setState("done"); if (r.warnings && r.warnings.length) setWarn({ id: w.id, list: r.warnings }); else location.hash = "#/works/" + w.id; } catch (e) { setState(""); setErr(e.message || String(e)); toast(e.message || String(e)); } };
   const types = [...new Set(spec.nodes.map((n) => n && n.type))];

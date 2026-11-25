@@ -119,6 +119,11 @@ def _public(r):
     o = {k: r.get(k, "") for k in ("id", "name", "kind", "url", "user", "kernel", "env", "root")}
     o["verify"] = r.get("verify", True) is not False
     o["has_secret"] = bool(r.get("has_secret"))
+    if o["kind"] == "local":                                   # the folder on this machine its paths are relative to (Copy full path)
+        try:
+            o["abs_root"] = os.path.abspath(os.path.expanduser(r.get("root") or "") or store.ui_dir("notebooks"))
+        except Exception:
+            pass
     return o
 
 

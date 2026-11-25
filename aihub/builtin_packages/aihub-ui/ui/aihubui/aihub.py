@@ -95,7 +95,11 @@ CLAUDE_MISSING = ("Claude Code (the `claude` command) was not found on this mach
 
 # ---- short-lived cache for the two read-only listings every page polls (a CLI process costs ~0.4 s)
 TTL = {("list",): 5.0, ("run", "list"): 2.0}
-_cache = {}                                            # key -> (time, doc); callers get a deep copy
+# `aihub --json list` reads only these files of ~/.aihub (and the CLI build): while none changed, its answer is reused up to STAMP_TTL
+# (tab switches no longer start a CLI process every 5 s); a change made outside the UI (`aihub install` in a terminal) shows at once
+STAMPED = {("list",): ("state.json", "config.json", "credentials.json")}
+STAMP_TTL = 60.0
+_cache = {}                                            # key -> (time, doc, stamp); callers get a deep copy
 _cl = threading.Lock()
 _flight = {}                                           # key -> lock (single flight: N callers at once = one process)
 _epoch = [0]                                           # bumped by invalidate(): an answer that started before it is not stored
@@ -119,12 +123,38 @@ def invalidate():
 
 def _changes(args):
     a = list(args)
+    if a[:1] == ["vault"] and a[1:2] in (["list"], ["test"]):      # read only: the Logins card no longer drops the package list cache
+        return False
     return bool(a) and (a[0] in CHANGES or (a[0] == "run" and len(a) > 1 and a[1] not in RUN_READ))
+
+
+def _stamp(key):
+    """(mtime, size) of every file the answer of KEY depends on, or None when KEY has no such list."""
+    files = STAMPED.get(key)
+    if not files:
+        return None
+    paths = [os.path.join(HOME(), n) for n in files] + [os.path.join(HOME(), "bin", "aihub.pyz")] + command()[:1]
+    out = []
+    for p in paths:
+        try:
+            st = os.stat(p)
+            out.append((st.st_mtime_ns, st.st_size))
+        except (OSError, ValueError):
+            out.append(None)
+    return tuple(out)
+
+
+def _fresh(hit, ttl, key):
+    if not hit:
+        return False
+    age = time.time() - hit[0]
+    return age < ttl or (hit[2] is not None and age < STAMP_TTL and hit[2] == _stamp(key))
 
 
 def run(args, stdin=None, timeout=600):
     """-> the JSON document of `aihub --json ARGS`. Raises CliError (message = the CLI's own error) when ok is false.
-    `list` (5 s) and `run list` (2 s) are cached and single flight; commands that change state drop the cache when they end."""
+    `list` (5 s, up to 60 s while its files are unchanged) and `run list` (2 s) are cached and single flight; commands that change
+    state drop the cache when they end."""
     key = tuple(args)
     ttl = TTL.get(key)
     if not ttl or stdin is not None:
@@ -135,20 +165,31 @@ def run(args, stdin=None, timeout=600):
                 invalidate()
     with _cl:
         hit = _cache.get(key)
-        if hit and time.time() - hit[0] < ttl:
-            return copy.deepcopy(hit[1])
         gate = _flight.setdefault(key, threading.Lock())
+    if _fresh(hit, ttl, key):
+        return copy.deepcopy(hit[1])
     with gate:
         with _cl:
             hit = _cache.get(key)
-            if hit and time.time() - hit[0] < ttl:
-                return copy.deepcopy(hit[1])
             epoch = _epoch[0]
+        if _fresh(hit, ttl, key):
+            return copy.deepcopy(hit[1])
+        stamp = _stamp(key)                            # taken BEFORE the run: a file written while it runs makes the next call ask again
         doc = _run(args, stdin, timeout)
         with _cl:
             if epoch == _epoch[0]:
-                _cache[key] = (time.time(), copy.deepcopy(doc))
+                _cache[key] = (time.time(), copy.deepcopy(doc), stamp)
         return doc
+
+
+def prefetch():
+    """Warm the `aihub list` cache in the background (UI start): the first page load then needs no CLI process of its own."""
+    def go():
+        try:
+            run(["list"])
+        except Exception:
+            pass
+    threading.Thread(target=go, daemon=True, name="cli-prefetch").start()
 
 
 def _run(args, stdin=None, timeout=600):
@@ -253,13 +294,26 @@ def env_spec(rec):
 
 def services():
     """Installed bots and services with their settings (secret values are reported as set / not set, never returned)."""
-    doc = run(["list"])
-    runs = {}
+    got = {}
+
+    def run_list():                                    # at the same time as `list`: two CLI processes in parallel, not one after the other
+        try:
+            got["runs"] = run(["run", "list"]).get("data") or []
+        except CliError:
+            pass
+        except Exception as e:
+            got["err"] = e
+    t = threading.Thread(target=run_list, daemon=True)
+    t.start()
     try:
-        for r in run(["run", "list"]).get("data") or []:
-            runs.setdefault(r.get("bot"), []).append(r)
-    except CliError:
-        pass
+        doc = run(["list"])
+    finally:
+        t.join()
+    if "err" in got:
+        raise got["err"]
+    runs = {}
+    for r in got.get("runs") or []:
+        runs.setdefault(r.get("bot"), []).append(r)
     out = []
     for p in doc.get("data") or []:
         comps = p.get("components") or []

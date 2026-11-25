@@ -183,7 +183,7 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--accent)
 
 /* ---- inline graphic, install terminal, node guide, work run in chat */
 .svgbox .svgv{padding:14px;display:grid;place-items:center;background:var(--surface)}.svgbox svg{max-width:100%;height:auto;max-height:420px}
-.termbox{height:340px;border-radius:10px;overflow:hidden;background:#1c1c1e;padding:8px;position:relative}.termtools{position:absolute;top:6px;right:10px;z-index:5;display:flex;gap:4px;align-items:center;opacity:.35;transition:opacity .15s;font:11.5px var(--mono);color:#d1d1d6}.termbox:hover .termtools,.termbox:focus-within .termtools{opacity:1}.termtools button{font:inherit;color:#d1d1d6;background:#3a3a3ccc;border:1px solid #ffffff1f;border-radius:6px;padding:2px 8px;cursor:pointer}.termtools button:hover{background:#48484a;color:#fff}.termtools span{margin-left:6px;color:#9fd0a8}.termbox .xterm{height:100%}
+.termbox{height:340px;border-radius:10px;overflow:hidden;background:var(--surface);border:1px solid var(--line);padding:8px;position:relative}.termtools{position:absolute;top:6px;right:10px;z-index:5;display:flex;gap:4px;align-items:center;opacity:.35;transition:opacity .15s;font:11.5px var(--font);color:var(--ink2)}.termbox:hover .termtools,.termbox:focus-within .termtools{opacity:1}.termtools button{font:12px var(--font);color:var(--ink2);background:var(--soft2);border:1px solid var(--line2);border-radius:6px;padding:2px 8px;cursor:pointer}.termtools button:hover{color:var(--ink)}.termtools span{margin-left:6px;color:var(--mute);font-family:var(--font)}.termbox .xterm{height:100%}
 .sheet.wide{width:min(860px,94vw)}
 .guide{border:1px solid var(--line2);border-radius:10px;background:var(--soft);margin:0 0 14px;font-size:12.5px}.guide summary{cursor:pointer;padding:9px 12px;font-weight:600;display:flex;align-items:center;gap:7px;color:var(--accent2)}
 .guide-b{white-space:pre-wrap;line-height:1.55;padding:2px 12px 12px;color:var(--ink2);font-size:12.5px}
@@ -303,6 +303,10 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--accent)
 .wkpage .wksw{flex:none;gap:8px;align-items:center}.wkpage .wksw>span{min-width:24px}
 .wkpage textarea{width:100%;display:block;margin:0 0 10px}
 .wkbar{gap:12px}.wkbar>*{flex:none}.wkbar>.grow{flex:1 1 220px}.wkbar .row{gap:8px}
+.wktitle{display:flex;align-items:center;gap:6px;min-width:180px;padding:0 8px;border:1px solid transparent;border-radius:8px;color:var(--mute);cursor:text}.wktitle:hover{border-color:var(--line2)}.wktitle:focus-within{border-color:var(--accent);background:var(--surface)}
+.wktitle input{flex:1;min-width:0;font:600 16px var(--serif);border:0!important;background:transparent!important;box-shadow:none!important;padding:5px 0;color:var(--ink);outline:0}.wktitle:focus-within svg{display:none}
+.node .nren{width:100%;font:600 13px var(--font);padding:1px 4px;height:22px;border-radius:5px}
+.wk-diff{margin:6px 0;padding-left:18px;display:flex;flex-direction:column;gap:2px}
 .wkdesc{margin:8px 0 2px}.wkbody{margin-top:14px}.insp{margin-left:16px}
 @media(max-width:860px){.wk{padding:14px 14px 16px}.wkbar{gap:8px}}
 
@@ -362,7 +366,7 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--accent)
 .tip-hint{position:absolute;top:calc(100% + 10px);right:0;width:250px;z-index:30;background:var(--surface);border:1px solid var(--accent);border-radius:12px;padding:12px 14px;box-shadow:0 10px 30px rgba(0,0,0,.25);font-size:13px;color:var(--ink2);display:flex;flex-direction:column;gap:4px;animation:rise .3s var(--ease)}.tip-hint b{color:var(--ink);font-size:14px}.tip-hint:before{content:"";position:absolute;top:-6px;right:24px;width:10px;height:10px;background:var(--surface);border-left:1px solid var(--accent);border-top:1px solid var(--accent);transform:rotate(45deg)}
 @media (prefers-reduced-motion:reduce){.dirchip.nudge,.ibtn.cvb.nudge{animation:none}}
 
-.chatterm{display:flex;flex-direction:column;min-height:0;border-top:1px solid var(--line2);background:#1c1c1e;position:relative;margin:0;border-radius:0;overflow:hidden;flex:none}.ct-grip{position:absolute;top:0;left:0;right:0;height:6px;cursor:ns-resize;z-index:2}
+.chatterm{display:flex;flex-direction:column;min-height:0;border-top:1px solid var(--line2);background:var(--surface);position:relative;margin:0;border-radius:0;overflow:hidden;flex:none}.ct-grip{position:absolute;top:0;left:0;right:0;height:6px;cursor:ns-resize;z-index:2}
 .ct-h{display:flex;align-items:center;gap:8px;padding:5px 10px;background:var(--surface);border-bottom:1px solid var(--line2);font-size:12.5px}.ct-b{flex:1;min-height:0;padding:6px 8px;position:relative}.ct-b .termtools{position:absolute;right:10px;top:6px}
 .chatterm.ct-off{display:none}.chatterm.ct-full{position:fixed;inset:0;height:auto;z-index:300;border-top:0}.chatterm:fullscreen{height:100%}
 .ct-h{padding:0 6px 0 10px;gap:6px}.ct-tabs{display:flex;gap:2px;align-items:flex-end;overflow-x:auto;min-width:0;scrollbar-width:none;align-self:stretch}.ct-tabs::-webkit-scrollbar{display:none}
@@ -969,7 +973,6 @@ button.dl.gap:hover{color:var(--ink);background:var(--soft2)}
 .nbj-frame{width:100%;height:440px;border:1px solid var(--line);border-radius:8px;background:#fff;resize:vertical}
 .nbj-sqlbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:5px 10px;margin-bottom:4px;border:1px solid var(--line);border-radius:8px;background:color-mix(in srgb,var(--accent) 7%,var(--soft));font-size:12px}
 .nbj-sqlbar select,.nbj-sqlbar input{font-size:12px;height:26px;padding:0 6px}.nbj-var{width:84px;font-family:var(--mono)}
-.nb-cell.sql .nb-src{border-left:3px solid var(--accent)}
 .nbj-ai{margin-top:6px;padding:8px;border:1px solid var(--line2);border-radius:10px;background:var(--surface);display:flex;flex-direction:column;gap:8px}
 .nbj-ai input{min-width:0}.nbj-prop pre{margin:0 0 6px;padding:8px 10px;max-height:260px;overflow:auto;font:12px/1.5 var(--mono);background:var(--soft);border-radius:8px;white-space:pre-wrap}
 .nbj-bad{color:var(--bad)}
@@ -979,9 +982,8 @@ button.dl.gap:hover{color:var(--ink);background:var(--soft2)}
 .nbj-img{padding:16px;overflow:auto;flex:1}.nbj-img img{max-width:100%;background:#fff}
 .nbj-local{margin-top:8px;display:flex;flex-direction:column}
 .nbj-termw{display:flex;flex-direction:column;flex:1;min-height:0}.nbj-termh{padding:4px 10px;border-bottom:1px solid var(--line)}
-.nbj-term{flex:1;min-height:0;background:#1c1c1e;padding:4px 6px}
+.nbj-term{flex:1;min-height:0;background:var(--surface);padding:4px 6px;position:relative}
 .nb-o.html{overflow:auto}.nb-o.html table{width:max-content;max-width:none}.nb-o.html th{position:sticky;top:0;background:var(--soft);text-align:right;font-weight:600}
-.nb-o.html tbody tr:nth-child(even){background:var(--soft2)}.nb-o.html tbody tr:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}
 .nb-o.html td,.nb-o.html th{white-space:nowrap}
 
 /* setup stage: the pane and its forms use the whole page, like the chat */
@@ -1003,13 +1005,11 @@ button.dl.gap:hover{color:var(--ink);background:var(--soft2)}
 .nbj .nb-cell.sel .nb-src{border-color:var(--line2)}.nbj .nb-cell.sel .nb-src:focus-within{border-color:var(--accent)}
 .nbj .nb-md{padding:6px 12px;border-radius:6px}
 .nbj .nb-outs{margin-top:6px;gap:2px}.nbj .nb-o{padding:4px 12px}
-.nbj .nb-tools{top:-14px;right:6px}
-.nbj .nb-add{height:12px;margin-left:55px}
 .nbj .ebar{padding:0 14px;height:28px;gap:14px;font-size:11.5px;background:var(--surface);color:var(--mute)}
 .nbj .ebar .dot{width:7px;height:7px;border-radius:50%;background:var(--mute);display:inline-block;margin-right:5px}.nbj .ebar .dot.idle{background:var(--good)}.nbj .ebar .dot.busy{background:var(--accent)}.nbj .ebar .dot.dead{background:var(--bad)}
 .nbj .ebar kbd{font:inherit;font-size:10.5px;border:1px solid var(--line2);border-bottom-width:2px;border-radius:4px;padding:0 4px;background:var(--soft)}
 .nbj-ghost{opacity:.4}
-@media (max-width:640px){.nbj .nb-cells{padding:8px 8px 24px}.nbj .nb-cell{grid-template-columns:34px minmax(0,1fr)}.nbj .nb-add{margin-left:37px}.nbj .ebar .hint{display:none}}
+@media (max-width:640px){.nbj .nb-cells{padding:8px 8px 24px}.nbj .nb-cell{grid-template-columns:34px minmax(0,1fr)}.nbj .ebar .hint{display:none}}
 .shell.sbhide .sq-head{padding-left:60px}.sq-head .sq-logo{flex:none}
 /* notebook v3: tighter, larger text, run button inside the cell (Kaggle style), completion list */
 .nbj .nb-cells{padding:6px 10px 24px}
@@ -1022,7 +1022,6 @@ button.dl.gap:hover{color:var(--ink);background:var(--soft2)}
 .nbj .nb-md{padding:4px 10px;font-size:15px}.nbj .nb-md h1,.nbj .nb-md h2,.nbj .nb-md h3{margin:.3em 0}
 .nbj .nb-outs{margin-top:3px}.nbj .nb-o{font:13.5px/1.55 var(--mono);padding:3px 10px;max-height:480px}.nbj .nb-o.html{font:14px/1.5 var(--font)}
 .nbj .nb-o.html td,.nbj .nb-o.html th{padding:3px 10px;font-size:13px}
-.nbj .nb-tools{top:-13px}.nbj .nb-add{height:10px;margin:0 0 0 50px}
 .nbj .nbj-bar{padding:5px 10px;gap:6px}.nbj .nbj-bar .btn,.nbj .nbj-bar select{font-size:13px}
 .nbj .ebar{font-size:12px}
 .nbj-pop{position:absolute;z-index:40;min-width:180px;max-width:360px;max-height:224px;overflow:auto;background:var(--surface);border:1px solid var(--line2);border-radius:8px;box-shadow:var(--shl);padding:3px;font:13px/1.4 var(--mono)}
@@ -1030,7 +1029,7 @@ button.dl.gap:hover{color:var(--ink);background:var(--soft2)}
 .nbj-t{overflow:hidden;text-overflow:ellipsis}
 .nbj-k{flex:none;width:18px;height:18px;border-radius:4px;display:grid;place-items:center;font:600 11px var(--font);background:var(--soft2);color:var(--mute)}
 .nbj-k.k-function,.nbj-k.k-method{color:#7c5cd6}.nbj-k.k-class{color:#c47a00}.nbj-k.k-module{color:#1c7ed6}.nbj-k.k-instance,.nbj-k.k-statement,.nbj-k.k-property{color:#17803a}
-@media (max-width:640px){.nbj .nb-cell{grid-template-columns:34px minmax(0,1fr)}.nbj-run{width:26px;height:26px}.nbj .nb-add{margin-left:40px}}
+@media (max-width:640px){.nbj .nb-cell{grid-template-columns:34px minmax(0,1fr)}}
 /* notebook file browser */
 .nbj-tree{gap:8px;padding:10px;width:auto}
 .nbj-th{display:flex;align-items:center;gap:6px}.nbj-srv{display:flex;align-items:center;gap:7px;min-width:0;color:var(--ink)}.nbj-srv b{font-size:14px;font-weight:600}
@@ -1092,10 +1091,6 @@ button.dl.gap:hover{color:var(--ink);background:var(--soft2)}
 .nbj-d{margin-left:auto;padding-left:14px;color:var(--mute);font:11.5px var(--mono);overflow:hidden;text-overflow:ellipsis;max-width:200px}
 .nb-src{position:relative}
 .nbj-rsep{height:1px;background:var(--line2);margin:3px 8px}
-.nbj .nb-add{height:30px;margin:0 0 0 52px;opacity:.28;align-items:center;gap:8px}.nbj .nb-add:hover,.nbj .nb-add:focus-within{opacity:1}
-.nbj .nb-add button{font-size:13px;padding:3px 14px;gap:6px;border-radius:14px;height:24px}.nbj .nb-add button svg{width:14px;height:14px}
-.nbj .nb-add::before,.nbj .nb-add::after{content:"";flex:1;height:1px;background:var(--line2);align-self:center}
-@media (max-width:640px){.nbj .nb-add{margin-left:36px}}
 .nbj-emptynb{padding:30px 10px;text-align:center}.nbj-emptynb .nb-add{opacity:1;margin:8px 0 0;justify-content:center}.nbj-emptynb .nb-add::before,.nbj-emptynb .nb-add::after{display:none}
 /* settings panel */
 .nbj-rb{border:0!important;box-shadow:none!important;background:none;outline-offset:2px}.nbj-rb.on{background:var(--accent)}
@@ -1106,9 +1101,6 @@ button.dl.gap:hover{color:var(--ink);background:var(--soft2)}
 .nbj-panel .nbj-sets{max-width:none;gap:8px}.nbj-panel .nbj-set{padding:10px;gap:8px;border-radius:10px}.nbj-panel .nbj-set .sq-logo{display:none}.nbj-panel .nbj-set .grow{flex:1 1 100%}
 .nbj-panel .nbj-sets>p{display:none}
 /* between-cell quick add: invisible until you point at the gap, then four clear buttons */
-.nbj .nb-add{height:22px;margin:0 0 0 52px;opacity:0;transition:opacity .12s}.nbj .nb-add:hover,.nbj .nb-add:focus-within{opacity:1}
-.nbj .nb-cells:hover .nb-add{opacity:.0}.nbj .nb-cells .nb-add:hover{opacity:1}
-.nbj .nb-add button{font-size:12.5px;padding:2px 12px;height:22px}
 /* burger no longer hangs below the page header; header reserves room for it */
 .shell.sbhide .sq-head,.shell.sbhide .nbjp>.sq-head{min-height:56px;padding-left:60px;align-items:center}
 @media(max-width:860px){.sq-head,.nbjp>.sq-head{min-height:56px;padding-left:60px}}
@@ -1182,8 +1174,6 @@ button.dl.gap:hover{color:var(--ink);background:var(--soft2)}
 .sq-params{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .sqw .sq-bar{flex-wrap:nowrap;overflow-x:auto}.sqw .sq-conn{min-width:120px;max-width:200px}.sqw .sq-bar .btn{white-space:nowrap}
 /* long notebooks: the browser skips layout and paint of cells that are off screen */
-.nbj .nb-cell{content-visibility:auto;contain-intrinsic-size:auto 140px}
-.nbj .nb-cell.sel,.nbj .nb-cell:focus-within{content-visibility:visible}
 
 /* notebook file tree: same compact, indented, guide-lined look as the canvas tree */
 .nbj-list{padding:2px 2px 6px;font-size:12.5px}
@@ -1277,3 +1267,76 @@ button.dl.gap:hover{color:var(--ink);background:var(--soft2)}
 /* file menu of the canvas: the ⋯ of a row shows on hover / focus; a cut file is dimmed until it is pasted */
 .tr .tr-more{opacity:0;flex:none}.tr:hover .tr-more,.tr:focus-within .tr-more,.tr:focus .tr-more{opacity:1}.tr.cut{opacity:.5}
 @media (hover:none){.tr .tr-more{opacity:1}}
+
+/* ---------- Notebook, final layer (one place for the cell look: replaces the stacked overrides above) ---------- */
+/* cells render off screen lazily: long notebooks with big outputs scroll and type fast */
+.nbj .nb-cw{content-visibility:auto;contain-intrinsic-size:auto 120px}
+.nbj .nb-cw:has(.nb-cell.sel),.nbj .nb-cw:focus-within{content-visibility:visible}
+.nbj .nb-cell{border-left:2px solid transparent;border-radius:0 6px 6px 0;margin:0}
+.nbj .nb-cell:hover{background:none}.nbj .nb-cell.sel{border-left-color:var(--accent);background:var(--soft)}
+.nbj .nb-cell.run .nb-src{border-color:var(--line2)}
+/* gutter: the execution count; the run button takes its place on hover and on the selected cell */
+.nbj .nb-gut{position:relative;padding-top:6px;align-items:flex-end;padding-right:2px}
+.nbj-n{font:11px/1.4 var(--mono);color:var(--mute)}
+.nbj-run{width:26px;height:26px;border:0;border-radius:6px;background:transparent;color:var(--ink2);opacity:0;transition:opacity .1s}
+.nb-cell:hover .nbj-run,.nb-cell.sel .nbj-run,.nbj-run.busy,.nbj-run:focus-visible{opacity:1}
+.nbj-run:hover:not(:disabled){background:var(--soft2);border:0;color:var(--ink)}
+/* the floating cell tools: only on hover / selection */
+.nbj .nb-tools{top:-13px;right:6px;gap:0;padding:1px 3px;border-color:var(--line2);box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.nbj .nb-tools select{border:0;background:transparent;font-size:12px;color:var(--ink2)}
+/* add-cell row between cells: a quiet strip that shows its buttons only when you point at it */
+.nbj .nb-add{display:flex;justify-content:center;align-items:center;gap:6px;height:12px;margin:0 0 0 50px;opacity:0;transition:opacity .12s .05s}
+.nbj .nb-add:hover,.nbj .nb-add:focus-within{opacity:1;height:24px}
+.nbj .nb-add button{font-size:12px;height:22px;padding:0 10px;gap:4px;border:1px solid var(--line2);border-radius:6px;background:var(--surface);color:var(--ink2)}
+.nbj .nb-add button:hover{color:var(--ink);border-color:var(--ink2)}
+.nbj-emptynb .nb-add{opacity:1;height:auto;margin:10px 0 0}
+/* SQL cell: a plain settings row */
+.nbj-sqlbar{background:var(--soft);border-color:var(--line)}
+/* outputs: tables are rules and alignment */
+.nb-o.html tbody tr:hover{background:var(--soft)}
+.nb-o.html th{background:var(--surface);box-shadow:inset 0 -1px 0 var(--line2)}
+.nb-o.html th,.nb-o.html td{border:0;border-bottom:1px solid var(--line)}
+.nbj .nb-o.html td{font-variant-numeric:tabular-nums}
+.nbj-ohid{font-size:12px;color:var(--mute);background:none;border:0;padding:4px 10px}.nbj-ohid:hover{color:var(--ink)}
+/* toolbar: ghost buttons, kernel state as a dot and a word, Save is a plain button */
+.nbj-colab{min-height:40px}
+.nbj-ksel{max-width:170px;height:28px;font-size:12.5px;padding:0 6px;border-color:transparent;background:transparent}
+.nbj-ksel:hover{border-color:var(--line2)}
+.nbj-kst{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--mute);padding:0 4px;white-space:nowrap;background:none;border:0}
+.nbj-kst i{width:7px;height:7px;border-radius:50%;background:var(--mute)}.nbj-kst.idle i{background:var(--good)}.nbj-kst.busy i,.nbj-kst.starting i{background:var(--accent)}
+.nbj-kst.bad{color:var(--bad);cursor:pointer}.nbj-kst.bad:hover{text-decoration:underline}
+.nbj-save{min-width:84px;justify-content:center}.nbj-save.bad{color:var(--bad)}
+.nbj .ebar{gap:12px}.nbj .ebar .hint{color:var(--mute)}
+/* files panel: one grey icon set, names in the text face, sentence-case section labels, neutral selection */
+.nbj-fi,.nbj-fi.directory,.nbj-fi.notebook{color:var(--mute);background:none}
+.nbj-fn,.nbj-fn.dir{font-family:var(--font)}
+.nbj-f.on{background:var(--soft2);font-weight:500}
+.nbj-sec{text-transform:none;letter-spacing:0;font-size:12px}
+.nbj-rb.on{background:var(--soft2);color:var(--ink)}
+.nbj-srow.on{border-color:var(--line2);background:var(--soft2)}
+.nbj-pv button.on{background:var(--soft2)}
+.nbj-tg.on{background:var(--soft2);color:var(--ink)}
+.nbj-pvbar{min-height:38px;gap:8px}
+/* terminal on a Jupyter server: a slim bar above it */
+.nbj-termbar{display:flex;align-items:center;gap:4px;padding:3px 8px;border-bottom:1px solid var(--line);background:var(--surface);min-height:32px}
+.nbj-termbar .btn.on,.chatterm .btn.on{background:var(--soft2)}
+@media (max-width:640px){.nbj-termbar .grow{display:none}.ct-hint{display:none}}
+
+/* ---------- terminal assist (term.js wireTerm): grey text after the cursor and the Ctrl+Space list ---------- */
+.tg-layer{position:absolute;inset:0;pointer-events:none;z-index:4;overflow:hidden}
+.tg-ghost{position:absolute;display:none;white-space:pre;overflow:hidden;text-overflow:clip;color:var(--mute);opacity:.75}
+.tg-list{position:absolute;display:none;pointer-events:auto;min-width:220px;max-width:min(560px,90%);max-height:220px;overflow:auto;background:var(--surface);border:1px solid var(--line2);border-radius:8px;box-shadow:var(--shl);padding:3px;font:12.5px/1.45 var(--mono);color:var(--ink)}
+.tg-opt{display:flex;justify-content:space-between;gap:14px;padding:3px 8px;border-radius:5px;cursor:pointer;white-space:nowrap}.tg-opt.on,.tg-opt:hover{background:var(--soft2)}
+.tg-opt span{overflow:hidden;text-overflow:ellipsis}.tg-opt small{color:var(--mute);font:11.5px var(--font)}
+/* chat terminal: part of the page, not a dark box */
+.chatterm .ct-h{background:var(--surface)}.ct-hint{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:40%}
+.ct-end{background:var(--surface);color:var(--ink2);border:1px solid var(--line2);box-shadow:var(--shl)}
+.nbj-colab{flex-wrap:nowrap;overflow:hidden}.nbj-colab>*{flex-shrink:0}.nbj-colab .nbj-ksel{flex-shrink:1;min-width:90px}
+.nbj .nb-gut{display:block;position:relative;padding:8px 2px 0 0;text-align:right}
+.nbj .nb-gut .nbj-run{position:absolute;top:3px;right:0}
+.nbj .nb-cell:hover .nbj-n,.nbj .nb-cell.sel .nbj-n{visibility:hidden}.nbj .nb-cell.run .nbj-n{visibility:visible}.nbj .nb-cell.run .nbj-run{top:22px}
+@media (max-width:1100px){.nbj-colab .nbj-split+.btn.ghost,.nbj-colab .nbj-vr{display:none}}
+.nbj .nb-o.html table{border:0;border-collapse:collapse}.nbj .nb-o.html table th,.nbj .nb-o.html table td{border:0;border-bottom:1px solid var(--line);padding:4px 12px}
+.nbj .nb-o.html table thead th{border-bottom-color:var(--line2)}
+.nbj-opt.on{background:var(--soft2)}
+.nbj-termbar .btn.on,.chatterm .btn.on,.editor .ebar .btn.on{color:var(--ink);border-color:var(--line2);background:var(--soft2)}

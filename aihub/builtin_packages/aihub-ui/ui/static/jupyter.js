@@ -2,7 +2,7 @@
 // File browser, notebook editor with a live kernel (tables, figures, rich HTML), SQL cells that can fill a pandas DataFrame, a remote terminal,
 // and AI help (inline suggestions, write a cell, fix an error) where each of the three has its own model. A notebook can become a Works node.
 // Data: /api/jupyter/* (server.py -> aihubui/jupyter.py). Tokens never reach the browser.
-import { html, useState, useEffect, useRef, useMemo, useCallback } from "./vendor/preact-htm.js";
+import { h, html, Component, useState, useEffect, useRef, useMemo, useCallback } from "./vendor/preact-htm.js";
 import { Ic } from "./icons.js";
 import { toast, guard, escPush, Seg, Modal, Switch, Pop, confirmBox, ask, CtxMenu, menuAt } from "./ui.js";
 import { Output, serializeNotebook, parseNotebook, cellsOf, fixCR, widgetEvent, widgetSnap } from "./notebook.js";
@@ -12,13 +12,13 @@ import { Md } from "./blocks.js";
 import { useHl, colorize, esc, langOf } from "./code.js";
 import { CodeBox, IDENT, KW } from "./codebox.js";
 import { sqlComplete, sqlSignature, SQL_WORDS } from "./sqlintel.js";
-import { loadXterm } from "./term.js";
+import { loadXterm, wireTerm, termSuggestOn, setTermSuggest, termTheme } from "./term.js";
 
 const LS = { get(k, d) { try { const v = localStorage.getItem("nbj_" + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem("nbj_" + k, JSON.stringify(v)); } catch (e) { /* private mode */ } } };
 const enc = encodeURIComponent, sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const uid = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join("");
 const join = (s) => (Array.isArray(s) ? s.join("") : typeof s === "string" ? s : "");
-const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
+const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g, isMacJ = /Mac/.test(navigator.platform);
 let nbClip = null;                                                          // Copy / Cut of the Notebook file list: {sid, path, name, type, cut}
 const fmtSize = (n) => (n == null ? "" : n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB" : (n / 1048576).toFixed(1) + " MB");
 const ago = (t) => { const d = t ? (Date.now() - new Date(t).getTime()) / 1000 : NaN; return isNaN(d) ? "" : d < 60 ? "just now" : d < 3600 ? Math.floor(d / 60) + " min ago" : d < 86400 ? Math.floor(d / 3600) + " h ago" : d < 2592000 ? Math.floor(d / 86400) + " d ago" : new Date(t).toLocaleDateString(); };
@@ -198,10 +198,58 @@ function AiBar({ c, sql, conns, post, ctx, lang, apply, close, failed }) {
         <span class="mute small">${prop.model || ""}</span></div></div>`}</div>`;
 }
 
+// ---------- one cell. Memoized: typing in a cell, or output streaming into it, re-renders that cell only. Handlers come through `fx`
+// (one object, refreshed by the notebook each render), so a cell never holds a stale closure and its props stay comparable.
+function memo(C, same) {
+  class M extends Component { shouldComponentUpdate(n) { return !same(this.props, n); } render(p) { return h(C, p); } }
+  return M;
+}
+const sameCell = (a, b) => { for (const k in b) if (k === "marks" ? JSON.stringify(a.marks) !== JSON.stringify(b.marks) : a[k] !== b[k]) return false; return true; };
+const CELL_TYPE = (x) => (sqlOf(x) ? "sql" : x.type);
+const Cell = memo(function Cell({ c, i, last, sel, running, aiOpen, marks, lang, kOk, sugg, conns, fx }) {
+  const F = () => fx.current, sql = sqlOf(c), failed = !!errText(c), ec = c.raw && c.raw.execution_count, out = hasOut(c);
+  const connId = sql ? (conns.find((q) => q.name === sql.conn) || {}).id || "" : "";
+  const adder = html`<div class="nb-add"><button type="button" onClick=${() => F().insert(i + 1, "code", true)}>${Ic("plus", 12)} Code</button><button type="button" onClick=${() => F().insert(i + 1, "markdown")}>${Ic("plus", 12)} Text</button><button type="button" onClick=${() => F().insert(i + 1, "sql", true)}>${Ic("plus", 12)} SQL</button></div>`;
+  return html`<div class="nb-cw"><div id=${"nbc-" + c.key} class=${"nb-cell " + c.type + (sql ? " sql" : "") + (sel ? " sel" : "") + (running ? " run" : "")} onPointerDown=${() => F().setSel(c.key)} onContextMenu=${(e) => F().openCtx(c, e)}>
+    <div class="nb-gut">${c.type === "code" ? html`<button class=${"nbj-run" + (running ? " busy" : "")} title=${running ? "Running…" : "Run cell (Shift+Enter)"} aria-label="Run cell" disabled=${running} onClick=${(e) => { e.stopPropagation(); F().runCell(c.key); }}>${running ? html`<i class="spin"></i>` : Ic("play", 12)}</button><span class="mono nbj-n">${running ? "[*]" : sql ? "sql" : ec ? "[" + ec + "]" : "[ ]"}</span>` : ""}</div>
+    <div class="nb-body">
+      <div class="nb-tools">
+        <select aria-label="Cell type" value=${CELL_TYPE(c)} onChange=${(e) => F().retype(c.key, e.target.value)}><option value="code">Code</option><option value="sql">SQL</option><option value="markdown">Text</option><option value="raw">Raw</option></select>
+        <button class="ibtn sm" title="Move up" aria-label="Move up" disabled=${!i} onClick=${() => F().move(i, -1)}>${Ic("up", 13)}</button><button class="ibtn sm" title="Move down" aria-label="Move down" disabled=${last} onClick=${() => F().move(i, 1)}>${Ic("down", 13)}</button>
+        <button class="ibtn sm" title="More: run, output, AI, convert" aria-label="More cell actions" onClick=${(e) => { e.stopPropagation(); F().openCtx(c, e, e.currentTarget); }}>${Ic("more", 13)}</button>
+        <button class="ibtn sm bad" title="Delete cell" aria-label="Delete cell" onClick=${() => F().remove(c.key)}>${Ic("trash", 13)}</button></div>
+      ${sql && html`<div class="nbj-sqlbar"><b>SQL</b>
+        <select value=${sql.conn} onChange=${(e) => F().setSql(c.key, { conn: e.target.value })} aria-label="Connection"><option value="">Connection…</option>${conns.map((q) => html`<option value=${q.name}>${q.name}</option>`)}</select>
+        <label class="mute small">into <input class="nbj-var" placeholder="no variable" value=${sql.var || ""} onInput=${(e) => F().setSql(c.key, { var: e.target.value.replace(/[^A-Za-z0-9_]/g, "") })} aria-label="Python variable"/></label>
+        <label class="mute small">rows <select value=${sql.limit || 10000} onChange=${(e) => F().setSql(c.key, { limit: +e.target.value })}>${[100, 1000, 10000, 50000, 200000].map((n) => html`<option value=${n}>${n.toLocaleString()}</option>`)}</select></label>
+        ${!conns.length && html`<span class="mute small">Add a database in Data Studio first.</span>`}</div>`}
+      ${c.type === "markdown" && !sel ? html`<div class="nb-md" title="Click to edit" onClick=${() => F().setSel(c.key)}>${c.src.trim() ? html`<${Md} text=${c.src}/>` : html`<span class="mute small">Empty text cell. Click to write.</span>`}</div>`
+        : html`<${CodeBox} value=${c.src} lang=${sql ? "sql" : c.type === "code" ? lang : c.type === "markdown" ? "markdown" : ""} autofocus=${sel && !c.src}
+            onChange=${(v) => F().upd(c.key, { src: v })} onKey=${(e) => F().key(c.key, e)} delay=${c.type === "code" && !sql ? sugg : 0}
+            intel=${c.type === "code"} marks=${marks} onAi=${(s2, m) => F().setAi({ s: s2, m: m || "" })} words=${sql ? SQL_WORDS : F().wordsFor(c.key)}
+            complete=${sql ? sqlComplete(F().post, connId) : kOk ? (code, pos) => F().kern.complete(code, pos) : null}
+            signature=${c.type !== "code" ? null : sql ? sqlSignature : kOk ? (code, pos) => F().kern.signature(code, pos) : null}
+            suggest=${(prefix, suffix) => F().post("jupyter/ai/suggest", { prefix, suffix, lang, cells: F().ctxFor(c.key)(), ...F().kern.live() }).then((r) => r.text || "")}/>`}
+      ${aiOpen && html`<${AiBar} c=${c} sql=${sql ? { ...sql, conn: connId || sql.conn } : null} conns=${conns} post=${F().post} ctx=${F().ctxFor(c.key)} lang=${lang} apply=${F().aiApply(c, i)} close=${() => F().setAiOpen(null)} failed=${failed}/>`}
+      ${out && hiddenOf(c) && html`<button class="nbj-ohid" title="Show this cell's output" onClick=${() => F().upd(c.key, (x) => ({ raw: withHidden(x, false) }))}>${Ic("eye", 12)} Output hidden${c.outputs.length > 1 ? " (" + c.outputs.length + ")" : ""}. Show</button>`}
+      ${out && !hiddenOf(c) && html`<div class="nbj-ow">
+      <${OutBox} scroll=${scrollOf(c)} running=${running}>
+        ${c.sqlres && c.sqlres.ok && c.sqlres.columns && c.sqlres.columns.length ? html`<${DataView} res=${c.sqlres} spec=${vizOf(c, "sql")} onSpec=${(s) => F().upd(c.key, (x) => ({ raw: withViz(x, "sql", s) }))} table=${html`<${Grid} res=${c.sqlres} name=${(sql && sql.conn) || "result"}/>`}/>${c.sqlres.assigned && html`<div class=${"small " + (c.sqlres.assigned.ok ? "mute" : "nbj-bad")}>${c.sqlres.assigned.ok ? "Also in the kernel as DataFrame " : "Could not assign "}<code>${c.sqlres.assigned.var}</code>${c.sqlres.assigned.error ? ": " + c.sqlres.assigned.error : ""}</div>`}`
+          : c.sqlres && !c.sqlres.ok ? html`<pre class="nb-o err">${c.sqlres.error}</pre>`
+          : c.outputs.map((o, j) => html`<${Out} key=${j} o=${o} post=${F().post} viz=${vizOf(c, String(j))} onViz=${(s) => F().upd(c.key, (x) => ({ raw: withViz(x, String(j), s) }))}/>`)}
+        ${failed && !aiOpen && !running && html`<div><button class="btn sm" onClick=${() => F().setAiOpen(c.key)}>Fix with AI</button></div>`}<//></div>`}
+    </div></div>${adder}</div>`;
+}, sameCell);
+
+// the notebook as a .py file in the percent format (Jupytext, VS Code, Spyder): `# %%` code cells, `# %% [markdown]` text cells as comments
+const toPy = (cells) => cells.map((c) => { const q = (s) => s.split("\n").map((l) => (l ? "# " + l : "#")).join("\n"), s = sqlOf(c);
+  return c.type === "code" && !s ? "# %%\n" + c.src : c.type === "code" ? "# %% [sql] " + (s.conn || "") + (s.var ? " -> " + s.var : "") + "\n" + q(c.src) : "# %% [" + c.type + "]\n" + q(c.src); }).join("\n\n") + "\n";
+export const saveBlob = (blob, name) => { const url = URL.createObjectURL(blob), a = document.createElement("a"); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000); };
+
 // ---------- the notebook
-function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, onExpose, onOutline, jump }) {
+function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, onExpose, onOutline, onFileMenu, jump }) {
   const [cells, setCells] = useState(null), [dirty, setDirty] = useState(false), [err, setErr] = useState(""), [sel, setSel] = useState(null), [run, setRun] = useState({}), [aiOpen, setAiOpen] = useState(null);
-  const nbRef = useRef(null), cellsRef = useRef([]), dids = useRef({}), runAll = useRef(false);
+  const nbRef = useRef(null), cellsRef = useRef([]), dids = useRef({}), runAll = useRef(false), fx = useRef(null);
   cellsRef.current = cells || [];
   const nbKernel = nbRef.current && ((nbRef.current.metadata || {}).kernelspec || {}).name;
   const kern = useKernel(server, path, nbKernel || "", post, api, !!cells);
@@ -215,9 +263,12 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
   useEffect(() => { setCells(null); load(); }, [server, path]);
   const spec = kern.specs.find((s) => s.name === kern.k.name), lang = ((spec && spec.language) || "python").toLowerCase();
   const upd = (key, f) => { setDirty(true); setCells((cs) => cs.map((c) => (c.key === key ? { ...c, ...(typeof f === "function" ? f(c) : f) } : c))); };
-  const insert = (at, type, extra = {}) => { const c = { key: uid(), type: type === "sql" ? "code" : type, src: "", outputs: [], raw: null, ...extra }; if (type === "sql") c.raw = withSql(c, { conn: (conns[0] || {}).name || "", var: "df", limit: 10000 }); setDirty(true); setCells((cs) => [...cs.slice(0, at), c, ...cs.slice(at)]); setSel(c.key); return c; };
+  const newSql = (x) => withSql(x, { conn: (conns[0] || {}).name || "", var: "df", limit: 10000 });
+  const insert = (at, type, focus, extra = {}) => { const c = { key: uid(), type: type === "sql" ? "code" : type, src: "", outputs: [], raw: null, ...extra }; if (type === "sql") c.raw = newSql(c); setDirty(true); setCells((cs) => [...cs.slice(0, at), c, ...cs.slice(at)]); setSel(c.key); if (focus) focusCell(c.key); return c; };
   const move = (i, by) => { setDirty(true); setCells((cs) => { const j = i + by; if (j < 0 || j >= cs.length) return cs; const n = [...cs]; [n[i], n[j]] = [n[j], n[i]]; return n; }); };
   const remove = (key) => { setDirty(true); setCells((cs) => cs.filter((c) => c.key !== key)); };
+  const retype = (key, t) => upd(key, (x) => (t === "sql" ? { type: "code", raw: sqlOf(x) ? x.raw : newSql(x) } : { type: t, raw: sqlOf(x) ? withSql(x, null) : x.raw }));
+  const setSql = (key, patch) => upd(key, (x) => ({ raw: withSql(x, { ...sqlOf(x), ...patch }) }));
   const wordsFor = (key) => () => {                          // names used in this notebook, nearest cells first (cheap: only runs while you type a word)
     const out = new Set(KW), cs = cellsRef.current, i = cs.findIndex((c) => c.key === key);
     for (let d = 0; d < cs.length; d++) for (const j of [i - d, i + d]) { const c = cs[j]; if (c && c.type === "code") for (const w of c.src.match(IDENT) || []) out.add(w); if (out.size > 600) return out; }
@@ -233,6 +284,11 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
     const sql = sqlOf(c);
     setRun((r) => ({ ...r, [key]: 1 }));
     upd(key, (x) => ({ outputs: [], sqlres: null, cleared: false, raw: { ...(hiddenOf(x) ? withHidden(x, false) : x.raw || {}), execution_count: null } }));   // running shows the output again
+    // kernel events are folded into the cell once per frame, not once per message: a chatty loop (prints, progress bars) stays one render a frame
+    // (a hidden tab gets no animation frames: a timer then, so a long run in the background does not pile up its output)
+    const q = [], d = {}; let raf = 0;
+    const later = () => (document.hidden ? { t: setTimeout(flush, 250) } : { r: requestAnimationFrame(flush) }), unlater = (h) => { if (h && h.r) cancelAnimationFrame(h.r); if (h && h.t) clearTimeout(h.t); };
+    const flush = () => { raf = 0; if (!q.length) return; const evs = q.splice(0); upd(key, (x) => ({ outputs: evs.reduce((o, e) => fold(o, d, e), x.outputs) })); };
     try {
       if (sql) {
         if (!sql.conn) { toast("Pick a SQL connection for this cell"); return false; }
@@ -241,22 +297,23 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
         upd(key, { sqlres: r, outputs: r.ok ? [{ output_type: "display_data", data: { "text/plain": sum }, metadata: {} }] : [] });
         return !!r.ok && (!a || a.ok);
       }
-      const d = {};
       const reply = await kern.exec(c.src, (e) => {
-        if (e.t === "input_request") { const v = window.prompt(e.c.prompt || "Input", ""); kern.reply(v == null ? "" : v).catch(() => {}); return; }
-        upd(key, (x) => ({ outputs: fold(x.outputs, d, e) }));
+        if (e.t === "input_request") { flush(); const v = window.prompt(e.c.prompt || "Input", ""); kern.reply(v == null ? "" : v).catch(() => {}); return; }
+        q.push(e); if (!raf) raf = later();
       });
+      unlater(raf); flush();
       if (reply.lost) { toast(reply.error || "Lost the connection to the kernel"); return false; }
       upd(key, (x) => ({ outputs: widgetSnap(x.outputs), raw: { ...(x.raw || {}), execution_count: reply.execution_count == null ? null : reply.execution_count } }));
       return reply.status !== "error";
     } catch (e) { toast(e.message); return false; }
-    finally { setRun((r) => { const n = { ...r }; delete n[key]; return n; }); }
+    finally { unlater(raf); flush(); setRun((r) => { const n = { ...r }; delete n[key]; return n; }); }
   };
+  const codeKeys = (cs) => cs.filter((c) => c.type === "code").map((c) => c.key);
   const runMany = async (keys) => { runAll.current = true; for (const k of keys) { if (!runAll.current) break; if (!(await runCell(k))) break; } runAll.current = false; };
   const interrupt = guard(async () => { runAll.current = false; await kern.interrupt(); });
   const restart = guard(async (thenAll) => {
     if (!(await confirmBox({ title: "Restart the kernel?", text: "All variables are lost.", ok: "Restart" }))) return;
-    runAll.current = false; await kern.restart(); toast("Kernel restarting"); if (thenAll) setTimeout(() => runMany(cellsRef.current.filter((c) => c.type === "code").map((c) => c.key)), 1500);
+    runAll.current = false; await kern.restart(); toast("Kernel restarting"); if (thenAll) setTimeout(() => runMany(codeKeys(cellsRef.current)), 1500);
   });
   const persist = async () => {
     const nb = nbRef.current, snap = cellsRef.current;
@@ -268,38 +325,38 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
   const clearOut = (key) => upd(key, { outputs: [], sqlres: null, cleared: true });
   const allOut = (f) => { setDirty(true); setCells((cs) => cs.map((c) => (c.type === "code" ? { ...c, ...f(c) } : c))); };
   const clearAll = guard(async () => { if (await confirmBox({ title: "Clear all outputs?", text: "Every cell's output is removed (a smaller file, clean diffs). Variables in the kernel stay; outputs come back when cells run again.", ok: "Clear" })) allOut(() => ({ outputs: [], sqlres: null, cleared: true })); });
-  const [outMenu, setOutMenu] = useState(false), [ctx, setCtx] = useState(null);
-  const openCtx = (c) => (e) => {                                          // right-click on a cell; the editor (copy / paste) and Shift+right-click keep the browser's menu
-    if (e.shiftKey || e.target.closest("textarea,input,select,a,.nbj-ctx")) return;
-    e.preventDefault(); setSel(c.key); setCtx({ key: c.key, at: { x: e.clientX, y: e.clientY } });
+  const [ctx, setCtx] = useState(null);
+  const openCtx = (c, e, btnEl) => {                                       // right-click on a cell (or its ⋯ button); the editor and Shift+right-click keep the browser's menu
+    if (!btnEl && (e.shiftKey || e.target.closest("textarea,input,select,a,.nbj-ctx"))) return;
+    e.preventDefault(); setSel(c.key); setCtx({ key: c.key, at: btnEl ? menuAt(null, btnEl) : { x: e.clientX, y: e.clientY } });
   };
   const ctxItems = (key) => {
     const cs = cellsRef.current, i = cs.findIndex((x) => x.key === key), c = cs[i]; if (!c) return [];
-    const code = c.type === "code", out = hasOut(c), any = cs.some(hasOut), mod = /Mac/.test(navigator.platform) ? "⌘" : "Ctrl";
-    const asType = (t) => upd(c.key, (x) => (t === "sql" ? { type: "code", raw: withSql(x, { conn: (conns[0] || {}).name || "", var: "df", limit: 10000 }) } : { type: t, raw: sqlOf(x) ? withSql(x, null) : x.raw }));
+    const code = c.type === "code", out = hasOut(c), any = cs.some(hasOut), mod = isMacJ ? "⌘" : "Ctrl";
     return [
       code && ["Run cell", "play", mod + "+Enter", !!run[c.key], () => runCell(c.key)],
-      code && ["Run this and below", "down", "", busy, () => runMany(cs.slice(i).filter((x) => x.type === "code").map((x) => x.key))],
+      code && ["Run this and below", "down", "", busy, () => runMany(codeKeys(cs.slice(i)))],
       code && "-",
       code && ["Clear output", "x", "", !out, () => clearOut(c.key)],
       code && [hiddenOf(c) ? "Show output" : "Hide output", "eye", "", !out, () => upd(c.key, (x) => ({ raw: withHidden(x, !hiddenOf(x)) }))],
       code && [scrollOf(c) ? "Expand output (full height)" : "Scroll output in a box", scrollOf(c) ? "expand" : "shrink", "", !out, () => upd(c.key, (x) => ({ raw: withScroll(x, !scrollOf(x)) }))],
       code && ["Clear all outputs", "trash", "", !any, clearAll],
       "-",
-      ["Insert code cell above", "up", "", false, () => focusCell(insert(i, "code").key)],
-      ["Insert code cell below", "plus", "", false, () => focusCell(insert(i + 1, "code").key)],
+      ["Insert code cell above", "up", "", false, () => insert(i, "code", true)],
+      ["Insert code cell below", "plus", "", false, () => insert(i + 1, "code", true)],
       ["Insert text cell below", "note", "", false, () => insert(i + 1, "markdown")],
       ["Ask AI about this cell", "sparkles", "", false, () => setAiOpen(c.key)],
+      ["Copy cell source", "copy", "", !c.src, () => navigator.clipboard.writeText(c.src).then(() => toast("Copied"), () => toast("Could not copy"))],
       "-",
-      c.type !== "code" || sqlOf(c) ? ["Convert to code", "code", "", false, () => asType("code")] : ["Convert to text", "note", "", false, () => asType("markdown")],
-      code && !sqlOf(c) && ["Convert to SQL", "database", "", false, () => asType("sql")],
+      c.type !== "code" || sqlOf(c) ? ["Convert to code", "code", "", false, () => retype(c.key, "code")] : ["Convert to text", "note", "", false, () => retype(c.key, "markdown")],
+      code && !sqlOf(c) && ["Convert to SQL", "database", "", false, () => retype(c.key, "sql")],
       ["Move up", "up", "", !i, () => move(i, -1)],
       ["Move down", "down", "", i === cs.length - 1, () => move(i, 1)],
       "-",
       ["Delete cell", "trash", "", false, () => remove(c.key), true],
     ];
   };
-  const [addMenu, setAddMenu] = useState(false), [runMenu, setRunMenu] = useState(false), [fnd, setFnd] = useState(null), [ai, setAi] = useState({ s: "", m: "" }), findIn = useRef();
+  const [addMenu, setAddMenu] = useState(false), [runMenu, setRunMenu] = useState(false), [outMenu, setOutMenu] = useState(false), [fnd, setFnd] = useState(null), [ai, setAi] = useState({ s: "", m: "" }), findIn = useRef();
   const findRe = (global = true) => { if (!fnd || !fnd.q) return null; try { return new RegExp(fnd.rx ? fnd.q : fnd.q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), (global ? "g" : "") + (fnd.cs ? "" : "i") + "m"); } catch (e) { return null; } };
   const matches = useMemo(() => {
     const re = findRe(); if (!re || !cells) return [];
@@ -311,8 +368,12 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
   const replaceOne = () => { const m = matches[fnd.i]; if (!m) return; const re = findRe(false), to = fnd.rx && re ? m.text.replace(re, fnd.r) : fnd.r; upd(m.key, (x) => ({ src: x.src.slice(0, m.start) + to + x.src.slice(m.end) })); };
   const replaceAll = () => { const re = findRe(); if (!re || !matches.length) return; const keys = new Set(matches.map((m) => m.key)); setDirty(true); setCells((cs) => cs.map((c) => (keys.has(c.key) ? { ...c, src: c.src.replace(re, fnd.rx ? fnd.r : () => fnd.r) } : c))); toast(matches.length + " replaced"); };
   const marksOf = (k) => (fnd && matches.length ? matches.filter((m) => m.key === k).map((m) => [m.start, m.end, m === matches[fnd.i]]) : null);
-  useEffect(() => { if (onOutline && cells) onOutline(path, cells.flatMap((c, n) => (c.type === "markdown" ? c.src.split("\n").filter(((fence) => (l) => { if (/^\s*(```|~~~)/.test(l)) fence = !fence; return !fence && /^#{1,6}\s+\S/.test(l); })(false)).map((l) => ({ key: c.key, level: /^#+/.exec(l)[0].length, text: l.replace(/^#+\s+/, "").replace(/[*_`]/g, "").trim() })) : []))); }, [cells]);
-  const addAfter = (t) => { const cs = cellsRef.current, i = cs.findIndex((c) => c.key === sel), at = i < 0 ? cs.length : i + 1; const c = insert(at, t === "ai" ? "code" : t); if (t === "ai") setAiOpen(c.key); };
+  useEffect(() => {                                                      // the headings for the Contents panel: after a pause in typing, not on every key
+    if (!onOutline || !cells) return;
+    const t = setTimeout(() => onOutline(path, cells.flatMap((c) => (c.type === "markdown" ? c.src.split("\n").filter(((fence) => (l) => { if (/^\s*(```|~~~)/.test(l)) fence = !fence; return !fence && /^#{1,6}\s+\S/.test(l); })(false)).map((l) => ({ key: c.key, level: /^#+/.exec(l)[0].length, text: l.replace(/^#+\s+/, "").replace(/[*_`]/g, "").trim() })) : []))), 300);
+    return () => clearTimeout(t);
+  }, [cells]);
+  const addAfter = (t) => { const cs = cellsRef.current, i = cs.findIndex((c) => c.key === sel), at = i < 0 ? cs.length : i + 1; const c = insert(at, t === "ai" ? "code" : t, t === "code" || t === "sql"); if (t === "ai") setAiOpen(c.key); };
   useEffect(() => { if (!jump || jump.path !== path) return; requestAnimationFrame(() => { const el = document.getElementById("nbc-" + jump.key); if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); }); }, [jump]);
   const saving = useRef(false), [auto, setAuto] = useState(() => LS.get("auto", true)), [busySave, setBusySave] = useState(false), [saveErr, setSaveErr] = useState("");
   const persistRef = useRef(persist); persistRef.current = persist;
@@ -326,49 +387,51 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
   const openFind = () => { setFnd((f) => f || { q: "", r: "", cs: false, rx: false, i: 0 }); setTimeout(() => findIn.current && findIn.current.focus() && findIn.current.select(), 30); };
   const aiApply = (c, i) => (prop, mode) => {
     if (mode === "replace") upd(c.key, (x) => ({ src: prop.code, raw: sqlOf(x) && prop.conn ? withSql(x, { ...sqlOf(x), conn: (conns.find((q) => q.id === prop.conn) || {}).name || sqlOf(x).conn }) : x.raw }));
-    else insert(i + 1, sqlOf(c) ? "sql" : "code", { src: prop.code });
+    else insert(i + 1, sqlOf(c) ? "sql" : "code", false, { src: prop.code });
   };
   const focusCell = (k) => setTimeout(() => { const t = document.querySelector("#nbc-" + k + " textarea"); if (t) { t.focus(); t.selectionStart = t.selectionEnd = t.value.length; } const el = document.getElementById("nbc-" + k); if (el) el.scrollIntoView({ block: "nearest" }); }, 40);
-  const key = (c, i) => (e) => {
+  const key = (k, e) => {
+    const cs = cellsRef.current, i = cs.findIndex((x) => x.key === k), c = cs[i]; if (!c) return;
     if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); save(); }
     else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") { e.preventDefault(); openFind(); }
     else if (e.shiftKey && e.key === "Enter") {                       // run, then land in the next cell ready to type (a new one after the last)
       e.preventDefault(); if (c.type === "code") runCell(c.key);
-      if (i === cellsRef.current.length - 1) { const nc = insert(i + 1, "code"); focusCell(nc.key); } else { const nk = cellsRef.current[i + 1].key; setSel(nk); focusCell(nk); }
+      if (i === cs.length - 1) insert(i + 1, "code", true); else { const nk = cs[i + 1].key; setSel(nk); focusCell(nk); }
     }
     else if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); runCell(c.key); }
+    else if (e.key === "Escape" && c.type === "markdown") { e.preventDefault(); setSel(null); }
   };
+  const fileExtra = () => [["Save", "check", isMacJ ? "⌘S" : "Ctrl+S", !dirty, save], ["Revert to saved", "refresh", "", !dirty, () => { setCells(null); load(); }],
+    ["Download as Python (.py)", "download", "", !cellsRef.current.length, () => saveBlob(new Blob([toPy(cellsRef.current)], { type: "text/x-python" }), path.split("/").pop().replace(/\.ipynb$/i, "") + ".py")], "-"];
+  fx.current = { upd, insert, move, remove, retype, setSql, runCell, setSel, setAiOpen, setAi, openCtx, aiApply, ctxFor, wordsFor, key, kern, post };
   if (err) return html`<div class="empty"><div>${Ic("alert", 24)}<div>${err}</div></div></div>`;
   if (!cells) return html`<div class="empty"><div class="shine">Opening…</div></div>`;
-  const adder = (at) => html`<div class="nb-add"><button type="button" onClick=${() => insert(at, "code")}>${Ic("plus", 12)} Code</button><button type="button" onClick=${() => insert(at, "markdown")}>${Ic("plus", 12)} Text</button>
-    <button type="button" onClick=${() => insert(at, "sql")}>${Ic("database", 12)} SQL</button><button type="button" onClick=${() => { const c = insert(at, "code"); setAiOpen(c.key); }}>${Ic("sparkles", 12)} AI</button></div>`;
-  const st = kern.k.state, busy = Object.keys(run).length > 0;
-  const stateTag = st === "dead" ? html`<button class="tag bad nbj-recon" title=${(kern.k.err ? kern.k.err + ". " : "") + "Click to connect a kernel again"} onClick=${kern.reconnect}>${Ic("alert", 11)} Kernel offline · Reconnect</button>`
-    : html`<span class=${"tag " + (st === "idle" ? "good" : st === "busy" ? "acc" : "")} title=${kern.k.err || ""}>${st === "busy" || st === "starting" ? html`<i class="spin"></i>` : Ic("check", 11)} ${st === "starting" ? "Starting kernel" : st === "busy" ? "Busy" : "Idle"}</span>`;
+  const st = kern.k.state, busy = Object.keys(run).length > 0, kOk = !!kern.k.id && st !== "dead", sugg = settings.suggest.on ? settings.suggest.delay : 0;
+  const stateTag = st === "dead" ? html`<button class="nbj-kst bad" title=${(kern.k.err ? kern.k.err + ". " : "") + "Click to connect a kernel again"} onClick=${kern.reconnect}>${Ic("alert", 11)} Offline. Reconnect</button>`
+    : html`<span class=${"nbj-kst " + st} title=${kern.k.err || ""}><i></i>${st === "starting" ? "Starting" : st === "busy" ? "Busy" : "Idle"}</span>`;
+  const opts = (list, close) => html`<div class="optlist">${list.map(([n, i, d, off, f]) => html`<button class="opt" disabled=${off} onClick=${() => { close(); f(); }}><span class="oi">${Ic(i, 16)}</span><span class="grow"><b>${n}</b>${d && html`<span class="d">${d}</span>`}</span></button>`)}</div>`;
+  const s = cells.find((c) => c.key === sel), so = s && hasOut(s), anyOut = cells.some(hasOut), selAt = cells.findIndex((c) => c.key === sel);
+  const saveLabel = saveErr ? "Save failed" : busySave ? "Saving…" : dirty ? (auto ? "Saving soon" : "Save") : "Saved";
   return html`<div class="nb nbj" onKeyDown=${(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); save(); } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") { e.preventDefault(); openFind(); } }}>
     <div class="nbj-bar nbj-colab">
       <div class="nbj-split"><button class="btn sm ghost" title="Add a code cell after the selected one" onClick=${() => addAfter("code")}>${Ic("plus", 14)} Code</button>
         <${Pop} open=${addMenu} setOpen=${setAddMenu} up=${false} width=${230} button=${html`<button class="btn sm ghost nbj-caret" aria-label="More cell types" onClick=${() => setAddMenu(!addMenu)}>${Ic("down", 12)}</button>`}>
-          <div class="optlist">${[["code", "code", "Code cell", "Python or the kernel's language"], ["sql", "database", "SQL cell", "Query a database into a DataFrame"], ["ai", "sparkles", "Cell written by AI", "Describe it, review the code"]].map(([t, i, n, d]) => html`<button class="opt" onClick=${() => { setAddMenu(false); addAfter(t); }}><span class="oi">${Ic(i, 16)}</span><span class="grow"><b>${n}</b><span class="d">${d}</span></span></button>`)}</div><//></div>
+          ${opts([["Code cell", "code", "Python or the kernel's language", false, () => addAfter("code")], ["Text cell", "note", "Markdown", false, () => addAfter("markdown")], ["SQL cell", "database", "Query a database into a DataFrame", false, () => addAfter("sql")], ["Cell written by AI", "sparkles", "Describe it, review the code", false, () => addAfter("ai")]], () => setAddMenu(false))}<//></div>
       <button class="btn sm ghost" title="Add a text cell after the selected one" onClick=${() => addAfter("markdown")}>${Ic("plus", 14)} Text</button><span class="nbj-vr"></span>
-      <div class="nbj-split"><button class="btn sm ghost" disabled=${busy} title="Run every code cell" onClick=${() => runMany(cells.filter((c) => c.type === "code").map((c) => c.key))}>${Ic("play", 13)} Run all</button>
+      <div class="nbj-split"><button class="btn sm ghost" disabled=${busy} title="Run every code cell" onClick=${() => runMany(codeKeys(cells))}>${Ic("play", 13)} Run all</button>
         <${Pop} open=${runMenu} setOpen=${setRunMenu} up=${false} width=${250} button=${html`<button class="btn sm ghost nbj-caret" aria-label="More run options" onClick=${() => setRunMenu(!runMenu)}>${Ic("down", 12)}</button>`}>
-          <div class="optlist">${[["Run selected cell", "play", "Shift+Enter", !sel || busy, () => sel && runCell(sel)], ["Run selected and below", "down", "From the selected cell to the end", !sel || busy, () => runMany(cells.slice(cells.findIndex((c) => c.key === sel)).filter((c) => c.type === "code").map((c) => c.key))], ["Run all above", "up", "Every cell before the selected one", !sel || busy, () => runMany(cells.slice(0, cells.findIndex((c) => c.key === sel)).filter((c) => c.type === "code").map((c) => c.key))], ["Interrupt execution", "stop", "", !busy, interrupt], ["Restart session", "refresh", "Clears all variables", false, () => restart(false)], ["Restart and run all", "refresh", "Fresh kernel, every cell", false, () => restart(true)]].map(([n, i, d, off, f]) => html`<button class="opt" disabled=${off} onClick=${() => { setRunMenu(false); f(); }}><span class="oi">${Ic(i, 16)}</span><span class="grow"><b>${n}</b><span class="d">${d}</span></span></button>`)}</div><//></div>
-      <${Pop} open=${outMenu} setOpen=${setOutMenu} up=${false} width=${260} button=${html`<button class="btn sm ghost" title="Clear, hide or scroll cell outputs" onClick=${() => setOutMenu(!outMenu)}>${Ic("list", 13)} Output ${Ic("down", 11)}</button>`}>
-        <div class="optlist">${(() => { const s = cells.find((c) => c.key === sel), so = s && hasOut(s), any = cells.some(hasOut); return [
-          ["Clear selected cell's output", "x", "", !so, () => clearOut(sel)],
-          ["Clear all outputs", "trash", "Every code cell", !any, clearAll],
-          [s && hiddenOf(s) ? "Show selected output" : "Hide selected output", "eye", "Keeps it, just folded away", !so, () => upd(sel, (x) => ({ raw: withHidden(x, !hiddenOf(x)) }))],
-          [s && scrollOf(s) ? "Expand selected output" : "Scroll selected output", s && scrollOf(s) ? "expand" : "shrink", s && scrollOf(s) ? "Show it at full height" : "Long output scrolls in a box", !so, () => upd(sel, (x) => ({ raw: withScroll(x, !scrollOf(x)) }))],
-          ["Hide all outputs", "eye", "", !any, () => allOut((c) => ({ raw: withHidden(c, true) }))],
-          ["Show all outputs", "eye", "", !cells.some(hiddenOf), () => allOut((c) => ({ raw: withHidden(c, false) }))],
-          ["Scroll all long outputs", "shrink", "Each output in a box with its own scroll", false, () => allOut((c) => ({ raw: withScroll(c, true) }))],
-          ["Expand all outputs", "expand", "Full height, the page scrolls", false, () => allOut((c) => ({ raw: withScroll(c, false) }))],
-        ].map(([n, i, d, off, f]) => html`<button class="opt" disabled=${off} onClick=${() => { setOutMenu(false); f(); }}><span class="oi">${Ic(i, 16)}</span><span class="grow"><b>${n}</b>${d && html`<span class="d">${d}</span>`}</span></button>`); })()}</div><//>
-      ${busy && html`<button class="btn sm bad" onClick=${interrupt}>${Ic("stop", 12)} Interrupt</button>`}<span class="grow"></span>
-      <select class="sq-conn" value=${kern.k.name} onChange=${(e) => kern.switchTo(e.target.value)} aria-label="Kernel" disabled=${!kern.specs.length}>${!kern.specs.length && html`<option value="">Kernel…</option>`}${kern.specs.map((s) => html`<option value=${s.name}>${s.display}</option>`)}</select>${stateTag}
-      <button class="btn sm ghost" title="Find and replace (Ctrl/Cmd+F)" onClick=${openFind}>${Ic("search", 13)} Find</button><button class="btn sm ghost" title="Create a work that runs this notebook; chat can run it too" onClick=${() => onExpose(path)}>${Ic("flow", 13)} Use as node</button>
-      <button class="btn sm ghost" disabled=${!dirty} onClick=${() => { setCells(null); load(); }}>Revert</button><button class="btn sm acc" disabled=${!dirty} onClick=${save}>${Ic("check", 12)} Save</button></div>
+          ${opts([["Run selected cell", "play", "Shift+Enter", !sel || busy, () => sel && runCell(sel)], ["Run selected and below", "down", "", !sel || busy, () => runMany(codeKeys(cells.slice(selAt)))], ["Run all above", "up", "", !sel || busy, () => runMany(codeKeys(cells.slice(0, selAt)))], "-", ["Restart kernel", "refresh", "Clears all variables", false, () => restart(false)], ["Restart and run all", "refresh", "", false, () => restart(true)]].filter((x) => x !== "-"), () => setRunMenu(false))}<//></div>
+      ${busy && html`<button class="btn sm ghost bad" onClick=${interrupt}>${Ic("stop", 12)} Interrupt</button>`}
+      <${Pop} open=${outMenu} setOpen=${setOutMenu} up=${false} width=${260} button=${html`<button class="btn sm ghost" title="Clear, hide or fold cell outputs" onClick=${() => setOutMenu(!outMenu)}>Output ${Ic("down", 11)}</button>`}>
+        ${opts([["Clear selected output", "x", "", !so, () => clearOut(sel)], ["Clear all outputs", "trash", "", !anyOut, clearAll],
+          [s && hiddenOf(s) ? "Show selected output" : "Hide selected output", "eye", "", !so, () => upd(sel, (x) => ({ raw: withHidden(x, !hiddenOf(x)) }))],
+          ["Hide all outputs", "eye", "", !anyOut, () => allOut((c) => ({ raw: withHidden(c, true) }))], ["Show all outputs", "eye", "", !cells.some(hiddenOf), () => allOut((c) => ({ raw: withHidden(c, false) }))],
+          ["Scroll long outputs", "shrink", "Each in a box with its own scroll", false, () => allOut((c) => ({ raw: withScroll(c, true) }))], ["Expand all outputs", "expand", "Full height", false, () => allOut((c) => ({ raw: withScroll(c, false) }))]], () => setOutMenu(false))}<//>
+      <span class="grow"></span>
+      <button class="ibtn sm" title="Find and replace (Ctrl/Cmd+F)" aria-label="Find and replace" onClick=${openFind}>${Ic("search", 15)}</button>
+      <select class="nbj-ksel" value=${kern.k.name} onChange=${(e) => kern.switchTo(e.target.value)} aria-label="Kernel" disabled=${!kern.specs.length}>${!kern.specs.length && html`<option value="">Kernel…</option>`}${kern.specs.map((x) => html`<option value=${x.name}>${x.display}</option>`)}</select>${stateTag}
+      <button class=${"btn sm nbj-save" + (saveErr ? " bad" : "")} disabled=${!dirty && !saveErr} title=${saveErr || (isMacJ ? "⌘S" : "Ctrl+S")} onClick=${save}>${busySave ? html`<i class="spin"></i>` : !dirty && !saveErr ? Ic("check", 12) : ""} ${saveLabel}</button>
+      <button class="ibtn sm" title="File: download, copy path, rename, use as a Works node…" aria-label="File actions" onClick=${(e) => onFileMenu(e, path, fileExtra())}>${Ic("more", 16)}</button></div>
     ${fnd && html`<div class="nbj-find" role="search" onKeyDown=${(e) => { if (e.key === "Escape") { e.stopPropagation(); setFnd(null); } }}>
       <div class="nbj-ff"><input ref=${findIn} placeholder="Find" value=${fnd.q} onInput=${(e) => setFnd({ ...fnd, q: e.target.value, i: 0 })} onKeyDown=${(e) => { if (e.key === "Enter") { e.preventDefault(); goto(fnd.i + (e.shiftKey ? -1 : 1)); } }} aria-label="Find"/>
         <button class=${"nbj-tg" + (fnd.cs ? " on" : "")} title="Match case" aria-pressed=${fnd.cs} onClick=${() => setFnd({ ...fnd, cs: !fnd.cs })}>Aa</button><button class=${"nbj-tg" + (fnd.rx ? " on" : "")} title="Regular expression" aria-pressed=${fnd.rx} onClick=${() => setFnd({ ...fnd, rx: !fnd.rx })}>.*</button></div>
@@ -377,42 +440,12 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
       <div class="nbj-ff"><input placeholder="Replace with" value=${fnd.r} onInput=${(e) => setFnd({ ...fnd, r: e.target.value })} aria-label="Replace with"/></div>
       <button class="btn sm" disabled=${!matches.length} onClick=${replaceOne}>Replace</button><button class="btn sm" disabled=${!matches.length} onClick=${replaceAll}>Replace all</button>
       <span class="grow"></span><button class="ibtn sm" title="Close (Esc)" aria-label="Close find" onClick=${() => setFnd(null)}>${Ic("x", 14)}</button></div>`}
-    <div class="nb-cells">${!cells.length ? html`<div class="nbj-emptynb"><p class="mute">This notebook has no cells yet.</p>${adder(0)}</div>` : adder(0)}${cells.map((c, i) => {
-      const sql = sqlOf(c), failed = !!errText(c), running = !!run[c.key], ec = c.raw && c.raw.execution_count;
-      return html`<div key=${c.key} id=${"nbc-" + c.key} class=${"nb-cell " + c.type + (sql ? " sql" : "") + (sel === c.key ? " sel" : "")} onPointerDown=${() => setSel(c.key)} onContextMenu=${openCtx(c)}>
-        <div class="nb-gut">${c.type === "code" ? html`<button class=${"nbj-run" + (running ? " busy" : "")} title=${running ? "Running…" : "Run cell (Shift+Enter)"} aria-label="Run cell" disabled=${running} onClick=${(e) => { e.stopPropagation(); runCell(c.key); }}>${running ? html`<i class="spin"></i>` : Ic("play", 13)}</button><span class="mono nbj-n">${running ? "*" : sql ? "sql" : ec ? "[" + ec + "]" : ""}</span>` : ""}</div>
-        <div class="nb-body">
-          <div class="nb-tools">            <button class="ibtn sm" title="Add a code cell below" aria-label="Add cell below" onClick=${() => { const nc = insert(i + 1, "code"); focusCell(nc.key); }}>${Ic("plus", 13)}</button>
-            <button class="ibtn sm" title="Ask AI" aria-label="Ask AI" onClick=${() => setAiOpen(aiOpen === c.key ? null : c.key)}>${Ic("sparkles", 13)}</button>
-            <select aria-label="Cell type" value=${sql ? "sql" : c.type} onChange=${(e) => { const t = e.target.value; upd(c.key, (x) => (t === "sql" ? { type: "code", raw: withSql(x, { conn: (conns[0] || {}).name || "", var: "df", limit: 10000 }) } : { type: t, raw: sqlOf(x) ? withSql(x, null) : x.raw })); }}><option value="code">Code</option><option value="sql">SQL</option><option value="markdown">Markdown</option><option value="raw">Raw</option></select>
-            <button class="ibtn sm" aria-label="Move up" disabled=${!i} onClick=${() => move(i, -1)}>${Ic("up", 13)}</button><button class="ibtn sm" aria-label="Move down" disabled=${i === cells.length - 1} onClick=${() => move(i, 1)}>${Ic("down", 13)}</button>
-            ${hasOut(c) && html`<button class="ibtn sm" title="Clear output" aria-label="Clear output" onClick=${() => clearOut(c.key)}>${Ic("x", 13)}</button>`}
-            <button class="ibtn sm bad" aria-label="Delete cell" onClick=${() => remove(c.key)}>${Ic("trash", 13)}</button></div>
-          ${sql && html`<div class="nbj-sqlbar">${Ic("database", 13)}<b>SQL</b>
-            <select value=${sql.conn} onChange=${(e) => upd(c.key, (x) => ({ raw: withSql(x, { ...sql, conn: e.target.value }) }))} aria-label="Connection"><option value="">Connection…</option>${conns.map((q) => html`<option value=${q.name}>${q.name}</option>`)}</select>
-            <label class="mute small">into DataFrame <input class="nbj-var" placeholder="none" value=${sql.var || ""} onInput=${(e) => upd(c.key, (x) => ({ raw: withSql(x, { ...sql, var: e.target.value.replace(/[^A-Za-z0-9_]/g, "") }) }))} aria-label="Python variable"/></label>
-            <label class="mute small">rows <select value=${sql.limit || 10000} onChange=${(e) => upd(c.key, (x) => ({ raw: withSql(x, { ...sql, limit: +e.target.value }) }))}>${[100, 1000, 10000, 50000, 200000].map((n) => html`<option value=${n}>${n.toLocaleString()}</option>`)}</select></label>
-            ${!conns.length && html`<span class="mute small">Add a database in Data Studio first.</span>`}</div>`}
-          ${c.type === "markdown" && sel !== c.key ? html`<div class="nb-md" title="Click to edit" onClick=${() => setSel(c.key)}>${c.src.trim() ? html`<${Md} text=${c.src}/>` : html`<span class="mute small">Empty text cell: click to write.</span>`}</div>`
-            : html`<${CodeBox} value=${c.src} lang=${sql ? "sql" : c.type === "code" ? lang : c.type === "markdown" ? "markdown" : ""} autofocus=${sel === c.key && !c.src}
-                onChange=${(v) => upd(c.key, { src: v })} onKey=${key(c, i)} delay=${settings.suggest.on && c.type === "code" && !sql ? settings.suggest.delay : 0}
-                intel=${c.type === "code"} marks=${marksOf(c.key)} onAi=${(s2, m) => setAi({ s: s2, m: m || "" })} words=${sql ? SQL_WORDS : wordsFor(c.key)}
-                complete=${sql ? sqlComplete(post, (conns.find((q) => q.name === sql.conn) || {}).id || "") : kern.k.id && kern.k.state !== "dead" ? (code, pos) => kern.complete(code, pos) : null}
-                signature=${c.type !== "code" ? null : sql ? sqlSignature : kern.k.id && kern.k.state !== "dead" ? (code, pos) => kern.signature(code, pos) : null} suggest=${(prefix, suffix) => post("jupyter/ai/suggest", { prefix, suffix, lang, cells: ctxFor(c.key)(), ...kern.live() }).then((r) => r.text || "")}/>`}
-          ${aiOpen === c.key && html`<${AiBar} c=${c} sql=${sql ? { ...sql, conn: (conns.find((q) => q.name === sql.conn) || {}).id || sql.conn } : null} conns=${conns} post=${post} ctx=${ctxFor(c.key)} lang=${lang} apply=${aiApply(c, i)} close=${() => setAiOpen(null)} failed=${failed}/>`}
-          ${hasOut(c) && hiddenOf(c) && html`<button class="nbj-ohid" title="Show this cell's output" onClick=${() => upd(c.key, (x) => ({ raw: withHidden(x, false) }))}>${Ic("eye", 12)} Output hidden${c.outputs.length > 1 ? " (" + c.outputs.length + ")" : ""} · show</button>`}
-          ${hasOut(c) && !hiddenOf(c) && html`<div class="nbj-ow">
-          <${OutBox} scroll=${scrollOf(c)} running=${running}>
-            ${c.sqlres && c.sqlres.ok && c.sqlres.columns && c.sqlres.columns.length ? html`<${DataView} res=${c.sqlres} spec=${vizOf(c, "sql")} onSpec=${(s) => upd(c.key, (x) => ({ raw: withViz(x, "sql", s) }))} table=${html`<${Grid} res=${c.sqlres} name=${(sql && sql.conn) || "result"}/>`}/>${c.sqlres.assigned && html`<div class=${"small " + (c.sqlres.assigned.ok ? "mute" : "nbj-bad")}>${c.sqlres.assigned.ok ? "Also in the kernel as DataFrame " : "Could not assign "}<code>${c.sqlres.assigned.var}</code>${c.sqlres.assigned.error ? ": " + c.sqlres.assigned.error : ""}</div>`}`
-              : c.sqlres && !c.sqlres.ok ? html`<pre class="nb-o err">${c.sqlres.error}</pre>`
-              : c.outputs.map((o, j) => html`<${Out} key=${j} o=${o} post=${post} viz=${vizOf(c, String(j))} onViz=${(s) => upd(c.key, (x) => ({ raw: withViz(x, String(j), s) }))}/>`)}
-            ${failed && !aiOpen && html`<div><button class="btn sm" onClick=${() => setAiOpen(c.key)}>${Ic("bolt", 12)} Fix with AI</button></div>`}<//></div>`}
-        </div></div>${adder(i + 1)}`; })}</div>
+    <div class="nb-cells">${!cells.length ? html`<div class="nbj-emptynb"><p class="mute">This notebook has no cells yet.</p><div class="nb-add"><button type="button" onClick=${() => insert(0, "code", true)}>${Ic("plus", 12)} Code</button><button type="button" onClick=${() => insert(0, "markdown")}>${Ic("plus", 12)} Text</button><button type="button" onClick=${() => insert(0, "sql", true)}>${Ic("plus", 12)} SQL</button></div></div>`
+      : cells.map((c, i) => html`<${Cell} key=${c.key} c=${c} i=${i} last=${i === cells.length - 1} sel=${sel === c.key} running=${!!run[c.key]} aiOpen=${aiOpen === c.key} marks=${marksOf(c.key)} lang=${lang} kOk=${kOk} sugg=${sugg} conns=${conns} fx=${fx}/>`)}</div>
     ${ctx && html`<${CtxMenu} at=${ctx.at} items=${ctxItems(ctx.key)} close=${() => setCtx(null)}/>`}
-    <div class="ebar"><span class=${saveErr ? "nbj-bad" : ""} title=${saveErr}><i class=${"dot " + (saveErr ? "dead" : dirty ? "busy" : "idle")}></i>${saveErr ? "Auto-save failed" : busySave ? "Saving…" : dirty ? (auto ? "Saving soon" : "Unsaved changes") : "Saved"}</span><label class="nbj-auto" title="Save changes automatically"><input type="checkbox" checked=${auto} onChange=${(e) => { setAuto(e.target.checked); LS.set("auto", e.target.checked); }}/> Auto-save</label><span>${cells.length} cell${cells.length === 1 ? "" : "s"}</span><span>${lang}</span><span class="grow"></span>
-      ${settings.suggest.on && ai.s && html`<span class=${ai.s === "err" ? "nbj-bad" : ""} title=${ai.m || "AI suggestions"}>${ai.s === "busy" ? html`<i class="spin"></i> AI thinking…` : ai.s === "err" ? "AI suggestions failed: " + ai.m.slice(0, 60) : ai.s === "none" ? "AI: no suggestion" : "AI ready"}</span>`}
-      <span class="hint"><kbd>Shift</kbd>+<kbd>Enter</kbd> run · right-click a cell for options · <kbd>${/Mac/.test(navigator.platform) ? "⌘" : "Ctrl"}</kbd>+<kbd>S</kbd> save${settings.suggest.on ? html` · <kbd>Tab</kbd> accept` : ""}</span>
-      <span title=${kern.k.err || ""}><i class=${"dot " + (st === "idle" ? "idle" : st === "busy" || st === "starting" ? "busy" : "dead")}></i>${kern.k.name || "No kernel"}</span></div></div>`;
+    <div class="ebar"><span class=${saveErr ? "nbj-bad" : ""} title=${saveErr}>${saveErr ? "Auto-save failed: " + saveErr.slice(0, 80) : dirty ? "Unsaved changes" : "All changes saved"}</span><label class="nbj-auto" title="Save changes automatically"><input type="checkbox" checked=${auto} onChange=${(e) => { setAuto(e.target.checked); LS.set("auto", e.target.checked); }}/> Auto-save</label><span>${cells.length} cell${cells.length === 1 ? "" : "s"}</span><span class="grow"></span>
+      ${settings.suggest.on && ai.s && ai.s !== "ok" && html`<span class=${ai.s === "err" ? "nbj-bad" : ""} title=${ai.m || "AI suggestions"}>${ai.s === "busy" ? "Suggesting…" : ai.s === "err" ? "Suggestions failed: " + ai.m.slice(0, 60) : ""}</span>`}
+      <span class="hint"><kbd>Shift</kbd>+<kbd>Enter</kbd> run and next · right-click a cell for more${settings.suggest.on ? html` · <kbd>Tab</kbd> accepts a suggestion` : ""}</span></div></div>`;
 }
 
 // ---------- other files
@@ -433,10 +466,14 @@ function CsvView({ text, sep }) {
   const more = rows.length > 501, head = rows[0], body = rows.slice(1, 501);
   return html`<div class="nb-o html nbj-csv"><table><thead><tr>${head.map((c, i) => html`<th key=${i}>${c}</th>`)}</tr></thead><tbody>${body.map((r, i) => html`<tr key=${i}>${r.map((c, j) => html`<td key=${j}>${c}</td>`)}</tr>`)}</tbody></table>${more && html`<p class="mute small">Showing the first 500 rows. Edit to see the whole file.</p>`}</div>`;
 }
-function FileView({ server, path, post, dirtyRef }) {
+function FileView({ server, path, post, dirtyRef, onFileMenu, settings }) {
   const [d, setD] = useState(null), [text, setText] = useState(""), [base, setBase] = useState(""), [mode, setMode] = useState(""), [frame, setFrame] = useState(""), h = useHl(), kind = previewKind(path);
   useEffect(() => { setD(null); post("jupyter/file/get", { server, path }).then((r) => { setD(r); setText(r.format === "text" ? r.content || "" : ""); setBase(r.format === "text" ? r.content || "" : ""); }).catch((e) => setD({ err: e.message })); }, [server, path]);
   const dirty = !!d && d.format === "text" && text !== base;
+  const textRef = useRef(text); textRef.current = text;
+  // completion without a kernel: the file's own names at once, then the UI's completer (jedi / stdlib members for .py, words otherwise)
+  const fileWords = useCallback(() => new Set([...(/\.py$/i.test(path) ? KW : []), ...(textRef.current.length < 400000 ? textRef.current.match(IDENT) || [] : [])]), [path]);
+  const fileComplete = useCallback((code, pos) => post("code/complete", { code, pos, path, lang: /\.py$/i.test(path) ? "python" : /\.(sh|bash|zsh)$/i.test(path) ? "sh" : "" }), [path]);
   dirtyRef.current = dirty;
   useEffect(() => () => { dirtyRef.current = false; }, []);
   const wr = (t) => post("jupyter/file/put", { server, path, type: "file", format: "text", content: t }).then(() => setBase(t));
@@ -446,22 +483,27 @@ function FileView({ server, path, post, dirtyRef }) {
   useEffect(() => { if (kind === "html" && view === "preview" && d && d.format === "text") post("jupyter/frame", { html: text }).then((r) => setFrame("/nbframe/" + r.id)).catch(() => {}); }, [kind, view, d, base]);
   if (!d) return html`<div class="empty"><div class="shine">Opening…</div></div>`;
   if (d.err) return html`<div class="empty"><div>${Ic("alert", 24)}<div>${d.err}</div></div></div>`;
-  if (d.format === "base64") return /^image\//.test(d.mimetype || "") ? html`<div class="nbj-img"><img alt=${path} src=${"data:" + d.mimetype + ";base64," + d.content}/></div>` : html`<div class="empty"><div>${Ic("file", 24)}<div>${path.split("/").pop()} is a binary file (${d.mimetype || "unknown type"}).</div></div></div>`;
   const save = guard(async () => { await wr(text); toast("Saved " + path.split("/").pop()); });
+  const more = html`<button class="ibtn sm" title="File: download, copy path, rename…" aria-label="File actions" onClick=${(e) => onFileMenu(e, path, d.format === "text" ? [["Save", "check", isMacJ ? "⌘S" : "Ctrl+S", !dirty, save], ["Revert to saved", "refresh", "", !dirty, () => setText(base)], ["Copy contents", "copy", "", !text, () => navigator.clipboard.writeText(text).then(() => toast("Copied"), () => toast("Could not copy"))], "-"] : [])}>${Ic("more", 16)}</button>`;
+  const flang = langOf(h, path) || "";
+  const bar = (extra) => html`<div class="nbj-pvbar">${extra}<span class="mute small grow sq-ell" title=${path}>${path}</span>${more}</div>`;
+  if (d.format === "base64") return html`<div class="nb nbj">${bar("")}${/^image\//.test(d.mimetype || "") ? html`<div class="nbj-img"><img alt=${path} src=${"data:" + d.mimetype + ";base64," + d.content}/></div>` : html`<div class="empty"><div>${Ic("file", 24)}<div>${path.split("/").pop()} is a binary file (${d.mimetype || "unknown type"}). Use the file menu to download it.</div></div></div>`}</div>`;
   const seg = kind ? html`<span class="nbj-pv"><button class=${view === "preview" ? "on" : ""} onClick=${() => setMode("preview")}>${Ic("eye", 13)} Preview</button><button class=${view === "edit" ? "on" : ""} onClick=${() => setMode("edit")}>${Ic("edit", 13)} Edit</button></span>` : "";
-  if (kind && view === "preview") return html`<div class="nb nbj"><div class="nbj-pvbar">${seg}<span class="mute small grow">${path}</span></div><div class="nbj-pvbody">${kind === "md" ? html`<div class="mdfile"><${Md} text=${text}/></div>`
+  if (kind && view === "preview") return html`<div class="nb nbj">${bar(seg)}<div class="nbj-pvbody">${kind === "md" ? html`<div class="mdfile"><${Md} text=${text}/></div>`
       : kind === "html" ? (frame ? html`<iframe class="nbj-pvframe" sandbox="allow-scripts allow-popups" src=${frame} title=${path}></iframe>` : html`<div class="empty"><div class="shine">Rendering…</div></div>`)
       : kind === "svg" ? html`<div class="nbj-img"><img alt=${path} src=${"data:image/svg+xml;charset=utf-8," + encodeURIComponent(text)}/></div>`
       : html`<${CsvView} text=${text} sep=${/\.tsv$/i.test(path) ? "\t" : ","}/>`}</div></div>`;
-  return html`<div class="nb nbj">${seg && html`<div class="nbj-pvbar">${seg}<span class="mute small grow">${path}</span></div>`}<div class="nb-cells" style="padding:10px 14px"><${CodeBox} value=${text} lang=${langOf(h, path)} onChange=${setText} onKey=${(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); save(); } }} label="File text"/></div>
-    <div class="ebar"><span class="mute small grow">${dirty ? "Unsaved changes" : "Saved"} · ${path}</span><button class="btn" disabled=${!dirty} onClick=${() => setText(base)}>Revert</button><button class="btn acc" disabled=${!dirty} onClick=${save}>${Ic("check", 13)} Save</button></div></div>`;
+  return html`<div class="nb nbj">${bar(seg)}<div class="nb-cells" style="padding:10px 14px"><${CodeBox} value=${text} lang=${flang} onChange=${setText} intel=${true} words=${fileWords} complete=${fileComplete} delay=${settings && settings.suggest.on ? settings.suggest.delay : 0}
+    suggest=${(prefix, suffix) => post("jupyter/ai/suggest", { prefix, suffix, lang: flang, cells: [] }).then((r) => r.text || "")} onKey=${(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); save(); } }} label="File text"/></div>
+    <div class="ebar"><span class="grow">${dirty ? (LS.get("auto", true) ? "Saving soon" : "Unsaved changes") : "All changes saved"}</span><button class="btn sm" disabled=${!dirty} onClick=${() => setText(base)}>Revert</button><button class="btn sm" disabled=${!dirty} onClick=${save}>Save</button></div></div>`;
 }
 
 // ---------- remote terminal (xterm.js on one of the server's terminals). A tab attaches to a terminal by name; closing the tab leaves it running
 // (like JupyterLab), the Running panel shuts it down. Re-attaching replays what the UI still buffers.
 const TERM = "term:", termOf = (p) => (p.startsWith(TERM) ? p.slice(TERM.length) : "");
 function RemoteTerm({ server, name, post, api, active, gone }) {
-  const host = useRef(), tr = useRef(), [msg, setMsg] = useState("Connecting…"), [dead, setDead] = useState(false);
+  const host = useRef(), tr = useRef(), wt = useRef(null), [msg, setMsg] = useState("Connecting…"), [dead, setDead] = useState(false), [hint, setHint] = useState(""), [sug, setSug] = useState(termSuggestOn), hintT = useRef(0);
+  const note = (m) => { setHint(m); clearTimeout(hintT.current); hintT.current = setTimeout(() => setHint(""), 3000); };
   useEffect(() => { if (active && tr.current) setTimeout(() => tr.current && tr.current.focus(), 30); }, [active]);
   useEffect(() => {
     let stop = false, t, ro;
@@ -469,12 +511,15 @@ function RemoteTerm({ server, name, post, api, active, gone }) {
       try {
         const [{ Terminal }, { FitAddon }] = await loadXterm();
         if (stop) return;
-        const dark = matchMedia("(prefers-color-scheme: dark)").matches;
-        t = new Terminal({ fontFamily: "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace", fontSize: 12.5, cursorBlink: true, scrollback: 5000, theme: dark ? { background: "#0e0e10", foreground: "#e5e5ea" } : { background: "#1c1c1e", foreground: "#e5e5ea" } });
+        t = new Terminal({ fontFamily: "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace", fontSize: 12.5, cursorBlink: true, scrollback: 5000, theme: termTheme() });
         tr.current = t;
         const fit = new FitAddon(); t.loadAddon(fit); t.open(host.current);
         let q = Promise.resolve();
-        t.onData((d) => { for (let i = 0; i < d.length; i += 4000) { const part = d.slice(i, i + 4000); q = q.then(() => post("jupyter/term/write", { server, name, data: part })).catch(() => {}); } });
+        const send = (d) => { for (let i = 0; i < d.length; i += 4000) { const part = d.slice(i, i + 4000); q = q.then(() => post("jupyter/term/write", { server, name, data: part })).catch(() => {}); } };
+        // copy / paste keys and the command assist (this terminal's history, AI); the server's PATH is not ours, so no command list
+        const W = wireTerm(t, host.current, { send, kind: "jupyter:" + server, note, suggest: (prefix) => post("jupyter/ai/suggest", { prefix, suffix: "", lang: "bash", cells: [] }).then((x) => x.text || "") });
+        wt.current = W;
+        t.onData((d) => { W.onData(d); send(d); });
         const size = () => { try { if (!host.current || !host.current.offsetWidth) return; fit.fit(); post("jupyter/term/write", { server, name, rows: t.rows, cols: t.cols }).catch(() => {}); } catch (e) { /* hidden */ } };
         ro = new ResizeObserver(size); ro.observe(host.current); size();
         let after = 0, chid = 0, first = true;
@@ -489,9 +534,16 @@ function RemoteTerm({ server, name, post, api, active, gone }) {
         }
       } catch (e) { if (!stop) { setDead(true); setMsg(e.message); } }
     })();
-    return () => { stop = true; if (ro) ro.disconnect(); if (t) t.dispose(); tr.current = null; };
+    return () => { stop = true; clearTimeout(hintT.current); if (ro) ro.disconnect(); if (wt.current) wt.current.dispose(); wt.current = null; if (t) t.dispose(); tr.current = null; };
   }, [server, name]);
-  return html`<div class="nbj-termw">${msg && html`<div class=${"row nbj-termh" + (dead ? " bad" : "")}>${dead ? Ic("alert", 13) : html`<i class="spin"></i>`}<span class="small grow">${msg}</span>${dead && html`<button class="btn sm" onClick=${gone}>Close tab</button>`}</div>`}<div class="nbj-term" ref=${host}></div></div>`;
+  const tool = (label, title, f) => html`<button type="button" class="btn sm ghost" title=${title} onMouseDown=${(e) => e.preventDefault()} onClick=${f}>${label}</button>`;
+  return html`<div class="nbj-termw">${msg && html`<div class=${"row nbj-termh" + (dead ? " bad" : "")}>${dead ? Ic("alert", 13) : html`<i class="spin"></i>`}<span class="small grow">${msg}</span>${dead && html`<button class="btn sm" onClick=${gone}>Close tab</button>`}</div>`}
+    <div class="nbj-termbar"><span class="small mute grow">${hint || "→ accepts grey text · Ctrl+Space history · # describe a command, AI writes it"}</span>
+      ${tool("Copy", "Copy the selection (" + (isMacJ ? "⌘C" : "Ctrl+Shift+C") + ")", () => { if (wt.current && !wt.current.copy()) note("Select text first"); else note("Copied"); })}
+      ${tool("Paste", "Paste from the clipboard (" + (isMacJ ? "⌘V" : "Ctrl+V") + ")", () => wt.current && wt.current.paste())}
+      ${tool("Clear", "Clear the screen" + (isMacJ ? " (⌘K)" : ""), () => { if (tr.current) { tr.current.clear(); tr.current.focus(); } })}
+      <button type="button" class=${"btn sm ghost" + (sug ? " on" : "")} aria-pressed=${sug} title="AI suggestions as grey text after a pause" onMouseDown=${(e) => e.preventDefault()} onClick=${() => { setTermSuggest(!sug); setSug(!sug); }}>Suggest ${sug ? "on" : "off"}</button></div>
+    <div class="nbj-term" ref=${host}></div></div>`;
 }
 
 // ---------- Running panel: kernels and terminals on the server (JupyterLab's "Running Terminals and Kernels")
@@ -591,7 +643,8 @@ function Workspace({ server, servers, conns, settings, models, post, api, go, us
   const moved = (a, b) => { const m = (x) => (x === a ? b : x.startsWith(a + "/") ? b + x.slice(a.length) : x); setTabs((t) => t.map(m)); setCur((c) => m(c)); if (nbClip && nbClip.sid === sid) nbClip = { ...nbClip, path: m(nbClip.path) }; };
   // ---- right-click menu of a file, a folder, an open tab or the empty list (paths are the server's; "" = its top folder)
   const [fctx, setFctx] = useState(null), [, setClipV] = useState(0);
-  const openF = (e, it) => { e.preventDefault(); e.stopPropagation(); setFctx({ at: menuAt(e), it }); };
+  const openF = (e, it, extra) => { e.preventDefault(); e.stopPropagation(); setFctx({ at: menuAt(e), it, extra }); };
+  const fileMenu = useCallback((e, p, extra) => openF(e, { path: p, name: p.split("/").pop(), type: p.endsWith(".ipynb") ? "notebook" : "file", tab: true }, extra), []);
   const copyText = async (t) => { try { await navigator.clipboard.writeText(t); toast("Copied " + t); } catch (e) { toast("Could not copy: " + t); } };
   const fClip = (it, cut) => { nbClip = { sid, path: it.path, name: it.name, type: it.type, cut }; setClipV((v) => v + 1); toast((cut ? "Cut " : "Copied ") + it.name + ": right-click a folder and Paste"); };
   const fPaste = guard(async (to) => {
@@ -614,22 +667,26 @@ function Workspace({ server, servers, conns, settings, models, post, api, go, us
     let blob;
     if (r.format === "base64") { const bin = atob(String(r.content || "").replace(/\s+/g, "")), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); blob = new Blob([u], { type: r.mimetype || "application/octet-stream" }); }
     else blob = new Blob([r.format === "json" || typeof r.content !== "string" ? JSON.stringify(r.content, null, 1) + "\n" : r.content], { type: r.mimetype || (it.type === "notebook" ? "application/x-ipynb+json" : "text/plain") });
-    const url = URL.createObjectURL(blob), a = document.createElement("a"); a.href = url; a.download = it.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
+    saveBlob(blob, it.name);
   });
   const uploadTo = (d) => { setDir(d); fileIn.current && fileIn.current.click(); };
-  const fItems = (it, tab) => {
+  const fullPath = (p) => (server.abs_root ? server.abs_root.replace(/\/+$/, "") + "/" + p : "");
+  const fItems = (it, tab, extra) => {
     const c = nbClip, mod = /Mac/.test(navigator.platform) ? "⌘" : "Ctrl+";
     if (!it) return [["New notebook", "book", "", false, () => mk("notebook", "")], ["New file", "file", "", false, () => mk("file", "")], ["New folder", "folder", "", false, () => mk("directory", "")], ["Upload files…", "upload", "", !!upl, () => uploadTo("")], "-",
       [c ? (c.cut ? "Paste (move " : "Paste (") + c.name + ")" : "Paste", "clip", mod + "V", !c, () => fPaste("")], "-", ["Refresh", "refresh", "", false, refresh]];
     const isDir = it.type === "directory", here = isDir ? it.path : up(it.path);
-    return [
+    return [...(extra || []),
       tab ? ["Close tab", "x", "", false, () => closeTab(it.path)] : isDir ? [exp.includes(it.path) ? "Collapse" : "Expand", "folder", "", false, () => toggle(it)] : ["Open", it.type === "notebook" ? "book" : "file", "", false, () => open(it.path)],
       "-",
       isDir && ["New notebook here", "book", "", false, () => mk("notebook", it.path)], isDir && ["New file here", "file", "", false, () => mk("file", it.path)], isDir && ["New folder here", "folder", "", false, () => mk("directory", it.path)], isDir && ["Upload files here…", "upload", "", !!upl, () => uploadTo(it.path)],
       "-",
       ["Cut", "shrink", mod + "X", false, () => fClip(it, true)], ["Copy", "copy", mod + "C", isDir, () => fClip(it, false)], [(c ? (c.cut ? "Paste (move " : "Paste (") + c.name + ")" : "Paste") + (isDir ? " into " + it.name : " here"), "clip", mod + "V", !c, () => fPaste(here)], ["Duplicate", "layers", mod + "D", isDir, () => fDup(it)],
       "-",
-      ["Rename…", "edit", "F2", false, () => rename(it)], ["Copy path", "link", "", false, () => copyText(it.path)], ["Download", "download", "", isDir, () => fDownload(it)],
+      ["Rename…", "edit", "F2", false, () => rename(it)],
+      "-",
+      ["Copy path", "link", "", false, () => copyText(it.path)], fullPath(it.path) && ["Copy full path", "link", "", false, () => copyText(fullPath(it.path))], ["Copy name", "copy", "", false, () => copyText(it.name)],
+      ["Download", "download", "", isDir, () => fDownload(it)],
       it.type === "notebook" && ["Use as a Works node…", "flow", "", false, () => expose(it.path)],
       "-",
       ["Delete", "trash", "Del", false, () => del(it), true]];
@@ -724,7 +781,7 @@ function Workspace({ server, servers, conns, settings, models, post, api, go, us
       onClick=${() => (isDir ? toggle(x) : open(x.path))} onContextMenu=${(e) => openF(e, x)} onKeyDown=${(e) => { if (e.key === "Enter") (isDir ? toggle(x) : open(x.path)); else rowKey(x)(e); }}>
       <span class=${"nbj-chev" + (on ? " o" : "") + (isDir ? "" : " none")}>${isDir ? Ic("right", 12) : ""}</span><span class=${"nbj-fi " + x.type}>${Ic(ic(x), 14)}</span>
       <span class=${"nbj-fn" + (isDir ? " dir" : "")}><span class="sq-ell">${x.name}</span></span>${isDir ? (kids[x.path] ? html`<span class="nbj-ct">${kids[x.path].length}</span>` : null) : (x.size != null ? html`<span class="nbj-ct">${x.size < 1024 ? x.size + "B" : x.size < 1048576 ? Math.round(x.size / 1024) + "K" : (x.size / 1048576).toFixed(1) + "M"}</span>` : null)}
-      <span class="nbj-fa"><button class="ibtn sm" title="Rename" aria-label="Rename" onClick=${(e) => { e.stopPropagation(); rename(x); }}>${Ic("edit", 12)}</button><button class="ibtn sm" title="Delete" aria-label="Delete" onClick=${(e) => { e.stopPropagation(); del(x); }}>${Ic("trash", 12)}</button></span></div>`;
+      <span class="nbj-fa"><button class="ibtn sm" title="Download, copy path, rename, delete…" aria-label=${"Actions for " + x.name} onClick=${(e) => { e.stopPropagation(); setFctx({ at: menuAt(null, e.currentTarget), it: x }); }}>${Ic("more", 14)}</button></span></div>`;
   };
   const branch = (d, depth) => [...(kids[d] || [])].sort((a, b) => (a.type === "directory") !== (b.type === "directory") ? (a.type === "directory" ? -1 : 1) : String(a.name).localeCompare(String(b.name))).flatMap((x) => [rowOf(x, depth), x.type === "directory" && exp.includes(x.path) ? (kids[x.path] ? (kids[x.path].length ? branch(x.path, depth + 1) : html`<div class="nbj-none" style=${{ paddingLeft: 36 + (depth + 1) * 14 + "px" }}>Empty</div>`) : html`<div class="nbj-none" style=${{ paddingLeft: 36 + (depth + 1) * 14 + "px" }}><i class="spin"></i></div>`) : null]);
   const flat = q.trim() ? Object.values(kids).flat().filter((x) => x.name.toLowerCase().includes(q.toLowerCase())) : null;
@@ -752,7 +809,7 @@ function Workspace({ server, servers, conns, settings, models, post, api, go, us
         ${!kids[""] && !err && html`<p class="mute small" style="padding:6px 8px"><i class="spin"></i> Connecting to ${server.name}…</p>`}
         ${flat ? (flat.length ? flat.map((x) => rowOf(x, 0)) : html`<p class="mute small" style="padding:10px 8px">No file matches.</p>`) : html`${dir && html`<div class="nbj-f up" role="button" tabindex="0" data-drop=${up(dir)} onClick=${() => setDir(up(dir))}><span class="nbj-chev none"></span><span class="nbj-fi">${Ic("folder", 17)}</span><span class="nbj-fn">..</span></div>`}${branch("", 0)}`}
         ${kids[""] && !kids[""].length && !err && !q && html`<p class="mute small" style="padding:10px 8px">This server has no files yet. Use +, or drop files here to upload.</p>`}</div></aside>`}
-    ${fctx && html`<${CtxMenu} at=${fctx.at} items=${fItems(fctx.it, fctx.it && fctx.it.tab)} close=${() => setFctx(null)}/>`}
+    ${fctx && html`<${CtxMenu} at=${fctx.at} items=${fItems(fctx.it, fctx.it && fctx.it.tab, fctx.extra)} close=${() => setFctx(null)}/>`}
     ${runOpen && html`<aside class="nbj-panel" aria-label="Running kernels and terminals">
       <div class="nbj-ph"><b>Running</b><span class="nbj-srvname sq-ell" title=${server.name}>${server.name}</span><span class="grow"></span><button class="ibtn sm" title="Close panel" aria-label="Close panel" onClick=${() => setPanel("")}>${Ic("x", 14)}</button></div>
       <${Running} server=${sid} post=${post} tabs=${tabs} cur=${cur} open=${open} closeTab=${closeTab} newTerm=${newTerm} onTermGone=${(n) => dropTab(TERM + n)}/></aside>`}
@@ -774,7 +831,7 @@ function Workspace({ server, servers, conns, settings, models, post, api, go, us
     <section class="nbj-main"><div class="sq-tabs" role="tablist">${tabs.map((p) => html`<div key=${p} role="tab" aria-selected=${p === cur} class=${"sq-tab" + (p === cur ? " on" : "")} title=${termOf(p) ? "Terminal " + termOf(p) + " on " + server.name : p} onClick=${() => setCur(p)} onContextMenu=${termOf(p) ? undefined : (e) => openF(e, { path: p, name: p.split("/").pop(), type: p.endsWith(".ipynb") ? "notebook" : "file", tab: true })}>${Ic(termOf(p) ? "terminal" : p.endsWith(".ipynb") ? "book" : "file", 12)}<span class="sq-ell">${termOf(p) ? "Terminal " + termOf(p) : p.split("/").pop()}</span>
           <button class="ibtn sm" aria-label="Close tab" title=${termOf(p) ? "Close the tab (the terminal keeps running)" : "Close"} onClick=${(e) => { e.stopPropagation(); closeTab(p); }}>${Ic("x", 11)}</button></div>`)}${tabs.length > 0 && html`<button class="ibtn sm nbj-newterm" title="New terminal" aria-label="New terminal" onClick=${newTerm}>${Ic("plus", 12)}</button>`}</div>
       <div class="nbj-stage">${!tabs.length && html`<div class="sq-empty big">${Ic("book", 28)}<div>Open a notebook from the file list</div><div class="mute small">Or create one with + — cells run on ${server.name}'s kernel. Terminals and kernels are under Running.</div></div>`}
-        ${tabs.map((p) => html`<div key=${sid + p} class="nbj-tab" hidden=${p !== cur}>${termOf(p) ? html`<${RemoteTerm} server=${sid} name=${termOf(p)} post=${post} api=${api} active=${p === cur} gone=${() => dropTab(p)}/>` : p.endsWith(".ipynb") ? html`<${Notebook} server=${sid} path=${p} post=${post} api=${api} conns=${conns} settings=${settings} models=${models} dirtyRef=${dref(p)} onExpose=${expose} onOutline=${onOutline} jump=${jump}/>` : html`<${FileView} server=${sid} path=${p} post=${post} dirtyRef=${dref(p)}/>`}</div>`)}</div>
+        ${tabs.map((p) => html`<div key=${sid + p} class="nbj-tab" hidden=${p !== cur}>${termOf(p) ? html`<${RemoteTerm} server=${sid} name=${termOf(p)} post=${post} api=${api} active=${p === cur} gone=${() => dropTab(p)}/>` : p.endsWith(".ipynb") ? html`<${Notebook} server=${sid} path=${p} post=${post} api=${api} conns=${conns} settings=${settings} models=${models} dirtyRef=${dref(p)} onExpose=${expose} onOutline=${onOutline} onFileMenu=${fileMenu} jump=${jump}/>` : html`<${FileView} server=${sid} path=${p} post=${post} dirtyRef=${dref(p)} onFileMenu=${fileMenu} settings=${settings}/>`}</div>`)}</div>
 </section></div>`;
 }
 

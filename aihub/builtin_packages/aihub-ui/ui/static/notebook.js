@@ -145,16 +145,17 @@ function renderOutput(o) {
 }
 
 export function Notebook({ id, path, ver, api, put, onSaved, dirtyRef }) {
-  const [d, setD] = useState(null), [cells, setCells] = useState([]), [orig, setOrig] = useState([]), [base, setBase] = useState(""), [edit, setEdit] = useState(null), [sel, setSel] = useState(null);
+  const [d, setD] = useState(null), [cells, setCells] = useState([]), [orig, setOrig] = useState([]), [edit, setEdit] = useState(null), [sel, setSel] = useState(null);
   const nbRef = useRef(null), dr = useRef(false);
-  const text = useMemo(() => (nbRef.current ? serializeNotebook(nbRef.current, cells) : ""), [cells]);
-  const dirty = !!d && !d.err && !!nbRef.current && text !== base;
+  // dirty = the cells are not the ones last loaded / saved (identity: every edit makes a new array). Serializing the whole notebook
+  // (outputs and images included) on each key to compare texts made typing slow in big notebooks; it now happens on save only.
+  const dirty = !!d && !d.err && !!nbRef.current && cells !== orig;
   dr.current = dirty; if (dirtyRef) dirtyRef.current = dirty;
   useEffect(() => () => { if (dirtyRef) dirtyRef.current = false; }, []);
   useEffect(() => { if (!dirty) return; const b = (e) => { e.preventDefault(); e.returnValue = ""; }; addEventListener("beforeunload", b); return () => removeEventListener("beforeunload", b); }, [dirty]);
   const load = () => api(`files/content?id=${id}&path=${encodeURIComponent(path)}`).then((r) => {
     if (r.binary || r.big) { setD({ err: r.big ? "This notebook is too large to edit here." : "This file is not text." }); return; }
-    try { const nb = parseNotebook(r.text || ""); nbRef.current = nb; const cs = cellsOf(nb); setCells(cs); setOrig(cs); setBase(serializeNotebook(nb, cs)); setD(r); setEdit(null); }
+    try { const nb = parseNotebook(r.text || ""); nbRef.current = nb; const cs = cellsOf(nb); setCells(cs); setOrig(cs); setD(r); setEdit(null); }
     catch (e) { nbRef.current = null; setD({ err: "Cannot read this notebook: " + e.message + ". Use the Edit tab to fix the JSON." }); }
   }).catch((e) => setD({ err: e.message }));
   useEffect(() => { if (dr.current && d) return; load(); }, [id, path, ver]);
@@ -164,8 +165,8 @@ export function Notebook({ id, path, ver, api, put, onSaved, dirtyRef }) {
   const move = (i, by) => setCells((cs) => { const j = i + by; if (j < 0 || j >= cs.length) return cs; const n = [...cs]; [n[i], n[j]] = [n[j], n[i]]; return n; });
   const remove = (key) => setCells((cs) => cs.filter((c) => c.key !== key));
   const save = guard(async (force) => {
-    const body = text;
-    try { const r = await put("files/content", { id, path, text: body, ...(force === true || !d.mtime ? {} : { mtime: d.mtime }) }); setBase(body); setOrig(cells); setD((x) => ({ ...x, mtime: r && r.mtime !== undefined ? r.mtime : x.mtime })); toast("Saved " + path.split("/").pop()); onSaved && onSaved(); }
+    const body = serializeNotebook(nbRef.current, cells);
+    try { const r = await put("files/content", { id, path, text: body, ...(force === true || !d.mtime ? {} : { mtime: d.mtime }) }); setOrig(cells); setD((x) => ({ ...x, mtime: r && r.mtime !== undefined ? r.mtime : x.mtime })); toast("Saved " + path.split("/").pop()); onSaved && onSaved(); }
     catch (e) {
       if (e.status !== 409 && !/changed/i.test(e.message)) throw e;
       const v = await ask({ title: "Notebook changed on disk", text: path.split("/").pop() + " was modified (by Claude, Jupyter or another program) after you opened it.", submit: "Apply", fields: [{ name: "c", label: "What to do", type: "select", value: "reload", options: [{ value: "reload", label: "Reload from disk (my edits are lost)" }, { value: "over", label: "Overwrite the file with my edits" }] }] });

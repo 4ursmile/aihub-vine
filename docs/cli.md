@@ -296,7 +296,10 @@ The default CLI home is `~/.aihub`; set `AIHUB_HOME` to override it. The CLI use
   bin/                 CLI wrapper and package executable shims
   backups/<name>/      Setup-step backups
   queue/               Usage event spool and flusher state
+  cache/pyc/           Compiled CLI modules of aihub.pyz, one folder per pyz build and Python version (safe to delete)
 ```
+
+When the CLI runs from `aihub.pyz`, it keeps the compiled code of its modules in `cache/pyc/` (zipimport would compile every module again on each start, most of the start time). A new or updated pyz gets a new folder and the folders of the earlier build are removed; a damaged or unwritable cache is ignored. `AIHUB_NO_PYC_CACHE=1` turns it off. pip and source installs use Python's own `__pycache__`.
 
 Settings resolve in this order: environment variables, then `config.json`, then the built-in `aihub/core/defaults.json` (keys such as `index_url`, `index_branch`, `index_path`, `telemetry_url`, `telemetry_inbox_branch` and `telemetry_interval`). `aihub setup` does not copy the bundled telemetry values into `config.json`; they are read from `defaults.json` each time, unless the hub sends its own.
 

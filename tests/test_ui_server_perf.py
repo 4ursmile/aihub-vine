@@ -60,6 +60,46 @@ class ListCache(unittest.TestCase):
         A.run(["list"])
         self.assertEqual(self.calls.count(["list"]), 1)
 
+    def test_vault_list_and_test_keep_it(self):
+        A.run(["list"])
+        A.run(["vault", "list"])
+        A.run(["vault", "test"])
+        A.run(["list"])
+        self.assertEqual(self.calls.count(["list"]), 1)
+        A.run(["vault", "remove", "h", "--yes"])
+        A.run(["list"])
+        self.assertEqual(self.calls.count(["list"]), 2)
+
+    def test_list_outlives_its_ttl_until_a_file_it_reads_changes(self):
+        home = tempfile.mkdtemp()
+        old = os.environ.get("AIHUB_HOME")
+        os.environ["AIHUB_HOME"] = home
+        self.addCleanup(lambda: os.environ.pop("AIHUB_HOME") if old is None else os.environ.__setitem__("AIHUB_HOME", old))
+        ttl = A.TTL[("list",)]
+        A.TTL[("list",)] = 0.01
+        self.addCleanup(A.TTL.__setitem__, ("list",), ttl)
+        state = os.path.join(home, "state.json")
+        with open(state, "w") as f:
+            f.write('{"packages": {}}')
+        A.run(["list"])
+        time.sleep(0.05)
+        A.run(["list"])
+        self.assertEqual(self.calls.count(["list"]), 1)             # past the TTL, nothing changed: reused
+        with open(state, "w") as f:                                # `aihub install` in a terminal
+            f.write('{"packages": {"x": {"version": "1"}}}')
+        time.sleep(0.05)
+        A.run(["list"])
+        self.assertEqual(self.calls.count(["list"]), 2)
+        os.remove(state)
+        time.sleep(0.05)
+        A.run(["list"])
+        self.assertEqual(self.calls.count(["list"]), 3)             # gone counts as a change too
+        A.STAMP_TTL, keep = 0.0, A.STAMP_TTL
+        self.addCleanup(setattr, A, "STAMP_TTL", keep)
+        time.sleep(0.05)
+        A.run(["list"])
+        self.assertEqual(self.calls.count(["list"]), 4)             # never older than STAMP_TTL
+
     def test_answer_started_before_an_invalidation_is_not_kept(self):
         t = threading.Thread(target=lambda: A.run(["list"]))
         t.start()

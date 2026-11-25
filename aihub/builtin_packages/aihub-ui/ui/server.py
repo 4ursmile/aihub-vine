@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from aihubui import aihub as A, auth, chat, chatshare, drawioview, freechat, gitinspect, harness, harnesstools, hubusage, jupyter, jupyterai, magic, mcpclient, nodeenv, officeview, searchidx, selfupdate, sources, spacebundle, sqlstudio, store, term, usagereport, workpkg, works as W    # noqa: E402
+from aihubui import aihub as A, auth, chat, chatshare, codecomplete, drawioview, freechat, gitinspect, harness, harnesstools, hubusage, jupyter, jupyterai, magic, mcpclient, nodeenv, officeview, searchidx, selfupdate, sources, spacebundle, sqlstudio, store, term, usagereport, workpkg, works as W    # noqa: E402
 from aihubui.secretbox import Box, write_private                  # noqa: E402
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -739,7 +739,11 @@ def term_read(h, q, b):
         after = max(0, int(q.get("after") or 0))
     except ValueError:
         after = 0
-    data, pos, code = t.read(after, 15.0)
+    try:
+        wait = max(0.0, min(15.0, float(q.get("wait") if q.get("wait") not in (None, "") else 15.0)))   # wait=0: a quick probe (is it still there?)
+    except ValueError:
+        wait = 15.0
+    data, pos, code = t.read(after, wait)
     if code is not None and not t.shell and not getattr(t, "inv", False):
         t.inv = True                                       # an install / publish ended: installed packages, services and nodes may have changed
         A.invalidate()
@@ -2130,13 +2134,47 @@ def work_generate_status(h, q, b):
 
 
 def work_make(h, q, b):
-    """Save a work that an answer proposed in a ```workflow block (unknown nodes refused, secrets emptied, switched OFF)."""
-    warns = []
+    """Save a work that an answer proposed in a ```workflow block (unknown nodes refused, secrets emptied, switched OFF).
+    With the id of an existing work it changes that work instead: same id and On/Off state, stored secrets and sets kept, the version
+    it replaces kept as a backup (works/restore puts it back)."""
+    warns, spec = [], need(b, "work", dict)
+    old = store.get_work(spec.get("id")) if spec.get("id") else None
     try:
-        w = store.save_work(W.checked_work(need(b, "work", dict), warnings=warns))
+        if old:
+            w = W.updated_work(old, spec, warnings=warns)
+            name = W.backup_work(old)
+            w = store.save_work(w)
+        else:
+            w = store.save_work(W.checked_work(spec, warnings=warns))
     except ValueError as e:
         raise Err(str(e))
+    if old:
+        if ENGINE:
+            ENGINE.sync()
+        return {"work": w, "warnings": warns, "updated": True, "backup": name}
     return {"work": w, "warnings": warns}
+
+
+def work_restore(h, q, b):
+    """Undo a chat's change: put back the version works/make kept."""
+    try:
+        w = W.restore_work(need(b, "id"), need(b, "backup"))
+    except ValueError as e:
+        raise Err(str(e), 404)
+    if ENGINE:
+        ENGINE.sync()
+    return {"work": w}
+
+
+def work_rename(h, q, b):
+    w = store.get_work(need(b, "id"))
+    if not w:
+        raise Err("no such work", 404)
+    title = " ".join(str(b.get("title") or "").split())[:80]
+    if not title:
+        raise Err("a work needs a name")
+    w["title"] = title
+    return {"work": store.save_work(w)}
 
 
 def presets_list(h, q, b):
@@ -2551,6 +2589,12 @@ def jup_k_complete(h, q, b):
 def jup_k_inspect(h, q, b):
     code = str(b.get("code") or "")[-20000:]
     return jupyter.inspect(_jc(b), need(b, "kid"), code, int(b.get("pos") or len(code)))
+
+
+def code_complete(h, q, b):
+    """Completions for a file or a terminal line edited without a kernel (aihubui/codecomplete.py: jedi when installed, else names)."""
+    cwd = term.cwd_of(b["term"]) if b.get("term") else ""        # a local chat shell: its files and folders complete too
+    return codecomplete.complete(b.get("code"), b.get("pos"), str(b.get("lang") or ""), str(b.get("path") or ""), cwd)
 
 
 def jup_frame(h, q, b):
@@ -3244,7 +3288,7 @@ ROUTES = {
     ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("POST", "files/reveal"): reveal_file, ("POST", "files/new"): file_new, ("POST", "files/rename"): file_rename, ("POST", "files/copy"): file_copy, ("POST", "files/delete"): file_delete, ("POST", "files/upload"): file_upload, ("GET", "files/zip"): file_zip, ("GET", "files/diff"): file_diff, ("GET", "files/changes"): file_changes, ("GET", "git/info"): git_info, ("GET", "git/log"): git_log, ("GET", "git/commit"): git_commit, ("GET", "git/file"): git_file, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "update"): update_status, ("POST", "update/check"): update_check, ("POST", "update/apply"): update_act, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/hint"): chat_hint, ("POST", "chat/agent_stop"): chat_agent_stop, ("POST", "chat/btw"): chat_btw, ("POST", "chat/permit"): chat_permit, ("GET", "harness/memory"): harness_memory, ("PUT", "harness/memory"): harness_memory_put, ("POST", "chat/card"): chat_card, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("GET", "sessions/export"): chat_export, ("POST", "sessions/share"): chat_share, ("GET", "sessions/shared"): chats_shared, ("POST", "sessions/import"): chat_import, ("POST", "sessions/rewind"): session_rewind,
     ("GET", "themes"): themes_list, ("POST", "themes/save"): theme_save, ("POST", "themes/delete"): theme_delete, ("GET", "usage"): usage_get, ("GET", "usage/sessions"): usage_sessions, ("GET", "usage/session"): usage_session, ("POST", "spaces/publish"): space_publish, ("GET", "spaces"): spaces_mine, ("GET", "prefs"): prefs_get, ("PUT", "prefs"): prefs_put, ("GET", "slash"): slash,
     ("GET", "works"): works, ("GET", "works/get"): work_get, ("POST", "works/save"): work_save, ("POST", "works/delete"): work_delete,
-    ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("GET", "works/presets"): presets_list, ("GET", "works/credentials"): credentials_list, ("POST", "works/credentials/save"): credentials_save, ("POST", "works/credentials/delete"): credentials_delete, ("POST", "works/presets/save"): presets_save, ("POST", "works/presets/delete"): presets_delete, ("POST", "nodes/run"): node_run, ("POST", "works/env/check"): env_check, ("POST", "works/env/install"): env_install, ("GET", "works/env/job"): env_job, ("POST", "works/env/cancel"): env_cancel, ("GET", "works/envs"): env_list, ("POST", "works/magic"): work_magic, ("POST", "works/try"): work_try, ("GET", "works/try/status"): work_try_status, ("GET", "works/chatruns"): work_chat_runs, ("GET", "works/active"): work_active, ("GET", "works/files"): work_files, ("POST", "works/open"): work_open, ("POST", "works/rerun"): work_rerun, ("POST", "works/stop"): work_stop, ("GET", "works/log"): work_log, ("GET", "project/info"): project_info, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/generate/start"): work_generate_start, ("GET", "works/generate/status"): work_generate_status, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import,
+    ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("GET", "works/presets"): presets_list, ("GET", "works/credentials"): credentials_list, ("POST", "works/credentials/save"): credentials_save, ("POST", "works/credentials/delete"): credentials_delete, ("POST", "works/presets/save"): presets_save, ("POST", "works/presets/delete"): presets_delete, ("POST", "nodes/run"): node_run, ("POST", "works/env/check"): env_check, ("POST", "works/env/install"): env_install, ("GET", "works/env/job"): env_job, ("POST", "works/env/cancel"): env_cancel, ("GET", "works/envs"): env_list, ("POST", "works/magic"): work_magic, ("POST", "works/try"): work_try, ("GET", "works/try/status"): work_try_status, ("GET", "works/chatruns"): work_chat_runs, ("GET", "works/active"): work_active, ("GET", "works/files"): work_files, ("POST", "works/open"): work_open, ("POST", "works/rerun"): work_rerun, ("POST", "works/stop"): work_stop, ("GET", "works/log"): work_log, ("GET", "project/info"): project_info, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/restore"): work_restore, ("POST", "works/rename"): work_rename, ("POST", "works/generate/start"): work_generate_start, ("GET", "works/generate/status"): work_generate_status, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import,
     ("GET", "works/run"): work_run_get, ("GET", "nodes/local"): nodes_local, ("GET", "nodes/starter"): nodes_starter, ("POST", "nodes/save"): nodes_save, ("POST", "nodes/delete"): nodes_delete,
     ("GET", "nodes/export-info"): nodes_export_info, ("POST", "nodes/export"): nodes_export, ("GET", "nodes/packages"): nodes_packages, ("POST", "works/layout"): works_layout, ("GET", "works/mentions"): works_mentions, ("GET", "works/sources"): works_sources, ("GET", "works/hook"): work_hook,
     ("GET", "sql/connections"): sql_connections, ("POST", "sql/save"): sql_save, ("POST", "sql/delete"): sql_delete, ("POST", "sql/test"): sql_test, ("POST", "sql/tables"): sql_tables,
@@ -3255,7 +3299,7 @@ ROUTES = {
     ("POST", "jupyter/ls"): _jx(jup_ls), ("POST", "jupyter/file/get"): _jx(jup_file_get), ("POST", "jupyter/file/put"): _jx(jup_file_put), ("POST", "jupyter/file/new"): _jx(jup_file_new),
     ("POST", "jupyter/file/rename"): _jx(jup_file_rename), ("POST", "jupyter/file/delete"): _jx(jup_file_delete), ("POST", "jupyter/file/copy"): _jx(jup_file_copy), ("POST", "jupyter/kernelspecs"): _jx(jup_kernelspecs),
     ("POST", "jupyter/session"): _jx(jup_session), ("POST", "jupyter/session/end"): _jx(jup_session_end), ("POST", "jupyter/kernel/execute"): _jx(jup_k_execute), ("POST", "jupyter/kernel/complete"): _jx(jup_k_complete), ("POST", "jupyter/kernel/inspect"): _jx(jup_k_inspect), ("GET", "jupyter/poll"): _jx(jup_k_poll),
-    ("POST", "jupyter/kernel/op"): _jx(jup_k_op), ("POST", "jupyter/frame"): _jx(jup_frame), ("POST", "jupyter/term/new"): _jx(jup_term_new), ("POST", "jupyter/term/write"): _jx(jup_term_write), ("POST", "jupyter/term/close"): _jx(jup_term_close),
+    ("POST", "jupyter/kernel/op"): _jx(jup_k_op), ("POST", "code/complete"): code_complete, ("POST", "jupyter/frame"): _jx(jup_frame), ("POST", "jupyter/term/new"): _jx(jup_term_new), ("POST", "jupyter/term/write"): _jx(jup_term_write), ("POST", "jupyter/term/close"): _jx(jup_term_close),
     ("POST", "jupyter/running"): _jx(jup_running), ("POST", "jupyter/kernel/shutdown"): _jx(jup_k_shutdown),
     ("POST", "jupyter/sql/run"): _jx(jup_sql_run), ("POST", "jupyter/ai/suggest"): _jx(jup_ai("suggest")), ("POST", "jupyter/ai/write"): _jx(jup_ai("write")), ("POST", "jupyter/ai/fix"): _jx(jup_ai("fix")),
     ("GET", "jupyter/settings"): _jx(jup_settings), ("POST", "jupyter/settings"): _jx(jup_settings), ("POST", "jupyter/run/start"): _jx(jup_run_start), ("GET", "jupyter/run/status"): _jx(jup_run_status),
@@ -3281,6 +3325,7 @@ def main():
     if len(TOKEN) < 30:
         TOKEN, fresh = secrets.token_urlsafe(32), True
         write_private(tokf, TOKEN.encode("utf-8"))
+    A.prefetch()                                                  # `aihub list` warms up while the rest starts: the first page needs no CLI run
     BOX = Box(folder)
     sqlstudio.bind(BOX)
     ENGINE = W.Engine(BOX)

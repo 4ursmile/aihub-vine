@@ -65,7 +65,12 @@ const kindOf = (t) => !t ? "other" : t === "insertText" ? "type" : t.startsWith(
 
 // value/onChange = the text; `doc` changes when the file is (re)loaded from disk, which resets the history.
 // `footer(tools)` renders the bar under the editor with { undo, redo, canUndo, canRedo, find }.
-export function CodeEditor({ value, onChange, doc, path, onSave, footer }) {
+// `assist` (optional) = { complete(code, pos) -> {start, matches:[{t,k}]}, suggest(before, after) -> text, on (grey AI text), delay, onState(s, msg) }:
+// a completion list (the file's names at once, the completer's answer a moment later; Ctrl+Space opens it) and AI ghost text at the end of a line.
+const A_WORD = /[A-Za-z_][A-Za-z0-9_]*$/, A_IDENT = /[A-Za-z_][A-Za-z0-9_]{2,}/g, A_TRIG = /[A-Za-z0-9_.]$/, A_KIND = { function: "ƒ", method: "ƒ", class: "C", module: "M", instance: "v", statement: "v", keyword: "k", property: "p", path: "/" };
+const sugLru = new Map();
+let aMetrics = null;
+export function CodeEditor({ value, onChange, doc, path, onSave, footer, assist }) {
   const h = useHl(), lang = useMemo(() => langOf(h, path), [h, path]);
   const ta = useRef(null), view = useRef(null), gut = useRef(null), pend = useRef(null), last = useRef(value), hist = useRef({ doc: {} });
   const [, setTick] = useState(0), bump = () => setTick((n) => n + 1);
@@ -93,6 +98,79 @@ export function CodeEditor({ value, onChange, doc, path, onSave, footer }) {
     H.i = j; H.kind = null; const s = H.stack[j]; last.current = s.t; pend.current = { a: s.a, b: s.b, show: true }; onChange(s.t); bump();
   };
   const undo = () => go(-1), redo = () => go(1);
+
+  // ---- completion list and AI ghost text
+  const [pop, setPopS] = useState(null), [ghost, setGhostS] = useState({ at: 0, text: "" }), popR = useRef(null), ghR = useRef(ghost), atk = useRef(0), aT = useRef(0), cT = useRef(0);
+  const setPop = (p) => { popR.current = p; setPopS(p); }, setGhost = (g) => { ghR.current = g; setGhostS(g); };
+  useEffect(() => () => { clearTimeout(aT.current); clearTimeout(cT.current); }, []);
+  useEffect(() => { setPop(null); setGhost({ at: 0, text: "" }); }, [doc]);
+  const AS = assist || {};
+  const acceptItem = (p, i) => { const t = ta.current; if (!t) return; const v = t.value, it = p.items[i], nv = v.slice(0, p.start) + it.t + v.slice(p.end), at = p.start + it.t.length; atk.current++; setPop(null); setGhost({ at: 0, text: "" }); edit(nv, "other", { a: at, b: at }); };
+  const listAt = (v, at, now) => {
+    const before = v.slice(0, at), m = A_WORD.exec(before), my = ++atk.current;
+    let loc = null;
+    if (m && before[before.length - m[0].length - 1] !== "." && v.length < 400000) {
+      const w = m[0], out = [], seen = new Set();
+      for (const x of v.match(A_IDENT) || []) if (x.length > w.length && x.startsWith(w) && !seen.has(x)) { seen.add(x); out.push({ t: x, k: "" }); if (out.length >= 30) break; }
+      if (out.length) loc = { items: out, start: at - w.length, end: at, sel: 0 };
+    }
+    setPop(loc);
+    clearTimeout(cT.current); if (!AS.complete) return;
+    cT.current = setTimeout(async () => {
+      let r; try { r = await AS.complete(v, at); } catch (e) { return; }
+      const t = ta.current; if (atk.current !== my || !t || t.value !== v || t.selectionStart !== at) return;
+      const ms = ((r && r.matches) || []).slice(0, 40);
+      if (!ms.length) { if (!loc) setPop(null); return; }
+      if (now && ms.length === 1) { acceptItem({ items: ms, start: r.start, end: at, sel: 0 }, 0); return; }
+      setPop({ items: ms, start: r.start, end: at, sel: 0 });
+    }, now ? 0 : 90);
+  };
+  const askAi = (v, at, wait, force) => {
+    clearTimeout(aT.current); if (!AS.suggest || (!AS.on && !force) || v.length > SYNC_HL) return;
+    const my = atk.current;
+    aT.current = setTimeout(async () => {
+      const t = ta.current; if (!t || t.value !== v || t.selectionStart !== at || document.activeElement !== t) return;
+      const k = v.slice(Math.max(0, at - 800), at) + "\u0001" + v.slice(at, at + 120);
+      let s = sugLru.get(k);
+      if (s == null) { AS.onState && AS.onState("busy"); try { s = String((await AS.suggest(v.slice(0, at), v.slice(at))) || "").replace(/\s+$/, ""); } catch (e) { AS.onState && AS.onState("err", e.message); return; } AS.onState && AS.onState(s ? "ok" : "none"); sugLru.set(k, s); if (sugLru.size > 80) sugLru.delete(sugLru.keys().next().value); }
+      if (atk.current === my && s && !popR.current) setGhost({ at, text: s });
+    }, wait);
+  };
+  const afterInput = (v, at, kind) => {
+    if (!assist) return;
+    const g = ghR.current, typed = at - g.at;
+    if (g.text) { if (kind === "insertText" && typed > 0 && v.slice(g.at, at) === g.text.slice(0, typed)) { setGhost({ at, text: g.text.slice(typed) }); if (g.text.length > typed) return; } else setGhost({ at: 0, text: "" }); }
+    const ls = v.lastIndexOf("\n", at - 1) + 1, le = v.indexOf("\n", at), line = v.slice(ls, at), rest = v.slice(at, le < 0 ? v.length : le);
+    const ins = (kind || "").startsWith("insert"), tailOk = /^[\s)\]}'"`,:;]*$/.test(rest), comment = /^\s*(#|\/\/|--)/.test(line);
+    if (ins && A_TRIG.test(line) && !comment && !rest.trim()) listAt(v, at, false); else if (popR.current) setPop(null);
+    if (!ins || !tailOk || v.slice(0, at).trim().length < 2 || (comment && kind !== "insertLineBreak")) return;
+    if (!line.trim()) { const prev = v.slice(0, ls).replace(/\n+$/, "").split("\n").pop() || ""; if (!/[:{(\[]\s*$/.test(prev) && !/^\s*(#|\/\/)/.test(prev)) return; }
+    askAi(v, at, Math.max(350, (AS.delay || 900) - 300));
+  };
+  const acceptGhost = (part) => {
+    const g = ghR.current, t = ta.current; if (!g.text || !t) return;
+    let x = g.text; if (part) { const m = /^\s*\S+/.exec(x); if (m && m[0].length < x.length) x = m[0]; }
+    const v = t.value, nv = v.slice(0, g.at) + x + v.slice(g.at), at = g.at + x.length;
+    atk.current++; setGhost({ at, text: part ? g.text.slice(x.length) : "" }); edit(nv, "other", { a: at, b: at });
+  };
+  const assistKey = (e) => {                                                  // true = handled
+    if (!assist) return false;
+    const p = popR.current, g = ghR.current, t = e.target, plain = !e.metaKey && !e.ctrlKey && !e.altKey;
+    if (p) {
+      if ((e.key === "ArrowDown" || e.key === "ArrowUp") && plain) { e.preventDefault(); const n = p.items.length; setPop({ ...p, sel: (p.sel + (e.key === "ArrowDown" ? 1 : n - 1)) % n }); return true; }
+      if (((e.key === "Tab" && !e.shiftKey) || (e.key === "Enter" && !e.shiftKey)) && plain) { e.preventDefault(); acceptItem(p, p.sel); return true; }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setPop(null); return true; }
+    }
+    if (g.text) {
+      if (e.key === "Tab" && !e.shiftKey && plain) { e.preventDefault(); acceptGhost(false); return true; }
+      if (e.key === "ArrowRight" && e.altKey && t.selectionStart === g.at) { e.preventDefault(); acceptGhost(true); return true; }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setGhost({ at: 0, text: "" }); return true; }
+    }
+    if (e.ctrlKey && (e.key === " " || e.code === "Space")) { e.preventDefault(); listAt(t.value, t.selectionStart, true); return true; }
+    if (e.altKey && (e.key === "\\" || e.code === "Backslash")) { e.preventDefault(); askAi(t.value, t.selectionStart, 0, true); return true; }
+    return false;
+  };
+  const caretMoved = () => { const t = ta.current; if (!t) return; if (ghR.current.text && t.selectionStart !== ghR.current.at) setGhost({ at: 0, text: "" }); const p = popR.current; if (p && (t.selectionStart !== p.end || t.selectionEnd !== p.end)) setPop(null); };
 
   // find / replace
   const [fo, setFo] = useState(false), [rep, setRep] = useState(false), [q, setQ] = useState(""), [r, setR] = useState(""), [cs, setCs] = useState(false), [rx, setRx] = useState(false), [cur, setCur] = useState(0);
@@ -135,7 +213,10 @@ export function CodeEditor({ value, onChange, doc, path, onSave, footer }) {
     if (!big || !lang) return;
     const id = setTimeout(() => setSlow({ t: value, html: colorize(h, lang, value) }), 250); return () => clearTimeout(id);
   }, [value, big, lang, h]);
-  const hlHtml = useMemo(() => !big ? colorize(h, lang, value) : slow.t === value ? slow.html : esc(value), [value, big, lang, h, slow]);
+  const hlHtml = useMemo(() => {
+    if (ghost.text && !big && ghost.at <= value.length) return colorize(h, lang, value.slice(0, ghost.at)) + '<span class="nbj-ghost">' + esc(ghost.text) + "</span>" + colorize(h, lang, value.slice(ghost.at));
+    return !big ? colorize(h, lang, value) : slow.t === value ? slow.html : esc(value);
+  }, [value, big, lang, h, slow, ghost]);
   const lines = useMemo(() => { let n = 1; for (let i = value.indexOf("\n"); i >= 0; i = value.indexOf("\n", i + 1)) n++; return n; }, [value]);
   const nums = useMemo(() => Array.from({ length: lines }, (_, i) => i + 1).join("\n"), [lines]);
 
@@ -176,6 +257,7 @@ export function CodeEditor({ value, onChange, doc, path, onSave, footer }) {
   const onKey = (e) => {
     const t = e.target, mod = e.metaKey || e.ctrlKey, k = e.key.toLowerCase();
     snapSel();
+    if (assistKey(e)) return;
     if (mod && k === "s") { e.preventDefault(); onSave && onSave(); }
     else if (mod && k === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
     else if (mod && !isMac && k === "y") { e.preventDefault(); redo(); }
@@ -201,7 +283,7 @@ export function CodeEditor({ value, onChange, doc, path, onSave, footer }) {
   };
   const tog = (on, set, label, txt) => html`<button type="button" class=${"ce-tog" + (on ? " on" : "")} aria-pressed=${on} title=${label} onClick=${() => set(!on)}>${txt}</button>`;
   const count = !q ? "" : found.bad ? "Bad pattern" : M.length ? `${Math.min(cur + 1, M.length)} of ${M.length}${M.length >= MAX_MATCH ? "+" : ""}` : "No results";
-  const tools = { undo, redo, canUndo: H.i > 0, canRedo: H.i < H.stack.length - 1, find: () => (fo ? closeFind() : openFind(false)), lang, finding: fo };
+  const tools = { undo, redo, canUndo: H.i > 0, canRedo: H.i < H.stack.length - 1, find: () => (fo ? closeFind() : openFind(false)), lang, finding: fo, ghost: !!ghost.text };
 
   return html`<div class="ce">
     ${fo && html`<div class="ce-find" onKeyDown=${fKey}>
@@ -223,8 +305,16 @@ export function CodeEditor({ value, onChange, doc, path, onSave, footer }) {
         ${fo && M.length > 0 && html`<pre class="ce-l ce-marks" aria-hidden="true"><div class="ce-in" dangerouslySetInnerHTML=${{ __html: marksHtml(value, M, cur) + "\n" }}></div></pre>`}
         <pre class="ce-l syn" aria-hidden="true"><div class="ce-in" dangerouslySetInnerHTML=${{ __html: hlHtml + "\n" }}></div></pre>
         <textarea ref=${ta} class="ce-ta" spellcheck="false" wrap="off" autocapitalize="off" autocomplete="off" value=${value}
-          onScroll=${sync} onKeyDown=${onKey} onPointerDown=${() => { H.kind = null; }} onBeforeInput=${snapSel}
-          onInput=${(e) => edit(e.target.value, kindOf(e.inputType))}></textarea>
+          onScroll=${() => { sync(); if (popR.current) setPop(null); }} onKeyDown=${onKey} onKeyUp=${caretMoved} onPointerDown=${() => { H.kind = null; }} onClick=${caretMoved} onBlur=${() => { if (popR.current) setPop(null); if (ghR.current.text) setGhost({ at: 0, text: "" }); }} onBeforeInput=${snapSel}
+          onInput=${(e) => { edit(e.target.value, kindOf(e.inputType)); afterInput(e.target.value, e.target.selectionStart, e.inputType || ""); }}></textarea>
+        ${pop && ta.current && (() => {                                 // below the caret (above it near the bottom of the view)
+          const t = ta.current, cs = getComputedStyle(t);
+          if (!aMetrics || aMetrics.font !== cs.font) { const c = document.createElement("canvas").getContext("2d"); c.font = cs.font; aMetrics = { font: cs.font, cw: c.measureText("MMMMMMMMMM").width / 10, lh: parseFloat(cs.lineHeight) || 19 }; }
+          const ls = value.lastIndexOf("\n", pop.start - 1) + 1, row = value.slice(0, ls).split("\n").length - 1, col = pop.start - ls;
+          const top = (parseFloat(cs.paddingTop) || 0) + (row + 1) * aMetrics.lh - t.scrollTop, left = Math.max(0, Math.min((parseFloat(cs.paddingLeft) || 0) + col * aMetrics.cw - t.scrollLeft, t.clientWidth - 260)), up = top + 230 > t.clientHeight && top - aMetrics.lh > 230;
+          return html`<div class="nbj-pop" role="listbox" style=${up ? { left: left + "px", bottom: t.clientHeight - top + aMetrics.lh + "px" } : { left: left + "px", top: top + "px" }} onMouseDown=${(e) => e.preventDefault()}>
+            ${pop.items.map((it, i) => html`<div key=${it.t} role="option" aria-selected=${i === pop.sel} class=${"nbj-opt" + (i === pop.sel ? " on" : "")} ref=${(el) => { if (el && i === pop.sel) el.scrollIntoView({ block: "nearest" }); }} onClick=${() => { acceptItem(pop, i); t.focus(); }}>
+              <span class=${"nbj-k k-" + (it.k || "x")}>${A_KIND[it.k] || "·"}</span><span class="nbj-t">${it.t}</span></div>`)}</div>`; })()}
       </div>
     </div>
     ${footer && footer(tools)}</div>`;
