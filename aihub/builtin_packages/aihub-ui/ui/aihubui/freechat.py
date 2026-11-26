@@ -620,8 +620,7 @@ def turn(sess, text, model="", effort="", mode="auto", extra_env=None, mcp=None,
             store.append(sid, ev)
             yield ev
         elif not state["cancel"].is_set():
-            total["cost"] = 0
-            store.add_usage(sid, total, model=used_model)
+            total["cost"] = store.add_usage(sid, dict(total, cost=0), model=used_model)     # priced from the hub's table
             ev = {"k": "result", "usage": total, "ms": int((time.time() - t0) * 1000), "error": False, "text": ""}
             store.append(sid, ev)
             yield ev

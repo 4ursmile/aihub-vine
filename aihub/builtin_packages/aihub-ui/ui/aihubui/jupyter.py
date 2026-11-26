@@ -663,8 +663,12 @@ def kernel_shutdown(c, kid):
 
 
 def kernel_op(c, kid, op):
+    """Interrupt or restart. A restart answers only once the new kernel is up, which a remote or loaded server can take well over 30 s for:
+    timing out then reported a failure for a restart that went through. The variables cache belongs to the old process."""
     if op in ("interrupt", "restart"):
-        http(c, "POST", "kernels/%s/%s" % (urllib.parse.quote(kid), op))
+        http(c, "POST", "kernels/%s/%s" % (urllib.parse.quote(kid), op), timeout=150 if op == "restart" else 30)
+        if op == "restart":
+            _ns_cache.pop(kid, None)
     return {"ok": True}
 
 
@@ -678,10 +682,20 @@ def _msg(session_id, mtype, content, mid=None):
 FRAMES = {}                                        # id -> html of a rich output (plotly, bokeh ...), served sandboxed at /nbframe/<id>
 
 
+# appended to a rich output: the frame tells the page its content height, so the page sizes it and the cell's output panel is the
+# only scroll (a fixed-height frame scrolled inside the panel). Sandboxed without same-origin, so a message is the only way out.
+# Content that sizes itself to the frame (height:100%) would grow it a few px per round: a small growth right after the frame took the
+# size reported last is ignored.
+FIT = ("<script>(function(){var l=-1;function s(){var b=document.body;if(!b)return;var m=parseFloat(getComputedStyle(b).marginBottom)||0,"
+       "h=Math.ceil(Math.max(b.scrollHeight,b.getBoundingClientRect().bottom+m));if(h===l||(l>0&&h>l&&h-l<24&&Math.abs(innerHeight-l)<3))return;"
+       "l=h;parent.postMessage({nbframe:1,h:h},'*')}addEventListener('load',s);try{new ResizeObserver(s).observe(document.body)}catch(e){}"
+       "setTimeout(s,300);setTimeout(s,1500);setTimeout(s,4000)})()</script>")
+
+
 def frame_put(html):
     fid = uuid.uuid4().hex
     with _lock:
-        FRAMES[fid] = html[:8_000_000]
+        FRAMES[fid] = html[:8_000_000] + FIT
         while len(FRAMES) > 60:
             FRAMES.pop(next(iter(FRAMES)))
     return fid

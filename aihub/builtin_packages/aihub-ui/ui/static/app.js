@@ -625,11 +625,26 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
   useEffect(() => { load(); api("works").then((d) => setWorks(d.works)).catch(() => {}); api("themes").then((d) => setThemes(d.themes)).catch(() => {}); return () => ctl.current && ctl.current.abort(); }, [id]);
   useEffect(() => { setHintOff(false); setTermOn(term); }, [id]);
   // stick to the bottom only while the reader is at the bottom; scrolling up lets go, "Jump to latest" or sending takes it back
+  // Following is always an instant scroll: a smooth one (each new row started one) was cut by the next streamed token and, while it ran,
+  // the scroll handler saw "not at the bottom" and let go, so the view shook and "Jump to latest" flickered. Only the reader lets go now:
+  // a scroll that moves UP away from the bottom. Content growing under a still view, or our own scrolls, keep it stuck.
+  const lastTop = useRef(0);
   const toEnd = (smooth) => { const m = msgsRef.current; if (m) m.scrollTo({ top: m.scrollHeight, behavior: smooth ? "smooth" : "instant" }); };
-  const onScroll = () => { const m = msgsRef.current; if (!m) return; const near = m.scrollHeight - m.scrollTop - m.clientHeight < 80; stick.current = near; setStuck(near); };
+  const onScroll = () => {
+    const m = msgsRef.current; if (!m) return;
+    const near = m.scrollHeight - m.scrollTop - m.clientHeight < 80, up = m.scrollTop < lastTop.current - 2;
+    lastTop.current = m.scrollTop;
+    const on = near ? true : up ? false : stick.current;
+    if (on !== stick.current) { stick.current = on; setStuck(on); }
+  };
   const jump = () => { stick.current = true; setStuck(true); toEnd(true); };
-  useEffect(() => { if (stick.current) toEnd(hist.length > 1); }, [hist.length]);
+  useEffect(() => { if (stick.current) toEnd(false); }, [hist.length]);
   useEffect(() => { if (!stick.current) return; const r = requestAnimationFrame(() => toEnd(false)); return () => cancelAnimationFrame(r); }, [live.text.length, live.think.length, busy]);
+  useEffect(() => {                                                      // rows that grow after they render (code highlight, images, tool output, a table) keep the bottom in view
+    const m = msgsRef.current, col = m && m.firstElementChild; if (!col || typeof ResizeObserver === "undefined") return;
+    let r = 0; const ro = new ResizeObserver(() => { if (stick.current && !r) r = requestAnimationFrame(() => { r = 0; if (stick.current) toEnd(false); }); });
+    ro.observe(col); return () => { ro.disconnect(); cancelAnimationFrame(r); };
+  }, [id]);
   useEffect(() => setPref("split", split ? "1" : "0"), [split]);
   useEffect(() => setPref("engine", engine), [engine]);
   useEffect(() => setPref("mode", mode), [mode]);
@@ -994,7 +1009,7 @@ function Chat({ id, boot, refresh, newChat, prefs, savePrefs, slash, onMenu, onB
                   ${open && html`<button class="btn" onClick=${async () => { if (!dirtyRef.current || (await discard(baseName(prevRef.current)))) { dirtyRef.current = false; setPrev(f.path); setTab("preview"); setOpen(true); } }}>${Ic("eye", 13)} Open</button>`}
                   <button class="btn" title="Share to a Space on the hub" onClick=${() => share(f.path, false)}>${Ic("upload", 13)}</button><a class="btn" href=${src(f.path) + "?download=1"} download title="Download">${Ic("download", 13)}</a></div>`; })}
               <div class="fc-f"><button type="button" class="lnk" onClick=${() => { setTab("files"); setOpen(true); }}>All files ${Ic("right", 12)}</button></div></div></div>`
-          : e.k === "result" ? html`<div class="stats"><span>${(e.ms / 1000).toFixed(1)}s</span><span>in ${num(e.usage.input)}</span><span title="Tokens the model wrote for this turn">${num(e.usage.output)} tokens written</span><span>cache read ${num(e.usage.cache_read)}</span><span>cache write ${num(e.usage.cache_write)}</span>${e.error && html`<span class="tag bad">failed</span>`}</div>`
+          : e.k === "result" ? html`<div class="stats"><span>${(e.ms / 1000).toFixed(1)}s</span><span>in ${num(e.usage.input)}</span><span title="Tokens the model wrote for this turn">${num(e.usage.output)} tokens written</span><span>cache read ${num(e.usage.cache_read)}</span><span>cache write ${num(e.usage.cache_write)}</span>${e.usage.cost > 0 && html`<span title="Estimated cost of this turn (list prices)">$${e.usage.cost.toFixed(3)}</span>`}${e.error && html`<span class="tag bad">failed</span>`}</div>`
           : e.k === "card" && e.kind === "work" && e.spec ? html`<div class="msg wcard"><${WorkRunCard} spec=${e.spec} onSend=${(t) => sendRef.current(t)} locked=${false}/></div>`
           : e.k === "perm" ? (() => { const a = hist.find((x) => x.k === "perm_answer" && x.id === e.id), del = e.kind === "delete", risky = e.kind === "risky", ok = a && (a.answer === "allow" || a.answer === "always");
               return html`<div class="msg"><div class=${"permcard" + (del ? " del" : risky ? " risky" : "") + (a ? " done" : "")}><div class="pc-h">${Ic(del ? "trash" : risky ? "alert" : "terminal", 15)}<b>${del ? "Allow this delete?" : risky ? "Allow this risky command?" : "Allow this command?"}</b><span class="mute small grow">${e.why}</span></div>

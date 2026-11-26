@@ -241,31 +241,40 @@ def update_session(sid, **kw):
 
 def add_usage(sid, u, model="", turn=True):
     """Add a turn's tokens to the chat's totals and report them to the hub. MODEL is the id the API really used (the chat's own `model`
-    is only the picker value: an alias like "sonnet" or empty, which the hub cannot price). TURN=False: extra tokens of the same turn."""
+    is only the picker value: an alias like "sonnet" or empty, which the hub cannot price). TURN=False: extra tokens of the same turn.
+    Chat / Lite turns (engine free / harness) are priced here from the hub's price table, like `aihub usage` does: the API returns no
+    cost (Claude Code's turns carry total_cost_usd). -> the cost added, in USD."""
+    s0 = _index(True)["sessions"].get(sid) or {}
+    engine = s0.get("engine") or "claude"
+    add = float(u.get("cost") or 0)
+    if engine in ("free", "harness"):
+        if not model:                                                   # Claude Code turns are logged by Claude itself
+            from . import freechat
+            try:
+                model = prefs().get("free_model") or freechat.resolve_model(s0.get("model") or "", freechat._env())
+            except Exception:
+                model = s0.get("model") or ""
+        if not add:
+            from . import hubusage, prices
+            add = prices.cost(hubusage._model(model), u)
     with _lock:
         d = _index()
         s = d["sessions"].get(sid)
         if not s:
-            return
+            return 0.0
         t = s["usage"]
         for k in ("input", "output", "cache_read", "cache_write"):
             t[k] = t.get(k, 0) + int(u.get(k) or 0)
-        t["cost"] = round(t.get("cost", 0.0) + float(u.get("cost") or 0), 6)
+        t["cost"] = round(t.get("cost", 0.0) + add, 6)
         t["turns"] = t.get("turns", 0) + (1 if turn else 0)
         s["updated"] = time.time()
         _save_index(d)
-        engine = s.get("engine") or "claude"
-    if not model and engine in ("free", "harness"):                   # Claude Code turns are logged by Claude itself
-        from . import freechat
-        try:
-            model = prefs().get("free_model") or freechat.resolve_model(s.get("model") or "", freechat._env())
-        except Exception:
-            model = s.get("model") or ""
     try:
         from . import hubusage
         hubusage.note(sid, engine, model, u)                      # every turn reaches the hub; never fails the turn
     except Exception:
         pass
+    return add
 
 
 def is_incognito(sid):

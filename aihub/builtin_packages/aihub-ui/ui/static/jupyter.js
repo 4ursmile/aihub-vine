@@ -55,6 +55,8 @@ const withSql = (c, sql) => { const raw = { ...(c.raw || {}) }, md = { ...(raw.m
 // kernel output event -> the cell's nbformat outputs (same rules as the server's Fold)
 function fold(o, dids, e) {
   const t = e.t, c = e.c || {};
+  if (t === "clear_output") { if (c.wait) { dids.__wait = 1; return o; } dids.__wait = 0; return []; }     // wait=True: clear when the next output comes (no empty frame in between)
+  if (dids.__wait && (t === "stream" || t === "display_data" || t === "execute_result" || t === "error")) { dids.__wait = 0; o = []; }
   if (t === "stream") { const l = o[o.length - 1]; return l && l.output_type === "stream" && l.name === c.name ? [...o.slice(0, -1), { ...l, text: fixCR(join(l.text) + (c.text || "")) }] : [...o, { output_type: "stream", name: c.name || "stdout", text: fixCR(c.text || "") }]; }
   if (t === "display_data" || t === "execute_result" || t === "update_display_data") {
     const did = c.transient && c.transient.display_id;
@@ -65,7 +67,6 @@ function fold(o, dids, e) {
     return [...o, x];
   }
   if (t === "error") return [...o, { output_type: "error", ename: c.ename, evalue: c.evalue, traceback: c.traceback || [] }];
-  if (t === "clear_output") return [];
   return o;
 }
 const outText = (c, n = 300) => { const s = (c.outputs || []).map((o) => (o.output_type === "stream" ? join(o.text) : o.output_type === "error" ? o.ename + ": " + o.evalue : join((o.data || {})["text/plain"]))).join("\n").replace(ANSI, ""); return s.slice(0, n); };
@@ -74,11 +75,16 @@ const errText = (c) => { const e = (c.outputs || []).find((o) => o.output_type =
 // ---------- one output: rich HTML that needs scripts (plotly, bokeh) runs in a sandboxed frame served by the UI, everything else is the shared renderer
 function Out({ o, post, viz, onViz }) {
   const d = o.data || {}, h = join(d["text/html"]);
-  const [src, setSrc] = useState("");
+  const [src, setSrc] = useState(""), [fh, setFh] = useState(0), fr = useRef();
   const df = useMemo(() => frameOf(o), [o]);
   const rich = (o.output_type === "display_data" || o.output_type === "execute_result") && h && /<script/i.test(h) && !d["image/png"];
   useEffect(() => { if (rich) post("jupyter/frame", { html: h }).then((r) => setSrc("/nbframe/" + r.id)).catch(() => {}); }, [rich, h]);
-  if (rich) return src ? html`<iframe class="nbj-frame" sandbox="allow-scripts allow-popups" src=${src} title="Interactive output"></iframe>` : html`<div class="nb-o mute small">Loading output…</div>`;
+  useEffect(() => {                                                      // the frame reports its content height: no scroll of its own inside the output panel
+    if (!src) return;
+    const on = (e) => { if (fr.current && e.source === fr.current.contentWindow && e.data && e.data.nbframe && +e.data.h > 0) setFh(Math.min(4000, Math.max(60, Math.round(+e.data.h)))); };
+    addEventListener("message", on); return () => removeEventListener("message", on);
+  }, [src]);
+  if (rich) return src ? html`<iframe ref=${fr} class="nbj-frame" sandbox="allow-scripts allow-popups" src=${src} title="Interactive output" scrolling=${fh ? "no" : undefined} style=${fh ? "height:" + fh + "px" : ""}></iframe>` : html`<div class="nb-o mute small">Loading output…</div>`;
   if (df) return html`<${DataView} res=${df} spec=${viz} onSpec=${onViz} table=${html`<${Output} o=${o}/>`} note=${"from the " + df.rows.length + " rows printed" + (df.partial ? " (output was cut: show more rows for full charts)" : "")}/>`;
   return html`<${Output} o=${o}/>`;
 }
@@ -104,8 +110,10 @@ function AiSettings({ settings, models, post, setSettings }) {
 // ---------- a live kernel for one notebook: session (reused after a reload), a polling loop, and run-with-callback
 function useKernel(server, path, nbKernel, post, api, ready) {
   const [k, setK] = useState({ id: "", name: "", sid: "", state: "starting", err: "" }), [specs, setSpecs] = useState([]), [gen, setGen] = useState(0);
-  const waiters = useRef({}), kid = useRef("");
-  kid.current = k.id;
+  const waiters = useRef({}), kid = useRef(""), kst = useRef("starting");
+  kid.current = k.id; kst.current = k.state;
+  // the running cells of a kernel that restarted or died never get their reply: end them, or they spin forever and block Run all
+  const dropAll = (why) => { const ws = Object.values(waiters.current); waiters.current = {}; ws.forEach((w) => w.done({ status: "error", lost: true, restarted: true, error: why })); };
   useEffect(() => {                                                      // the Running panel shut this kernel down: drop it (Reconnect or a kernel pick starts a new one)
     const on = (e) => { const d = e.detail || {}; if (d.server !== server || !d.kid || d.kid !== kid.current) return;
       if (d.op === "shutdown") { Object.values(waiters.current).forEach((w) => w.done({ status: "error", lost: true, error: "The kernel was shut down" })); waiters.current = {}; setK((x) => ({ ...x, id: "", sid: "", state: "dead", err: "Kernel shut down" })); } };
@@ -137,7 +145,11 @@ function useKernel(server, path, nbKernel, post, api, ready) {
           chid = r.ch;
           for (const e of r.events) {
             after = e.n;
-            if (e.t === "status" && e.c) setK((x) => (x.state === "dead" ? x : { ...x, state: e.c.execution_state === "busy" ? "busy" : "idle" }));
+            if (e.t === "status" && e.c) {
+              const es = e.c.execution_state;                                   // busy, idle, starting, restarting (a restart or an auto-restart after a crash), dead
+              setK((x) => (x.state === "dead" ? x : { ...x, state: es === "busy" || es === "idle" ? es : es === "dead" ? "dead" : "starting", err: es === "dead" ? "The kernel died" : x.err }));
+              if (es === "restarting" || es === "dead") { dropAll(es === "dead" ? "The kernel died" : "The kernel restarted"); continue; }
+            }
             if (widgetEvent(e)) continue;                                       // ipywidgets (tqdm.notebook bars ...): models live in notebook.js
             const w = waiters.current[e.p];
             // done = execute_reply (shell) AND status idle (iopub). They come on separate channels, so the reply often
@@ -170,7 +182,24 @@ function useKernel(server, path, nbKernel, post, api, ready) {
   const complete = (code, pos) => post("jupyter/kernel/complete", { server, kid: kid.current, code, pos });
   const signature = (code, pos) => post("jupyter/kernel/inspect", { server, kid: kid.current, code, pos });
   const live = () => (kid.current && k.state === "idle" ? { server, kid: kid.current } : {});
-  return { k, specs, exec, complete, signature, live, interrupt: () => op("interrupt"), restart: () => op("restart"), switchTo, reconnect: () => setGen((g) => g + 1), reply: (value) => post("jupyter/kernel/op", { server, kid: k.id, op: "input", value }) };
+  // restart: the server answers once the new kernel is up. The cells that ran in the old one end now (not when a reply that never comes arrives)
+  const restart = async () => {
+    dropAll("The kernel restarted"); setK((x) => ({ ...x, state: "starting", err: "" }));
+    try { await op("restart"); } finally { setK((x) => ({ ...x, state: x.state === "dead" ? x.state : "idle" })); }
+  };
+  // interrupt -> true when cells still run after a few seconds (code that ignores KeyboardInterrupt, a blocking native call): only a restart stops those.
+  // Cells whose kernel is idle by then lost their reply: they end here.
+  const interrupt = async () => {
+    const ids = Object.keys(waiters.current);
+    await op("interrupt");
+    if (!ids.length) return false;
+    for (let t = 0; t < 12 && ids.some((i) => waiters.current[i]); t++) await sleep(500);
+    const left = ids.filter((i) => waiters.current[i]);
+    if (!left.length) return false;
+    if (kst.current === "idle") { left.forEach((i) => waiters.current[i] && waiters.current[i].done({ status: "error", lost: true, restarted: true, error: "Interrupted" })); return false; }
+    return true;
+  };
+  return { k, specs, exec, complete, signature, live, interrupt, restart, switchTo, reconnect: () => setGen((g) => g + 1), reply: (value) => post("jupyter/kernel/op", { server, kid: k.id, op: "input", value }) };
 }
 
 // ---------- AI bar under a cell: write / fix, the proposal is shown first
@@ -205,13 +234,20 @@ function memo(C, same) {
   return M;
 }
 const sameCell = (a, b) => { for (const k in b) if (k === "marks" ? JSON.stringify(a.marks) !== JSON.stringify(b.marks) : a[k] !== b[k]) return false; return true; };
+// how long a running cell has run (replaces Jupyter's [*]); it lives in the cell's gutter, positioned so it never moves the cell
+function Elapsed() {
+  const [t0] = useState(Date.now), [, tick] = useState(0);
+  useEffect(() => { const i = setInterval(() => tick((n) => n + 1), 1000); return () => clearInterval(i); }, []);
+  const n = Math.floor((Date.now() - t0) / 1000);
+  return n < 60 ? n + "s" : Math.floor(n / 60) + "m" + String(n % 60).padStart(2, "0");
+}
 const CELL_TYPE = (x) => (sqlOf(x) ? "sql" : x.type);
 const Cell = memo(function Cell({ c, i, last, sel, running, aiOpen, marks, lang, kOk, sugg, conns, fx }) {
   const F = () => fx.current, sql = sqlOf(c), failed = !!errText(c), ec = c.raw && c.raw.execution_count, out = hasOut(c);
   const connId = sql ? (conns.find((q) => q.name === sql.conn) || {}).id || "" : "";
   const adder = html`<div class="nb-add"><button type="button" onClick=${() => F().insert(i + 1, "code", true)}>${Ic("plus", 12)} Code</button><button type="button" onClick=${() => F().insert(i + 1, "markdown")}>${Ic("plus", 12)} Text</button><button type="button" onClick=${() => F().insert(i + 1, "sql", true)}>${Ic("plus", 12)} SQL</button></div>`;
-  return html`<div class="nb-cw"><div id=${"nbc-" + c.key} class=${"nb-cell " + c.type + (sql ? " sql" : "") + (sel ? " sel" : "") + (running ? " run" : "")} onPointerDown=${() => F().setSel(c.key)} onContextMenu=${(e) => F().openCtx(c, e)}>
-    <div class="nb-gut">${c.type === "code" ? html`<button class=${"nbj-run" + (running ? " busy" : "")} title=${running ? "Running…" : "Run cell (Shift+Enter)"} aria-label="Run cell" disabled=${running} onClick=${(e) => { e.stopPropagation(); F().runCell(c.key); }}>${running ? html`<i class="spin"></i>` : Ic("play", 12)}</button><span class="mono nbj-n">${running ? "[*]" : sql ? "sql" : ec ? "[" + ec + "]" : "[ ]"}</span>` : ""}</div>
+  return html`<div class="nb-cw"><div id=${"nbc-" + c.key} class=${"nb-cell " + c.type + (sql ? " sql" : "") + (sel ? " sel" : "") + (running ? " run" : "") + (c.stale ? " stale" : "")} onPointerDown=${() => F().setSel(c.key)} onContextMenu=${(e) => F().openCtx(c, e)}>
+    <div class="nb-gut">${c.type === "code" ? html`<button class=${"nbj-run" + (running ? " busy" : "")} title=${running ? "Running: click to interrupt" : "Run cell (Shift+Enter)"} aria-label=${running ? "Interrupt the kernel" : "Run cell"} onClick=${(e) => { e.stopPropagation(); if (running) F().interrupt(); else F().runCell(c.key); }}>${running ? html`<i class="nbj-ring" aria-hidden="true"></i>${Ic("stop", 9)}` : Ic("play", 12)}</button><span class="mono nbj-n">${running ? html`<${Elapsed}/>` : sql ? "sql" : ec ? "[" + ec + "]" : "[ ]"}</span>` : ""}</div>
     <div class="nb-body">
       <div class="nb-tools">
         <select aria-label="Cell type" value=${CELL_TYPE(c)} onChange=${(e) => F().retype(c.key, e.target.value)}><option value="code">Code</option><option value="sql">SQL</option><option value="markdown">Text</option><option value="raw">Raw</option></select>
@@ -283,37 +319,39 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
     if (!c.src.trim()) return true;
     const sql = sqlOf(c);
     setRun((r) => ({ ...r, [key]: 1 }));
-    upd(key, (x) => ({ outputs: [], sqlres: null, cleared: false, raw: { ...(hiddenOf(x) ? withHidden(x, false) : x.raw || {}), execution_count: null } }));   // running shows the output again
+    // the last output stays (dimmed) until the first new one arrives: clearing it at the start collapsed the cell and the page below jumped up and back
+    upd(key, (x) => ({ stale: hasOut(x), sqlres: x.sqlres, cleared: false, raw: { ...(hiddenOf(x) ? withHidden(x, false) : x.raw || {}), execution_count: null } }));   // running shows the output again
     // kernel events are folded into the cell once per frame, not once per message: a chatty loop (prints, progress bars) stays one render a frame
     // (a hidden tab gets no animation frames: a timer then, so a long run in the background does not pile up its output)
     const q = [], d = {}; let raf = 0;
     const later = () => (document.hidden ? { t: setTimeout(flush, 250) } : { r: requestAnimationFrame(flush) }), unlater = (h) => { if (h && h.r) cancelAnimationFrame(h.r); if (h && h.t) clearTimeout(h.t); };
-    const flush = () => { raf = 0; if (!q.length) return; const evs = q.splice(0); upd(key, (x) => ({ outputs: evs.reduce((o, e) => fold(o, d, e), x.outputs) })); };
+    const flush = () => { raf = 0; if (!q.length) return; const evs = q.splice(0); upd(key, (x) => ({ outputs: evs.reduce((o, e) => fold(o, d, e), x.stale ? [] : x.outputs), sqlres: null, stale: false })); };
+    const unstale = () => upd(key, (x) => (x.stale ? { outputs: [], sqlres: null, stale: false } : {}));
     try {
       if (sql) {
         if (!sql.conn) { toast("Pick a SQL connection for this cell"); return false; }
         const r = await post("jupyter/sql/run", { server, kid: kern.k.id, sql: c.src, conn: sql.conn, var: sql.var || "", limit: sql.limit || 10000 });
         const a = r.assigned, sum = r.ok ? `${(r.rows || []).length} row${(r.rows || []).length === 1 ? "" : "s"} × ${(r.columns || []).length} columns${a && a.ok ? " → DataFrame " + a.var : ""}` : "SQL failed";
-        upd(key, { sqlres: r, outputs: r.ok ? [{ output_type: "display_data", data: { "text/plain": sum }, metadata: {} }] : [] });
+        upd(key, { sqlres: r, stale: false, outputs: r.ok ? [{ output_type: "display_data", data: { "text/plain": sum }, metadata: {} }] : [] });
         return !!r.ok && (!a || a.ok);
       }
       const reply = await kern.exec(c.src, (e) => {
         if (e.t === "input_request") { flush(); const v = window.prompt(e.c.prompt || "Input", ""); kern.reply(v == null ? "" : v).catch(() => {}); return; }
         q.push(e); if (!raf) raf = later();
       });
-      unlater(raf); flush();
-      if (reply.lost) { toast(reply.error || "Lost the connection to the kernel"); return false; }
+      unlater(raf); flush(); unstale();
+      if (reply.lost) { if (!reply.restarted) toast(reply.error || "Lost the connection to the kernel"); return false; }
       upd(key, (x) => ({ outputs: widgetSnap(x.outputs), raw: { ...(x.raw || {}), execution_count: reply.execution_count == null ? null : reply.execution_count } }));
       return reply.status !== "error";
     } catch (e) { toast(e.message); return false; }
-    finally { unlater(raf); flush(); setRun((r) => { const n = { ...r }; delete n[key]; return n; }); }
+    finally { unlater(raf); flush(); unstale(); setRun((r) => { const n = { ...r }; delete n[key]; return n; }); }
   };
   const codeKeys = (cs) => cs.filter((c) => c.type === "code").map((c) => c.key);
   const runMany = async (keys) => { runAll.current = true; for (const k of keys) { if (!runAll.current) break; if (!(await runCell(k))) break; } runAll.current = false; };
-  const interrupt = guard(async () => { runAll.current = false; await kern.interrupt(); });
+  const interrupt = guard(async () => { runAll.current = false; if (await kern.interrupt()) toast("Still running: this code does not stop on an interrupt. Restart the kernel (Run menu) to stop it."); });
   const restart = guard(async (thenAll) => {
     if (!(await confirmBox({ title: "Restart the kernel?", text: "All variables are lost.", ok: "Restart" }))) return;
-    runAll.current = false; await kern.restart(); toast("Kernel restarting"); if (thenAll) setTimeout(() => runMany(codeKeys(cellsRef.current)), 1500);
+    runAll.current = false; toast("Restarting the kernel…"); await kern.restart(); toast("Kernel restarted"); if (thenAll) { await sleep(300); runMany(codeKeys(cellsRef.current)); }
   });
   const persist = async () => {
     const nb = nbRef.current, snap = cellsRef.current;
@@ -403,7 +441,7 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
   };
   const fileExtra = () => [["Save", "check", isMacJ ? "⌘S" : "Ctrl+S", !dirty, save], ["Revert to saved", "refresh", "", !dirty, () => { setCells(null); load(); }],
     ["Download as Python (.py)", "download", "", !cellsRef.current.length, () => saveBlob(new Blob([toPy(cellsRef.current)], { type: "text/x-python" }), path.split("/").pop().replace(/\.ipynb$/i, "") + ".py")], "-"];
-  fx.current = { upd, insert, move, remove, retype, setSql, runCell, setSel, setAiOpen, setAi, openCtx, aiApply, ctxFor, wordsFor, key, kern, post };
+  fx.current = { upd, insert, move, remove, retype, setSql, runCell, interrupt, setSel, setAiOpen, setAi, openCtx, aiApply, ctxFor, wordsFor, key, kern, post };
   if (err) return html`<div class="empty"><div>${Ic("alert", 24)}<div>${err}</div></div></div>`;
   if (!cells) return html`<div class="empty"><div class="shine">Opening…</div></div>`;
   const st = kern.k.state, busy = Object.keys(run).length > 0, kOk = !!kern.k.id && st !== "dead", sugg = settings.suggest.on ? settings.suggest.delay : 0;

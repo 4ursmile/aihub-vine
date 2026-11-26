@@ -1340,3 +1340,19 @@ button.dl.gap:hover{color:var(--ink);background:var(--soft2)}
 .nbj .nb-o.html table thead th{border-bottom-color:var(--line2)}
 .nbj-opt.on{background:var(--soft2)}
 .nbj-termbar .btn.on,.chatterm .btn.on,.editor .ebar .btn.on{color:var(--ink);border-color:var(--line2);background:var(--soft2)}
+/* notebook: a running cell. The button stays where it is (it used to drop 22px, which made the gutter jump): a ring turns around a stop
+   square (click = interrupt) and the time run so far sits under it, absolutely placed so the cell never changes height */
+.nbj .nb-cell.run .nbj-run{top:3px}
+.nbj .nb-gut .nbj-run.busy{opacity:1;color:var(--accent);cursor:pointer}
+.nbj-run.busy svg{margin:0}
+.nbj-ring{position:absolute;inset:3px;border-radius:50%;border:2px solid color-mix(in srgb,var(--accent) 22%,transparent);border-top-color:var(--accent);animation:spin .9s linear infinite;pointer-events:none}
+.nbj .nb-gut .nbj-run.busy:hover{background:color-mix(in srgb,var(--bad) 12%,transparent);color:var(--bad)}
+.nbj-run.busy:hover .nbj-ring{border-color:color-mix(in srgb,var(--bad) 22%,transparent);border-top-color:var(--bad)}
+.nbj .nb-cell.run .nbj-n,.nbj .nb-cell.run.sel .nbj-n,.nbj .nb-cell.run:hover .nbj-n{visibility:visible;position:absolute;top:31px;right:0;width:26px;text-align:center;font-size:10px;color:var(--accent);font-variant-numeric:tabular-nums}
+/* notebook: ONE scroll panel per cell's output. The blocks inside (stdout, stderr, tqdm bars, tables, widgets) never scroll on their own:
+   each had overflow:auto, so a wide line or table (or a sub-pixel height) gave it a scrollbar of its own and the output broke into boxes */
+.nbj .nb-outs>.nb-o{max-height:none;overflow:visible}
+.nbj .nb-outs.full{overflow-x:auto}
+.nbj .nb-outs .dv-table .nb-o{max-height:none;overflow-x:auto;overflow-y:hidden}
+.nbj .nb-outs .nbj-frame{resize:none;display:block}
+.nbj .nb-cell.stale .nb-outs{opacity:.45;transition:opacity .15s}
