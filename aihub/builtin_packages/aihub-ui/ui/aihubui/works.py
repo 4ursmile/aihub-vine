@@ -108,6 +108,11 @@ GIT_PULL_GUIDE = """Pulls a git repository first and passes on WHERE the files a
 3. The output is the full path (one per line when you list several sub paths). {{input}} in the next node is that path; Claude (it may read the folder) opens the parquet, csv, images ... itself with its own tools.
 4. Next: a Claude task that analyses the data and writes a dashboard, then Publish to Space."""
 
+REMOTE_GUIDE = """Copies a file or folder from another machine and passes on WHERE the copy is, never what is in it (like Read from git (path)).
+* Files from Jupyter: the server is a saved name from the Notebook page (JupyterHub, Jupyter Server or the local one); its token stays in the UI. The copy lands in ~/.aihub/workingspace/data/jupyter/SERVER/PATH.
+* Files from SSH: uses this machine's scp, so a Host from ~/.ssh/config, your keys and ssh-agent work as in a terminal. A password or a private key can be set on the node or in an 'ssh' credential set (stored encrypted). New hosts are trusted on first use; a changed host key fails the run. The copy lands in ~/.aihub/workingspace/data/ssh/HOST/PATH.
+* Each run replaces the last copy (files removed on the server disappear too). {{input}} in the next node is the path; Claude, Python or Publish to Space open it."""
+
 PYFN_SAMPLE = """from pydantic import BaseModel
 
 
@@ -437,6 +442,23 @@ BUILTIN = {
                  "fields": [{"name": "url", "label": "Repository (https)", "type": "text", "required": True, "default": "", "help": "https://github.com/org/data.git"},
                             {"name": "ref", "label": "Branch, tag or commit", "type": "text", "default": ""},
                             {"name": "paths", "label": "File or folder inside the repo (one per line for several)", "type": "textarea", "default": "", "help": "Each becomes a pointer. Empty = the whole repository folder."}]},
+    "jupyter.fetch": {"title": "Files from Jupyter (path)", "kind": "action", "group": "Data", "desc": "Copies a file or folder from a saved Jupyter server (JupyterHub, Jupyter Server) to this machine and passes on its PATH, not the content.",
+                      "run": ["{python}", "{pkg}/nodes/jupyter_fetch.py"], "timeout": 630, "timeout_key": "timeout", "templated": ["server", "path"], "guide": REMOTE_GUIDE,
+                      "fields": [{"name": "server", "label": "Jupyter server (saved name)", "type": "text", "required": True, "default": "", "help": "The name on the Notebook page."},
+                                 {"name": "path", "label": "File or folder on the server", "type": "text", "default": "", "help": "e.g. data/sales or reports/q3.csv. Empty = the whole home folder."},
+                                 {"name": "max_mb", "label": "Max MB per file (bigger ones are skipped)", "type": "number", "default": 200},
+                                 {"name": "max_files", "label": "Max files", "type": "number", "default": 2000},
+                                 {"name": "timeout", "label": "Timeout (seconds)", "type": "number", "default": 600}]},
+    "ssh.fetch": {"title": "Files from SSH (path)", "kind": "action", "group": "Data", "desc": "Copies a file or folder from a server over SSH (scp) to this machine and passes on its PATH, not the content. Your ~/.ssh config, keys and agent work.",
+                  "run": ["{python}", "{pkg}/nodes/ssh_fetch.py"], "timeout": 630, "timeout_key": "timeout", "templated": ["host", "path"], "guide": REMOTE_GUIDE,
+                  "fields": [{"name": "host", "label": "Host", "type": "text", "required": True, "default": "", "help": "server.example.com, an IP, user@host, or a Host from ~/.ssh/config"},
+                             {"name": "path", "label": "Remote file or folder", "type": "text", "required": True, "default": "", "help": "e.g. /data/exports or ~/reports/q3.csv. * patterns work."},
+                             {"name": "user", "label": "User (empty = ssh's default)", "type": "text", "default": ""},
+                             {"name": "port", "label": "Port (empty = 22 or ~/.ssh/config)", "type": "text", "default": ""},
+                             {"name": "password", "label": "Password or key passphrase (secret)", "type": "password", "help": "Stored encrypted. Empty = keys / ssh-agent only."},
+                             {"name": "private_key", "label": "Private key (secret, optional)", "type": "password", "help": "Paste an OpenSSH / PEM key; stored encrypted, written to a 0600 temp file for the call only."},
+                             {"name": "key_file", "label": "Key file on this machine (optional)", "type": "text", "default": "", "help": "e.g. ~/.ssh/id_ed25519. Empty = ssh's usual keys."},
+                             {"name": "timeout", "label": "Timeout (seconds)", "type": "number", "default": 600}]},
     "io.path": {"title": "File / folder (path)", "kind": "action", "group": "Data", "desc": "Points at local files or folders and passes on their PATH, not the content. * and ? patterns work.",
                 "run": ["{python}", "{pkg}/nodes/path_pointer.py"], "timeout": 60, "templated": ["path"],
                 "fields": [{"name": "path", "label": "File, folder or pattern (one per line)", "type": "textarea", "required": True, "default": "", "assist": ["input", "data", "file"],
@@ -529,7 +551,7 @@ BUILTIN_CRED = {"send.smtp": ("smtp", {}), "io.request": ("http", {}), "git.read
                 "send.teams": ("teams", {"webhook_url": "webhook_url"}), "start.teams": ("teams", {"hook_secret": "secret"}),
                 "send.slack": ("slack", {"webhook_url": "webhook_url"}), "send.discord": ("discord", {"webhook_url": "webhook_url"}),
                 "start.slack": ("slack", {"signing_secret": "signing_secret"}), "start.telegram": ("telegram", {"bot_token": "bot_token"}), "send.telegram": ("telegram", {"bot_token": "bot_token"}),
-                "db.trino": ("trino", {}), "etl.spark": ("s3", {}), "db.sql": ("sql", {})}
+                "db.trino": ("trino", {}), "etl.spark": ("s3", {}), "db.sql": ("sql", {}), "ssh.fetch": ("ssh", {})}
 CODE_NODES = ("code.python", "etl.spark", "db.trino")                # nodes whose code may read more credential sets with aihub_vault (`vault` on the node)
 for _t, (_k, _m) in BUILTIN_CRED.items():
     BUILTIN[_t]["credential"] = {"kind": _k, "map": _m}
@@ -584,6 +606,10 @@ BUILTIN_SCHEMA = {
     "io.request": ([_i("url", "url", "set in the node, may use {{data.x}}", False)], [_o("text", "json", "the answer text", '{"items": []}'), _o("status", "text", "HTTP status code", "200")]),
     "git.read": ([_i("url", "url", "repository URL", True)], [_o("text", "text", "the file text or folder listing", "# README ...")]),
     "git.pull": ([_i("url", "url", "repository URL", True)], [_o("text", "path", "the folder or file path, not its content", "/Users/me/.aihub/ui/git/repo"), _o("path", "path", "the same path as {{data.path}}", "/Users/me/.aihub/ui/git/repo")]),
+    "jupyter.fetch": ([_IN_TEXT], [_o("text", "path", "the local copy's path, not its content", "/Users/me/.aihub/workingspace/data/jupyter/hub/data/sales"), _o("path", "path", "the same path as {{data.path}}", ""),
+                                   _o("files", "text", "files copied", "12"), _o("skipped", "json", "files over the limits", "[]")]),
+    "ssh.fetch": ([_IN_TEXT], [_o("text", "path", "the local copy's path(s), not the content", "/Users/me/.aihub/workingspace/data/ssh/box/data/exports"), _o("path", "path", "the first path as {{data.path}}", ""),
+                               _o("paths", "json", "every path copied (a * pattern may match several)", ""), _o("files", "text", "files copied", "12")]),
     "io.path": ([_IN_TEXT], [_o("text", "path", "the path(s), not the content", "/Users/me/data"), _o("path", "path", "the same path as {{data.path}}", "/Users/me/data")]),
     "start.pubsub": ([], [_o("text", "text", "the message data (JSON as text)", '{"id": 42}'), _o("subject", "text", "the subject it was published to", "orders.eu.paid"),
                           _o("key", "text", "message key", "42"), _o("id", "text", "message id on the hub", "17"), _o("by", "text", "who published it", "alice"),
@@ -1080,6 +1106,9 @@ CRED_KINDS = {                                     # builtin kinds; a package ad
                        {"name": "database", "label": "Database / service name / file", "aliases": ["db", "dbname", "service_name", "catalog"]},
                        {"name": "options", "label": "Options (key=value&key=value)", "aliases": ["query", "params"]},
                        {"name": "url", "label": "SQLAlchemy URL (instead of the fields)", "secret": True, "aliases": ["sqlalchemy_url", "dsn", "uri"]}]},
+    "ssh": {"title": "SSH server", "hint": "Login for Files from SSH. Empty password and key = this machine's ~/.ssh keys and ssh-agent.",
+            "fields": [{"name": "host", "label": "Host", "aliases": ["server", "hostname"]}, {"name": "port", "label": "Port"}, {"name": "user", "label": "User", "aliases": ["username", "login"]},
+                       {"name": "password", "label": "Password or key passphrase", "secret": True}, {"name": "private_key", "label": "Private key (OpenSSH / PEM)", "secret": True, "aliases": ["key"]}]},
     "trino": {"title": "Trino / Presto", "hint": "Coordinator address and login for the Trino node (password = HTTP basic over https).",
               "fields": [{"name": "host", "label": "Host", "aliases": ["server", "hostname"]}, {"name": "port", "label": "Port (default 443 https / 8080 http)"},
                          {"name": "http_scheme", "label": "Scheme (https or http)", "aliases": ["scheme"]}, {"name": "user", "label": "User", "aliases": ["username"]},

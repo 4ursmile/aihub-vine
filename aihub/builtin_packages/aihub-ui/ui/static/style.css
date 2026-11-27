@@ -1356,3 +1356,26 @@ button.dl.gap:hover{color:var(--ink);background:var(--soft2)}
 .nbj .nb-outs .dv-table .nb-o{max-height:none;overflow-x:auto;overflow-y:hidden}
 .nbj .nb-outs .nbj-frame{resize:none;display:block}
 .nbj .nb-cell.stale .nb-outs{opacity:.45;transition:opacity .15s}
+/* notebook: a cell waiting for the one before it (Run all, or Shift+Enter while the kernel runs): a still clock, no timer.
+   Only the cell the kernel really runs turns its ring and counts seconds */
+.nbj .nb-gut .nbj-run.wait{opacity:1;color:var(--mute);cursor:pointer}
+.nbj .nb-gut .nbj-run.wait:hover{background:color-mix(in srgb,var(--bad) 12%,transparent);color:var(--bad)}
+.nbj-wait{display:grid;place-items:center;animation:pulse 1.6s ease-in-out infinite}
+.nbj .nb-cell.wait .nbj-n{visibility:hidden}
+.nbj .nb-cell.wait .nb-src{border-style:dashed}
+/* toolbar: one kernel chip (dot, name, state); its menu switches, interrupts and restarts. The bar clips sideways only, so menus can open below */
+.nbj-colab{overflow:visible;overflow-x:clip}
+.nbj-kchip{display:inline-flex;align-items:center;gap:6px;height:28px;max-width:260px;padding:0 8px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--ink2);font-size:12.5px;cursor:pointer;white-space:nowrap}
+.nbj-kchip:hover,.pw:has(.pop) .nbj-kchip{border-color:var(--line2);background:var(--soft)}
+.nbj-kname{min-width:0;max-width:130px;color:var(--ink)}.nbj-kword{color:var(--mute);font-variant-numeric:tabular-nums}
+.nbj-kdot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--mute)}
+.idle>.nbj-kdot,.nbj-kdot.idle{background:var(--good)}
+.run>.nbj-kdot,.nbj-kdot.run,.busy>.nbj-kdot,.nbj-kdot.busy{background:var(--accent);animation:pulse 1.1s ease-in-out infinite}
+.wait>.nbj-kdot,.nbj-kdot.wait,.starting>.nbj-kdot,.nbj-kdot.starting{background:var(--accent);opacity:.55}
+.dead>.nbj-kdot,.nbj-kdot.dead{background:var(--bad)}.nbj-kchip.dead .nbj-kword{color:var(--bad)}
+.nbj-kchip.run .nbj-kword{color:var(--accent)}
+.nbj-kpop{display:flex;flex-direction:column}
+.nbj-khead{display:flex;align-items:center;gap:10px;padding:6px 10px 8px;border-bottom:1px solid var(--line);margin-bottom:4px}
+.nbj-khead b{display:block;max-width:200px}.nbj-khead small{color:var(--mute);font-size:12px}
+.nbj-ksec{font-size:11px;color:var(--mute);padding:6px 10px 2px}.nbj-ksep{height:1px;background:var(--line);margin:4px 0}
+@media (max-width:760px){.nbj-kname{display:none}}

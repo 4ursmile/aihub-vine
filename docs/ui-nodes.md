@@ -527,6 +527,8 @@ Data moves between nodes as **pointers**: a path, never the content, so parquet,
 | Node | What it does |
 | --- | --- |
 | `git.pull` Read from git (path) | Clones or updates the repo in `~/.aihub/workingspace/data/git/NAME` (Vault login, Git LFS files fetched) and outputs the path(s). Data: `path`, `paths`, `commit`, `files`. |
+| `jupyter.fetch` Files from Jupyter (path) | Copies a file or folder from a saved Jupyter server (Notebook page: JupyterHub, Jupyter Server, local) into `~/.aihub/workingspace/data/jupyter/SERVER/PATH` through the running UI (the token never leaves it) and outputs the path. Limits: `max_mb` per file (bigger ones are listed in `data.skipped`), `max_files`. |
+| `ssh.fetch` Files from SSH (path) | Copies a file, folder or `*` pattern with the system `scp` into `~/.aihub/workingspace/data/ssh/HOST/PATH` and outputs the path(s). `~/.ssh/config` hosts, keys and ssh-agent work; a password / key passphrase (via `SSH_ASKPASS`) or a pasted private key (0600 temp file) can come from the node or an `ssh` credential set. New host keys are trusted on first use, a changed one fails. Paths with shell characters are refused. |
 | `io.path` File / folder (path) | Checks local files / folders / `*` patterns exist and outputs the path(s). |
 | `ai.claude` | Gets pointers in `{{input}}` and `{{data.path}}`; the folders are added with `--add-dir`, so Claude opens the files itself. End a node that creates a file with `OUTPUT: /full/path`. |
 | `ai.free` Free chat | Direct API call (no Claude Code). Optional MCP servers (tool loop); "paste the text of small files" is opt-in (30 KB). |

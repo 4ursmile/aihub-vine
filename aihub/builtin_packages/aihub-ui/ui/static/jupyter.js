@@ -155,6 +155,7 @@ function useKernel(server, path, nbKernel, post, api, ready) {
             // done = execute_reply (shell) AND status idle (iopub). They come on separate channels, so the reply often
             // arrives before the last outputs: finishing on the reply alone dropped them. Same rule as the server's exec_wait.
             if (!w) continue;
+            if (e.t === "execute_input" || (e.t === "status" && e.c && e.c.execution_state === "busy")) w.go();
             if (e.t === "execute_reply") { w.reply = e.c; if (w.idle) w.done(e.c); else if (!w.t) w.t = setTimeout(() => w.done(w.reply), 3000); }
             else if (e.t === "status") { if (e.c && e.c.execution_state === "idle") { w.idle = true; if (w.reply) w.done(w.reply); } }
             else w.on(e);
@@ -165,10 +166,11 @@ function useKernel(server, path, nbKernel, post, api, ready) {
     })();
     return () => { stop = true; };
   }, [k.id, server]);
-  const exec = useCallback((code, on) => {
+  // onStart: the kernel began THIS code (it queues requests while another cell runs: until then the cell only waits)
+  const exec = useCallback((code, on, onStart) => {
     const msg = uid(); let done;
     const p = new Promise((res) => { done = res; });
-    const w = { on, reply: null, idle: false, t: 0, fin: false, done: (c) => { if (w.fin) return; w.fin = true; clearTimeout(w.t); if (waiters.current[msg] === w) delete waiters.current[msg]; done(c); } };
+    const w = { on, reply: null, idle: false, t: 0, fin: false, go: () => { if (!w.went) { w.went = true; onStart && onStart(); } }, done: (c) => { if (w.fin) return; w.fin = true; clearTimeout(w.t); if (waiters.current[msg] === w) delete waiters.current[msg]; done(c); } };
     waiters.current[msg] = w;
     post("jupyter/kernel/execute", { server, kid: kid.current, code, msg }).catch((e) => waiters.current[msg] && waiters.current[msg].done({ status: "error", lost: true, error: e.message }));
     return p;
@@ -242,12 +244,13 @@ function Elapsed() {
   return n < 60 ? n + "s" : Math.floor(n / 60) + "m" + String(n % 60).padStart(2, "0");
 }
 const CELL_TYPE = (x) => (sqlOf(x) ? "sql" : x.type);
-const Cell = memo(function Cell({ c, i, last, sel, running, aiOpen, marks, lang, kOk, sugg, conns, fx }) {
+const Cell = memo(function Cell({ c, i, last, sel, rs, aiOpen, marks, lang, kOk, sugg, conns, fx }) {
+  const running = rs === "run", waiting = rs === "wait";
   const F = () => fx.current, sql = sqlOf(c), failed = !!errText(c), ec = c.raw && c.raw.execution_count, out = hasOut(c);
   const connId = sql ? (conns.find((q) => q.name === sql.conn) || {}).id || "" : "";
   const adder = html`<div class="nb-add"><button type="button" onClick=${() => F().insert(i + 1, "code", true)}>${Ic("plus", 12)} Code</button><button type="button" onClick=${() => F().insert(i + 1, "markdown")}>${Ic("plus", 12)} Text</button><button type="button" onClick=${() => F().insert(i + 1, "sql", true)}>${Ic("plus", 12)} SQL</button></div>`;
-  return html`<div class="nb-cw"><div id=${"nbc-" + c.key} class=${"nb-cell " + c.type + (sql ? " sql" : "") + (sel ? " sel" : "") + (running ? " run" : "") + (c.stale ? " stale" : "")} onPointerDown=${() => F().setSel(c.key)} onContextMenu=${(e) => F().openCtx(c, e)}>
-    <div class="nb-gut">${c.type === "code" ? html`<button class=${"nbj-run" + (running ? " busy" : "")} title=${running ? "Running: click to interrupt" : "Run cell (Shift+Enter)"} aria-label=${running ? "Interrupt the kernel" : "Run cell"} onClick=${(e) => { e.stopPropagation(); if (running) F().interrupt(); else F().runCell(c.key); }}>${running ? html`<i class="nbj-ring" aria-hidden="true"></i>${Ic("stop", 9)}` : Ic("play", 12)}</button><span class="mono nbj-n">${running ? html`<${Elapsed}/>` : sql ? "sql" : ec ? "[" + ec + "]" : "[ ]"}</span>` : ""}</div>
+  return html`<div class="nb-cw"><div id=${"nbc-" + c.key} class=${"nb-cell " + c.type + (sql ? " sql" : "") + (sel ? " sel" : "") + (running ? " run" : waiting ? " wait" : "") + (c.stale ? " stale" : "")} onPointerDown=${() => F().setSel(c.key)} onContextMenu=${(e) => F().openCtx(c, e)}>
+    <div class="nb-gut">${c.type === "code" ? html`<button class=${"nbj-run" + (running ? " busy" : waiting ? " wait" : "")} title=${running ? "Running: click to interrupt" : waiting ? "Waiting for the cell before it: click to stop the run" : "Run cell (Shift+Enter)"} aria-label=${running ? "Interrupt the kernel" : waiting ? "Waiting, stop the run" : "Run cell"} onClick=${(e) => { e.stopPropagation(); if (running || waiting) F().interrupt(); else F().runCell(c.key); }}>${running ? html`<i class="nbj-ring" aria-hidden="true"></i>${Ic("stop", 9)}` : waiting ? html`<span class="nbj-wait" aria-hidden="true">${Ic("clock", 14)}</span>` : Ic("play", 12)}</button><span class="mono nbj-n">${running ? html`<${Elapsed} key=${"r" + c.key}/>` : waiting ? "" : sql ? "sql" : ec ? "[" + ec + "]" : "[ ]"}</span>` : ""}</div>
     <div class="nb-body">
       <div class="nb-tools">
         <select aria-label="Cell type" value=${CELL_TYPE(c)} onChange=${(e) => F().retype(c.key, e.target.value)}><option value="code">Code</option><option value="sql">SQL</option><option value="markdown">Text</option><option value="raw">Raw</option></select>
@@ -318,7 +321,8 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
     if (!kern.k.id || kern.k.state === "dead") { toast(kern.k.err || "The kernel is not ready"); return false; }
     if (!c.src.trim()) return true;
     const sql = sqlOf(c);
-    setRun((r) => ({ ...r, [key]: 1 }));
+    const mark = (v) => setRun((r) => (r[key] === v ? r : { ...r, [key]: v }));
+    mark(sql ? "run" : "wait");
     // the last output stays (dimmed) until the first new one arrives: clearing it at the start collapsed the cell and the page below jumped up and back
     upd(key, (x) => ({ stale: hasOut(x), sqlres: x.sqlres, cleared: false, raw: { ...(hiddenOf(x) ? withHidden(x, false) : x.raw || {}), execution_count: null } }));   // running shows the output again
     // kernel events are folded into the cell once per frame, not once per message: a chatty loop (prints, progress bars) stays one render a frame
@@ -338,7 +342,7 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
       const reply = await kern.exec(c.src, (e) => {
         if (e.t === "input_request") { flush(); const v = window.prompt(e.c.prompt || "Input", ""); kern.reply(v == null ? "" : v).catch(() => {}); return; }
         q.push(e); if (!raf) raf = later();
-      });
+      }, () => mark("run"));
       unlater(raf); flush(); unstale();
       if (reply.lost) { if (!reply.restarted) toast(reply.error || "Lost the connection to the kernel"); return false; }
       upd(key, (x) => ({ outputs: widgetSnap(x.outputs), raw: { ...(x.raw || {}), execution_count: reply.execution_count == null ? null : reply.execution_count } }));
@@ -347,7 +351,13 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
     finally { unlater(raf); flush(); unstale(); setRun((r) => { const n = { ...r }; delete n[key]; return n; }); }
   };
   const codeKeys = (cs) => cs.filter((c) => c.type === "code").map((c) => c.key);
-  const runMany = async (keys) => { runAll.current = true; for (const k of keys) { if (!runAll.current) break; if (!(await runCell(k))) break; } runAll.current = false; };
+  const runMany = async (keys) => {
+    const code = keys.filter((k) => { const c = cellsRef.current.find((x) => x.key === k); return c && c.src.trim(); });
+    runAll.current = true; setRun((r) => { const n = { ...r }; code.forEach((k) => { if (!n[k]) n[k] = "wait"; }); return n; });
+    let i = 0;
+    try { for (; i < code.length; i++) { if (!runAll.current) break; if (!(await runCell(code[i]))) { i++; break; } } }
+    finally { runAll.current = false; const left = code.slice(i); if (left.length) setRun((r) => { const n = { ...r }; left.forEach((k) => { if (n[k] === "wait") delete n[k]; }); return n; }); }
+  };
   const interrupt = guard(async () => { runAll.current = false; if (await kern.interrupt()) toast("Still running: this code does not stop on an interrupt. Restart the kernel (Run menu) to stop it."); });
   const restart = guard(async (thenAll) => {
     if (!(await confirmBox({ title: "Restart the kernel?", text: "All variables are lost.", ok: "Restart" }))) return;
@@ -394,7 +404,7 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
       ["Delete cell", "trash", "", false, () => remove(c.key), true],
     ];
   };
-  const [addMenu, setAddMenu] = useState(false), [runMenu, setRunMenu] = useState(false), [outMenu, setOutMenu] = useState(false), [fnd, setFnd] = useState(null), [ai, setAi] = useState({ s: "", m: "" }), findIn = useRef();
+  const [addMenu, setAddMenu] = useState(false), [runMenu, setRunMenu] = useState(false), [outMenu, setOutMenu] = useState(false), [kMenu, setKMenu] = useState(false), [fnd, setFnd] = useState(null), [ai, setAi] = useState({ s: "", m: "" }), findIn = useRef();
   const findRe = (global = true) => { if (!fnd || !fnd.q) return null; try { return new RegExp(fnd.rx ? fnd.q : fnd.q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), (global ? "g" : "") + (fnd.cs ? "" : "i") + "m"); } catch (e) { return null; } };
   const matches = useMemo(() => {
     const re = findRe(); if (!re || !cells) return [];
@@ -445,8 +455,21 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
   if (err) return html`<div class="empty"><div>${Ic("alert", 24)}<div>${err}</div></div></div>`;
   if (!cells) return html`<div class="empty"><div class="shine">Opening…</div></div>`;
   const st = kern.k.state, busy = Object.keys(run).length > 0, kOk = !!kern.k.id && st !== "dead", sugg = settings.suggest.on ? settings.suggest.delay : 0;
-  const stateTag = st === "dead" ? html`<button class="nbj-kst bad" title=${(kern.k.err ? kern.k.err + ". " : "") + "Click to connect a kernel again"} onClick=${kern.reconnect}>${Ic("alert", 11)} Offline. Reconnect</button>`
-    : html`<span class=${"nbj-kst " + st} title=${kern.k.err || ""}><i></i>${st === "starting" ? "Starting" : st === "busy" ? "Busy" : "Idle"}</span>`;
+  // the kernel chip: name + state from the cells of THIS notebook (running / waiting), so autocomplete requests do not flash "Busy"
+  const nRun = Object.values(run).filter((v) => v === "run").length, nWait = Object.values(run).filter((v) => v === "wait").length;
+  const kName = (kern.specs.find((x) => x.name === kern.k.name) || {}).display || kern.k.name || "Kernel";
+  const kSt = st === "dead" ? "dead" : st === "starting" ? "starting" : nRun ? "run" : nWait ? "wait" : st === "busy" ? "busy" : "idle";
+  const kWord = { dead: "Offline", starting: "Starting", run: "Running", wait: "Waiting", busy: "Busy", idle: "Idle" }[kSt] + (nWait && kSt !== "dead" ? " · " + nWait + " waiting" : "");
+  const kPick = (f) => () => { setKMenu(false); f(); };
+  const stateTag = html`<${Pop} open=${kMenu} setOpen=${setKMenu} up=${false} align="right" width=${270} button=${html`<button class=${"nbj-kchip " + kSt} title=${kern.k.err || kName + ": " + kWord} aria-label=${"Kernel " + kName + ", " + kWord} onClick=${() => setKMenu(!kMenu)}>
+      <i class="nbj-kdot" aria-hidden="true"></i><span class="nbj-kname sq-ell">${kName}</span><span class="nbj-kword">${kWord}</span>${Ic("down", 11)}</button>`}>
+    <div class="nbj-kpop">
+      <div class="nbj-khead"><i class=${"nbj-kdot " + kSt}></i><div class="grow"><b class="sq-ell">${kName}</b><small>${kWord}${kern.k.err && kSt === "dead" ? " · " + kern.k.err : ""}</small></div></div>
+      ${kern.specs.length > 1 && html`<div class="nbj-ksec">Switch kernel</div>${kern.specs.map((x) => html`<button class=${"opt" + (x.name === kern.k.name ? " on" : "")} disabled=${busy} onClick=${kPick(() => x.name !== kern.k.name && kern.switchTo(x.name))}><span class="oi">${x.name === kern.k.name ? Ic("check", 14) : ""}</span><span class="grow"><b>${x.display}</b></span></button>`)}<div class="nbj-ksep"></div>`}
+      ${kSt === "dead" ? html`<button class="opt" onClick=${kPick(kern.reconnect)}><span class="oi">${Ic("plug", 15)}</span><span class="grow"><b>Reconnect</b><span class="d">Start or attach a kernel again</span></span></button>`
+        : html`<button class="opt" disabled=${!busy && st !== "busy"} onClick=${kPick(interrupt)}><span class="oi">${Ic("stop", 15)}</span><span class="grow"><b>Interrupt</b><span class="d">Stop the running cell and the waiting ones</span></span></button>
+          <button class="opt" onClick=${kPick(() => restart(false))}><span class="oi">${Ic("refresh", 15)}</span><span class="grow"><b>Restart</b><span class="d">Clears all variables</span></span></button>
+          <button class="opt" onClick=${kPick(() => restart(true))}><span class="oi">${Ic("play", 15)}</span><span class="grow"><b>Restart and run all</b></span></button>`}</div><//>`;
   const opts = (list, close) => html`<div class="optlist">${list.map(([n, i, d, off, f]) => html`<button class="opt" disabled=${off} onClick=${() => { close(); f(); }}><span class="oi">${Ic(i, 16)}</span><span class="grow"><b>${n}</b>${d && html`<span class="d">${d}</span>`}</span></button>`)}</div>`;
   const s = cells.find((c) => c.key === sel), so = s && hasOut(s), anyOut = cells.some(hasOut), selAt = cells.findIndex((c) => c.key === sel);
   const saveLabel = saveErr ? "Save failed" : busySave ? "Saving…" : dirty ? (auto ? "Saving soon" : "Save") : "Saved";
@@ -467,7 +490,7 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
           ["Scroll long outputs", "shrink", "Each in a box with its own scroll", false, () => allOut((c) => ({ raw: withScroll(c, true) }))], ["Expand all outputs", "expand", "Full height", false, () => allOut((c) => ({ raw: withScroll(c, false) }))]], () => setOutMenu(false))}<//>
       <span class="grow"></span>
       <button class="ibtn sm" title="Find and replace (Ctrl/Cmd+F)" aria-label="Find and replace" onClick=${openFind}>${Ic("search", 15)}</button>
-      <select class="nbj-ksel" value=${kern.k.name} onChange=${(e) => kern.switchTo(e.target.value)} aria-label="Kernel" disabled=${!kern.specs.length}>${!kern.specs.length && html`<option value="">Kernel…</option>`}${kern.specs.map((x) => html`<option value=${x.name}>${x.display}</option>`)}</select>${stateTag}
+      ${stateTag}
       <button class=${"btn sm nbj-save" + (saveErr ? " bad" : "")} disabled=${!dirty && !saveErr} title=${saveErr || (isMacJ ? "⌘S" : "Ctrl+S")} onClick=${save}>${busySave ? html`<i class="spin"></i>` : !dirty && !saveErr ? Ic("check", 12) : ""} ${saveLabel}</button>
       <button class="ibtn sm" title="File: download, copy path, rename, use as a Works node…" aria-label="File actions" onClick=${(e) => onFileMenu(e, path, fileExtra())}>${Ic("more", 16)}</button></div>
     ${fnd && html`<div class="nbj-find" role="search" onKeyDown=${(e) => { if (e.key === "Escape") { e.stopPropagation(); setFnd(null); } }}>
@@ -479,7 +502,7 @@ function Notebook({ server, path, post, api, conns, settings, models, dirtyRef, 
       <button class="btn sm" disabled=${!matches.length} onClick=${replaceOne}>Replace</button><button class="btn sm" disabled=${!matches.length} onClick=${replaceAll}>Replace all</button>
       <span class="grow"></span><button class="ibtn sm" title="Close (Esc)" aria-label="Close find" onClick=${() => setFnd(null)}>${Ic("x", 14)}</button></div>`}
     <div class="nb-cells">${!cells.length ? html`<div class="nbj-emptynb"><p class="mute">This notebook has no cells yet.</p><div class="nb-add"><button type="button" onClick=${() => insert(0, "code", true)}>${Ic("plus", 12)} Code</button><button type="button" onClick=${() => insert(0, "markdown")}>${Ic("plus", 12)} Text</button><button type="button" onClick=${() => insert(0, "sql", true)}>${Ic("plus", 12)} SQL</button></div></div>`
-      : cells.map((c, i) => html`<${Cell} key=${c.key} c=${c} i=${i} last=${i === cells.length - 1} sel=${sel === c.key} running=${!!run[c.key]} aiOpen=${aiOpen === c.key} marks=${marksOf(c.key)} lang=${lang} kOk=${kOk} sugg=${sugg} conns=${conns} fx=${fx}/>`)}</div>
+      : cells.map((c, i) => html`<${Cell} key=${c.key} c=${c} i=${i} last=${i === cells.length - 1} sel=${sel === c.key} rs=${run[c.key] || ""} aiOpen=${aiOpen === c.key} marks=${marksOf(c.key)} lang=${lang} kOk=${kOk} sugg=${sugg} conns=${conns} fx=${fx}/>`)}</div>
     ${ctx && html`<${CtxMenu} at=${ctx.at} items=${ctxItems(ctx.key)} close=${() => setCtx(null)}/>`}
     <div class="ebar"><span class=${saveErr ? "nbj-bad" : ""} title=${saveErr}>${saveErr ? "Auto-save failed: " + saveErr.slice(0, 80) : dirty ? "Unsaved changes" : "All changes saved"}</span><label class="nbj-auto" title="Save changes automatically"><input type="checkbox" checked=${auto} onChange=${(e) => { setAuto(e.target.checked); LS.set("auto", e.target.checked); }}/> Auto-save</label><span>${cells.length} cell${cells.length === 1 ? "" : "s"}</span><span class="grow"></span>
       ${settings.suggest.on && ai.s && ai.s !== "ok" && html`<span class=${ai.s === "err" ? "nbj-bad" : ""} title=${ai.m || "AI suggestions"}>${ai.s === "busy" ? "Suggesting…" : ai.s === "err" ? "Suggestions failed: " + ai.m.slice(0, 60) : ""}</span>`}
